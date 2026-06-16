@@ -50,11 +50,13 @@ export const SyncActions: React.FC<SyncActionsProps> = ({
   const isPrimaryDisabled = disabled || syncAction !== null || isRemovingRemote || !trackingRemote || blocksRebaseSync;
   const isDropdownDisabled = disabled || syncAction !== null || isRemovingRemote || remotes.length === 0;
   const hasKnownSyncWork = aheadCount > 0 || behindCount > 0;
-  const primaryLabel = [
-    t('gitView.sync.sync'),
-    behindCount > 0 ? `↓${behindCount}` : null,
-    aheadCount > 0 ? `↑${aheadCount}` : null,
-  ].filter(Boolean).join(' ');
+  const primaryLabel = (
+    <span className="inline-flex items-center gap-1 whitespace-nowrap tabular-nums">
+      <span>{t('gitView.sync.sync')}</span>
+      {behindCount > 0 ? <span className="text-[var(--status-warning)]">↓{behindCount}</span> : null}
+      {aheadCount > 0 ? <span className="text-[var(--status-info)]">↑{aheadCount}</span> : null}
+    </span>
+  );
   const tooltipLabel = blocksRebaseSync
     ? t('gitView.sync.commitOrStashTooltip')
     : trackingRemote
@@ -89,7 +91,7 @@ export const SyncActions: React.FC<SyncActionsProps> = ({
             ) : (
               <Icon name="refresh" className="size-4" />
             )}
-            <span className="whitespace-nowrap tabular-nums">{primaryLabel}</span>
+            {primaryLabel}
           </button>
         </TooltipTrigger>
         <TooltipContent sideOffset={8}>{tooltipLabel}</TooltipContent>
