@@ -125,6 +125,7 @@ export const BehaviorPage: React.FC = () => {
         ]);
 
         let nextSettings: BehaviorSettingsState = DEFAULT_BEHAVIOR_SETTINGS;
+        let settingsGlobalBehaviorPrompt: string | undefined;
         if (data) {
           nextSettings = {
             ...nextSettings,
@@ -134,17 +135,24 @@ export const BehaviorPage: React.FC = () => {
             responseStyleCustomInstructions: data.responseStyleCustomInstructions ?? '',
           };
           if (data.globalBehaviorPrompt !== undefined) {
-            nextSettings = { ...nextSettings, prompt: data.globalBehaviorPrompt };
+            settingsGlobalBehaviorPrompt = data.globalBehaviorPrompt;
           }
         }
 
+        // AGENTS.md is the source of truth for the system prompt — read it
+        // first so that external edits are always reflected. Only fall back to
+        // the persisted copy (globalBehaviorPrompt) when the file is missing
+        // or empty.
         if (agentsMdRes.ok) {
           const agentsData = agentsMdResponseSchema.parse(await agentsMdRes.json());
           if (abort.signal.aborted) return;
           setAgentsMdPath(agentsData.path ?? 'AGENTS.md');
-          if (!nextSettings.prompt.trim()) {
+          if (agentsData.content.trim()) {
             nextSettings = { ...nextSettings, prompt: agentsData.content };
           }
+        }
+        if (!nextSettings.prompt.trim() && settingsGlobalBehaviorPrompt !== undefined) {
+          nextSettings = { ...nextSettings, prompt: settingsGlobalBehaviorPrompt };
         }
 
         setPrompt(nextSettings.prompt);
