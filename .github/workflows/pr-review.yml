@@ -2,7 +2,7 @@ name: pr-review
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: []
   issue_comment:
     types: [created]
   pull_request_review_comment:
