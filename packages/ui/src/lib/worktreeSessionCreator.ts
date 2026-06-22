@@ -25,6 +25,7 @@ import {
   rejectPendingDraftWorktreeRequest,
   resolvePendingDraftWorktreeRequest,
 } from '@/lib/worktrees/pendingDraftWorktree';
+import { waitForWorktreeBootstrap } from '@/lib/worktrees/worktreeBootstrap';
 
 const normalizePath = (value: string): string => value.replace(/\\/g, '/').replace(/\/+$/, '') || value;
 
@@ -417,6 +418,8 @@ export async function createWorktreeSessionForBranch(
       kind,
     };
 
+    await waitForWorktreeBootstrap(metadata.path);
+
     // Create the session
     const sessionStore = useSessionUIStore.getState();
     const session = await sessionStore.createSession(undefined, metadata.path);
@@ -519,6 +522,8 @@ export async function createWorktreeSessionForNewBranch(
         createdFromBranch: options?.createdFromBranch || rootBranch || start,
         kind,
       };
+
+      await waitForWorktreeBootstrap(metadata.path);
 
       const sessionStore = useSessionUIStore.getState();
       const session = await sessionStore.createSession(undefined, metadata.path);
