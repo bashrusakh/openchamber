@@ -117,8 +117,7 @@ const ConnectionStatusIndicatorBody = React.memo(function ConnectionStatusIndica
     return text;
   });
 
-  const tooltipLineDotClasses = [
-    null,
+  const hopLineDotClasses = [
     toneToDotClass(hop1LabelKeyToTone(viewModel.hop1.labelKey)),
     toneToDotClass(hop2LabelKeyToTone(viewModel.hop2.labelKey)),
   ];
@@ -135,27 +134,18 @@ const ConnectionStatusIndicatorBody = React.memo(function ConnectionStatusIndica
         </button>
       </TooltipTrigger>
       <TooltipContent>
-        <div className="flex flex-col gap-0.5">
-          {translatedLines.map((line, index) => (
-            <div
-              // Index-keyed list of a fixed-size array (always 3 entries);
-              // the view model is the actual key.
-              key={index}
-              className={cn(
-                'flex items-center gap-2 typography-micro',
-                index === 0 && 'font-medium text-foreground'
-              )}
-            >
-              {tooltipLineDotClasses[index] !== null ? (
-                <span
-                  aria-hidden="true"
-                  className={cn(CONNECTION_DOT_CLASS, 'shrink-0', tooltipLineDotClasses[index])}
-                />
-              ) : (
-                <span aria-hidden="true" className="w-2 shrink-0" />
-              )}
-              <span>{line}</span>
-            </div>
+        <div className="grid grid-cols-[0.5rem_1fr] items-center gap-x-2 gap-y-0.5">
+          <p className="col-span-2 typography-micro font-medium text-foreground">
+            {translatedLines[0]}
+          </p>
+          {translatedLines.slice(1).map((line, index) => (
+            <React.Fragment key={index}>
+              <span
+                aria-hidden="true"
+                className={cn(CONNECTION_DOT_CLASS, 'shrink-0', hopLineDotClasses[index])}
+              />
+              <p className="typography-micro">{line}</p>
+            </React.Fragment>
           ))}
         </div>
       </TooltipContent>
