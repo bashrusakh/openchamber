@@ -2660,6 +2660,6 @@ export const dict: Record<I18nKey, string> = {
   'connectionStatus.overall.disconnected': 'Disconnected',
   'connectionStatus.overall.unknown': 'Unknown',
   'connectionStatus.tooltip.title': 'Connection status',
-  'connectionStatus.tooltip.hopLabel': '{label}',
+
   'connectionStatus.aria.indicator': 'Connection status: {state}',
 } as const;
