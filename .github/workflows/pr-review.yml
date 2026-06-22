@@ -4,9 +4,9 @@ on:
   pull_request_target:
     types: []
   issue_comment:
-    types: [created]
+    types: []
   pull_request_review_comment:
-    types: [created]
+    types: []
 
 concurrency:
   # PR conversation comments arrive as `issue_comment` events, so their PR number
