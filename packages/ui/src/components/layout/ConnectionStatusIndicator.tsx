@@ -5,7 +5,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import { useI18n, type I18nKey, type I18nParams } from '@/lib/i18n';
+import { useI18n, type I18nKey } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { useConfigStore } from '@/stores/useConfigStore';
 import {
@@ -55,12 +55,6 @@ const toneToDotClass = (tone: ConnectionTone): string => {
 
 type ConnectionStatusIndicatorBodyProps = {
   viewModel: ConnectionStatusViewModel;
-  /**
-   * The i18n `t` function, passed down from the parent so the body can be
-   * memoized purely on `viewModel`. When the locale changes, the parent
-   * re-renders with a new `t` reference and the body picks it up.
-   */
-  t: (key: I18nKey, params?: I18nParams) => string;
 };
 
 /**
@@ -72,8 +66,8 @@ type ConnectionStatusIndicatorBodyProps = {
  */
 const ConnectionStatusIndicatorBody = React.memo(function ConnectionStatusIndicatorBody({
   viewModel,
-  t,
 }: ConnectionStatusIndicatorBodyProps) {
+  const { t } = useI18n();
   const dotClass = toneToDotClass(viewModel.tone);
   const stateLabel = t(viewModel.overallLabelKey as I18nKey);
   const ariaLabel = t('connectionStatus.aria.indicator', { state: stateLabel });
@@ -145,16 +139,14 @@ const ConnectionStatusIndicatorBody = React.memo(function ConnectionStatusIndica
  *   - does NOT subscribe to session list, streaming deltas, or message
  *     state — the source of truth is updated by the existing event
  *     pipeline and health-check paths
- *   - reads `navigator.onLine` once at mount; the existing sync-context
+ *   - reads `navigator.onLine` on each render; the existing sync-context
  *     browser online/offline listener already updates
- *     `runtimeTransportState` when the browser reports a change, so the
- *     ref snapshot is a redundancy check, not a primary signal
+ *     `runtimeTransportState` when the browser reports a change, so this
+ *     stays in sync without installing a second listener here
  *
  * No new polling loop is introduced.
  */
 export const ConnectionStatusIndicator: React.FC = React.memo(function ConnectionStatusIndicator() {
-  const { t } = useI18n();
-
   // Narrow leaf selectors. Each call returns the same reference when the
   // corresponding field is unchanged (Zustand uses Object.is on the
   // selector return value), so this component does not re-render on
@@ -162,21 +154,21 @@ export const ConnectionStatusIndicator: React.FC = React.memo(function Connectio
   const runtimeTransport = useConfigStore((s) => s.runtimeTransportState);
   const openCodeRuntime = useConfigStore((s) => s.openCodeRuntimeState);
 
-  // navigator.onLine is captured once at mount via a lazy ref initializer.
-  // We intentionally do not install a listener here — the existing
-  // sync-context browser online/offline listener already mirrors
-  // navigator.onLine transitions into `runtimeTransportState`, and the
-  // view model consults `navigatorOffline` only as a redundancy check for
-  // the case where the transport still believes it is connected.
-  const navigatorOfflineRef = React.useRef<boolean>(
-    typeof navigator === 'object' && navigator !== null && navigator.onLine === false,
-  );
-  const navigatorOffline = navigatorOfflineRef.current;
+  // Read `navigator.onLine` dynamically on every render. The browser's
+  // online/offline transitions are mirrored into `runtimeTransportState`
+  // by the existing sync-context listener, so this component re-renders
+  // exactly when the value could have changed — the snapshot stays
+  // fresh and a mount-while-offline app correctly transitions to a
+  // non-offline state once the network is restored. We intentionally do
+  // not install a separate `navigator.onLine` listener here; sync-context
+  // owns that.
+  const navigatorOffline =
+    typeof navigator === 'object' && navigator !== null && navigator.onLine === false;
 
   const viewModel = React.useMemo(
     () => buildConnectionStatusViewModel({ runtimeTransport, openCodeRuntime, navigatorOffline }),
     [runtimeTransport, openCodeRuntime, navigatorOffline],
   );
 
-  return <ConnectionStatusIndicatorBody viewModel={viewModel} t={t} />;
+  return <ConnectionStatusIndicatorBody viewModel={viewModel} />;
 });

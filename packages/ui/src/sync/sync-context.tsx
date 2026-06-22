@@ -1834,7 +1834,7 @@ export function SyncProvider(props: {
           lastDisconnectReason: reason,
         })
         useConfigStore.getState().setRuntimeTransportState({
-          phase: "disconnected",
+          phase: hasEverConnected ? "reconnecting" : "connecting",
           reason,
           updatedAt: Date.now(),
         })
