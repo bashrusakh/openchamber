@@ -106,7 +106,10 @@ export function routeMessage(params: {
     // When stripSlashOnSubmit is enabled, send the slash token as plain text
     // (with the leading slash removed) instead of routing to sendCommand.
     if (useUIStore.getState().stripSlashOnSubmit) {
-      content = content.replace(/^\/+/, "")
+      content = content.replace(/^(\s*)\/+/, '$1')
+      // Guard: bare "/" or "///" becomes empty after strip — bail out
+      // (mirrors the ChatInput.tsx guard for the same edge case)
+      if (!content.trim() && !params.files?.length && !params.additionalParts?.length) return Promise.resolve()
     } else {
       const [head, ...tail] = content.split(" ")
       const cmdName = head.slice(1)

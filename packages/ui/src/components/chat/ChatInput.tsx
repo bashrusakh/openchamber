@@ -1909,6 +1909,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
         // paths like /usr/bin/foo must keep their leading slash.
         if (inputMode === 'normal' && stripSlashOnSubmit && normalizedCommand.startsWith('/')) {
             primaryText = primaryText.replace(/^(\s*)\/+/, '$1');
+            // Guard: bare "/" or "///" becomes empty after strip — bail out
+            if (!primaryText.trim() && primaryAttachments.length === 0 && additionalParts.length === 0) return;
         } else if (inputMode === 'normal' && normalizedCommand.startsWith('/')) {
             const commandName = normalizedCommand
                 .slice(1)
