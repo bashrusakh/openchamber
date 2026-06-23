@@ -95,7 +95,13 @@ export function routeMessage(params: {
     }).then(() => undefined)
   }
 
-  // Slash commands — fire and forget, SSE delivers messages and status
+  // Slash commands — fire and forget, SSE delivers messages and status.
+  // This branch handles OpenCode/skill command expansion (sendCommand). The
+  // ChatInput submit path has its own client-side built-in slash handling
+  // (undo/redo/timeline/compact/summary/etc.) that also consults the
+  // stripSlashOnSubmit setting; this branch is the single source of truth for
+  // the server-side sendCommand expansion, called by both the chat composer
+  // and any other sendMessage caller (e.g. multi-run prompt composer).
   let content = params.content
   if (content.startsWith("/")) {
     // When stripSlashOnSubmit is enabled, send the slash token as plain text
@@ -158,7 +164,7 @@ export function routeMessage(params: {
       id: params.sessionId,
       providerID: params.providerID,
       modelID: params.modelID,
-      text: params.content,
+      text: content,
       agent: params.agent,
       agentMentions: params.agentMentionName ? [{ name: params.agentMentionName }] : undefined,
       variant: params.variant,
