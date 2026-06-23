@@ -615,6 +615,7 @@ interface UIStore {
   persistChatDraft: boolean;
   showOpenCodeUpdateNotifications: boolean;
   inputSpellcheckEnabled: boolean;
+  stripSlashOnSubmit: boolean;
   wideChatLayoutEnabled: boolean;
   showToolFileIcons: boolean;
   showTurnChangedFiles: boolean;
@@ -759,6 +760,7 @@ interface UIStore {
   setPersistChatDraft: (value: boolean) => void;
   setShowOpenCodeUpdateNotifications: (value: boolean) => void;
   setInputSpellcheckEnabled: (value: boolean) => void;
+  setStripSlashOnSubmit: (value: boolean) => void;
   setWideChatLayoutEnabled: (value: boolean) => void;
   setShowToolFileIcons: (value: boolean) => void;
   setShowTurnChangedFiles: (value: boolean) => void;
@@ -896,6 +898,7 @@ export const useUIStore = create<UIStore>()(
         persistChatDraft: true,
         showOpenCodeUpdateNotifications: true,
         inputSpellcheckEnabled: false,
+        stripSlashOnSubmit: false,
         wideChatLayoutEnabled: false,
         showToolFileIcons: true,
         showTurnChangedFiles: false,
@@ -1988,6 +1991,9 @@ export const useUIStore = create<UIStore>()(
         setInputSpellcheckEnabled: (value) => {
           set({ inputSpellcheckEnabled: value });
         },
+        setStripSlashOnSubmit: (value) => {
+          set({ stripSlashOnSubmit: value });
+        },
         setWideChatLayoutEnabled: (value) => {
           set({ wideChatLayoutEnabled: value });
         },
@@ -2249,6 +2255,7 @@ export const useUIStore = create<UIStore>()(
           persistChatDraft: state.persistChatDraft,
           showOpenCodeUpdateNotifications: state.showOpenCodeUpdateNotifications,
           inputSpellcheckEnabled: state.inputSpellcheckEnabled,
+          stripSlashOnSubmit: state.stripSlashOnSubmit,
           wideChatLayoutEnabled: state.wideChatLayoutEnabled,
           showToolFileIcons: state.showToolFileIcons,
           showTurnChangedFiles: state.showTurnChangedFiles,
