@@ -1908,7 +1908,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({ onOpenSettings, scrollTo
         // (no skill-prompt expansion). Shell mode is left untouched because
         // paths like /usr/bin/foo must keep their leading slash.
         if (inputMode === 'normal' && stripSlashOnSubmit && normalizedCommand.startsWith('/')) {
-            primaryText = primaryText.replace(/^\/+/, '');
+            primaryText = primaryText.replace(/^(\s*)\/+/, '$1');
         } else if (inputMode === 'normal' && normalizedCommand.startsWith('/')) {
             const commandName = normalizedCommand
                 .slice(1)
