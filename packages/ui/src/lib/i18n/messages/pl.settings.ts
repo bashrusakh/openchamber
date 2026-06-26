@@ -924,6 +924,9 @@ export const settingsDict = {
 
   'settings.openchamber.visual.field.enableSpellcheckInTextInputs': 'Włącz sprawdzanie pisowni w polach tekstowych',
   'settings.openchamber.visual.field.enableSpellcheckInTextInputsAria': 'Włącz sprawdzanie pisowni w polach tekstowych',
+  'settings.openchamber.visual.field.stripSlashOnSubmitAria': 'Usuń wiodący ukośnik przy wysyłaniu, aby polecenia slash nie były rozwijane',
+  'settings.openchamber.visual.field.stripSlashOnSubmit': 'Usuń ukośnik przy wysyłaniu',
+  'settings.openchamber.visual.field.stripSlashOnSubmitDescription': 'Po włączeniu, wysłanie polecenia lub umiejętności slash usuwa wiodący ukośnik i wysyła tekst jako zwykłą wiadomość. Polecenie lub umiejętność nie zostanie wywołana, a w rozmowie pojawi się to, co wpisałeś.',
   'settings.openchamber.visual.field.fontSizePercentageAria': 'Procentowy rozmiar czcionki',
   'settings.openchamber.visual.field.inputBarOffset': 'Przesunięcie paska wpisywania',
   'settings.openchamber.visual.field.inputBarOffsetTooltip': 'Podnieś pasek wpisywania, aby uniknąć zasłaniania przez systemowe elementy ekranu, takie jak pasek gestów.',
@@ -1787,4 +1790,11 @@ export const settingsDict = {
   'settings.voice.page.field.ttsInputModeSanitized': 'Oczyszczony tekst',
   'settings.voice.page.field.ttsInputModeRaw': 'Surowy Markdown',
   'settings.window.description': 'Okno ustawień OpenChamber.',
+  'settings.openchamber.visual.section.followUpBehavior': 'Follow-up behavior',
+  'settings.openchamber.visual.section.followUpBehaviorAria': 'Follow-up behavior',
+  'settings.openchamber.visual.field.followUpBehaviorAria': 'Follow-up behavior: {option}',
+  'settings.openchamber.visual.field.followUpBehaviorDescription': 'Choose what happens when you press Enter on a follow-up message while the agent is still responding.',
+  'settings.openchamber.visual.option.followUpBehavior.steer.label': 'Steer (insert into the running turn)',
+  'settings.openchamber.visual.option.followUpBehavior.queue.label': 'Queue (deliver after the current turn)',
+  'settings.openchamber.visual.option.followUpBehavior.immediate.label': 'Send immediately',
 };

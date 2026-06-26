@@ -199,8 +199,11 @@ describe('useMultiRunStore', () => {
     expect(worktreeCreateCalls[0]?.project).toEqual({ id: 'project-1', path: '/repo' });
     expect(worktreeCreateCalls[0]?.args.returnAfterDirectoryCreated).toBe(true);
     expect(worktreeCreateCalls[0]?.options).toEqual({ resolvedRootTrackingRemote: null });
-    expect(worktreeBootstrapWaitCalls).toEqual([]);
-    expect(operationOrder).toEqual(['createSession:/repo-worktrees/fix-thing']);
+    expect(worktreeBootstrapWaitCalls).toEqual(['/repo-worktrees/fix-thing']);
+    expect(operationOrder).toEqual([
+      'wait:/repo-worktrees/fix-thing',
+      'createSession:/repo-worktrees/fix-thing',
+    ]);
     expect(registeredDirectories).toEqual([{ sessionID: 'ses_multirun', directory: '/repo-worktrees/fix-thing' }]);
     expect(worktreeMetadataCalls).toEqual([{ sessionId: 'ses_multirun', path: '/repo-worktrees/fix-thing' }]);
   });

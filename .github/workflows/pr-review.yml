@@ -2,11 +2,11 @@ name: pr-review
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: []
   issue_comment:
-    types: [created]
+    types: []
   pull_request_review_comment:
-    types: [created]
+    types: []
 
 concurrency:
   # PR conversation comments arrive as `issue_comment` events, so their PR number

@@ -615,6 +615,7 @@ interface UIStore {
   persistChatDraft: boolean;
   showOpenCodeUpdateNotifications: boolean;
   inputSpellcheckEnabled: boolean;
+  stripSlashOnSubmit: boolean;
   wideChatLayoutEnabled: boolean;
   showToolFileIcons: boolean;
   showTurnChangedFiles: boolean;
@@ -730,7 +731,7 @@ interface UIStore {
   toggleHiddenModel: (providerID: string, modelID: string) => void;
   isHiddenModel: (providerID: string, modelID: string) => boolean;
   hideAllModels: (providerID: string, modelIDs: string[]) => void;
-  showAllModels: (providerID: string) => void;
+  showAllModels: (providerID: string, modelIDs?: string[]) => void;
   toggleModelProviderCollapsed: (providerID: string) => void;
   setModelProvidersCollapsed: (providerIDs: string[], collapsed: boolean) => void;
   isFavoriteModel: (providerID: string, modelID: string) => boolean;
@@ -759,6 +760,7 @@ interface UIStore {
   setPersistChatDraft: (value: boolean) => void;
   setShowOpenCodeUpdateNotifications: (value: boolean) => void;
   setInputSpellcheckEnabled: (value: boolean) => void;
+  setStripSlashOnSubmit: (value: boolean) => void;
   setWideChatLayoutEnabled: (value: boolean) => void;
   setShowToolFileIcons: (value: boolean) => void;
   setShowTurnChangedFiles: (value: boolean) => void;
@@ -896,6 +898,7 @@ export const useUIStore = create<UIStore>()(
         persistChatDraft: true,
         showOpenCodeUpdateNotifications: true,
         inputSpellcheckEnabled: false,
+        stripSlashOnSubmit: false,
         wideChatLayoutEnabled: false,
         showToolFileIcons: true,
         showTurnChangedFiles: false,
@@ -1772,10 +1775,20 @@ export const useUIStore = create<UIStore>()(
           });
         },
 
-        showAllModels: (providerID) => {
-          set((state) => ({
-            hiddenModels: state.hiddenModels.filter((item) => item.providerID !== providerID),
-          }));
+        showAllModels: (providerID, modelIDs) => {
+          set((state) => {
+            if (modelIDs === undefined) {
+              return {
+                hiddenModels: state.hiddenModels.filter((item) => item.providerID !== providerID),
+              };
+            }
+            const idsSet = new Set(modelIDs.filter((id) => typeof id === 'string' && id.length > 0));
+            return {
+              hiddenModels: state.hiddenModels.filter(
+                (item) => !(item.providerID === providerID && idsSet.has(item.modelID))
+              ),
+            };
+          });
         },
 
         toggleModelProviderCollapsed: (providerID) => {
@@ -1977,6 +1990,9 @@ export const useUIStore = create<UIStore>()(
         },
         setInputSpellcheckEnabled: (value) => {
           set({ inputSpellcheckEnabled: value });
+        },
+        setStripSlashOnSubmit: (value) => {
+          set({ stripSlashOnSubmit: value });
         },
         setWideChatLayoutEnabled: (value) => {
           set({ wideChatLayoutEnabled: value });
@@ -2239,6 +2255,7 @@ export const useUIStore = create<UIStore>()(
           persistChatDraft: state.persistChatDraft,
           showOpenCodeUpdateNotifications: state.showOpenCodeUpdateNotifications,
           inputSpellcheckEnabled: state.inputSpellcheckEnabled,
+          stripSlashOnSubmit: state.stripSlashOnSubmit,
           wideChatLayoutEnabled: state.wideChatLayoutEnabled,
           showToolFileIcons: state.showToolFileIcons,
           showTurnChangedFiles: state.showTurnChangedFiles,

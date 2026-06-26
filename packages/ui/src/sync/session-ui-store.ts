@@ -25,6 +25,7 @@ import { useDirectoryStore } from "@/stores/useDirectoryStore"
 import { useSessionFoldersStore } from "@/stores/useSessionFoldersStore"
 import { useCommandsStore } from "@/stores/useCommandsStore"
 import { useSkillsStore } from "@/stores/useSkillsStore"
+import { useUIStore } from "@/stores/useUIStore"
 import { getSafeStorage } from "@/stores/utils/safeStorage"
 import { markPendingUserSendAnimation } from "@/lib/userSendAnimation"
 import { flattenAssistantTextParts } from "@/lib/messages/messageText"
@@ -83,6 +84,7 @@ export function routeMessage(params: {
   inputMode?: "normal" | "shell"
   files?: Array<{ type: "file"; mime: string; url: string; filename: string }>
   additionalParts?: Array<{ text: string; synthetic?: boolean; files?: Array<{ type: "file"; mime: string; url: string; filename: string }> }>
+  delivery?: 'steer'
 }): Promise<void> {
   const requestDirectory = params.directory ?? undefined
   if (params.inputMode === "shell") {
@@ -95,53 +97,66 @@ export function routeMessage(params: {
     }).then(() => undefined)
   }
 
-  // Slash commands — fire and forget, SSE delivers messages and status
-  if (params.content.startsWith("/")) {
-    const [head, ...tail] = params.content.split(" ")
-    const cmdName = head.slice(1)
+  // Slash commands — fire and forget, SSE delivers messages and status.
+  // This branch handles OpenCode/skill command expansion (sendCommand). The
+  // ChatInput submit path has its own client-side built-in slash handling
+  // (undo/redo/timeline/compact/summary/etc.) that also consults the
+  // stripSlashOnSubmit setting; this branch is the single source of truth for
+  // the server-side sendCommand expansion, called by both the chat composer
+  // and any other sendMessage caller (e.g. multi-run prompt composer).
+  let content = params.content
+  if (content.startsWith("/")) {
+    // When stripSlashOnSubmit is enabled, send the slash token as plain text
+    // (with the leading slash removed) instead of routing to sendCommand.
+    if (useUIStore.getState().stripSlashOnSubmit) {
+      content = content.replace(/^\/+/, "")
+    } else {
+      const [head, ...tail] = content.split(" ")
+      const cmdName = head.slice(1)
 
-    const dirState = getDirectoryState(requestDirectory)
-    const syncCommands = dirState?.command ?? []
-    const storeCommands = useCommandsStore.getState().commands
+      const dirState = getDirectoryState(requestDirectory)
+      const syncCommands = dirState?.command ?? []
+      const storeCommands = useCommandsStore.getState().commands
 
-    // OpenCode registers every skill as a command (source: "skill"), but the
-    // commands store filters skills out and the synced command list is only
-    // hydrated at bootstrap. Consult the live skills store so a skill selected
-    // from the slash menu is invoked via session.command (injecting its
-    // content) instead of being sent as a literal "/name" message (#1605).
-    const isCommand = syncCommands.find((c) => c.name === cmdName)
-      || storeCommands.find((c) => c.name === cmdName)
-      || useSkillsStore.getState().skills.some((s) => s.name === cmdName)
+      // OpenCode registers every skill as a command (source: "skill"), but the
+      // commands store filters skills out and the synced command list is only
+      // hydrated at bootstrap. Consult the live skills store so a skill selected
+      // from the slash menu is invoked via session.command (injecting its
+      // content) instead of being sent as a literal "/name" message (#1605).
+      const isCommand = syncCommands.find((c) => c.name === cmdName)
+        || storeCommands.find((c) => c.name === cmdName)
+        || useSkillsStore.getState().skills.some((s) => s.name === cmdName)
 
-    if (isCommand) {
-      return optimisticSend({
-        sessionId: params.sessionId,
-        content: params.content,
-        providerID: params.providerID,
-        modelID: params.modelID,
-        agent: params.agent,
-        directory: requestDirectory,
-        files: params.files,
-        send: (messageID) => opencodeClient.sendCommand({
-          id: params.sessionId,
+      if (isCommand) {
+        return optimisticSend({
+          sessionId: params.sessionId,
+          content: params.content,
           providerID: params.providerID,
           modelID: params.modelID,
-          command: cmdName,
-          arguments: tail.join(" "),
           agent: params.agent,
-          variant: params.variant,
-          files: params.files,
-          messageId: messageID,
           directory: requestDirectory,
-        }).then(() => {}),
-      })
+          files: params.files,
+          send: (messageID) => opencodeClient.sendCommand({
+            id: params.sessionId,
+            providerID: params.providerID,
+            modelID: params.modelID,
+            command: cmdName,
+            arguments: tail.join(" "),
+            agent: params.agent,
+            variant: params.variant,
+            files: params.files,
+            messageId: messageID,
+            directory: requestDirectory,
+          }).then(() => {}),
+        })
+      }
     }
   }
 
   // Normal prompt — optimistic insert so message appears instantly
   return optimisticSend({
     sessionId: params.sessionId,
-    content: params.content,
+    content,
     providerID: params.providerID,
     modelID: params.modelID,
     agent: params.agent,
@@ -151,12 +166,13 @@ export function routeMessage(params: {
       id: params.sessionId,
       providerID: params.providerID,
       modelID: params.modelID,
-      text: params.content,
+      text: content,
       agent: params.agent,
       agentMentions: params.agentMentionName ? [{ name: params.agentMentionName }] : undefined,
       variant: params.variant,
       files: params.files,
       additionalParts: params.additionalParts,
+      delivery: params.delivery,
       messageId: messageID,
       directory: requestDirectory,
     }).then(() => {}),
@@ -165,6 +181,7 @@ export function routeMessage(params: {
 
 type SendMessageOptions = {
   sessionId?: string
+  delivery?: 'steer'
 }
 
 type AssistantMessageSessionExecution = {
@@ -448,6 +465,7 @@ export async function materializeOpenDraftSession(selection: {
   const trimmedAgent = typeof selection.agent === "string" && selection.agent.trim().length > 0
     ? selection.agent.trim()
     : undefined
+  const draftTargetFolderId = draft.targetFolderId
   let draftDirectoryOverride = draft.bootstrapPendingDirectory ?? draft.directoryOverride ?? null
   const draftProjectId = draft.selectedProjectId ?? null
 
@@ -456,7 +474,9 @@ export async function materializeOpenDraftSession(selection: {
     store.resolvePendingDraftWorktreeTarget(draft.pendingWorktreeRequestId, draftDirectoryOverride)
   }
 
-  await waitForWorktreeBootstrapIfConfigured(draftDirectoryOverride, draftProjectId)
+  if (draftDirectoryOverride) {
+    await waitForWorktreeBootstrap(draftDirectoryOverride)
+  }
 
   const created = await store.createSession(draft.title, draftDirectoryOverride, draft.parentID ?? null)
   if (!created?.id) throw new Error("Failed to create session")
@@ -485,7 +505,15 @@ export async function materializeOpenDraftSession(selection: {
 
   store.initializeNewOpenChamberSession(created.id, configState.agents ?? [])
 
+  store.closeNewSessionDraft()
   store.setCurrentSession(created.id, createdDirectory)
+
+  if (draftTargetFolderId) {
+    const scopeKey = draftDirectoryOverride || created.directory || null
+    if (scopeKey) {
+      useSessionFoldersStore.getState().addSessionToFolder(scopeKey, draftTargetFolderId, created.id)
+    }
+  }
 
   return {
     sessionId: created.id,
@@ -710,15 +738,19 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     const currentDirProject = resolveDraftProjectForDirectory(projects, availableWorktreesByProject, currentDirectory)
 
     const selectedProject = (() => {
-      if (explicitProject) return explicitProject
-      if (explicitDirectory !== null) return inferredProjectFromDir
-      if (currentDirectory) return currentDirProject
+      if (explicitProject || explicitDirectory !== null) {
+        return explicitProject ?? inferredProjectFromDir ?? fallbackProject
+      }
+      if (activeProject) return activeProject
+      if (currentDirectory) return currentDirProject ?? fallbackProject
       return persistedProjectByDir ?? persistedProjectById ?? fallbackProject
     })()
 
     const directory = (() => {
       if (explicitDirectory !== null) return explicitDirectory
       if (explicitProject) return normalizePath(explicitProject.path ?? null)
+      const selectedProjectPath = normalizePath(selectedProject?.path ?? null)
+      if (selectedProjectPath && selectedProjectPath !== currentDirectory) return selectedProjectPath
       if (currentDirectory) return currentDirectory
       if (persistedTarget?.directory) return persistedTarget.directory
       return normalizePath(selectedProject?.path ?? null)
@@ -1040,6 +1072,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         variant,
         inputMode,
         files,
+        delivery: options?.delivery,
         additionalParts: mergedAdditionalParts?.map((p) => ({
           text: p.text,
           synthetic: p.synthetic,
@@ -1118,6 +1151,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       variant,
       inputMode,
       files,
+      delivery: options?.delivery,
       additionalParts: additionalParts?.map((p) => ({
         text: p.text,
         synthetic: p.synthetic,

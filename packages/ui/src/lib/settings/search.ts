@@ -205,11 +205,11 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
-    id: 'chat.queue-mode',
+    id: 'chat.follow-up-behavior',
     page: 'chat',
-    titleKey: 'settings.openchamber.visual.field.queueMessagesByDefault',
-    descriptionKey: 'settings.openchamber.visual.field.queueMessagesByDefaultTooltip',
-    keywords: ['queue', 'enter', 'send'],
+    titleKey: 'settings.openchamber.visual.section.followUpBehavior',
+    descriptionKey: 'settings.openchamber.visual.field.followUpBehaviorDescription',
+    keywords: ['follow up', 'queue', 'steer', 'send immediately'],
   },
   {
     id: 'chat.persist-drafts',
@@ -223,6 +223,13 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     titleKey: 'settings.openchamber.visual.field.enableSpellcheckInTextInputs',
     keywords: ['spelling', 'input'],
     isAvailable: (ctx) => !ctx.isMobile,
+  },
+  {
+    id: 'chat.strip-slash-on-submit',
+    page: 'chat',
+    titleKey: 'settings.openchamber.visual.field.stripSlashOnSubmit',
+    descriptionKey: 'settings.openchamber.visual.field.stripSlashOnSubmitDescription',
+    keywords: ['slash', 'command', 'skill', 'expand', 'submit'],
   },
   {
     id: 'sessions.default-model',

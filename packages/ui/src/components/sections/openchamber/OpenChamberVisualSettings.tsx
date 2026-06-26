@@ -5,8 +5,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import type { ThemeMode } from '@/types/theme';
 import { useUIStore } from '@/stores/useUIStore';
-import { useMessageQueueStore } from '@/stores/messageQueueStore';
-import { cn, getModifierLabel } from '@/lib/utils';
+import { useMessageQueueStore, type FollowUpBehavior } from '@/stores/messageQueueStore';
+import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { NumberInput } from '@/components/ui/number-input';
@@ -230,6 +230,21 @@ const WEEK_START_OPTIONS: Option<'auto' | 'monday' | 'sunday'>[] = [
     },
 ];
 
+const FOLLOW_UP_BEHAVIOR_OPTIONS: Option<FollowUpBehavior>[] = [
+    {
+        id: 'steer',
+        labelKey: 'settings.openchamber.visual.option.followUpBehavior.steer.label',
+    },
+    {
+        id: 'queue',
+        labelKey: 'settings.openchamber.visual.option.followUpBehavior.queue.label',
+    },
+    {
+        id: 'immediate',
+        labelKey: 'settings.openchamber.visual.option.followUpBehavior.immediate.label',
+    },
+];
+
 const normalizeUserMessageRenderingMode = (mode: unknown): 'markdown' | 'plain' => {
     return mode === 'markdown' ? 'markdown' : 'plain';
 };
@@ -288,12 +303,14 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
     const setShowTerminalQuickKeysOnDesktop = useUIStore(state => state.setShowTerminalQuickKeysOnDesktop);
     const fileEditorKeymap = useUIStore(state => state.fileEditorKeymap);
     const setFileEditorKeymap = useUIStore(state => state.setFileEditorKeymap);
-    const queueModeEnabled = useMessageQueueStore(state => state.queueModeEnabled);
-    const setQueueMode = useMessageQueueStore(state => state.setQueueMode);
+    const followUpBehavior = useMessageQueueStore(state => state.followUpBehavior);
+    const setFollowUpBehavior = useMessageQueueStore(state => state.setFollowUpBehavior);
     const persistChatDraft = useUIStore(state => state.persistChatDraft);
     const setPersistChatDraft = useUIStore(state => state.setPersistChatDraft);
     const inputSpellcheckEnabled = useUIStore(state => state.inputSpellcheckEnabled);
     const setInputSpellcheckEnabled = useUIStore(state => state.setInputSpellcheckEnabled);
+    const stripSlashOnSubmit = useUIStore(state => state.stripSlashOnSubmit);
+    const setStripSlashOnSubmit = useUIStore(state => state.setStripSlashOnSubmit);
     const showToolFileIcons = useUIStore(state => state.showToolFileIcons);
     const setShowToolFileIcons = useUIStore(state => state.setShowToolFileIcons);
     const showTurnChangedFiles = useUIStore(state => state.showTurnChangedFiles);
@@ -427,6 +444,11 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
         void updateDesktopSettings({ inputSpellcheckEnabled: enabled });
     }, [setInputSpellcheckEnabled]);
 
+    const handleStripSlashOnSubmitChange = React.useCallback((enabled: boolean) => {
+        setStripSlashOnSubmit(enabled);
+        void updateDesktopSettings({ stripSlashOnSubmit: enabled });
+    }, [setStripSlashOnSubmit]);
+
     const handleChatRenderModeChange = React.useCallback((mode: 'sorted' | 'live') => {
         setChatRenderMode(mode);
         void updateDesktopSettings({ chatRenderMode: mode });
@@ -539,11 +561,12 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
         || shouldShow('dotfiles')
         || shouldShow('fileViewerPreview')
         || shouldShow('reasoning')
-        || shouldShow('queueMode')
+        || shouldShow('followUpBehavior')
         || shouldShow('persistDraft')
         || shouldShow('showToolFileIcons')
         || shouldShow('expandedTools')
-        || (!isMobile && shouldShow('inputSpellcheck'));
+        || (!isMobile && shouldShow('inputSpellcheck'))
+        || shouldShow('stripSlashOnSubmit');
 
     const showPwaInstallNameSetting = shouldShow('pwaInstallName') && isWebRuntime() && browserTab && !isDesktopShell() && !isVSCode;
     const showPwaOrientationSetting = shouldShow('pwaOrientation') && isWebRuntime() && !isDesktopShell() && !isVSCode;
@@ -1684,7 +1707,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                 </div>
                             )}
 
-                            {(shouldShow('collapsibleUserMessages') || shouldShow('stickyUserHeader') || shouldShow('wideChatLayout') || shouldShow('splitAssistantMessageActions') || shouldShow('dotfiles') || shouldShow('fileViewerPreview') || shouldShow('queueMode') || shouldShow('persistDraft') || shouldShow('showToolFileIcons') || shouldShow('showTurnChangedFiles') || (!isMobile && shouldShow('inputSpellcheck')) || shouldShow('reasoning')) && (
+                            {(shouldShow('collapsibleUserMessages') || shouldShow('stickyUserHeader') || shouldShow('wideChatLayout') || shouldShow('splitAssistantMessageActions') || shouldShow('dotfiles') || shouldShow('fileViewerPreview') || shouldShow('followUpBehavior') || shouldShow('persistDraft') || shouldShow('showToolFileIcons') || shouldShow('showTurnChangedFiles') || (!isMobile && shouldShow('inputSpellcheck')) || shouldShow('stripSlashOnSubmit') || shouldShow('reasoning')) && (
                                 <section className="p-2 space-y-0.5">
                                     {shouldShow('reasoning') && (
                                         <div
@@ -1936,38 +1959,40 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                         </div>
                                     )}
 
-                                    {shouldShow('queueMode') && (
-                                        <div
-                                            data-settings-item="chat.queue-mode"
-                                            className="group flex cursor-pointer items-center gap-2 py-0.5"
-                                            role="button"
-                                            tabIndex={0}
-                                            aria-pressed={queueModeEnabled}
-                                            onClick={() => setQueueMode(!queueModeEnabled)}
-                                            onKeyDown={(event) => {
-                                                if (event.key === ' ' || event.key === 'Enter') {
-                                                    event.preventDefault();
-                                                    setQueueMode(!queueModeEnabled);
-                                                }
-                                            }}
-                                        >
-                                            <Checkbox
-                                                checked={queueModeEnabled}
-                                                onChange={setQueueMode}
-                                                ariaLabel={t('settings.openchamber.visual.field.queueMessagesByDefaultAria')}
-                                            />
-                                            <div className="flex min-w-0 items-center gap-1.5">
-                                                <span className="typography-ui-label text-foreground">{t('settings.openchamber.visual.field.queueMessagesByDefault')}</span>
-                                                <Tooltip>
-                                                    <TooltipTrigger asChild>
-                                                        <Icon name="information" className="h-3.5 w-3.5 text-muted-foreground/60 cursor-help" />
-                                                    </TooltipTrigger>
-                                                    <TooltipContent sideOffset={8} className="max-w-xs">
-                                                        {t('settings.openchamber.visual.field.queueMessagesByDefaultTooltip', { modifier: getModifierLabel() })}
-                                                    </TooltipContent>
-                                                </Tooltip>
+                                    {shouldShow('followUpBehavior') && (
+                                        <section data-settings-item="chat.follow-up-behavior" className="p-2">
+                                            <h4 className="typography-ui-header font-medium text-foreground">{t('settings.openchamber.visual.section.followUpBehavior')}</h4>
+                                            <div role="radiogroup" aria-label={t('settings.openchamber.visual.section.followUpBehaviorAria')} className="mt-0.5 space-y-0">
+                                                {FOLLOW_UP_BEHAVIOR_OPTIONS.map((option) => {
+                                                    const selected = followUpBehavior === option.id;
+                                                    return (
+                                                        <div
+                                                            key={option.id}
+                                                            role="button"
+                                                            tabIndex={0}
+                                                            aria-pressed={selected}
+                                                            onClick={() => setFollowUpBehavior(option.id)}
+                                                            onKeyDown={(event) => {
+                                                                if (event.key === ' ' || event.key === 'Enter') {
+                                                                    event.preventDefault();
+                                                                    setFollowUpBehavior(option.id);
+                                                                }
+                                                            }}
+                                                            className="flex w-full items-center gap-2 py-0 text-left"
+                                                        >
+                                                            <Radio
+                                                                checked={selected}
+                                                                onChange={() => setFollowUpBehavior(option.id)}
+                                                                ariaLabel={t('settings.openchamber.visual.field.followUpBehaviorAria', { option: tUnsafe(option.labelKey) })}
+                                                            />
+                                                            <span className={cn('typography-ui-label font-normal', selected ? 'text-foreground' : 'text-foreground/50')}>
+                                                                {tUnsafe(option.labelKey)}
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                })}
                                             </div>
-                                        </div>
+                                        </section>
                                     )}
 
                                     {shouldShow('persistDraft') && (
@@ -2015,6 +2040,35 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                                 ariaLabel={t('settings.openchamber.visual.field.enableSpellcheckInTextInputsAria')}
                                             />
                                             <span className="typography-ui-label text-foreground">{t('settings.openchamber.visual.field.enableSpellcheckInTextInputs')}</span>
+                                        </div>
+                                    )}
+
+                                    {shouldShow('stripSlashOnSubmit') && (
+                                        <div
+                                            data-settings-item="chat.strip-slash-on-submit"
+                                            className="group flex cursor-pointer items-start gap-2 py-1.5"
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-pressed={stripSlashOnSubmit}
+                                            onClick={() => handleStripSlashOnSubmitChange(!stripSlashOnSubmit)}
+                                            onKeyDown={(event) => {
+                                                if (event.key === ' ' || event.key === 'Enter') {
+                                                    event.preventDefault();
+                                                    handleStripSlashOnSubmitChange(!stripSlashOnSubmit);
+                                                }
+                                            }}
+                                        >
+                                            <Checkbox
+                                                checked={stripSlashOnSubmit}
+                                                onChange={handleStripSlashOnSubmitChange}
+                                                ariaLabel={t('settings.openchamber.visual.field.stripSlashOnSubmit')}
+                                            />
+                                            <div className="flex flex-col">
+                                                <span className="typography-ui-label text-foreground">{t('settings.openchamber.visual.field.stripSlashOnSubmit')}</span>
+                                                <span className="typography-meta text-muted-foreground">
+                                                    {t('settings.openchamber.visual.field.stripSlashOnSubmitDescription')}
+                                                </span>
+                                            </div>
                                         </div>
                                     )}
 
