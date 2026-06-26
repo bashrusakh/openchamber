@@ -14,7 +14,7 @@ import { checkIsGitRepository, previewGitWorktree } from '@/lib/gitApi';
 import { generateBranchName } from '@/lib/git/branchNameGenerator';
 import { parseModelIdentifier } from '@/lib/modelIdentifier';
 import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
-import { getWorktreeSetupCommands } from '@/lib/openchamberConfig';
+import { getWorktreeSetupCommands, getWorktreeSetupWaitEnabled } from '@/lib/openchamberConfig';
 import {
   removeProjectWorktree,
   type ProjectRef,
@@ -28,6 +28,12 @@ import {
 import { waitForWorktreeBootstrap } from '@/lib/worktrees/worktreeBootstrap';
 
 const normalizePath = (value: string): string => value.replace(/\\/g, '/').replace(/\/+$/, '') || value;
+
+const waitForWorktreeBootstrapIfEnabled = async (project: ProjectRef, directory: string): Promise<void> => {
+  if (await getWorktreeSetupWaitEnabled(project)) {
+    await waitForWorktreeBootstrap(directory);
+  }
+};
 
 const resolveProjectRef = (directory: string): ProjectRef | null => {
   const normalized = normalizePath(directory);
@@ -279,10 +285,6 @@ export async function createWorktreeSession(): Promise<string | null> {
 /**
  * Check if a worktree session is currently being created.
  */
-export function isCreatingWorktree(): boolean {
-  return isCreatingWorktreeSession;
-}
-
 export async function createWorktreeDraft(options?: { initialPrompt?: string; title?: string }): Promise<string | null> {
   return createInstantWorktreeDraft(options);
 }
@@ -523,7 +525,7 @@ export async function createWorktreeSessionForNewBranch(
         kind,
       };
 
-      await waitForWorktreeBootstrap(metadata.path);
+      await waitForWorktreeBootstrapIfEnabled(projectRef, metadata.path);
 
       const sessionStore = useSessionUIStore.getState();
       const session = await sessionStore.createSession(undefined, metadata.path);
@@ -543,37 +545,4 @@ export async function createWorktreeSessionForNewBranch(
   } finally {
     isCreatingWorktreeSession = false;
   }
-}
-
-/**
- * Same as createWorktreeSessionForNewBranch, but preserves the exact branch name.
- * Use when the worktree must be tied to a specific ref (e.g. PR head ref).
- */
-export async function createWorktreeSessionForNewBranchExact(
-  projectDirectory: string,
-  branchName: string,
-  startPoint: string,
-  options?: {
-    kind?: 'pr' | 'standard';
-    worktreeName?: string;
-    setUpstream?: boolean;
-    upstreamRemote?: string;
-    upstreamBranch?: string;
-    ensureRemoteName?: string;
-    ensureRemoteUrl?: string;
-    createdFromBranch?: string;
-    returnAfterDirectoryCreated?: boolean;
-  }
-): Promise<{ id: string; branch: string; path: string } | null> {
-  return createWorktreeSessionForNewBranch(projectDirectory, branchName, startPoint, {
-    kind: options?.kind,
-    worktreeName: options?.worktreeName,
-    setUpstream: options?.setUpstream,
-    upstreamRemote: options?.upstreamRemote,
-    upstreamBranch: options?.upstreamBranch,
-    ensureRemoteName: options?.ensureRemoteName,
-    ensureRemoteUrl: options?.ensureRemoteUrl,
-    createdFromBranch: options?.createdFromBranch,
-    returnAfterDirectoryCreated: options?.returnAfterDirectoryCreated,
-  });
 }
