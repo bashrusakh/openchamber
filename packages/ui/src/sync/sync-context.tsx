@@ -533,6 +533,28 @@ export function getSessionWatchdogFreshnessAt(
   return freshnessBySessionByDirectory.get(directory)?.get(sessionId) ?? freshnessByDirectory.get(directory)
 }
 
+export function getSessionWatchdogFreshnessLineage(
+  directory: string,
+  sessionId: string,
+  lookupSession: (directory: string, sessionId: string) => Session | undefined,
+): string[] {
+  const lineage = new Set<string>()
+  const seen = new Set<string>()
+  let currentSessionId: string | undefined = sessionId
+
+  while (currentSessionId && !seen.has(currentSessionId)) {
+    lineage.add(currentSessionId)
+    seen.add(currentSessionId)
+
+    const currentSession = lookupSession(directory, currentSessionId)
+    const parentID = (currentSession as Session & { parentID?: string | null } | undefined)?.parentID ?? undefined
+    if (!parentID) break
+    currentSessionId = parentID
+  }
+
+  return Array.from(lineage)
+}
+
 type EventRoutingIndex = {
   sessionDirectoryById: Map<string, string>
   messageSessionById: Map<string, string>
@@ -1606,13 +1628,21 @@ export function SyncProvider(props: {
   const pipelineReconnectRef = useRef<((reason?: string) => void) | null>(null)
 
   const recordSessionWatchdogFreshness = useCallback((directory: string, sessionId: string) => {
+    const store = childStores.children.get(directory)
+    const lookupSession = (targetDirectory: string, targetSessionId: string) => (
+      store?.getState().session.find((session) => session.id === targetSessionId)
+      ?? getAllSyncSessions().find((session) => session.id === targetSessionId && (!session.directory || session.directory === targetDirectory))
+    )
+    const now = Date.now()
     let sessionFreshnessByDirectory = lastActiveEventAtBySessionRef.current.get(directory)
     if (!sessionFreshnessByDirectory) {
       sessionFreshnessByDirectory = new Map<string, number>()
       lastActiveEventAtBySessionRef.current.set(directory, sessionFreshnessByDirectory)
     }
-    sessionFreshnessByDirectory.set(sessionId, Date.now())
-  }, [])
+    for (const targetSessionId of getSessionWatchdogFreshnessLineage(directory, sessionId, lookupSession)) {
+      sessionFreshnessByDirectory.set(targetSessionId, now)
+    }
+  }, [childStores.children])
 
   const system = useMemo<SyncSystem>(
     () => ({

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { create, type StoreApi } from "zustand"
+import type { Session } from "@opencode-ai/sdk/v2"
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client"
 
 import { INITIAL_STATE, type State } from "../types"
@@ -7,6 +8,7 @@ import type { DirectoryStore } from "../child-store"
 import {
   applySessionStatusSnapshot,
   getSessionWatchdogFreshnessAt,
+  getSessionWatchdogFreshnessLineage,
   needsSnapshotAfterStatusPoll,
 } from "../sync-context"
 
@@ -151,5 +153,19 @@ describe("getSessionWatchdogFreshnessAt", () => {
     expect(
       getSessionWatchdogFreshnessAt("dir_a", "ses_a", freshnessBySessionByDirectory, freshnessByDirectory),
     ).toBe(9_000)
+  })
+})
+
+describe("getSessionWatchdogFreshnessLineage", () => {
+  test("includes ancestor sessions for delegated child activity", () => {
+    const sessions = new Map<string, Session>([
+      ["child", { id: "child", parentID: "parent" } as Session],
+      ["parent", { id: "parent", parentID: "root" } as Session],
+      ["root", { id: "root" } as Session],
+    ])
+
+    const lineage = getSessionWatchdogFreshnessLineage("dir_a", "child", (_directory, sessionId) => sessions.get(sessionId))
+
+    expect(lineage).toEqual(["child", "parent", "root"])
   })
 })
