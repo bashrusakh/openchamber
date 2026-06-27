@@ -29,7 +29,7 @@ import { SimpleMarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { Icon } from "@/components/icon/Icon";
 import { useUIStore } from '@/stores/useUIStore';
 import { formatDateTimeForPreference } from '@/lib/timeFormat';
-import { useSessionUIStore } from '@/sync/session-ui-store';
+import { materializeOpenDraftSession, useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
@@ -694,10 +694,32 @@ export const PullRequestSection: React.FC<{
     return all;
   }, [commentsDetails, t]);
 
-  const resolveChatDispatchTarget = React.useCallback((): ChatDispatchTarget | null => {
-    if (!currentSessionId) {
-      toast.error(t('gitView.pr.toast.noActiveSession'), { description: t('gitView.pr.toast.noActiveSessionDescription') });
-      return null;
+  const resolveChatDispatchTarget = React.useCallback(async (): Promise<ChatDispatchTarget | null> => {
+    let sessionId = currentSessionId;
+
+    if (!sessionId) {
+      const draft = useSessionUIStore.getState().newSessionDraft;
+      if (draft?.open) {
+        const config = useConfigStore.getState();
+        if (!config.currentProviderId || !config.currentModelId) {
+          toast.error(t('gitView.pr.toast.noModelSelected'));
+          return null;
+        }
+        const materialized = await materializeOpenDraftSession({
+          providerID: config.currentProviderId,
+          modelID: config.currentModelId,
+          agent: config.currentAgentName || undefined,
+          variant: config.currentVariant || undefined,
+        });
+        if (!materialized) {
+          toast.error(t('gitView.pr.toast.noActiveSession'), { description: t('gitView.pr.toast.noActiveSessionDescription') });
+          return null;
+        }
+        sessionId = materialized.sessionId;
+      } else {
+        toast.error(t('gitView.pr.toast.noActiveSession'), { description: t('gitView.pr.toast.noActiveSessionDescription') });
+        return null;
+      }
     }
 
     const { currentProviderId, currentModelId, currentAgentName, currentVariant } = useConfigStore.getState();
@@ -710,7 +732,7 @@ export const PullRequestSection: React.FC<{
     }
 
     return {
-      sessionId: currentSessionId,
+      sessionId,
       providerID,
       modelID,
       currentAgentName: currentAgentName ?? null,
@@ -880,7 +902,7 @@ export const PullRequestSection: React.FC<{
       return;
     }
     if (!directory || !pr) return;
-    const target = resolveChatDispatchTarget();
+    const target = await resolveChatDispatchTarget();
     if (!target) {
       return;
     }
@@ -936,7 +958,7 @@ export const PullRequestSection: React.FC<{
       return;
     }
     if (!directory || !pr) return;
-    const target = resolveChatDispatchTarget();
+    const target = await resolveChatDispatchTarget();
     if (!target) {
       return;
     }
@@ -971,7 +993,7 @@ export const PullRequestSection: React.FC<{
     setCommentsDialogOpen(false);
     setActiveMainTab('chat');
 
-    const target = resolveChatDispatchTarget();
+    const target = await resolveChatDispatchTarget();
     if (!target) {
       return;
     }
