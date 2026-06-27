@@ -474,6 +474,7 @@ export const PullRequestSection: React.FC<{
   const [commentsDialogOpen, setCommentsDialogOpen] = React.useState(false);
   const [commentsDetails, setCommentsDetails] = React.useState<GitHubPullRequestContextResult | null>(null);
   const [isLoadingCommentsDetails, setIsLoadingCommentsDetails] = React.useState(false);
+  const [isSendingComments, setIsSendingComments] = React.useState(false);
 
   const attemptedBodyHydrationRef = React.useRef<Set<string>>(new Set());
   const lastSyncedPrNumberRef = React.useRef<number | null>(null);
@@ -975,6 +976,8 @@ export const PullRequestSection: React.FC<{
     }
     if (!directory || !pr) return;
 
+    setIsSendingComments(true);
+
     try {
       const context = await github.prContext(directory, pr.number, { includeDiff: false, includeCheckDetails: false });
       const issueComments = context.issueComments ?? [];
@@ -1003,6 +1006,8 @@ export const PullRequestSection: React.FC<{
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       toast.error(t('gitView.pr.toast.loadPrCommentsFailed'), { description: message });
+    } finally {
+      setIsSendingComments(false);
     }
   }, [directory, dispatchSyntheticPrompt, github, pr, resolveChatDispatchTarget, setActiveMainTab, t]);
 
@@ -1704,9 +1709,10 @@ export const PullRequestSection: React.FC<{
                             size="sm"
                             className="h-7 w-7 px-0 border-[var(--status-success-border)] bg-[var(--status-success-background)] text-[var(--status-success)]"
                             onClick={sendCommentsToChat}
+                            disabled={isSendingComments}
                             aria-label={t('gitView.pr.actions.shareCommentsAria')}
                           >
-                            <Icon name="ai-generate-2" className="size-4" />
+                            {isSendingComments ? <Icon name="loader-4" className="size-4 animate-spin" /> : <Icon name="ai-generate-2" className="size-4" />}
                           </Button>
                         </TooltipTrigger>
                         <TooltipContent><p>{t('gitView.pr.actions.shareComments')}</p></TooltipContent>
