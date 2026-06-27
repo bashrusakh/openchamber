@@ -1,3 +1,5 @@
+import { getForegroundSystemdUserServiceController } from '../systemd-user-service.js';
+
 export const registerOpenChamberRoutes = (app, dependencies) => {
   const {
     fs,
@@ -112,6 +114,10 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
       }
       const launchMode = storedOptions.launchMode === 'foreground' ? 'foreground' : 'daemon';
       const isForegroundService = launchMode === 'foreground';
+      const managedForegroundController = getForegroundSystemdUserServiceController({
+        launchMode,
+        port: storedOptions.port,
+      });
 
       const isWindows = process.platform === 'win32';
       const quotePosix = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
@@ -156,7 +162,13 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
         restartCmdPrimary += ' --api-only';
         restartCmdFallback += ' --api-only';
       }
-      const restartCmd = isForegroundService ? '' : `(${restartCmdPrimary}) || (${restartCmdFallback})`;
+      const restartCmd = managedForegroundController
+        ? managedForegroundController.start.shellCommand
+        : isForegroundService
+          ? ''
+          : `(${restartCmdPrimary}) || (${restartCmdFallback})`;
+      const stopCmd = managedForegroundController?.stop.shellCommand || '';
+      const useSystemdRunDetachedUpdate = Boolean(managedForegroundController);
       const updateLogPath = path.join(openchamberDataDir, 'update-install.log');
       const logPreamble = [
         '',
@@ -170,7 +182,10 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
         `globalNodeModulesRoot=${pmDetails.globalNodeModulesRoot || 'unknown'}`,
         `mode=${isContainer ? 'container' : 'restart'}`,
         `launchMode=${launchMode}`,
+        `serviceManager=${managedForegroundController?.label || 'none'}`,
+        `launcher=${useSystemdRunDetachedUpdate ? 'systemd-run --user' : 'direct-detached-shell'}`,
         `updateCommand=${updateCmd}`,
+        `stopCommand=${stopCmd || 'pid/process-exit'}`,
         `restartCommand=${restartCmd || 'service-manager'}`,
         `logPath=${updateLogPath}`,
       ].join('\n');
@@ -181,7 +196,7 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
         version: updateInfo.version,
         packageManager: pm,
         autoRestart: true,
-        restartManager: isForegroundService ? 'service' : 'cli',
+        restartManager: managedForegroundController ? 'systemd-user-service' : isForegroundService ? 'process-manager' : 'cli',
       });
 
         setTimeout(() => {
@@ -207,12 +222,26 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
           : `
             printf '%s\n' ${quotePosix(logPreamble)}
             sleep 2
+            ${stopCmd || ':'}
+            if [ $? -ne 0 ]; then
+              echo "Failed to stop OpenChamber before update"
+              exit 1
+            fi
             ${updateCmd}
             if [ $? -eq 0 ]; then
               echo "Update successful, restarting OpenChamber..."
               ${restartCmd || 'echo "Service manager will restart OpenChamber."'}
+              ${managedForegroundController ? `
+              if [ $? -ne 0 ]; then
+                echo "Update succeeded but service restart failed"
+                exit 1
+              fi` : ''}
             else
               echo "Update failed"
+              ${managedForegroundController ? `${restartCmd}
+              if [ $? -ne 0 ]; then
+                echo "Update failed and service restart also failed"
+              fi` : ':'}
               exit 1
             fi
           `;
@@ -225,10 +254,27 @@ export const registerOpenChamberRoutes = (app, dependencies) => {
           console.warn('Failed to open update log file, continuing without log capture:', logError);
         }
 
-        const child = spawnChild(shell, [shellFlag, script], {
-          detached: true,
-          stdio: logFd !== null ? ['ignore', logFd, logFd] : 'ignore',
-          env: process.env,
+        const child = useSystemdRunDetachedUpdate
+          ? spawnChild('systemd-run', [
+            '--user',
+            '--unit', `openchamber-update-${Date.now()}`,
+            '--collect',
+            '--quiet',
+            'sh',
+            '-lc',
+            script,
+          ], {
+            detached: true,
+            stdio: logFd !== null ? ['ignore', logFd, logFd] : 'ignore',
+            env: process.env,
+          })
+          : spawnChild(shell, [shellFlag, script], {
+            detached: true,
+            stdio: logFd !== null ? ['ignore', logFd, logFd] : 'ignore',
+            env: process.env,
+          });
+        child.on('error', (error) => {
+          console.error('Failed to launch detached update process:', error);
         });
         child.unref();
 
