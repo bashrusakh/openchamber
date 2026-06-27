@@ -920,6 +920,11 @@ export const PullRequestSection: React.FC<{
     if (!directory || !pr) return;
 
     try {
+      const target = await resolveChatDispatchTarget();
+      if (!target) {
+        return;
+      }
+
       const context = await github.prContext(directory, pr.number, { includeDiff: false, includeCheckDetails: true });
       const runs = context.checkRuns ?? [];
       const failed = runs.filter((r) => {
@@ -955,11 +960,6 @@ export const PullRequestSection: React.FC<{
         failedAnnotations,
       }, null, 2)}`;
 
-      const target = await resolveChatDispatchTarget();
-      if (!target) {
-        return;
-      }
-
       dispatchSyntheticPrompt(target, visibleText, instructionsText, payloadText);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -979,6 +979,11 @@ export const PullRequestSection: React.FC<{
     setIsSendingComments(true);
 
     try {
+      const target = await resolveChatDispatchTarget();
+      if (!target) {
+        return;
+      }
+
       const context = await github.prContext(directory, pr.number, { includeDiff: false, includeCheckDetails: false });
       const issueComments = context.issueComments ?? [];
       const reviewComments = context.reviewComments ?? [];
@@ -996,11 +1001,6 @@ export const PullRequestSection: React.FC<{
         issueComments,
         reviewComments,
       }, null, 2)}`;
-
-      const target = await resolveChatDispatchTarget();
-      if (!target) {
-        return;
-      }
 
       dispatchSyntheticPrompt(target, visibleText, instructionsText, payloadText);
     } catch (e) {
