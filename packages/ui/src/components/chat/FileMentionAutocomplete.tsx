@@ -267,7 +267,7 @@ export const FileMentionAutocomplete = React.forwardRef<FileMentionHandle, FileM
 
     const filtered = rankAutocompleteItems(
       candidates,
-      searchQuery,
+      searchQuery ?? '',
       (agent) => `${agent.name} ${agent.description ?? ''}`,
       {
         compare: (a, b) => a.name.localeCompare(b.name),
