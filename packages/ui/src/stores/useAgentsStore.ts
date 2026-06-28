@@ -334,7 +334,6 @@ export const useAgentsStore = create<AgentsStore>()(
 
         createAgent: async (config: AgentConfig) => {
           startConfigUpdate("Creating agent configuration…");
-          let requiresReload = false;
           try {
             console.log('[AgentsStore] Creating agent:', config.name);
 
@@ -383,12 +382,12 @@ export const useAgentsStore = create<AgentsStore>()(
 
             const needsReload = payload?.requiresReload ?? true;
             if (needsReload) {
-              requiresReload = true;
               await refreshAfterOpenCodeRestart({
                 message: payload?.message,
                 delayMs: payload?.reloadDelayMs,
                 scopes: ["agents"],
-                mode: "projects",
+                mode: "active",
+                skipHealthCheck: true,
               });
               return { ok: true };
             }
@@ -402,15 +401,12 @@ export const useAgentsStore = create<AgentsStore>()(
             console.error('Failed to create agent:', error);
             return { ok: false };
           } finally {
-            if (!requiresReload) {
-              finishConfigUpdate();
-            }
+            finishConfigUpdate();
           }
         },
 
         updateAgent: async (name: string, config: Partial<AgentConfig>) => {
           startConfigUpdate("Updating agent configuration…");
-          let requiresReload = false;
           try {
             const agentConfig: Record<string, unknown> = {};
 
@@ -454,12 +450,12 @@ export const useAgentsStore = create<AgentsStore>()(
 
             const needsReload = payload?.requiresReload ?? true;
             if (needsReload) {
-              requiresReload = true;
               await refreshAfterOpenCodeRestart({
                 message: payload?.message,
                 delayMs: payload?.reloadDelayMs,
                 scopes: ["agents"],
-                mode: "projects",
+                mode: "active",
+                skipHealthCheck: true,
               });
               return { ok: true };
             }
@@ -473,15 +469,12 @@ export const useAgentsStore = create<AgentsStore>()(
             console.error('Failed to update agent:', error);
             throw error;
           } finally {
-            if (!requiresReload) {
-              finishConfigUpdate();
-            }
+            finishConfigUpdate();
           }
         },
 
         deleteAgent: async (name: string, scope?: AgentScope) => {
           startConfigUpdate("Deleting agent configuration…");
-          let requiresReload = false;
           try {
             // Use active project root for project-level agent support.
             const configDirectory = getConfigDirectory();
@@ -515,12 +508,12 @@ export const useAgentsStore = create<AgentsStore>()(
 
             const needsReload = payload?.requiresReload ?? true;
             if (needsReload) {
-              requiresReload = true;
               await refreshAfterOpenCodeRestart({
                 message: payload?.message,
                 delayMs: payload?.reloadDelayMs,
                 scopes: ["agents"],
-                mode: "projects",
+                mode: "active",
+                skipHealthCheck: true,
               });
               return { ok: true };
             }
@@ -535,9 +528,7 @@ export const useAgentsStore = create<AgentsStore>()(
             console.error('Failed to delete agent:', error);
             throw error;
           } finally {
-            if (!requiresReload) {
-              finishConfigUpdate();
-            }
+            finishConfigUpdate();
           }
         },
 
@@ -634,8 +625,9 @@ async function performConfigRefresh(options: {
   delayMs?: number;
   scopes?: ConfigChangeScope[];
   mode?: ConfigRefreshMode;
+  skipHealthCheck?: boolean;
 } = {}) {
-  const { message, delayMs } = options;
+  const { message, delayMs, skipHealthCheck } = options;
   const scopes = normalizeRefreshScopes(options.scopes);
   const mode: ConfigRefreshMode = options.mode ?? (scopes.includes("all") ? "projects" : "active");
 
@@ -646,7 +638,11 @@ async function performConfigRefresh(options: {
   }
 
   try {
-    await waitForOpenCodeConnection(delayMs);
+    // Server already confirmed OpenCode is healthy after a config change;
+    // skip the redundant client-side health poll.
+    if (!skipHealthCheck) {
+      await waitForOpenCodeConnection(delayMs);
+    }
 
     const configStore = useConfigStore.getState();
     const agentConfigStore = useAgentsStore.getState();
@@ -719,6 +715,7 @@ export async function refreshAfterOpenCodeRestart(options?: {
   delayMs?: number;
   scopes?: ConfigChangeScope[];
   mode?: ConfigRefreshMode;
+  skipHealthCheck?: boolean;
 }) {
   await performConfigRefresh(options);
 }
