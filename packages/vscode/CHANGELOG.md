@@ -1,3 +1,11 @@
+## [1.13.6] - 2026-06-28
+
+- Chat: scrolling in conversations now stays steady while sending, queueing, streaming, switching sessions, and loading older messages.
+
+## [1.13.5] - 2026-06-27
+
+- No notable changes.
+
 ## [1.13.4] - 2026-06-27
 
 - UI/Localization: added Japanese interface translations (thanks to @yuchi0531).
