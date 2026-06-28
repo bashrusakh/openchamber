@@ -254,8 +254,7 @@ export const AgentsPage: React.FC = () => {
   const [pendingRuleName, setPendingRuleName] = React.useState('');
   const [pendingRulePattern, setPendingRulePattern] = React.useState('*');
   const [showPermissionEditor, setShowPermissionEditor] = React.useState(false);
-  const [saveState, setSaveState] = React.useState<'idle' | 'saving' | 'saved'>('idle');
-  const savedTimerRef = React.useRef<ReturnType<typeof setTimeout>>();
+  const [saveState, setSaveState] = React.useState<'idle' | 'saving'>('idle');
   const initialStateRef = React.useRef<{
     draftName: string;
     draftScope: AgentScope;
@@ -602,13 +601,7 @@ export const AgentsPage: React.FC = () => {
     return false;
   }, [description, draftName, draftScope, globalPermission, isNewAgent, mode, model, permissionRules, prompt, temperature, topP, variant]);
 
-  // Cleanup saved timer on unmount
-  React.useEffect(() => () => clearTimeout(savedTimerRef.current), []);
-
   const handleSave = async () => {
-    // Clear any stale saved timer to prevent race on rapid re-saves
-    clearTimeout(savedTimerRef.current);
-
     const agentName = isNewAgent ? draftName.trim().replace(/\s+/g, '-') : selectedAgentName?.trim();
 
     if (!agentName) {
@@ -653,8 +646,7 @@ export const AgentsPage: React.FC = () => {
       }
 
       if (result.ok) {
-        setSaveState('saved');
-        savedTimerRef.current = setTimeout(() => setSaveState('idle'), 2000);
+        setSaveState('idle');
         if (result.requiresManualRestart) {
           toast.warning(t('settings.agents.page.toast.savedManualRestart'));
         } else {
@@ -1228,8 +1220,6 @@ export const AgentsPage: React.FC = () => {
           >
             {saveState === 'saving' ? (
               <><Icon name="loader-4" className="h-3.5 w-3.5 animate-spin" /> {t('settings.common.actions.saving')}</>
-            ) : saveState === 'saved' ? (
-              <><Icon name="check" className="h-3.5 w-3.5 text-green-500" /> {t('settings.common.actions.saved')}</>
             ) : (
               t('settings.common.actions.saveChanges')
             )}
