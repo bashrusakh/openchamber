@@ -550,12 +550,10 @@ export function getSessionWatchdogFreshnessLineage(
   lookupSession: (directory: string, sessionId: string) => Session | undefined,
 ): string[] {
   const lineage = new Set<string>()
-  const seen = new Set<string>()
   let currentSessionId: string | undefined = sessionId
 
-  while (currentSessionId && !seen.has(currentSessionId)) {
+  while (currentSessionId && !lineage.has(currentSessionId)) {
     lineage.add(currentSessionId)
-    seen.add(currentSessionId)
 
     const currentSession = lookupSession(directory, currentSessionId)
     const parentID = currentSession?.parentID ?? undefined
@@ -2015,7 +2013,7 @@ export function SyncProvider(props: {
                 sessionId,
                 lastActiveEventAtBySessionRef.current,
                 lastActiveEventAtByDirectoryRef.current,
-              ) ?? now
+              ) ?? 0
               return now - lastActiveEventAt >= ACTIVE_SESSION_STALE_EVENT_MS
             })
             if (staleSessionId && now - lastFullResyncAt >= ACTIVE_SESSION_FULL_RESYNC_COOLDOWN_MS) {

@@ -239,6 +239,8 @@ export function applyDirectoryEvent(
         trimSessions(draft)
         if (!info.parentID) draft.sessionTotal += 1
       }
+      // Metadata-only session creation should not keep an idle session alive;
+      // freshness is only touched when the session is already active.
       touchSessionFreshnessIfActive(info.id)
       return true
     }
@@ -263,6 +265,7 @@ export function applyDirectoryEvent(
         sessions.splice(result.index, 0, info)
         trimSessions(draft)
       }
+      // Metadata-only updates should not mask a stuck idle session.
       touchSessionFreshnessIfActive(info.id)
       return true
     }
