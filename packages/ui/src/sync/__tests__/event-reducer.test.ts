@@ -286,4 +286,49 @@ describe("applyDirectoryEvent", () => {
     expect(draft.question.ses_1).not.toBe(afterReply)
     expect(draft.question.ses_1).toEqual([])
   })
+
+  test("touches freshness when a session is archived before caches are cleared", () => {
+    const draft = state({
+      session_status: { ses_1: { type: "busy" } as SessionStatus },
+      session: [{ id: "ses_1" } as never],
+    })
+    const freshness: string[] = []
+
+    expect(applyDirectoryEvent(draft, {
+      type: "session.updated",
+      properties: { info: { id: "ses_1", time: { archived: 1 } } },
+    } as Event, { onSessionFreshness: (sessionID) => freshness.push(sessionID) })).toBe(true)
+    expect(freshness).toEqual(["ses_1"])
+  })
+
+  test("touches freshness when a session is deleted before caches are cleared", () => {
+    const draft = state({
+      session_status: { ses_1: { type: "busy" } as SessionStatus },
+      session: [{ id: "ses_1" } as never],
+    })
+    const freshness: string[] = []
+
+    expect(applyDirectoryEvent(draft, {
+      type: "session.deleted",
+      properties: { info: { id: "ses_1" } },
+    } as Event, { onSessionFreshness: (sessionID) => freshness.push(sessionID) })).toBe(true)
+    expect(freshness).toEqual(["ses_1"])
+  })
+
+  test("touches freshness when permission reply or question rejection removes a missing item", () => {
+    const draft = state({ session_status: { ses_1: { type: "busy" } as SessionStatus } })
+    const freshness: string[] = []
+
+    expect(applyDirectoryEvent(draft, {
+      type: "permission.replied",
+      properties: { sessionID: "ses_1", requestID: "perm_missing" },
+    } as Event, { onSessionFreshness: (sessionID) => freshness.push(sessionID) })).toBe(false)
+
+    expect(applyDirectoryEvent(draft, {
+      type: "question.rejected",
+      properties: { sessionID: "ses_1", requestID: "ques_missing" },
+    } as Event, { onSessionFreshness: (sessionID) => freshness.push(sessionID) })).toBe(false)
+
+    expect(freshness).toEqual(["ses_1", "ses_1"])
+  })
 })

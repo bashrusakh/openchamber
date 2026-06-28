@@ -243,9 +243,11 @@ export function applyDirectoryEvent(
       const result = Binary.search(sessions, info.id, (s) => s.id)
 
       if (info.time.archived) {
+        const wasActive = draft.session_status?.[info.id]?.type !== "idle"
         if (result.found) sessions.splice(result.index, 1)
         cleanupSessionCaches(draft, info.id, callbacks?.onSetSessionTodo)
         if (!info.parentID) draft.sessionTotal = Math.max(0, draft.sessionTotal - 1)
+        if (wasActive) touchSessionFreshness(info.id)
         return true
       }
 
@@ -263,10 +265,11 @@ export function applyDirectoryEvent(
       const info = (event.properties as { info: Session }).info
       const sessions = draft.session
       const result = Binary.search(sessions, info.id, (s) => s.id)
+      const wasActive = draft.session_status?.[info.id]?.type !== "idle"
       if (result.found) sessions.splice(result.index, 1)
       cleanupSessionCaches(draft, info.id, callbacks?.onSetSessionTodo)
       if (!info.parentID) draft.sessionTotal = Math.max(0, draft.sessionTotal - 1)
-      touchSessionFreshnessIfActive(info.id)
+      if (wasActive) touchSessionFreshness(info.id)
       return true
     }
 
@@ -522,6 +525,7 @@ export function applyDirectoryEvent(
         touchSessionFreshness(props.sessionID)
         return true
       }
+      touchSessionFreshness(props.sessionID)
       return false
     }
 
@@ -556,6 +560,7 @@ export function applyDirectoryEvent(
         touchSessionFreshness(props.sessionID)
         return true
       }
+      touchSessionFreshness(props.sessionID)
       return false
     }
 
