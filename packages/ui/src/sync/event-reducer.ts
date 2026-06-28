@@ -168,15 +168,6 @@ function hasMessage(draft: State, sessionID: string | undefined, messageID: stri
   return Binary.search(messages, messageID, (message) => message.id).found
 }
 
-function findSessionIdByMessageId(draft: State, messageID: string): string | undefined {
-  for (const [sessionID, messages] of Object.entries(draft.message)) {
-    if (messages?.some((message) => message.id === messageID)) {
-      return sessionID
-    }
-  }
-  return undefined
-}
-
 export function reduceGlobalEvent(event: Event): GlobalEventResult {
   if (event.type === "global.disposed" || event.type === "server.connected") {
     return { type: "refresh" }
@@ -211,8 +202,15 @@ export function applyDirectoryEvent(
     onLoadLsp?: () => void
     onSetSessionTodo?: (sessionID: string, todos: Todo[] | undefined) => void
     onSessionFreshness?: (sessionID: string) => void
+    onResolveSessionIDForMessageID?: (messageID: string) => string | undefined
   },
 ): DirectoryEventResult {
+  const isSessionActive = (sessionID?: string) => {
+    if (!sessionID) return false
+    const currentStatus = draft.session_status?.[sessionID]
+    return Boolean(currentStatus) && currentStatus.type !== "idle"
+  }
+
   const touchSessionFreshness = (sessionID?: string) => {
     if (!sessionID) return
     callbacks?.onSessionFreshness?.(sessionID)
@@ -222,12 +220,6 @@ export function applyDirectoryEvent(
     if (!sessionID) return
     if (!isSessionActive(sessionID)) return
     callbacks?.onSessionFreshness?.(sessionID)
-  }
-
-  const isSessionActive = (sessionID?: string) => {
-    if (!sessionID) return false
-    const currentStatus = draft.session_status?.[sessionID]
-    return Boolean(currentStatus) && currentStatus.type !== "idle"
   }
 
   switch (event.type) {
@@ -395,12 +387,12 @@ export function applyDirectoryEvent(
       const sessionID = props.sessionID ?? (part as { sessionID?: string }).sessionID
       if (SKIP_PARTS.has(part.type)) {
         syncDebug.reducer.partSkipped((part as { messageID: string }).messageID, part.id, part.type)
-        touchSessionFreshness(sessionID)
+        touchSessionFreshnessIfActive(sessionID)
         return false
       }
       const messageID = (part as { messageID?: string }).messageID
       if (!messageID) {
-        touchSessionFreshness(sessionID)
+        touchSessionFreshnessIfActive(sessionID)
         return false
       }
       const missingOwningMessage = !hasMessage(draft, sessionID, messageID)
@@ -421,7 +413,7 @@ export function applyDirectoryEvent(
       if (result.found) {
         const previous = next[result.index]
         if (shouldPreserveExistingPart(previous, part)) {
-          touchSessionFreshness(sessionID)
+          touchSessionFreshnessIfActive(sessionID)
           return false
         }
         const dedupeFields = getUpdatedDeltaFields(previous, part)
@@ -455,10 +447,9 @@ export function applyDirectoryEvent(
 
     case "message.part.removed": {
       const props = event.properties as { sessionID?: string; messageID: string; partID: string }
-      const sessionID = props.sessionID ?? findSessionIdByMessageId(draft, props.messageID)
+      const sessionID = props.sessionID ?? callbacks?.onResolveSessionIDForMessageID?.(props.messageID)
       const parts = draft.part[props.messageID]
       if (!parts) {
-        touchSessionFreshness(sessionID)
         return false
       }
       const result = Binary.search(parts, props.partID, (p) => p.id)
@@ -470,10 +461,9 @@ export function applyDirectoryEvent(
         } else {
           draft.part[props.messageID] = next
         }
-        touchSessionFreshness(sessionID)
+        touchSessionFreshnessIfActive(sessionID)
         return true
       }
-      touchSessionFreshness(sessionID)
       return false
     }
 
@@ -488,7 +478,7 @@ export function applyDirectoryEvent(
       const parts = draft.part[props.messageID]
       if (!parts) {
         syncDebug.reducer.partDeltaNoParts(props.messageID, props.partID)
-        touchSessionFreshness(props.sessionID)
+        touchSessionFreshnessIfActive(props.sessionID)
         return {
           changed: false,
           materialization: { type: "incomplete-session-snapshot", sessionID: props.sessionID, messageID: props.messageID, partID: props.partID },
@@ -497,7 +487,7 @@ export function applyDirectoryEvent(
       const result = Binary.search(parts, props.partID, (p) => p.id)
       if (!result.found) {
         syncDebug.reducer.partDeltaNotFound(props.messageID, props.partID)
-        touchSessionFreshness(props.sessionID)
+        touchSessionFreshnessIfActive(props.sessionID)
         return {
           changed: false,
           materialization: { type: "incomplete-session-snapshot", sessionID: props.sessionID, messageID: props.messageID, partID: props.partID },
