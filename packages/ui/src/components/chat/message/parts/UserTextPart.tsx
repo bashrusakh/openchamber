@@ -197,7 +197,7 @@ const UserTextPart: React.FC<UserTextPartProps> = ({ part, messageId, agentMenti
     return (
         <div className="relative" key={part.id || `${messageId}-user-text`}>
             {collapsibleUserMessages && isExpanded && (
-                <div className="sticky top-0 z-10 flex justify-end pointer-events-none">
+                <div className="sticky top-0 z-10 flex justify-end pointer-events-none h-0 overflow-visible">
                     <button
                         type="button"
                         onClick={handleCollapse}
