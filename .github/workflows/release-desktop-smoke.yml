@@ -165,7 +165,7 @@ jobs:
   build-windows-electron:
     if: ${{ inputs.build_windows }}
     name: Build Windows Electron (x64)
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
