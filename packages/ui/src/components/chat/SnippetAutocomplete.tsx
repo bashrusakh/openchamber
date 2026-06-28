@@ -1,6 +1,6 @@
 import React from 'react';
 import { cn } from '@/lib/utils';
-import { scoreByFuzzyQuery } from '@/lib/search/fuzzySearch';
+import { rankAutocompleteItems } from '@/lib/search/autocompleteRanking';
 import { useSnippetsStore } from '@/stores/useSnippetsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
@@ -47,34 +47,20 @@ export const SnippetAutocomplete = React.forwardRef<SnippetAutocompleteHandle, S
   }, [loadSnippets]);
 
   React.useEffect(() => {
-    const query = searchQuery.trim();
-    if (!query.length) {
-      const sortedMatches = [...snippets].sort((a, b) => {
-        if (a.source === 'project' && b.source !== 'project') return -1;
-        if (a.source !== 'project' && b.source === 'project') return 1;
-        return a.name.localeCompare(b.name);
-      });
-      setFilteredSnippets(sortedMatches);
-      setSelectedIndex(sortedMatches.length ? 1 : 0);
-      return;
-    }
-
-    const scored = scoreByFuzzyQuery(
+    const filtered = rankAutocompleteItems(
       snippets,
-      query,
-      (snippet) => snippet.name + ' ' + snippet.aliases.join(' '),
-      { threshold: 0.4 }
+      searchQuery,
+      (snippet) => `${snippet.name} ${snippet.aliases.join(' ')}`,
+      {
+        compare: (a, b) => {
+          if (a.source === 'project' && b.source !== 'project') return -1;
+          if (a.source !== 'project' && b.source === 'project') return 1;
+          return a.name.localeCompare(b.name);
+        },
+      },
     );
-
-    const ranked = [...scored].sort((a, b) => {
-      if (a.score !== b.score) return a.score - b.score;
-      if (a.item.source === 'project' && b.item.source !== 'project') return -1;
-      if (a.item.source !== 'project' && b.item.source === 'project') return 1;
-      return a.item.name.localeCompare(b.item.name);
-    });
-
-    setFilteredSnippets(ranked.map((r) => r.item));
-    setSelectedIndex(ranked.length ? 1 : 0);
+    setFilteredSnippets(filtered);
+    setSelectedIndex(filtered.length ? 1 : 0);
   }, [searchQuery, snippets]);
 
   React.useEffect(() => {

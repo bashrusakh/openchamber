@@ -1,5 +1,5 @@
 import React from 'react';
-import { scoreByFuzzyQuery } from '@/lib/search/fuzzySearch';
+import { rankAutocompleteItems } from '@/lib/search/autocompleteRanking';
 import { cn, truncatePathMiddle } from '@/lib/utils';
 import { useFileSearchStore } from '@/stores/useFileSearchStore';
 import { useConfigStore } from '@/stores/useConfigStore';
@@ -257,7 +257,6 @@ export const FileMentionAutocomplete = React.forwardRef<FileMentionHandle, FileM
 
   React.useEffect(() => {
     const visibleAgents = getVisibleAgents();
-    const normalizedQuery = (searchQuery ?? '').trim().toLowerCase();
     const candidates = visibleAgents
       .filter((agent) => agent.mode && agent.mode !== 'primary')
       .map((agent) => ({
@@ -266,19 +265,15 @@ export const FileMentionAutocomplete = React.forwardRef<FileMentionHandle, FileM
         mode: agent.mode,
       }));
 
-    if (!normalizedQuery) {
-      setAgents(candidates.sort((a, b) => a.name.localeCompare(b.name)));
-      return;
-    }
-
-    const scored = scoreByFuzzyQuery(
+    const filtered = rankAutocompleteItems(
       candidates,
-      normalizedQuery,
+      searchQuery,
       (agent) => `${agent.name} ${agent.description ?? ''}`,
-      { threshold: 0.4 }
+      {
+        compare: (a, b) => a.name.localeCompare(b.name),
+      },
     );
-
-    setAgents(scored.map((r) => r.item));
+    setAgents(filtered);
   }, [getVisibleAgents, searchQuery]);
 
   React.useEffect(() => {

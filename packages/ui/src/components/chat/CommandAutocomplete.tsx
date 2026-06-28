@@ -1,6 +1,6 @@
 import React from 'react';
 import { cn } from '@/lib/utils';
-import { scoreByFuzzyQuery } from '@/lib/search/fuzzySearch';
+import { rankAutocompleteItems } from '@/lib/search/autocompleteRanking';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSessionMessages } from '@/sync/sync-context';
 import { useCommandsStore } from '@/stores/useCommandsStore';
@@ -185,29 +185,25 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
         const allCommands = [...builtInCommands, ...customCommands, ...skillCommands];
 
         const allowInitCommand = !hasMessagesInCurrentSession;
-        const scored = searchQuery
-          ? scoreByFuzzyQuery(
-              allCommands,
-              searchQuery.trim(),
-              (cmd) => `${cmd.name} ${cmd.description ?? ''}`,
-              { threshold: 0.4 }
-            )
-          : allCommands.map((cmd) => ({ item: cmd, score: 0 }));
-        const filtered = scored.filter((r) => allowInitCommand || r.item.name !== 'init');
-
         const query = searchQuery.trim().toLowerCase();
-        filtered.sort((a, b) => {
-          if (a.score !== b.score) return a.score - b.score;
-          const aName = a.item.name.toLowerCase();
-          const bName = b.item.name.toLowerCase();
-          const aStartsWith = aName.startsWith(query);
-          const bStartsWith = bName.startsWith(query);
-          if (aStartsWith && !bStartsWith) return -1;
-          if (!aStartsWith && bStartsWith) return 1;
-          return aName.localeCompare(bName);
-        });
+        const filtered = rankAutocompleteItems(
+          allCommands.filter((cmd) => allowInitCommand || cmd.name !== 'init'),
+          searchQuery,
+          (cmd) => `${cmd.name} ${cmd.description ?? ''}`,
+          {
+            compare: (a, b) => {
+              const aName = a.name.toLowerCase();
+              const bName = b.name.toLowerCase();
+              const aStartsWith = aName.startsWith(query);
+              const bStartsWith = bName.startsWith(query);
+              if (aStartsWith && !bStartsWith) return -1;
+              if (!aStartsWith && bStartsWith) return 1;
+              return aName.localeCompare(bName);
+            },
+          },
+        );
 
-        setCommands(filtered.map((r) => r.item));
+        setCommands(filtered);
       } catch {
 
         const allowInitCommand = !hasMessagesInCurrentSession;
@@ -259,29 +255,25 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
           ),
         ];
 
-        const scored = searchQuery
-          ? scoreByFuzzyQuery(
-              builtInCommands,
-              searchQuery.trim(),
-              (cmd) => `${cmd.name} ${cmd.description ?? ''}`,
-              { threshold: 0.4 }
-            )
-          : builtInCommands.map((cmd) => ({ item: cmd, score: 0 }));
-        const filtered = scored.filter((r) => allowInitCommand || r.item.name !== 'init');
-
         const query = searchQuery.trim().toLowerCase();
-        filtered.sort((a, b) => {
-          if (a.score !== b.score) return a.score - b.score;
-          const aName = a.item.name.toLowerCase();
-          const bName = b.item.name.toLowerCase();
-          const aStartsWith = aName.startsWith(query);
-          const bStartsWith = bName.startsWith(query);
-          if (aStartsWith && !bStartsWith) return -1;
-          if (!aStartsWith && bStartsWith) return 1;
-          return aName.localeCompare(bName);
-        });
+        const filtered = rankAutocompleteItems(
+          builtInCommands.filter((cmd) => allowInitCommand || cmd.name !== 'init'),
+          searchQuery,
+          (cmd) => `${cmd.name} ${cmd.description ?? ''}`,
+          {
+            compare: (a, b) => {
+              const aName = a.name.toLowerCase();
+              const bName = b.name.toLowerCase();
+              const aStartsWith = aName.startsWith(query);
+              const bStartsWith = bName.startsWith(query);
+              if (aStartsWith && !bStartsWith) return -1;
+              if (!aStartsWith && bStartsWith) return 1;
+              return aName.localeCompare(bName);
+            },
+          },
+        );
 
-        setCommands(filtered.map((r) => r.item));
+        setCommands(filtered);
       } finally {
         setLoading(false);
       }
