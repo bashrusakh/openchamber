@@ -43,6 +43,7 @@ import { resolveFallbackTaskSessionId } from './resolveFallbackTaskSessionId';
 import { readTaskTagSessionIdFromOutput } from './taskSessionIdParser';
 import { areRenderRelevantPartsEqual } from '../renderCompare';
 import { useI18n } from '@/lib/i18n';
+import { stripAnsi } from '@/lib/text/stripAnsi';
 import { getDiffPatchEntries, getPatchText } from './toolDiffUtils';
 
 const TOOL_ROW_TEXT_CLASS = '!text-[length:var(--text-meta)] !leading-5 sm:!leading-6 tracking-normal';
@@ -845,7 +846,14 @@ const ToolScrollableTextOutput: React.FC<{
     input: Record<string, unknown> | undefined;
 }> = ({ output, part, metadata, input }) => {
     const { t } = useI18n();
-    const renderedOutput = getToolOutputText(output, part, metadata);
+    // Shell tools (bash, grep with --color, ocr, etc.) emit ANSI SGR/OSC codes
+    // that the chat renderer does not interpret. Strip them once at the
+    // boundary so the highlighted code block, JSON-tree fallback, and
+    // copy-to-clipboard all receive HTML-safe text.
+    const renderedOutput = React.useMemo(
+        () => stripAnsi(getToolOutputText(output, part, metadata)),
+        [output, part, metadata]
+    );
     const outputLanguage = getToolOutputLanguage(output, part, metadata, input);
     const jsonResult = React.useMemo(() => tryParseJsonOutput(renderedOutput), [renderedOutput]);
     const [jsonViewMode, setJsonViewMode] = React.useState<'formatted' | 'raw'>('formatted');
