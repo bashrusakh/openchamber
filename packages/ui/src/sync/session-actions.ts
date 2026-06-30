@@ -639,8 +639,11 @@ export async function optimisticSend(input: {
   onOptimisticInsert?: () => void
   onMessageID?: (messageID: string) => void
   beforeOptimisticInsert?: () => void
-  /** The actual API call — receives the optimistic messageID so the server can use the same ID */
-  send: (messageID: string) => Promise<void>
+  /** The actual API call — receives the optimistic messageID so the server can use the same ID.
+   *  May return a server-resolved payload (e.g. from session.command) so the
+   *  resolved `!`shell` substitutions land in the store even if the SSE echo
+   *  arrives with the template token unresolved (#1944). */
+  send: (messageID: string) => Promise<{ info?: Message; parts?: Part[] } | void>
 }): Promise<void> {
   if (!_optimisticAdd || !_optimisticRemove) {
     throw new Error("Optimistic refs not set — is useSync() mounted?")
@@ -697,7 +700,23 @@ export async function optimisticSend(input: {
   })
 
   try {
-    await input.send(messageID)
+    const resolved = await input.send(messageID)
+
+    // If the send returned a server-resolved payload (e.g. session.command
+    // returned the user message with `!`shell` substitutions), apply it
+    // through the optimistic add path. The server uses our messageID, so
+    // mergeOptimisticPage will dedup the message and merge the resolved
+    // parts against the optimistic placeholder. This restores display of
+    // the resolved value even when the later SSE echo arrives without it
+    // (#1944).
+    if (resolved && resolved.info && Array.isArray(resolved.parts) && resolved.parts.length > 0) {
+      _optimisticAdd({
+        sessionID: input.sessionId,
+        directory: targetDirectory,
+        message: resolved.info,
+        parts: resolved.parts,
+      })
+    }
   } catch (error) {
     // Rollback via optimistic infrastructure
     _optimisticRemove({
