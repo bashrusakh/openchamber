@@ -842,10 +842,10 @@ const ToolScrollableTextOutput: React.FC<{
         [output, part, metadata]
     );
     // Use the same ANSI-cleaned string the highlighter/JSON/copy paths see.
-    // Skip the formatEditOutput pass inside getToolOutputLanguage because
-    // renderedOutput is already formatEditOutput + stripAnsi — running it
-    // again could re-apply cleanOutput's 5-digit-`|` prefix strip or the LSP
-    // diagnostic envelope strip on already-cleaned text.
+    // Pass renderedOutput (already formatEditOutput + stripAnsi) directly to
+    // detectLanguageFromOutput instead of re-applying formatEditOutput, which
+    // could re-run cleanOutput's 5-digit-`|` prefix strip or the LSP diagnostic
+    // envelope strip on already-cleaned text.
     const outputLanguage = part.tool === 'bash'
         ? 'bash'
         : detectLanguageFromOutput(renderedOutput, part.tool, input);
