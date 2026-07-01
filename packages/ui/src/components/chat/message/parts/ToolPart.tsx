@@ -814,19 +814,6 @@ const ToolScrollableSection: React.FC<ToolScrollableSectionProps> = ({
     </div>
 );
 
-const getToolOutputLanguage = (
-    output: string,
-    part: ToolPartType,
-    metadata: Record<string, unknown> | undefined,
-    input: Record<string, unknown> | undefined,
-): string => {
-    if (part.tool === 'bash') {
-        return 'bash';
-    }
-
-    return detectLanguageFromOutput(formatEditOutput(output, part.tool, metadata), part.tool, input);
-};
-
 const getToolOutputText = (
     output: string,
     part: ToolPartType,
@@ -854,7 +841,14 @@ const ToolScrollableTextOutput: React.FC<{
         () => stripAnsi(getToolOutputText(output, part, metadata)),
         [output, part, metadata]
     );
-    const outputLanguage = getToolOutputLanguage(output, part, metadata, input);
+    // Use the same ANSI-cleaned string the highlighter/JSON/copy paths see.
+    // Skip the formatEditOutput pass inside getToolOutputLanguage because
+    // renderedOutput is already formatEditOutput + stripAnsi — running it
+    // again could re-apply cleanOutput's 5-digit-`|` prefix strip or the LSP
+    // diagnostic envelope strip on already-cleaned text.
+    const outputLanguage = part.tool === 'bash'
+        ? 'bash'
+        : detectLanguageFromOutput(renderedOutput, part.tool, input);
     const jsonResult = React.useMemo(() => tryParseJsonOutput(renderedOutput), [renderedOutput]);
     const [jsonViewMode, setJsonViewMode] = React.useState<'formatted' | 'raw'>('formatted');
     const [copiedJson, setCopiedJson] = React.useState(false);

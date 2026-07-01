@@ -11,6 +11,14 @@ describe('stripAnsi', () => {
         expect(stripAnsi('')).toBe('');
     });
 
+    test('returns empty string for non-string falsy input', () => {
+        // Defensive contract: the function's signature is `string` but a
+        // caller might still pass `undefined`/`null` at runtime. Return ''
+        // rather than propagating the falsy value to a method chain.
+        expect(stripAnsi(undefined as unknown as string)).toBe('');
+        expect(stripAnsi(null as unknown as string)).toBe('');
+    });
+
     test('returns plain text unchanged', () => {
         const text = 'just some plain text\nacross multiple lines\n';
         expect(stripAnsi(text)).toBe(text);
@@ -24,6 +32,23 @@ describe('stripAnsi', () => {
     test('removes 24-bit background and foreground colors', () => {
         const input = `${ESC}[48;2;38;38;38m         subtask: subtask || undefined,${ESC}[0m${ESC}[0m`;
         expect(stripAnsi(input)).toBe('         subtask: subtask || undefined,');
+    });
+
+    test('removes SGR sub-parameter sequences (modern 24-bit color)', () => {
+        // `ESC[38:2:R:G:Bm` is the sub-parameter form used by kitty, wezterm,
+        // and iTerm2. The `:` separator must be in the CSI parameter class.
+        const input = `${ESC}[38:2:255:128:0morange${ESC}[0m`;
+        expect(stripAnsi(input)).toBe('orange');
+    });
+
+    test('removes CSI private-mode bytes (<, =, >)', () => {
+        // ESC [ > 0 c is the secondary device attributes request.
+        const input = `prompt${ESC}[>0cresponse`;
+        expect(stripAnsi(input)).toBe('promptresponse');
+        // ESC [ < ... is the SGR mouse mode introducer (no final here, just check the
+        // parameter class doesn't break a normal cursor sequence after it).
+        const input2 = `a${ESC}[<0b${ESC}[Hdone`;
+        expect(stripAnsi(input2)).toBe('adone');
     });
 
     test('removes cursor movement and erase sequences', () => {
@@ -88,5 +113,19 @@ describe('stripAnsi', () => {
         // A bare ESC that does not start a known sequence is stripped defensively
         // so it cannot leak as a control character into rendered text.
         expect(stripAnsi(`text${ESC}more`)).toBe('textmore');
+    });
+
+    test('strips unterminated OSC openers from truncated output', () => {
+        // Real-world: OpenCode's bash tool may truncate a large stdout. If
+        // the truncation lands inside an OSC sequence, the opener is left
+        // without its BEL/ST terminator. The fallback pass consumes the rest
+        // of the string so the `]` byte and its payload don't leak.
+        const truncated = `text${ESC}]0;window title was being set`;
+        expect(stripAnsi(truncated)).toBe('text');
+    });
+
+    test('strips unterminated DCS openers from truncated output', () => {
+        const truncated = `before${ESC}Psixel-payload-without-terminator`;
+        expect(stripAnsi(truncated)).toBe('before');
     });
 });

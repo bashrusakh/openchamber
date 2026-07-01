@@ -12,15 +12,20 @@
  *
  * Coverage:
  *  - CSI (`ESC [` … final byte `@`-`~`): SGR colors/styles, cursor moves,
- *    erases, mode toggles, etc.
+ *    erases, mode toggles, etc. The parameter class covers the full ECMA-48
+ *    range 0x30–0x3F (`0-9:;<=>?`), which is required for sub-parameter
+ *    sequences such as `ESC[38:2:R:G:Bm` and private modes like `ESC[>c`.
  *  - OSC (`ESC ]` … BEL or ST): window title, hyperlink, color palette.
  *  - DCS / SOS / PM / APC (`ESC P/X/^/_` … ST): sixel, status strings,
  *    private messages.
  *  - Two-byte ESC sequences (`ESC` … final byte `@`-`~`): charset selection
  *    and similar.
+ *  - Unterminated OSC / DCS / SOS / PM / APC openers (truncated output).
  *  - Stray lone ESC bytes that did not match a sequence above.
  *
  * Notes:
+ *  - Returns `''` for any falsy input so the `: string` contract holds even
+ *    if a caller passes `undefined`/`null` despite the annotation.
  *  - The visible text content is preserved verbatim; only control sequences
  *    are removed. Trailing whitespace per line is NOT collapsed — that would
  *    be a behavior change for tools like `diff` whose alignment matters.
@@ -30,7 +35,7 @@
  */
 export const stripAnsi = (text: string): string => {
   if (!text) {
-    return text;
+    return '';
   }
 
   // Longest matches first so DCS/SOS/PM/APC (which can contain CSI-like
@@ -42,8 +47,16 @@ export const stripAnsi = (text: string): string => {
     .replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\)/g, '')
     // DCS / SOS / PM / APC: ESC P / X / ^ / _ … terminated by ST (ESC \)
     .replace(/\x1B[PX^_][\s\S]*?\x1B\\/g, '')
-    // CSI: ESC [ … final byte in the @-~ range (0x40–0x7E)
-    .replace(/\x1B\[[0-9;?]*[ -/]*[@-~]/g, '')
+    // Fallback: unterminated OSC / DCS / SOS / PM / APC openers. When tool
+    // output is truncated mid-sequence, the terminated form above misses the
+    // opener; this pass consumes the rest of the string so the `]` / `P` /
+    // `X` / `^` / `_` byte and its payload don't leak into the rendered text.
+    .replace(/\x1B\][\s\S]*/g, '')
+    .replace(/\x1B[PX^_][\s\S]*/g, '')
+    // CSI: ESC [ … final byte in the @-~ range (0x40–0x7E). Parameter class
+    // covers the full ECMA-48 range 0x30–0x3F so sub-parameter separators
+    // (e.g. `ESC[38:2:R:G:Bm`) and private-mode bytes are matched.
+    .replace(/\x1B\[[0-9:;<=>?]*[ -/]*[@-~]/g, '')
     // Two-byte ESC sequences (charset selection etc.): ESC <intermediates> <final>
     .replace(/\x1B[ -/]+[@-~]/g, '')
     // Stray lone ESC bytes (defensive — should be unreachable after the above)
