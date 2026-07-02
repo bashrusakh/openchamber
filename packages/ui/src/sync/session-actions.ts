@@ -847,7 +847,7 @@ export async function rejectQuestion(
  *
  * NOTE: rejecting unblocks the agent's tool but does NOT end its turn. Callers
  * that need to send the next message right away (the chat send path) must also
-  * interrupt the session so the OpenCode runner reaches `idle` — otherwise the new
+ * interrupt the session so the OpenCode runner reaches `idle` — otherwise the new
  * prompt arrives while the run is still active and is discarded by the runner's
  * `ensureRunning`.
  */
