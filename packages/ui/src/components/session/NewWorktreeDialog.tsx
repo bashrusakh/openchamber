@@ -31,7 +31,7 @@ import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
 import * as sessionActions from '@/sync/session-actions';
 import { useConfigStore } from '@/stores/useConfigStore';
-import { validateWorktreeCreate, createWorktree } from '@/lib/worktrees/worktreeManager';
+import { validateWorktreeCreate, createWorktree, listProjectWorktrees, invalidateWorktreeList } from '@/lib/worktrees/worktreeManager';
 import { withWorktreeUpstreamDefaults } from '@/lib/worktrees/worktreeCreate';
 import { waitForWorktreeBootstrap } from '@/lib/worktrees/worktreeBootstrap';
 import { getWorktreeSetupCommands, getWorktreeSetupWaitEnabled } from '@/lib/openchamberConfig';
@@ -54,6 +54,7 @@ import type {
   GitHubPullRequestSummary,
 } from '@/lib/api/types';
 import type { ProjectRef } from '@/lib/worktrees/worktreeManager';
+import type { WorktreeMetadata } from '@/types/worktree';
 import { useI18n } from '@/lib/i18n';
 
 type Mode = 'new-branch' | 'existing-branch';
@@ -715,6 +716,13 @@ export function NewWorktreeDialog({
               return;
             }
 
+            // For existing-branch mode, branch_in_use means the worktree
+            // already exists on disk — we'll attach it instead of creating.
+            // Don't treat it as a validation error.
+            if (error.code === 'branch_in_use' && mode === 'existing-branch') {
+              return;
+            }
+
             if (error.code.startsWith('branch_')) {
               branchError = branchError ?? error.message;
             }
@@ -852,7 +860,41 @@ export function NewWorktreeDialog({
       
       const resolvedArgs = await withWorktreeUpstreamDefaults(projectDirectory, args);
 
-      const metadata = await createWorktree(projectRef, resolvedArgs);
+      let metadata: WorktreeMetadata;
+      try {
+        metadata = await createWorktree(projectRef, resolvedArgs);
+      } catch (createError) {
+        // If the branch is already checked out in another worktree,
+        // find the existing worktree and attach it to the store instead.
+        const message = createError instanceof Error ? createError.message : '';
+        if (message.includes('already checked out') && mode === 'existing-branch') {
+          // Invalidate cache so we get fresh data from git
+          invalidateWorktreeList(projectDirectory);
+          const existingWorktrees = await listProjectWorktrees(projectRef);
+          const matched = existingWorktrees.find(
+            (wt) => wt.branch === normalizedBranch || wt.branch === `refs/heads/${normalizedBranch}`,
+          );
+          if (matched) {
+            // Attach existing worktree to the store
+            const sidebarProjectKey = projectDirectory;
+            const currentByProject = useSessionUIStore.getState().availableWorktreesByProject;
+            const updatedByProject = new Map(currentByProject);
+            const existing = updatedByProject.get(sidebarProjectKey) ?? [];
+            if (!existing.some((wt) => wt.path === matched.path)) {
+              updatedByProject.set(sidebarProjectKey, [...existing, matched]);
+              useSessionUIStore.setState({
+                availableWorktreesByProject: updatedByProject,
+                availableWorktrees: [...useSessionUIStore.getState().availableWorktrees, matched],
+              });
+            }
+            metadata = matched;
+          } else {
+            throw createError;
+          }
+        } else {
+          throw createError;
+        }
+      }
 
       let createdSessionId: string | null = null;
 
