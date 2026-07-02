@@ -874,11 +874,12 @@ export function NewWorktreeDialog({
         const localBranchFromRemote = branchName.startsWith('remotes/')
           ? branchName.split('/').slice(2).join('/')
           : null;
+        // readProjectWorktrees strips the refs/heads/ prefix, so wt.branch
+        // never contains it. Compare against the bare branch name only.
         const matched = existingWorktrees.find(
           (wt) =>
             wt.branch === normalizedBranch ||
-            wt.branch === `refs/heads/${normalizedBranch}` ||
-            (localBranchFromRemote && (wt.branch === localBranchFromRemote || wt.branch === `refs/heads/${localBranchFromRemote}`)),
+            (localBranchFromRemote && wt.branch === localBranchFromRemote),
         );
         if (matched) {
           // Attach existing worktree to the store using shared helper

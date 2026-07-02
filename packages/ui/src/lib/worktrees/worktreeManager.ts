@@ -233,12 +233,14 @@ const toCreatePayload = (args: {
  * Attach a worktree to the store so it appears immediately in the sidebar
  * without waiting for re-discovery. Deduplicates against both the per-project
  * map and the flat list to avoid double entries.
+ * Normalizes the project directory to ensure consistent key matching with
+ * discovery loops that normalize paths the same way.
  */
 export const attachWorktreeToStore = (
   projectDirectory: string,
   worktree: WorktreeMetadata,
 ): void => {
-  const sidebarProjectKey = projectDirectory;
+  const sidebarProjectKey = normalizePath(projectDirectory) ?? projectDirectory;
   const state = useSessionUIStore.getState();
   const currentByProject = state.availableWorktreesByProject;
   const currentFlat = state.availableWorktrees;

@@ -432,6 +432,10 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       if (projectEntries.length === 0) return;
 
       const worktreesByProject = new Map<string, WorktreeMetadata[]>();
+      // Track which project paths were confirmed as non-Git repos so we can
+      // prune their stale entries. Projects where discovery failed (server
+      // not ready) are NOT added here — their data is preserved.
+      const nonGitProjectPaths = new Set<string>();
 
       // Constrain fanout: previously `Promise.all(projects.map(...))` could
       // spawn dozens of concurrent `git worktree list` and
@@ -455,7 +459,10 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
             // PR/render paths downstream can read isGitRepo for free.
             const cachedIsGitRepo = useGitStore.getState().directories.get(projectPath)?.isGitRepo;
             const isGitRepo = cachedIsGitRepo ?? await checkIsGitRepository(projectPath);
-            if (!isGitRepo) continue;
+            if (!isGitRepo) {
+              nonGitProjectPaths.add(projectPath);
+              continue;
+            }
             const worktrees = await listProjectWorktrees({ id: project.id, path: projectPath });
             if (cancelled) continue;
             // Always add the project to the map, even with an empty worktree
@@ -475,22 +482,23 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       // Merge discovery results with existing store data. This preserves
       // worktrees for projects where discovery failed (e.g., server not
       // ready at startup) while updating projects where discovery succeeded.
-      // Prune stale entries for projects that have been removed from the
-      // project list or are no longer Git repos.
+      // Prune stale entries for projects removed from the list or confirmed
+      // as non-Git repos.
       const currentByProject = useSessionUIStore.getState().availableWorktreesByProject;
       const mergedByProject = new Map<string, WorktreeMetadata[]>();
       const currentProjectPaths = new Set(
         projectEntries
           .map((p) => normalizePath(p.path))
-          .filter(Boolean) as string[],
+          .filter((p): p is string => p !== null),
       );
       for (const [projectPath, worktrees] of worktreesByProject) {
         mergedByProject.set(projectPath, worktrees);
       }
       // Preserve existing data for projects in the current project list
-      // where discovery failed, but drop stale entries for removed projects.
+      // where discovery failed, but drop entries for removed projects
+      // and projects confirmed as non-Git repos.
       for (const [projectPath, worktrees] of currentByProject) {
-        if (!mergedByProject.has(projectPath) && currentProjectPaths.has(projectPath)) {
+        if (!mergedByProject.has(projectPath) && currentProjectPaths.has(projectPath) && !nonGitProjectPaths.has(projectPath)) {
           mergedByProject.set(projectPath, worktrees);
         }
       }

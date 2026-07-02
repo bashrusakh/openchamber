@@ -176,6 +176,8 @@ const MiniChatBootstrap: React.FC<{ config: MiniChatConfig }> = ({ config }) => 
 
     const discoverWorktrees = async () => {
       const worktreesByProject = new Map<string, WorktreeMetadata[]>();
+      // Track confirmed non-Git repos so we can prune their stale entries.
+      const nonGitProjectPaths = new Set<string>();
 
       await Promise.all(projects.map(async (project) => {
         const projectPath = project.path.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -183,7 +185,10 @@ const MiniChatBootstrap: React.FC<{ config: MiniChatConfig }> = ({ config }) => 
         try {
           const cachedIsGitRepo = useGitStore.getState().directories.get(projectPath)?.isGitRepo;
           const isGitRepo = cachedIsGitRepo ?? await import('@/lib/gitApi').then((m) => m.checkIsGitRepository(projectPath));
-          if (!isGitRepo) return;
+          if (!isGitRepo) {
+            nonGitProjectPaths.add(projectPath);
+            return;
+          }
           const worktrees = await listProjectWorktrees({ id: project.id, path: projectPath });
           if (cancelled) return;
           // Always add the project, even with an empty worktree list.
@@ -198,19 +203,21 @@ const MiniChatBootstrap: React.FC<{ config: MiniChatConfig }> = ({ config }) => 
       if (cancelled) return;
 
       // Merge with existing store data to preserve worktrees for projects
-      // where discovery failed. Prune stale entries for removed projects.
+      // where discovery failed. Prune stale entries for removed projects
+      // and projects confirmed as non-Git repos.
       const currentByProject = useSessionUIStore.getState().availableWorktreesByProject;
+      const normalizeProjectPath = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
       const currentProjectPaths = new Set(
         projects
-          .map((p) => p.path.replace(/\\/g, '/').replace(/\/+$/, ''))
-          .filter(Boolean) as string[],
+          .map((p) => normalizeProjectPath(p.path))
+          .filter((p): p is string => Boolean(p)),
       );
       const mergedByProject = new Map<string, WorktreeMetadata[]>();
       for (const [projectPath, worktrees] of worktreesByProject) {
         mergedByProject.set(projectPath, worktrees);
       }
       for (const [projectPath, worktrees] of currentByProject) {
-        if (!mergedByProject.has(projectPath) && currentProjectPaths.has(projectPath)) {
+        if (!mergedByProject.has(projectPath) && currentProjectPaths.has(projectPath) && !nonGitProjectPaths.has(projectPath)) {
           mergedByProject.set(projectPath, worktrees);
         }
       }
