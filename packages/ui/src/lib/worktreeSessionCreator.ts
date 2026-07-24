@@ -87,12 +87,30 @@ let isCreatingWorktreeSession = false;
 
 
 
-const applyDefaultAgentAndModelSelection = (sessionId: string, configState = useConfigStore.getState()) => {
+export type WorktreeSessionOverrides = {
+  agentName?: string;
+  providerId?: string;
+  modelId?: string;
+  variant?: string;
+};
+
+export const applyDefaultAgentAndModelSelection = (
+  sessionId: string,
+  configState = useConfigStore.getState(),
+  overrides?: WorktreeSessionOverrides
+) => {
   try {
     const visibleAgents = configState.getVisibleAgents();
     let agentName: string | undefined;
 
-    if (configState.settingsDefaultAgent) {
+    if (overrides?.agentName) {
+      const overrideAgent = visibleAgents.find((a) => a.name === overrides.agentName);
+      if (overrideAgent) {
+        agentName = overrideAgent.name;
+      }
+    }
+
+    if (!agentName && configState.settingsDefaultAgent) {
       const settingsAgent = visibleAgents.find((a) => a.name === configState.settingsDefaultAgent);
       if (settingsAgent) {
         agentName = settingsAgent.name;
@@ -112,27 +130,43 @@ const applyDefaultAgentAndModelSelection = (sessionId: string, configState = use
     configState.setAgent(agentName);
     useContextStore.getState().saveSessionAgentSelection(sessionId, agentName);
 
-    const settingsDefaultModel = configState.settingsDefaultModel;
-    if (!settingsDefaultModel) {
-      return;
+    let providerId: string | undefined;
+    let modelId: string | undefined;
+
+    if (overrides?.providerId && overrides?.modelId) {
+      const modelMetadata = configState.getModelMetadata(overrides.providerId, overrides.modelId);
+      if (modelMetadata) {
+        providerId = overrides.providerId;
+        modelId = overrides.modelId;
+      }
     }
 
-    const parsed = parseModelIdentifier(settingsDefaultModel);
-    if (!parsed) {
-      return;
-    }
+    if (!providerId || !modelId) {
+      const settingsDefaultModel = configState.settingsDefaultModel;
+      if (!settingsDefaultModel) {
+        return;
+      }
 
-    const { providerId, modelId } = parsed;
-    const modelMetadata = configState.getModelMetadata(providerId, modelId);
-    if (!modelMetadata) {
-      return;
+      const parsed = parseModelIdentifier(settingsDefaultModel);
+      if (!parsed) {
+        return;
+      }
+
+      const modelMetadata = configState.getModelMetadata(parsed.providerId, parsed.modelId);
+      if (!modelMetadata) {
+        return;
+      }
+
+      providerId = parsed.providerId;
+      modelId = parsed.modelId;
     }
 
     useContextStore.getState().saveSessionModelSelection(sessionId, providerId, modelId);
     useContextStore.getState().saveAgentModelForSession(sessionId, agentName, providerId, modelId);
 
     const settingsDefaultVariant = configState.settingsDefaultVariant;
-    if (!settingsDefaultVariant) {
+    const variantCandidate = overrides?.variant ?? settingsDefaultVariant;
+    if (!variantCandidate) {
       return;
     }
 
@@ -142,32 +176,36 @@ const applyDefaultAgentAndModelSelection = (sessionId: string, configState = use
       | undefined;
     const variants = model?.variants;
 
-    if (variants && Object.prototype.hasOwnProperty.call(variants, settingsDefaultVariant)) {
-      configState.setCurrentVariant(settingsDefaultVariant);
+    if (variants && Object.prototype.hasOwnProperty.call(variants, variantCandidate)) {
+      configState.setCurrentVariant(variantCandidate);
       useContextStore
         .getState()
-        .saveAgentModelVariantForSession(sessionId, agentName, providerId, modelId, settingsDefaultVariant);
+        .saveAgentModelVariantForSession(sessionId, agentName, providerId, modelId, variantCandidate);
     }
   } catch {
     // Ignore errors setting default agent
   }
 };
 
-const initializeSessionForWorktree = (sessionId: string, metadata: {
-  path: string;
-  projectDirectory: string;
-  branch: string;
-  label: string;
-  name?: string;
-  createdFromBranch?: string;
-  kind?: 'pr' | 'standard';
-}) => {
+const initializeSessionForWorktree = (
+  sessionId: string,
+  metadata: {
+    path: string;
+    projectDirectory: string;
+    branch: string;
+    label: string;
+    name?: string;
+    createdFromBranch?: string;
+    kind?: 'pr' | 'standard';
+  },
+  overrides?: WorktreeSessionOverrides
+) => {
   const sessionStore = useSessionUIStore.getState();
   const configState = useConfigStore.getState();
   sessionStore.initializeNewOpenChamberSession(sessionId, configState.agents);
   sessionStore.setSessionDirectory(sessionId, metadata.path);
   sessionStore.setWorktreeMetadata(sessionId, metadata);
-  applyDefaultAgentAndModelSelection(sessionId, configState);
+  applyDefaultAgentAndModelSelection(sessionId, configState, overrides);
   useDirectoryStore.getState().setDirectory(metadata.path, { showOverlay: false });
 };
 
@@ -321,6 +359,7 @@ export async function createWorktreeSessionForNewBranch(
     ensureRemoteUrl?: string;
     createdFromBranch?: string;
     returnAfterDirectoryCreated?: boolean;
+    overrides?: WorktreeSessionOverrides;
   }
 ): Promise<{ id: string; branch: string; path: string } | null> {
   if (isCreatingWorktreeSession) {
@@ -389,7 +428,7 @@ export async function createWorktreeSessionForNewBranch(
         throw new Error('Could not create a session for the worktree.');
       }
 
-      initializeSessionForWorktree(session.id, createdMetadata);
+      initializeSessionForWorktree(session.id, createdMetadata, options?.overrides);
 
       return { id: session.id, branch: metadata.branch || base, path: metadata.path };
     } catch (error) {

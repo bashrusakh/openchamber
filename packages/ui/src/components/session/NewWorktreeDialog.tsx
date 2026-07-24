@@ -32,9 +32,15 @@ import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
 import * as sessionActions from '@/sync/session-actions';
 import { useConfigStore } from '@/stores/useConfigStore';
+import { useAgentsStore } from '@/stores/useAgentsStore';
+import { ModelSelector } from '@/components/sections/agents/ModelSelector';
+import { AgentSelector } from '@/components/sections/commands/AgentSelector';
+import { ThinkingPill } from '@/components/session/ThinkingPill';
+import { isPrimaryMode } from '@/components/chat/mobileControlsUtils';
 import { validateWorktreeCreate, createWorktree } from '@/lib/worktrees/worktreeManager';
 import { withWorktreeUpstreamDefaults } from '@/lib/worktrees/worktreeCreate';
 import { waitForWorktreeBootstrap } from '@/lib/worktrees/worktreeBootstrap';
+import { applyDefaultAgentAndModelSelection } from '@/lib/worktreeSessionCreator';
 import { getWorktreeSetupCommands, getWorktreeSetupWaitEnabled } from '@/lib/openchamberConfig';
 import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
 import { generateBranchSlug } from '@/lib/git/branchNameGenerator';
@@ -470,12 +476,92 @@ export function NewWorktreeDialog({
     return undefined;
   }, []);
 
+  // Config store subscriptions for selector state
+  const loadProviders = useConfigStore((state) => state.loadProviders);
+  const loadConfigAgents = useConfigStore((state) => state.loadAgents);
+  const loadAgentsStoreAgents = useAgentsStore((state) => state.loadAgents);
+  const providers = useConfigStore((state) => state.providers);
+
+  // Read once via getState() for initial selector state so background config
+  // refreshes do not clobber in-progress user edits. The pre-fill effect below
+  // overrides these on the open transition.
+  const { currentProviderId, currentModelId, currentVariant, currentAgentName } = useConfigStore.getState();
+  const initialProviderID = currentProviderId;
+  const initialModelID = currentModelId;
+  const initialVariant = currentVariant || '';
+  const initialAgentName = currentAgentName || '';
+
+  // Local selector state (overrides for the initial session message)
+  const [providerID, setProviderID] = React.useState(initialProviderID);
+  const [modelID, setModelID] = React.useState(initialModelID);
+  const [variant, setVariant] = React.useState(initialVariant);
+  const [agent, setAgent] = React.useState(initialAgentName);
+
+  // Load providers + agents when dialog opens so selectors have data.
+  React.useEffect(() => {
+    if (!open) return;
+    void loadProviders({ directory: projectDirectory, source: 'newWorktreeDialog' });
+    void loadConfigAgents({ directory: projectDirectory });
+    void loadAgentsStoreAgents();
+  }, [open, loadProviders, loadConfigAgents, loadAgentsStoreAgents, projectDirectory]);
+
+  // Pre-fill selector state from defaults when the dialog opens. Read from
+  // getState() rather than subscribing so background config refreshes do not
+  // clobber in-progress user edits.
+  React.useEffect(() => {
+    if (!open) return;
+    const config = useConfigStore.getState();
+    const defaultModel = resolveDefaultModelSelection();
+    const defaultProvider = defaultModel?.providerID || config.currentProviderId;
+    const defaultModelID = defaultModel?.modelID || config.currentModelId;
+    const defaultAgent = resolveDefaultAgentName() || '';
+    setProviderID(defaultProvider);
+    setModelID(defaultModelID);
+    setVariant(resolveDefaultVariant(defaultProvider, defaultModelID) || '');
+    setAgent(defaultAgent);
+  }, [open, resolveDefaultAgentName, resolveDefaultModelSelection, resolveDefaultVariant]);
+
+  // Fallback to first available provider/model if current selection is missing.
+  React.useEffect(() => {
+    if (!open || providers.length === 0) return;
+
+    const provider = providers.find((item) => item.id === providerID) ?? providers[0];
+    const models = Array.isArray(provider?.models) ? provider.models : [];
+    const hasModel = models.some((item) => item.id === modelID);
+    const fallbackModelID = models[0]?.id ?? '';
+
+    if (provider?.id === providerID && hasModel) return;
+
+    setProviderID(provider?.id ?? '');
+    setModelID(hasModel ? modelID : fallbackModelID);
+    setVariant('');
+  }, [open, providers, providerID, modelID]);
+
+  const agentFilter = React.useCallback((candidate: { mode?: string }) => isPrimaryMode(candidate.mode), []);
+
+  const variantOptions = React.useMemo(() => {
+    const provider = providers.find((item) => item.id === providerID);
+    const model = provider?.models?.find((item) => item.id === modelID) as { variants?: Record<string, unknown> } | undefined;
+    return model?.variants ? Object.keys(model.variants) : [];
+  }, [providers, providerID, modelID]);
+
+  const hasVariantOptions = variantOptions.length > 0;
+
+  // Reset variant when the model no longer offers it.
+  React.useEffect(() => {
+    if (!variant) return;
+    if (!hasVariantOptions || !variantOptions.includes(variant)) {
+      setVariant('');
+    }
+  }, [hasVariantOptions, variantOptions, variant]);
+
   const sendLinkedContextMessage = React.useCallback(async (args: {
     sessionId: string;
     directory: string;
     issue: GitHubIssue | null;
     pr: GitHubPullRequestSummary | null;
     includeDiff: boolean;
+    overrides?: { agentName?: string; providerID?: string; modelID?: string; variant?: string };
   }) => {
     if (!projectDirectory || !github) {
       return;
@@ -483,17 +569,18 @@ export function NewWorktreeDialog({
 
     const configState = useConfigStore.getState();
     const lastUsedProvider = useSelectionStore.getState().lastUsedProvider;
+    const overrides = args.overrides;
     const defaultModel = resolveDefaultModelSelection();
-    const providerID = defaultModel?.providerID || configState.currentProviderId || lastUsedProvider?.providerID;
-    const modelID = defaultModel?.modelID || configState.currentModelId || lastUsedProvider?.modelID;
-    const agentName = resolveDefaultAgentName() || configState.currentAgentName || undefined;
+    const providerID = overrides?.providerID || defaultModel?.providerID || configState.currentProviderId || lastUsedProvider?.providerID;
+    const modelID = overrides?.modelID || defaultModel?.modelID || configState.currentModelId || lastUsedProvider?.modelID;
+    const agentName = overrides?.agentName || resolveDefaultAgentName() || configState.currentAgentName || undefined;
 
     if (!providerID || !modelID) {
       toast.error(t('session.newWorktree.error.noModelSelected'));
       return;
     }
 
-    const variant = resolveDefaultVariant(providerID, modelID);
+    const variant = overrides?.variant ?? resolveDefaultVariant(providerID, modelID);
 
     if (args.issue) {
       if (!github.issueGet || !github.issueComments) {
@@ -902,6 +989,17 @@ export function NewWorktreeDialog({
         } catch {
           // ignore
         }
+
+        try {
+          applyDefaultAgentAndModelSelection(session.id, useConfigStore.getState(), {
+            agentName: agent || undefined,
+            providerId: providerID || undefined,
+            modelId: modelID || undefined,
+            variant: variant || undefined,
+          });
+        } catch {
+          // ignore — overrides are best-effort
+        }
       } else {
         onOpenChange(false);
         setIsCreating(false);
@@ -932,6 +1030,12 @@ export function NewWorktreeDialog({
           issue: linkedIssue,
           pr: linkedPrState,
           includeDiff: includePrDiff,
+          overrides: {
+            providerID: providerID || undefined,
+            modelID: modelID || undefined,
+            variant: variant || undefined,
+            agentName: agent || undefined,
+          },
         }).catch((error) => {
           const message = error instanceof Error ? error.message : t('session.newWorktree.error.sendGitHubContextFailed');
           toast.error(t('session.newWorktree.error.sendGitHubContextFailed'), { description: message });
@@ -1053,6 +1157,46 @@ export function NewWorktreeDialog({
           {isCreating ? t('session.newWorktree.actions.creating') : t('session.newWorktree.actions.createWorktree')}
         </Button>
       </div>
+    </div>
+  );
+
+  const renderOverridesSection = () => (
+    <div className="space-y-3">
+      <div className="flex flex-col gap-1.5">
+        <span className="typography-meta font-medium text-muted-foreground">{t('chat.modelControls.model')}</span>
+        <ModelSelector
+          providerId={providerID}
+          modelId={modelID}
+          className="max-w-[320px] justify-between"
+          dropdownPortalToBody
+          onChange={(nextProviderID, nextModelID) => {
+            setProviderID(nextProviderID);
+            setModelID(nextModelID);
+            setVariant('');
+          }}
+        />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <span className="typography-meta font-medium text-muted-foreground">{t('sessions.scheduledTasks.editor.thinkingLevel.label')}</span>
+        <ThinkingPill
+          value={variant}
+          options={variantOptions}
+          disabled={!hasVariantOptions}
+          onChange={setVariant}
+        />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <span className="typography-meta font-medium text-muted-foreground">{t('sessions.scheduledTasks.editor.agent.label')}</span>
+        <AgentSelector
+          agentName={agent}
+          filter={agentFilter}
+          dropdownPortalToBody
+          onChange={setAgent}
+        />
+      </div>
+      <p className="typography-micro text-muted-foreground">
+        {t('session.newWorktree.overridesHelper')}
+      </p>
     </div>
   );
 
@@ -1490,6 +1634,9 @@ export function NewWorktreeDialog({
                 </MobileOverlayPanel>
               </div>
             )}
+
+            {/* Initial-session model/variant/agent overrides */}
+            {renderOverridesSection()}
 
             {/* Linked Item Preview - Two row minimal display */}
             {(newBranchState.linkedIssue || newBranchState.linkedPr) && mode === 'new-branch' && (
@@ -1933,6 +2080,9 @@ export function NewWorktreeDialog({
                   )}
                 </div>
               )}
+
+              {/* Initial-session model/variant/agent overrides */}
+              {renderOverridesSection()}
 
               {/* Linked Item Preview - Two row minimal display */}
               {(newBranchState.linkedIssue || newBranchState.linkedPr) && mode === 'new-branch' && (
