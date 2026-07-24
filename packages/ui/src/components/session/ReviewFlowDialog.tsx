@@ -80,6 +80,16 @@ export function ReviewFlowDialog({
     });
   }, [canConfirm, submitting, onConfirm, providerID, modelID, variant, agent, generateHandoff, autoReview]);
 
+  // Reset dialog-local flags on each open transition. The dialog stays mounted
+  // (parent controls `open`), so user changes to these checkboxes would
+  // otherwise persist across opens. Mirrors the `runAsGoal` reset pattern in
+  // TodoSendDialog.
+  React.useEffect(() => {
+    if (!open) return;
+    setGenerateHandoff(true);
+    setAutoReview(false);
+  }, [open]);
+
   React.useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {

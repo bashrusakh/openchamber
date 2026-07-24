@@ -931,11 +931,18 @@ export function NewWorktreeDialog({
         }
 
         try {
+          // Pass the raw selector state directly. The selectors can all emit
+          // `""` for the "Not selected" / "Default" choice; that is a real
+          // user choice and must reach the creator unchanged. The creator
+          // uses truthy / `??` checks, so an empty string is treated as
+          // "no override" and the corresponding code path is skipped —
+          // which is the intended behavior for the "Default" / "Not
+          // selected" choice (don't apply the global default for this run).
           applyDefaultAgentAndModelSelection(session.id, useConfigStore.getState(), {
-            agentName: agent || undefined,
-            providerId: providerID || undefined,
-            modelId: modelID || undefined,
-            variant: variant || undefined,
+            agentName: agent,
+            providerId: providerID,
+            modelId: modelID,
+            variant,
           });
         } catch {
           // ignore — overrides are best-effort
@@ -970,11 +977,12 @@ export function NewWorktreeDialog({
           issue: linkedIssue,
           pr: linkedPrState,
           includeDiff: includePrDiff,
+          // Raw selector state — see the matching comment above.
           overrides: {
-            providerID: providerID || undefined,
-            modelID: modelID || undefined,
-            variant: variant || undefined,
-            agentName: agent || undefined,
+            providerID,
+            modelID,
+            variant,
+            agentName: agent,
           },
         }).catch((error) => {
           const message = error instanceof Error ? error.message : t('session.newWorktree.error.sendGitHubContextFailed');
