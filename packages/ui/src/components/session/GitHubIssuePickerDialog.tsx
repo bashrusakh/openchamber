@@ -19,13 +19,12 @@ import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
 import * as sessionActions from '@/sync/session-actions';
 import { useConfigStore } from '@/stores/useConfigStore';
-import { useAgentsStore } from '@/stores/useAgentsStore';
+import { useInitialSessionOverrides } from '@/hooks/useInitialSessionOverrides';
 import { useUIStore } from '@/stores/useUIStore';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { ModelSelector } from '@/components/sections/agents/ModelSelector';
 import { AgentSelector } from '@/components/sections/commands/AgentSelector';
 import { ThinkingPill } from '@/components/session/ThinkingPill';
-import { isPrimaryMode } from '@/components/chat/mobileControlsUtils';
 import { renderMagicPrompt } from '@/lib/magicPrompts';
 import { parseModelIdentifier } from '@/lib/modelIdentifier';
 import { useDeviceInfo } from '@/lib/device';
@@ -300,98 +299,29 @@ export function GitHubIssuePickerDialog({
     return undefined;
   }, []);
 
-  // Config store subscriptions for selector state
-  const loadProviders = useConfigStore((state) => state.loadProviders);
-  const loadConfigAgents = useConfigStore((state) => state.loadAgents);
-  const loadAgentsStoreAgents = useAgentsStore((state) => state.loadAgents);
-  const providers = useConfigStore((state) => state.providers);
-
-  // Read once via getState() for initial selector state so background config
-  // refreshes do not clobber in-progress user edits. The pre-fill effect below
-  // overrides these on the open transition.
-  const { currentProviderId, currentModelId, currentVariant, currentAgentName } = useConfigStore.getState();
-  const initialProviderID = currentProviderId;
-  const initialModelID = currentModelId;
-  const initialVariant = currentVariant || '';
-  const initialAgentName = currentAgentName || '';
-
-  // Local selector state (overrides for the initial session message)
-  const [providerID, setProviderID] = React.useState(initialProviderID);
-  const [modelID, setModelID] = React.useState(initialModelID);
-  const [variant, setVariant] = React.useState(initialVariant);
-  const [agent, setAgent] = React.useState(initialAgentName);
-
-  // Load providers + agents when dialog opens so selectors have data.
-  React.useEffect(() => {
-    if (!open) return;
-    void loadProviders({ directory: projectDirectory, source: 'githubIssuePickerDialog' });
-    void loadConfigAgents({ directory: projectDirectory });
-    void loadAgentsStoreAgents();
-  }, [open, loadProviders, loadConfigAgents, loadAgentsStoreAgents, projectDirectory]);
-
-  // Pre-fill selector state from settings defaults. Read from getState() rather
-  // than subscribing so background config refreshes do not clobber in-progress
-  // user edits. Used both on dialog open and when createInWorktree is re-enabled
-  // so toggle-off → toggle-on restores settings defaults rather than the live
-  // current store snapshot.
-  const prefillFromDefaults = React.useCallback(() => {
-    const config = useConfigStore.getState();
-    const defaultModel = resolveDefaultModelSelection();
-    const defaultProvider = defaultModel?.providerID || config.currentProviderId;
-    const defaultModelID = defaultModel?.modelID || config.currentModelId;
-    const defaultAgent = resolveDefaultAgentName() || '';
-    setProviderID(defaultProvider);
-    setModelID(defaultModelID);
-    setVariant(resolveDefaultVariant(defaultProvider, defaultModelID) || '');
-    setAgent(defaultAgent);
-  }, [resolveDefaultAgentName, resolveDefaultModelSelection, resolveDefaultVariant]);
-
-  // Pre-fill on dialog open.
-  React.useEffect(() => {
-    if (open) prefillFromDefaults();
-  }, [open, prefillFromDefaults]);
-
-  // Re-prefill from settings defaults whenever createInWorktree is re-enabled,
-  // so toggling off then on restores settings defaults instead of leaving the
-  // user's previous manual choices in place.
-  React.useEffect(() => {
-    if (open && createInWorktree) prefillFromDefaults();
-  }, [open, createInWorktree, prefillFromDefaults]);
-
-  // Fallback to first available provider/model if current selection is missing.
-  React.useEffect(() => {
-    if (!open || providers.length === 0) return;
-
-    const provider = providers.find((item) => item.id === providerID) ?? providers[0];
-    const models = Array.isArray(provider?.models) ? provider.models : [];
-    const hasModel = models.some((item) => item.id === modelID);
-    const fallbackModelID = models[0]?.id ?? '';
-
-    if (provider?.id === providerID && hasModel) return;
-
-    setProviderID(provider?.id ?? '');
-    setModelID(hasModel ? modelID : fallbackModelID);
-    setVariant('');
-  }, [open, providers, providerID, modelID]);
-
-  const agentFilter = React.useCallback((candidate: { mode?: string }) => isPrimaryMode(candidate.mode), []);
-
-  const variantOptions = React.useMemo(() => {
-    const provider = providers.find((item) => item.id === providerID);
-    const model = provider?.models?.find((item) => item.id === modelID) as { variants?: Record<string, unknown> } | undefined;
-    return model?.variants ? Object.keys(model.variants) : [];
-  }, [providers, providerID, modelID]);
-
-  const hasVariantOptions = variantOptions.length > 0;
-
-  // Reset variant when the model no longer offers it, or when the current
-  // variant is no longer valid for the new model's variantOptions.
-  React.useEffect(() => {
-    if (!variant) return;
-    if (!hasVariantOptions || !variantOptions.includes(variant)) {
-      setVariant('');
-    }
-  }, [hasVariantOptions, variantOptions, variant]);
+  // Shared session-override state (providers/agents loading, default prefill,
+  // provider/model fallback, variant reset, agent filter). The
+  // `createInWorktree` toggle is forwarded as an extra prefill trigger so that
+  // toggling it off then on restores settings defaults instead of leaving the
+  // user's previous manual choices in place. See
+  // packages/ui/src/hooks/useInitialSessionOverrides.ts.
+  const {
+    providerID,
+    modelID,
+    variant,
+    agent,
+    setVariant,
+    setAgent,
+    variantOptions,
+    hasVariantOptions,
+    agentFilter,
+    setProviderAndModel,
+  } = useInitialSessionOverrides({
+    open,
+    projectDirectory,
+    source: 'githubIssuePickerDialog',
+    extraPrefillTriggers: [createInWorktree],
+  });
 
   const startSession = React.useCallback(async (issueNumber: number, sourceRepo?: GitHubRepoSelector | null) => {
     if (mode === 'select') {
@@ -599,11 +529,7 @@ export function GitHubIssuePickerDialog({
           modelId={modelID}
           className="max-w-[320px] justify-between"
           dropdownPortalToBody
-          onChange={(nextProviderID, nextModelID) => {
-            setProviderID(nextProviderID);
-            setModelID(nextModelID);
-            setVariant('');
-          }}
+          onChange={setProviderAndModel}
         />
       </div>
       <div className="flex flex-col gap-1.5">
