@@ -932,12 +932,25 @@ export function NewWorktreeDialog({
 
         try {
           // Pass the raw selector state directly. The selectors can all emit
-          // `""` for the "Not selected" / "Default" choice; that is a real
-          // user choice and must reach the creator unchanged. The creator
-          // uses truthy / `??` checks, so an empty string is treated as
-          // "no override" and the corresponding code path is skipped —
-          // which is the intended behavior for the "Default" / "Not
-          // selected" choice (don't apply the global default for this run).
+          // `""` for the "Not selected" / "Default" choice, which is a real
+          // user choice and must reach the creator unchanged.
+          //
+          // Per-field semantics inside `applyDefaultAgentAndModelSelection`:
+          //   - agentName empty: truthy check skips the override; the function
+          //     falls through to `settingsDefaultAgent` (then 'build', then
+          //     first visible). The settings default IS applied.
+          //   - providerId / modelId empty: same — truthy check skips, falls
+          //     through to `settingsDefaultModel`. The settings default IS
+          //     applied.
+          //   - variant empty: the `??` check yields `""` and the
+          //     `if (!variantCandidate) return;` guard exits the function
+          //     BEFORE applying any variant. NO variant is applied to
+          //     session metadata; OpenCode uses its no-variant default.
+          //
+          // The variant path is intentionally different: an empty variant
+          // means "no variant" (not "use the settings default variant"). The
+          // `sendLinkedContextMessage` path uses the same `??` semantics so
+          // the first message and the session metadata agree.
           applyDefaultAgentAndModelSelection(session.id, useConfigStore.getState(), {
             agentName: agent,
             providerId: providerID,
@@ -977,7 +990,8 @@ export function NewWorktreeDialog({
           issue: linkedIssue,
           pr: linkedPrState,
           includeDiff: includePrDiff,
-          // Raw selector state — see the matching comment above.
+          // Raw selector state — see the matching comment above for the
+          // per-field empty-string semantics.
           overrides: {
             providerID,
             modelID,

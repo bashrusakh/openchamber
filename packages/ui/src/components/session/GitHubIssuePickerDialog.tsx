@@ -432,12 +432,10 @@ export function GitHubIssuePickerDialog({
             undefined,
             {
               returnAfterDirectoryCreated: true,
-              // Pass the raw selector state. Selectors can emit `""` for
-              // "Not selected" / "Default"; that is a real user choice and
-              // must reach the creator unchanged. The creator's truthy /
-              // `??` checks treat an empty string as "no override" and
-              // skip the corresponding code path — which is the intended
-              // behavior for the "Default" / "Not selected" choice.
+              // Pass the raw selector state. Selectors can emit `""` for the
+              // "Not selected" / "Default" choice. See the matching comment in
+              // `NewWorktreeDialog.handleCreate` for the per-field empty-string
+              // semantics inside `applyDefaultAgentAndModelSelection`.
               overrides: {
                 providerId: providerID,
                 modelId: modelID,
