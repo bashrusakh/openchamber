@@ -2,7 +2,7 @@ import * as React from 'react';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useAgentsStore } from '@/stores/useAgentsStore';
 import { isPrimaryMode } from '@/components/chat/mobileControlsUtils';
-import { parseModelIdentifier } from '@/lib/modelIdentifier';
+import { resolveWorktreeSessionSelection } from '@/lib/worktreeSessionSelection';
 
 export type InitialSessionOverridesOptions = {
   /** Whether the host dialog is currently open. Used to gate load + prefill. */
@@ -37,16 +37,36 @@ export type InitialSessionOverrides = {
   setProviderAndModel: (nextProviderID: string, nextModelID: string) => void;
 };
 
+export const createInitialSessionOverridePrefillGuard = () => {
+  let initialSelectionEstablished = false;
+  let manuallyEdited = false;
+
+  return {
+    reset: () => {
+      initialSelectionEstablished = false;
+      manuallyEdited = false;
+    },
+    markInitialSelection: (established: boolean) => {
+      initialSelectionEstablished = established;
+    },
+    markManualEdit: () => {
+      manuallyEdited = true;
+    },
+    shouldRetryForAgents: (hasAgents: boolean) => (
+      hasAgents && !initialSelectionEstablished && !manuallyEdited
+    ),
+  };
+};
+
 /**
  * Shared session-override state used by dialogs that let the user pick a
  * provider / model / variant / agent before kicking off a new session or worktree.
  *
  * Encapsulates:
  *   - loading providers + agents when the dialog opens
- *   - prefilling selector defaults from settings (settingsDefaultModel/Agent/Variant)
- *     with a current-state fallback
- *   - falling back to the first available provider/model when the current
- *     selection is missing or invalidated by a refresh
+   *   - prefilling selector defaults through the shared validated selection cascade:
+   *     settings, current selection, last-used selection, then first available model
+   *   - reapplying that cascade when a selected provider/model is invalidated by a refresh
  *   - resetting the variant when the selected model no longer offers it
  *   - exposing a stable agentFilter for primary-mode agents and a
  *     setProviderAndModel helper that mirrors the ThinkingPill pattern
@@ -61,6 +81,9 @@ export const useInitialSessionOverrides = (
 
   // Reactive: providers (so the fallback effect can re-validate selection)
   const providers = useConfigStore((state) => state.providers);
+  // Agent availability completes the initial shared resolver cascade when
+  // providers arrive before the asynchronous agent load.
+  const configAgents = useConfigStore((state) => state.agents);
   // Stable function references
   const loadProviders = useConfigStore((state) => state.loadProviders);
   const loadConfigAgents = useConfigStore((state) => state.loadAgents);
@@ -82,61 +105,26 @@ export const useInitialSessionOverrides = (
   const [modelID, setModelID] = React.useState(initial.modelID);
   const [variant, setVariant] = React.useState(initial.variant);
   const [agent, setAgent] = React.useState(initial.agent);
+  const prefillGuard = React.useRef(createInitialSessionOverridePrefillGuard());
 
-  // Snapshot of `resolveDefault*` logic — read from config store via getState().
-  // Re-runs on `open` transition and any extraPrefillTriggers change.
-  const prefillFromDefaults = React.useCallback(() => {
+  // Resolve defaults from the shared selection cascade. Re-runs on `open`
+  // transitions and any extraPrefillTriggers change.
+  const applyDefaultPrefill = React.useCallback(() => {
     const s = useConfigStore.getState();
-    const settingsDefaultModel = s.settingsDefaultModel;
-    let defaultProviderID = s.currentProviderId;
-    let defaultModelID = s.currentModelId;
-    if (settingsDefaultModel) {
-      const parsed = parseModelIdentifier(settingsDefaultModel);
-      if (parsed) {
-        // Only adopt the parsed model if the config store has metadata for it;
-        // this matches the previous `resolveDefaultModelSelection` behavior.
-        const modelMetadata = s.getModelMetadata(parsed.providerId, parsed.modelId);
-        if (modelMetadata) {
-          defaultProviderID = parsed.providerId;
-          defaultModelID = parsed.modelId;
-        }
-      }
-    }
-    const visibleAgents = s.getVisibleAgents();
-    let defaultAgent = '';
-    if (s.settingsDefaultAgent) {
-      const found = visibleAgents.find((a) => a.name === s.settingsDefaultAgent);
-      if (found) defaultAgent = found.name;
-    }
-    if (!defaultAgent) {
-      defaultAgent =
-        visibleAgents.find((a) => a.name === 'build')?.name || visibleAgents[0]?.name || '';
-    }
-    // Default variant
-    let defaultVariant = '';
-    if (s.settingsDefaultVariant) {
-      const provider = s.providers.find((p) => p.id === defaultProviderID);
-      const model = provider?.models.find((m: { id?: string }) => m.id === defaultModelID) as
-        | { variants?: Record<string, unknown> }
-        | undefined;
-      if (model?.variants && Object.prototype.hasOwnProperty.call(model.variants, s.settingsDefaultVariant)) {
-        defaultVariant = s.settingsDefaultVariant;
-      }
-    }
-    if (!defaultVariant && s.currentProviderId === defaultProviderID && s.currentModelId === defaultModelID && s.currentVariant) {
-      const provider = s.providers.find((p) => p.id === defaultProviderID);
-      const model = provider?.models.find((m: { id?: string }) => m.id === defaultModelID) as
-        | { variants?: Record<string, unknown> }
-        | undefined;
-      if (model?.variants && Object.prototype.hasOwnProperty.call(model.variants, s.currentVariant)) {
-        defaultVariant = s.currentVariant;
-      }
-    }
-    setProviderID(defaultProviderID);
-    setModelID(defaultModelID);
-    setVariant(defaultVariant);
-    setAgent(defaultAgent);
+    const selection = resolveWorktreeSessionSelection(s);
+    setProviderID(selection?.providerID ?? '');
+    setModelID(selection?.modelID ?? '');
+    setVariant(selection?.variant ?? '');
+    setAgent(selection?.agentName ?? '');
+    return selection;
   }, []);
+
+  const prefillFromDefaults = React.useCallback(() => {
+    prefillGuard.current.reset();
+    const selection = applyDefaultPrefill();
+    prefillGuard.current.markInitialSelection(selection !== null);
+    return selection;
+  }, [applyDefaultPrefill]);
 
   // Load on open
   React.useEffect(() => {
@@ -148,27 +136,41 @@ export const useInitialSessionOverrides = (
 
   // Prefill on open + extra triggers
   React.useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      prefillGuard.current.reset();
+      return;
+    }
     prefillFromDefaults();
     // extraPrefillTriggers are flattened into deps so the effect re-runs on each
     // declared trigger (e.g. when createInWorktree toggles back on).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, prefillFromDefaults, ...extraPrefillTriggers]);
 
-  // Fallback to first available provider/model if current selection is missing
+  // A provider response can precede `loadAgents`, making the first resolver
+  // attempt intentionally return null. Retry only until that first valid
+  // selection is established so later background refreshes cannot overwrite
+  // dialog edits.
+  React.useEffect(() => {
+    if (!open || !prefillGuard.current.shouldRetryForAgents(configAgents.length > 0)) return;
+    prefillGuard.current.markInitialSelection(applyDefaultPrefill() !== null);
+  }, [open, configAgents, applyDefaultPrefill]);
+
+  // Preserve valid user choices. If a refresh invalidates one, return to the
+  // shared cascade rather than promoting an arbitrary provider into an override.
   React.useEffect(() => {
     if (!open || providers.length === 0) return;
 
     const provider = providers.find((p) => p.id === providerID) ?? providers[0];
     const models = Array.isArray(provider?.models) ? provider.models : [];
     const hasModel = models.some((m) => m.id === modelID);
-    const fallbackModelID = models[0]?.id ?? '';
 
     if (provider?.id === providerID && hasModel) return;
 
-    setProviderID(provider?.id ?? '');
-    setModelID(hasModel ? modelID : fallbackModelID);
-    setVariant('');
+    const selection = resolveWorktreeSessionSelection(useConfigStore.getState());
+    setProviderID(selection?.providerID ?? '');
+    setModelID(selection?.modelID ?? '');
+    setVariant(selection?.variant ?? '');
+    setAgent(selection?.agentName ?? '');
   }, [open, providers, providerID, modelID]);
 
   // Reset variant when the model no longer offers it
@@ -195,9 +197,30 @@ export const useInitialSessionOverrides = (
   );
 
   const setProviderAndModel = React.useCallback((nextProviderID: string, nextModelID: string) => {
+    prefillGuard.current.markManualEdit();
     setProviderID(nextProviderID);
     setModelID(nextModelID);
     setVariant('');
+  }, []);
+
+  const setProviderIDWithManualGuard = React.useCallback((next: string) => {
+    prefillGuard.current.markManualEdit();
+    setProviderID(next);
+  }, []);
+
+  const setModelIDWithManualGuard = React.useCallback((next: string) => {
+    prefillGuard.current.markManualEdit();
+    setModelID(next);
+  }, []);
+
+  const setVariantWithManualGuard = React.useCallback((next: string) => {
+    prefillGuard.current.markManualEdit();
+    setVariant(next);
+  }, []);
+
+  const setAgentWithManualGuard = React.useCallback((next: string) => {
+    prefillGuard.current.markManualEdit();
+    setAgent(next);
   }, []);
 
   return {
@@ -205,10 +228,10 @@ export const useInitialSessionOverrides = (
     modelID,
     variant,
     agent,
-    setProviderID,
-    setModelID,
-    setVariant,
-    setAgent,
+    setProviderID: setProviderIDWithManualGuard,
+    setModelID: setModelIDWithManualGuard,
+    setVariant: setVariantWithManualGuard,
+    setAgent: setAgentWithManualGuard,
     prefillFromDefaults,
     providers,
     variantOptions,

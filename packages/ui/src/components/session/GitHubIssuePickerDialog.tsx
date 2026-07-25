@@ -16,7 +16,6 @@ import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
-import { useSelectionStore } from '@/sync/selection-store';
 import * as sessionActions from '@/sync/session-actions';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useInitialSessionOverrides } from '@/hooks/useInitialSessionOverrides';
@@ -26,9 +25,11 @@ import { ModelSelector } from '@/components/sections/agents/ModelSelector';
 import { AgentSelector } from '@/components/sections/commands/AgentSelector';
 import { ThinkingPill } from '@/components/session/ThinkingPill';
 import { renderMagicPrompt } from '@/lib/magicPrompts';
-import { parseModelIdentifier } from '@/lib/modelIdentifier';
 import { useDeviceInfo } from '@/lib/device';
-import { createWorktreeSessionForNewBranch } from '@/lib/worktreeSessionCreator';
+import {
+  createWorktreeSessionForNewBranch,
+  resolveWorktreeSessionSelection,
+} from '@/lib/worktreeSessionCreator';
 import { generateBranchSlug } from '@/lib/git/branchNameGenerator';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import type { GitHubIssue, GitHubIssueComment, GitHubIssuesListResult, GitHubIssueSummary, GitHubRepoSelector } from '@/lib/api/types';
@@ -237,68 +238,6 @@ export function GitHubIssuePickerDialog({
     setSettingsDialogOpen(true);
   }, [setSettingsDialogOpen, setSettingsPage]);
 
-  const resolveDefaultAgentName = React.useCallback((): string | undefined => {
-    const configState = useConfigStore.getState();
-    const visibleAgents = configState.getVisibleAgents();
-
-    if (configState.settingsDefaultAgent) {
-      const settingsAgent = visibleAgents.find((a) => a.name === configState.settingsDefaultAgent);
-      if (settingsAgent) {
-        return settingsAgent.name;
-      }
-    }
-
-    return (
-      visibleAgents.find((agent) => agent.name === 'build')?.name ||
-      visibleAgents[0]?.name
-    );
-  }, []);
-
-  const resolveDefaultModelSelection = React.useCallback((): { providerID: string; modelID: string } | null => {
-    const configState = useConfigStore.getState();
-    const settingsDefaultModel = configState.settingsDefaultModel;
-    if (!settingsDefaultModel) {
-      return null;
-    }
-
-    const parsed = parseModelIdentifier(settingsDefaultModel);
-    if (!parsed) {
-      return null;
-    }
-    const { providerId: providerID, modelId: modelID } = parsed;
-
-    const modelMetadata = configState.getModelMetadata(providerID, modelID);
-    if (!modelMetadata) {
-      return null;
-    }
-
-    return { providerID, modelID };
-  }, []);
-
-  const resolveDefaultVariant = React.useCallback((providerID: string, modelID: string): string | undefined => {
-    const configState = useConfigStore.getState();
-    const settingsDefaultVariant = configState.settingsDefaultVariant;
-    const currentVariant = configState.currentProviderId === providerID && configState.currentModelId === modelID
-      ? configState.currentVariant
-      : undefined;
-
-    const provider = configState.providers.find((p) => p.id === providerID);
-    const model = provider?.models.find((m: Record<string, unknown>) => (m as { id?: string }).id === modelID) as
-      | { variants?: Record<string, unknown> }
-      | undefined;
-    const variants = model?.variants;
-    if (!variants) {
-      return settingsDefaultVariant || currentVariant || undefined;
-    }
-    if (settingsDefaultVariant && Object.prototype.hasOwnProperty.call(variants, settingsDefaultVariant)) {
-      return settingsDefaultVariant;
-    }
-    if (currentVariant && Object.prototype.hasOwnProperty.call(variants, currentVariant)) {
-      return currentVariant;
-    }
-    return undefined;
-  }, []);
-
   // Shared session-override state (providers/agents loading, default prefill,
   // provider/model fallback, variant reset, agent filter). The
   // `createInWorktree` toggle is forwarded as an extra prefill trigger so that
@@ -422,6 +361,17 @@ export function GitHubIssuePickerDialog({
       const comments = commentsRes.comments ?? [];
 
       const sessionTitle = `#${issue.number} ${issue.title}`.trim();
+      const selectionOverrides = createInWorktree
+        ? { providerID, modelID, variant, agentName: agent }
+        : undefined;
+      const sessionSelection = resolveWorktreeSessionSelection(
+        useConfigStore.getState(),
+        selectionOverrides,
+      );
+      if (!sessionSelection) {
+        toast.error(t('session.githubIssuePicker.error.noModelSelected'));
+        return;
+      }
 
       const { sessionId } = await (async () => {
         if (createInWorktree) {
@@ -432,16 +382,8 @@ export function GitHubIssuePickerDialog({
             undefined,
             {
               returnAfterDirectoryCreated: true,
-              // Pass the raw selector state. Selectors can emit `""` for the
-              // "Not selected" / "Default" choice. See the matching comment in
-              // `NewWorktreeDialog.handleCreate` for the per-field empty-string
-              // semantics inside `applyDefaultAgentAndModelSelection`.
-              overrides: {
-                providerID,
-                modelID,
-                variant,
-                agentName: agent,
-              },
+              overrides: selectionOverrides,
+              selection: sessionSelection,
             }
           );
           if (!created?.id) {
@@ -469,22 +411,6 @@ export function GitHubIssuePickerDialog({
       // Close modal immediately after session exists (don't wait for message send).
       onOpenChange(false);
 
-      const configState = useConfigStore.getState();
-      const lastUsedProvider = useSelectionStore.getState().lastUsedProvider;
-
-      const defaultModel = resolveDefaultModelSelection();
-      const sendProviderID = (createInWorktree && providerID) || defaultModel?.providerID || configState.currentProviderId || lastUsedProvider?.providerID;
-      const sendModelID = (createInWorktree && modelID) || defaultModel?.modelID || configState.currentModelId || lastUsedProvider?.modelID;
-      const sendAgentName = (createInWorktree && agent) || resolveDefaultAgentName() || configState.currentAgentName || undefined;
-      if (!sendProviderID || !sendModelID) {
-        toast.error(t('session.githubIssuePicker.error.noModelSelected'));
-        return;
-      }
-
-      // In a worktree, an explicit empty variant is passed as `undefined`.
-      // Only the non-worktree path resolves the default variant.
-      const sendVariant = createInWorktree ? (variant || undefined) : resolveDefaultVariant(sendProviderID, sendModelID);
-
       const visiblePromptText = await renderMagicPrompt('github.issue.review.visible', {
         issue_number: String(issue.number),
       });
@@ -493,16 +419,16 @@ export function GitHubIssuePickerDialog({
 
       void useSessionUIStore.getState().sendMessage(
         visiblePromptText,
-        sendProviderID,
-        sendModelID,
-        sendAgentName,
+        sessionSelection.providerID,
+        sessionSelection.modelID,
+        sessionSelection.agentName,
         undefined,
         undefined,
         [
           { text: instructionsText, synthetic: true },
           { text: contextText, synthetic: true },
         ],
-        sendVariant,
+        sessionSelection.variant,
         undefined,
         { sessionId },
       ).catch((e) => {
@@ -519,7 +445,7 @@ export function GitHubIssuePickerDialog({
     } finally {
       setStartingIssueNumber(null);
     }
-  }, [agent, createInWorktree, github, mode, modelID, onOpenChange, onSelect, projectDirectory, providerID, resolveDefaultAgentName, resolveDefaultModelSelection, resolveDefaultVariant, startingIssueNumber, t, variant]);
+  }, [agent, createInWorktree, github, mode, modelID, onOpenChange, onSelect, projectDirectory, providerID, startingIssueNumber, t, variant]);
 
   const title = mode === 'select' ? t('session.githubIssuePicker.title.select') : t('session.githubIssuePicker.title.createSession');
   const description = mode === 'select'

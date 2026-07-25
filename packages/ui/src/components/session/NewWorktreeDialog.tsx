@@ -29,7 +29,6 @@ import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
-import { useSelectionStore } from '@/sync/selection-store';
 import * as sessionActions from '@/sync/session-actions';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useInitialSessionOverrides } from '@/hooks/useInitialSessionOverrides';
@@ -39,12 +38,15 @@ import { ThinkingPill } from '@/components/session/ThinkingPill';
 import { validateWorktreeCreate, createWorktree } from '@/lib/worktrees/worktreeManager';
 import { withWorktreeUpstreamDefaults } from '@/lib/worktrees/worktreeCreate';
 import { waitForWorktreeBootstrap } from '@/lib/worktrees/worktreeBootstrap';
-import { applyDefaultAgentAndModelSelection, type WorktreeSessionOverrides } from '@/lib/worktreeSessionCreator';
+import {
+  applyDefaultAgentAndModelSelection,
+  resolveWorktreeSessionSelection,
+  type WorktreeSessionSelection,
+} from '@/lib/worktreeSessionCreator';
 import { getWorktreeSetupCommands, getWorktreeSetupWaitEnabled } from '@/lib/openchamberConfig';
 import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
 import { generateBranchSlug } from '@/lib/git/branchNameGenerator';
 import { renderMagicPrompt } from '@/lib/magicPrompts';
-import { parseModelIdentifier } from '@/lib/modelIdentifier';
 import { rankBranchesForQuery } from '@/lib/worktrees/branchSearch';
 import {
   LAST_WORKTREE_SOURCE_BRANCH_KEY,
@@ -429,52 +431,6 @@ export function NewWorktreeDialog({
   const [isCreating, setIsCreating] = React.useState(false);
   const [validationAbortController, setValidationAbortController] = React.useState<AbortController | null>(null);
 
-  const resolveDefaultAgentName = React.useCallback((): string | undefined => {
-    const configState = useConfigStore.getState();
-    const visibleAgents = configState.getVisibleAgents();
-
-    if (configState.settingsDefaultAgent) {
-      const settingsAgent = visibleAgents.find((a) => a.name === configState.settingsDefaultAgent);
-      if (settingsAgent) {
-        return settingsAgent.name;
-      }
-    }
-
-    return visibleAgents.find((agent) => agent.name === 'build')?.name || visibleAgents[0]?.name;
-  }, []);
-
-  const resolveDefaultModelSelection = React.useCallback((): { providerID: string; modelID: string } | null => {
-    const configState = useConfigStore.getState();
-    const settingsDefaultModel = configState.settingsDefaultModel;
-    if (!settingsDefaultModel) return null;
-
-    const parsed = parseModelIdentifier(settingsDefaultModel);
-    if (!parsed) return null;
-    const { providerId: providerID, modelId: modelID } = parsed;
-
-    const modelMetadata = configState.getModelMetadata(providerID, modelID);
-    if (!modelMetadata) return null;
-    return { providerID, modelID };
-  }, []);
-
-  const resolveDefaultVariant = React.useCallback((providerID: string, modelID: string): string | undefined => {
-    const configState = useConfigStore.getState();
-    const settingsDefaultVariant = configState.settingsDefaultVariant;
-    const currentVariant = configState.currentProviderId === providerID && configState.currentModelId === modelID
-      ? configState.currentVariant
-      : undefined;
-
-    const provider = configState.providers.find((p) => p.id === providerID);
-    const model = provider?.models.find((m: Record<string, unknown>) => (m as { id?: string }).id === modelID) as
-      | { variants?: Record<string, unknown> }
-      | undefined;
-    const variants = model?.variants;
-    if (!variants) return settingsDefaultVariant || currentVariant || undefined;
-    if (settingsDefaultVariant && Object.prototype.hasOwnProperty.call(variants, settingsDefaultVariant)) return settingsDefaultVariant;
-    if (currentVariant && Object.prototype.hasOwnProperty.call(variants, currentVariant)) return currentVariant;
-    return undefined;
-  }, []);
-
   // Shared session-override state (providers/agents loading, default prefill,
   // provider/model fallback, variant reset, agent filter). See
   // packages/ui/src/hooks/useInitialSessionOverrides.ts.
@@ -501,26 +457,13 @@ export function NewWorktreeDialog({
     issue: GitHubIssue | null;
     pr: GitHubPullRequestSummary | null;
     includeDiff: boolean;
-    overrides?: WorktreeSessionOverrides;
+    selection: WorktreeSessionSelection;
   }) => {
     if (!projectDirectory || !github) {
       return;
     }
 
-    const configState = useConfigStore.getState();
-    const lastUsedProvider = useSelectionStore.getState().lastUsedProvider;
-    const overrides = args.overrides;
-    const defaultModel = resolveDefaultModelSelection();
-    const providerID = overrides?.providerID || defaultModel?.providerID || configState.currentProviderId || lastUsedProvider?.providerID;
-    const modelID = overrides?.modelID || defaultModel?.modelID || configState.currentModelId || lastUsedProvider?.modelID;
-    const agentName = overrides?.agentName || resolveDefaultAgentName() || configState.currentAgentName || undefined;
-
-    if (!providerID || !modelID) {
-      toast.error(t('session.newWorktree.error.noModelSelected'));
-      return;
-    }
-
-    const variant = overrides ? overrides.variant || undefined : resolveDefaultVariant(providerID, modelID);
+    const { providerID, modelID, agentName, variant } = args.selection;
 
     if (args.issue) {
       if (!github.issueGet || !github.issueComments) {
@@ -608,9 +551,6 @@ export function NewWorktreeDialog({
   }, [
     github,
     projectDirectory,
-    resolveDefaultAgentName,
-    resolveDefaultModelSelection,
-    resolveDefaultVariant,
     t,
   ]);
 
@@ -861,6 +801,19 @@ export function NewWorktreeDialog({
       const linkedPrState = mode === 'new-branch' ? newBranchState.linkedPr : null;
       const includePrDiff = mode === 'new-branch' ? newBranchState.includePrDiff : false;
       const shouldCreateSession = Boolean(linkedIssue || linkedPrState);
+      const selectionOverrides = {
+        agentName: agent,
+        providerID,
+        modelID,
+        variant,
+      };
+      const linkedSelection = shouldCreateSession
+        ? resolveWorktreeSessionSelection(useConfigStore.getState(), selectionOverrides)
+        : null;
+      if (shouldCreateSession && !linkedSelection) {
+        toast.error(t('session.newWorktree.error.noModelSelected'));
+        return;
+      }
 
       const setupCommands = await getWorktreeSetupCommands(projectRef);
       const sourceBranch = newBranchState.sourceBranch;
@@ -934,32 +887,12 @@ export function NewWorktreeDialog({
           // ignore
         }
 
-        // Pass the raw selector state directly. The selectors can all emit
-        // `""` for the "Not selected" / "Default" choice, which is a real
-        // user choice and must reach the creator unchanged.
-        //
-        // Per-field semantics inside `applyDefaultAgentAndModelSelection`:
-        //   - agentName empty: truthy check skips the override; the function
-        //     falls through to `settingsDefaultAgent` (then 'build', then
-        //     first visible). The settings default IS applied.
-        //   - providerId / modelId empty: same — truthy check skips, falls
-        //     through to `settingsDefaultModel`. The settings default IS
-        //     applied.
-        //   - variant empty: the `??` check yields `""` and the
-        //     `if (!variantCandidate) return;` guard exits the function
-        //     BEFORE applying any variant. NO variant is applied to
-        //     session metadata; OpenCode uses its no-variant default.
-        //
-        // The variant path is intentionally different: an empty variant
-        // means "no variant" (not "use the settings default variant"). The
-        // first message receives the same effective variant: an explicit empty
-        // override is passed as `undefined`, without resolving a default.
-        applyDefaultAgentAndModelSelection(session.id, useConfigStore.getState(), {
-          agentName: agent,
-          providerID,
-          modelID,
-          variant,
-        });
+        applyDefaultAgentAndModelSelection(
+          session.id,
+          useConfigStore.getState(),
+          selectionOverrides,
+          linkedSelection,
+        );
       } else {
         onOpenChange(false);
         setIsCreating(false);
@@ -984,24 +917,19 @@ export function NewWorktreeDialog({
       });
 
       if (createdSessionId) {
-        void sendLinkedContextMessage({
-          sessionId: createdSessionId,
-          directory: metadata.path,
-          issue: linkedIssue,
-          pr: linkedPrState,
-          includeDiff: includePrDiff,
-          // Raw selector state — see the matching comment above for the
-          // per-field empty-string semantics.
-          overrides: {
-            providerID,
-            modelID,
-            variant,
-            agentName: agent,
-          },
-        }).catch((error) => {
-          const message = error instanceof Error ? error.message : t('session.newWorktree.error.sendGitHubContextFailed');
-          toast.error(t('session.newWorktree.error.sendGitHubContextFailed'), { description: message });
-        });
+        if (linkedSelection) {
+          void sendLinkedContextMessage({
+            sessionId: createdSessionId,
+            directory: metadata.path,
+            issue: linkedIssue,
+            pr: linkedPrState,
+            includeDiff: includePrDiff,
+            selection: linkedSelection,
+          }).catch((error) => {
+            const message = error instanceof Error ? error.message : t('session.newWorktree.error.sendGitHubContextFailed');
+            toast.error(t('session.newWorktree.error.sendGitHubContextFailed'), { description: message });
+          });
+        }
       } else {
         onWorktreeCreated?.(metadata.path);
       }
