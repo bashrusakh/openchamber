@@ -437,8 +437,8 @@ export function GitHubIssuePickerDialog({
               // `NewWorktreeDialog.handleCreate` for the per-field empty-string
               // semantics inside `applyDefaultAgentAndModelSelection`.
               overrides: {
-                providerId: providerID,
-                modelId: modelID,
+                providerID,
+                modelID,
                 variant,
                 agentName: agent,
               },

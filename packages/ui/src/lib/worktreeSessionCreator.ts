@@ -89,8 +89,8 @@ let isCreatingWorktreeSession = false;
 
 export type WorktreeSessionOverrides = {
   agentName?: string;
-  providerId?: string;
-  modelId?: string;
+  providerID?: string;
+  modelID?: string;
   variant?: string;
 };
 
@@ -130,18 +130,18 @@ export const applyDefaultAgentAndModelSelection = (
     configState.setAgent(agentName);
     useContextStore.getState().saveSessionAgentSelection(sessionId, agentName);
 
-    let providerId: string | undefined;
-    let modelId: string | undefined;
+    let providerID: string | undefined;
+    let modelID: string | undefined;
 
-    if (overrides?.providerId && overrides?.modelId) {
-      const modelMetadata = configState.getModelMetadata(overrides.providerId, overrides.modelId);
+    if (overrides?.providerID && overrides?.modelID) {
+      const modelMetadata = configState.getModelMetadata(overrides.providerID, overrides.modelID);
       if (modelMetadata) {
-        providerId = overrides.providerId;
-        modelId = overrides.modelId;
+        providerID = overrides.providerID;
+        modelID = overrides.modelID;
       }
     }
 
-    if (!providerId || !modelId) {
+    if (!providerID || !modelID) {
       const settingsDefaultModel = configState.settingsDefaultModel;
       if (!settingsDefaultModel) {
         return;
@@ -157,12 +157,12 @@ export const applyDefaultAgentAndModelSelection = (
         return;
       }
 
-      providerId = parsed.providerId;
-      modelId = parsed.modelId;
+      providerID = parsed.providerId;
+      modelID = parsed.modelId;
     }
 
-    useContextStore.getState().saveSessionModelSelection(sessionId, providerId, modelId);
-    useContextStore.getState().saveAgentModelForSession(sessionId, agentName, providerId, modelId);
+    useContextStore.getState().saveSessionModelSelection(sessionId, providerID, modelID);
+    useContextStore.getState().saveAgentModelForSession(sessionId, agentName, providerID, modelID);
 
     const settingsDefaultVariant = configState.settingsDefaultVariant;
     const variantCandidate = overrides?.variant ?? settingsDefaultVariant;
@@ -170,8 +170,8 @@ export const applyDefaultAgentAndModelSelection = (
       return;
     }
 
-    const provider = configState.providers.find((p) => p.id === providerId);
-    const model = provider?.models.find((m: Record<string, unknown>) => (m as { id?: string }).id === modelId) as
+    const provider = configState.providers.find((p) => p.id === providerID);
+    const model = provider?.models.find((m: Record<string, unknown>) => (m as { id?: string }).id === modelID) as
       | { variants?: Record<string, unknown> }
       | undefined;
     const variants = model?.variants;
@@ -180,10 +180,10 @@ export const applyDefaultAgentAndModelSelection = (
       configState.setCurrentVariant(variantCandidate);
       useContextStore
         .getState()
-        .saveAgentModelVariantForSession(sessionId, agentName, providerId, modelId, variantCandidate);
+        .saveAgentModelVariantForSession(sessionId, agentName, providerID, modelID, variantCandidate);
     }
-  } catch {
-    // Ignore errors setting default agent
+  } catch (error) {
+    console.warn('[worktreeSessionCreator] applyDefaultAgentAndModelSelection failed', error);
   }
 };
 

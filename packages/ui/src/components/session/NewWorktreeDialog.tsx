@@ -617,6 +617,10 @@ export function NewWorktreeDialog({
   // Get current state based on mode
   const currentState = mode === 'new-branch' ? newBranchState : existingBranchState;
 
+  // Only show override selectors when they will actually be used: new-branch
+  // mode with a linked issue/PR that triggers session creation.
+  const showOverridesSection = mode === 'new-branch' && (newBranchState.linkedIssue || newBranchState.linkedPr);
+
   // Set default source branch when the dialog opens and branches become available
   React.useEffect(() => {
     if (!open || !branches?.all || !projectDirectory) return;
@@ -953,8 +957,8 @@ export function NewWorktreeDialog({
           // the first message and the session metadata agree.
           applyDefaultAgentAndModelSelection(session.id, useConfigStore.getState(), {
             agentName: agent,
-            providerId: providerID,
-            modelId: modelID,
+            providerID,
+            modelID,
             variant,
           });
         } catch {
@@ -1594,7 +1598,7 @@ export function NewWorktreeDialog({
             )}
 
             {/* Initial-session model/variant/agent overrides */}
-            {renderOverridesSection()}
+            {showOverridesSection && renderOverridesSection()}
 
             {/* Linked Item Preview - Two row minimal display */}
             {(newBranchState.linkedIssue || newBranchState.linkedPr) && mode === 'new-branch' && (
@@ -2040,7 +2044,7 @@ export function NewWorktreeDialog({
               )}
 
               {/* Initial-session model/variant/agent overrides */}
-              {renderOverridesSection()}
+              {showOverridesSection && renderOverridesSection()}
 
               {/* Linked Item Preview - Two row minimal display */}
               {(newBranchState.linkedIssue || newBranchState.linkedPr) && mode === 'new-branch' && (

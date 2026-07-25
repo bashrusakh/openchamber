@@ -77,10 +77,10 @@ export function ForkSessionDialog(props: ForkSessionDialogProps) {
     source: 'forkSessionDialog',
   });
 
-  // Reset dialog-local state when the dialog transitions to open.
-  // Reading the config snapshot here (instead of subscribing) avoids
-  // clobbering in-progress user edits when the config store refreshes in the
-  // background while the dialog is open.
+  // Reset dialog-local state when the dialog opens.
+  // This is a fresh dialog surface each time, so clearing is safe and desired;
+  // the user's override choices live inside `useInitialSessionOverrides` and
+  // are managed by that hook, not this effect.
   React.useEffect(() => {
     if (!open) return;
     setInstructions(EXECUTION_FORK_DEFAULT_INSTRUCTIONS);
