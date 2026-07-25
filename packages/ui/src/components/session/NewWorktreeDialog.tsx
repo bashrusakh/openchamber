@@ -520,7 +520,7 @@ export function NewWorktreeDialog({
       return;
     }
 
-    const variant = overrides?.variant || resolveDefaultVariant(providerID, modelID);
+    const variant = overrides ? overrides.variant || undefined : resolveDefaultVariant(providerID, modelID);
 
     if (args.issue) {
       if (!github.issueGet || !github.issueComments) {
@@ -952,10 +952,8 @@ export function NewWorktreeDialog({
         //
         // The variant path is intentionally different: an empty variant
         // means "no variant" (not "use the settings default variant"). The
-        // first message receives the same effective variant because
-        // `sendLinkedContextMessage` coalesces an empty-string override to
-        // `undefined` and `applyDefaultAgentAndModelSelection` exits early on
-        // an empty override.
+        // first message receives the same effective variant: an explicit empty
+        // override is passed as `undefined`, without resolving a default.
         applyDefaultAgentAndModelSelection(session.id, useConfigStore.getState(), {
           agentName: agent,
           providerID,
@@ -997,7 +995,7 @@ export function NewWorktreeDialog({
           overrides: {
             providerID,
             modelID,
-            variant: variant || undefined,
+            variant,
             agentName: agent,
           },
         }).catch((error) => {

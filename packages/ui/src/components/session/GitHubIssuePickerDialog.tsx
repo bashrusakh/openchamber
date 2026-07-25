@@ -481,9 +481,9 @@ export function GitHubIssuePickerDialog({
         return;
       }
 
-      // Empty variant means "no variant"; only fall back to the resolved default
-      // when no override was chosen.
-      const sendVariant = createInWorktree ? (variant || resolveDefaultVariant(sendProviderID, sendModelID)) : resolveDefaultVariant(sendProviderID, sendModelID);
+      // In a worktree, an explicit empty variant is passed as `undefined`.
+      // Only the non-worktree path resolves the default variant.
+      const sendVariant = createInWorktree ? (variant || undefined) : resolveDefaultVariant(sendProviderID, sendModelID);
 
       const visiblePromptText = await renderMagicPrompt('github.issue.review.visible', {
         issue_number: String(issue.number),
