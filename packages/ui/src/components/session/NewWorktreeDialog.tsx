@@ -39,7 +39,7 @@ import { ThinkingPill } from '@/components/session/ThinkingPill';
 import { validateWorktreeCreate, createWorktree } from '@/lib/worktrees/worktreeManager';
 import { withWorktreeUpstreamDefaults } from '@/lib/worktrees/worktreeCreate';
 import { waitForWorktreeBootstrap } from '@/lib/worktrees/worktreeBootstrap';
-import { applyDefaultAgentAndModelSelection } from '@/lib/worktreeSessionCreator';
+import { applyDefaultAgentAndModelSelection, type WorktreeSessionOverrides } from '@/lib/worktreeSessionCreator';
 import { getWorktreeSetupCommands, getWorktreeSetupWaitEnabled } from '@/lib/openchamberConfig';
 import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
 import { generateBranchSlug } from '@/lib/git/branchNameGenerator';
@@ -501,7 +501,7 @@ export function NewWorktreeDialog({
     issue: GitHubIssue | null;
     pr: GitHubPullRequestSummary | null;
     includeDiff: boolean;
-    overrides?: { agentName?: string; providerID?: string; modelID?: string; variant?: string };
+    overrides?: WorktreeSessionOverrides;
   }) => {
     if (!projectDirectory || !github) {
       return;
@@ -520,7 +520,7 @@ export function NewWorktreeDialog({
       return;
     }
 
-    const variant = overrides?.variant ?? resolveDefaultVariant(providerID, modelID);
+    const variant = overrides?.variant || resolveDefaultVariant(providerID, modelID);
 
     if (args.issue) {
       if (!github.issueGet || !github.issueComments) {
@@ -934,36 +934,34 @@ export function NewWorktreeDialog({
           // ignore
         }
 
-        try {
-          // Pass the raw selector state directly. The selectors can all emit
-          // `""` for the "Not selected" / "Default" choice, which is a real
-          // user choice and must reach the creator unchanged.
-          //
-          // Per-field semantics inside `applyDefaultAgentAndModelSelection`:
-          //   - agentName empty: truthy check skips the override; the function
-          //     falls through to `settingsDefaultAgent` (then 'build', then
-          //     first visible). The settings default IS applied.
-          //   - providerId / modelId empty: same — truthy check skips, falls
-          //     through to `settingsDefaultModel`. The settings default IS
-          //     applied.
-          //   - variant empty: the `??` check yields `""` and the
-          //     `if (!variantCandidate) return;` guard exits the function
-          //     BEFORE applying any variant. NO variant is applied to
-          //     session metadata; OpenCode uses its no-variant default.
-          //
-          // The variant path is intentionally different: an empty variant
-          // means "no variant" (not "use the settings default variant"). The
-          // `sendLinkedContextMessage` path uses the same `??` semantics so
-          // the first message and the session metadata agree.
-          applyDefaultAgentAndModelSelection(session.id, useConfigStore.getState(), {
-            agentName: agent,
-            providerID,
-            modelID,
-            variant,
-          });
-        } catch {
-          // ignore — overrides are best-effort
-        }
+        // Pass the raw selector state directly. The selectors can all emit
+        // `""` for the "Not selected" / "Default" choice, which is a real
+        // user choice and must reach the creator unchanged.
+        //
+        // Per-field semantics inside `applyDefaultAgentAndModelSelection`:
+        //   - agentName empty: truthy check skips the override; the function
+        //     falls through to `settingsDefaultAgent` (then 'build', then
+        //     first visible). The settings default IS applied.
+        //   - providerId / modelId empty: same — truthy check skips, falls
+        //     through to `settingsDefaultModel`. The settings default IS
+        //     applied.
+        //   - variant empty: the `??` check yields `""` and the
+        //     `if (!variantCandidate) return;` guard exits the function
+        //     BEFORE applying any variant. NO variant is applied to
+        //     session metadata; OpenCode uses its no-variant default.
+        //
+        // The variant path is intentionally different: an empty variant
+        // means "no variant" (not "use the settings default variant"). The
+        // first message receives the same effective variant because
+        // `sendLinkedContextMessage` coalesces an empty-string override to
+        // `undefined` and `applyDefaultAgentAndModelSelection` exits early on
+        // an empty override.
+        applyDefaultAgentAndModelSelection(session.id, useConfigStore.getState(), {
+          agentName: agent,
+          providerID,
+          modelID,
+          variant,
+        });
       } else {
         onOpenChange(false);
         setIsCreating(false);
@@ -999,7 +997,7 @@ export function NewWorktreeDialog({
           overrides: {
             providerID,
             modelID,
-            variant,
+            variant: variant || undefined,
             agentName: agent,
           },
         }).catch((error) => {

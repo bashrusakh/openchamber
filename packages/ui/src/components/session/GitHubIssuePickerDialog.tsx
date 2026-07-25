@@ -481,7 +481,9 @@ export function GitHubIssuePickerDialog({
         return;
       }
 
-      const sendVariant = createInWorktree ? (variant ?? resolveDefaultVariant(sendProviderID, sendModelID)) : resolveDefaultVariant(sendProviderID, sendModelID);
+      // Empty variant means "no variant"; only fall back to the resolved default
+      // when no override was chosen.
+      const sendVariant = createInWorktree ? (variant || resolveDefaultVariant(sendProviderID, sendModelID)) : resolveDefaultVariant(sendProviderID, sendModelID);
 
       const visiblePromptText = await renderMagicPrompt('github.issue.review.visible', {
         issue_number: String(issue.number),
