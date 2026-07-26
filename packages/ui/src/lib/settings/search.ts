@@ -276,6 +276,12 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['copy', 'save image', 'read aloud'],
   },
   {
+    id: 'chat.draft-starters-visible',
+    page: 'chat',
+    titleKey: 'settings.openchamber.visual.field.draftStartersVisible',
+    keywords: ['starter', 'starters', 'new session', 'welcome', 'suggestions'],
+  },
+  {
     id: 'chat.subagent-read-only-banner',
     page: 'chat',
     titleKey: 'settings.openchamber.visual.field.allowPromptingSubagentSessions',
@@ -392,7 +398,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
   },
   {
     id: 'sessions.desktop-window-controls-position',
-    page: 'general',
+    page: 'appearance',
     titleKey: 'settings.openchamber.desktopNetwork.field.windowControlsPosition',
     descriptionKey: 'settings.openchamber.desktopNetwork.field.windowControlsPositionDescription',
     keywords: ['desktop', 'window', 'controls', 'minimize', 'maximize', 'close', 'titlebar', 'linux', 'windows'],
@@ -450,6 +456,14 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     page: 'general',
     titleKey: 'settings.openchamber.opencodeCli.field.showUpdateNotifications',
     keywords: ['opencode', 'cli', 'updates'],
+    isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
+    id: 'sessions.agent-control-tool',
+    page: 'general',
+    titleKey: 'settings.openchamber.opencodeCli.field.agentControlTool',
+    descriptionKey: 'settings.openchamber.opencodeCli.field.agentControlToolInfo',
+    keywords: ['agent', 'tool', 'orchestration', 'openchamber', 'sessions', 'schedule', 'control'],
     isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
