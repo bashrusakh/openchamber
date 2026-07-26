@@ -171,37 +171,71 @@ describe('worktree session initialization', () => {
     }
   });
 
-  test('persists resolved selection to both stores and clears an empty variant', () => {
+  test('sets the global variant for a resolved non-empty selection', () => {
+    const previousConfig = useConfigStore.getState();
+    const sessionId = 'worktree-session-global-variant';
+    useConfigStore.setState({ currentVariant: undefined, selectionSource: 'auto' });
+
+    try {
+      const result = applyDefaultAgentAndModelSelection(
+        sessionId,
+        useConfigStore.getState(),
+        undefined,
+        { agentName: 'build', providerID: 'current-provider', modelID: 'current-model', variant: 'high' },
+      );
+
+      expect(result).toEqual({ agentName: 'build', providerID: 'current-provider', modelID: 'current-model', variant: 'high' });
+      expect(useConfigStore.getState().currentVariant).toBe('high');
+    } finally {
+      useConfigStore.setState(previousConfig, true);
+    }
+  });
+
+  test('preserves the global variant while clearing undefined session variants', () => {
     const sessionId = 'worktree-session-selection';
+    const previousConfig = useConfigStore.getState();
+    const configState = useConfigStore.getState();
+    const setCurrentVariantCalls: (string | undefined)[] = [];
+    const setCurrentVariant = (variant: string | undefined) => {
+      setCurrentVariantCalls.push(variant);
+      configState.setCurrentVariant(variant);
+    };
     const selectionStore = useSelectionStore.getState();
     const contextStore = useContextStore.getState();
     selectionStore.saveAgentModelVariantForSession(sessionId, 'build', 'current-provider', 'current-model', 'high');
     contextStore.saveAgentModelVariantForSession(sessionId, 'build', 'current-provider', 'current-model', 'high');
+    useConfigStore.setState({ currentVariant: 'high', selectionSource: 'auto' });
 
-    const result = applyDefaultAgentAndModelSelection(
-      sessionId,
-      undefined,
-      undefined,
-      { agentName: 'build', providerID: 'current-provider', modelID: 'current-model', variant: undefined },
-    );
+    try {
+      const result = applyDefaultAgentAndModelSelection(
+        sessionId,
+        { ...configState, setCurrentVariant },
+        undefined,
+        { agentName: 'build', providerID: 'current-provider', modelID: 'current-model', variant: undefined },
+      );
 
-    expect(result).toEqual({ agentName: 'build', providerID: 'current-provider', modelID: 'current-model', variant: undefined });
-    expect(useSelectionStore.getState().getSessionAgentSelection(sessionId)).toBe('build');
-    expect(useSelectionStore.getState().getSessionModelSelection(sessionId)).toEqual({
-      providerId: 'current-provider',
-      modelId: 'current-model',
-    });
-    expect(useSelectionStore.getState().getAgentModelForSession(sessionId, 'build')).toEqual({
-      providerId: 'current-provider',
-      modelId: 'current-model',
-    });
-    expect(useSelectionStore.getState().getAgentModelVariantForSession(sessionId, 'build', 'current-provider', 'current-model')).toBe(undefined);
-    expect(useContextStore.getState().getSessionAgentSelection(sessionId)).toBe('build');
-    expect(useContextStore.getState().getSessionModelSelection(sessionId)).toEqual({
-      providerId: 'current-provider',
-      modelId: 'current-model',
-    });
-    expect(useContextStore.getState().getAgentModelVariantForSession(sessionId, 'build', 'current-provider', 'current-model')).toBe(undefined);
+      expect(result).toEqual({ agentName: 'build', providerID: 'current-provider', modelID: 'current-model', variant: undefined });
+      expect(setCurrentVariantCalls).toEqual([]);
+      expect(useConfigStore.getState().currentVariant).toBe('high');
+      expect(useSelectionStore.getState().getSessionAgentSelection(sessionId)).toBe('build');
+      expect(useSelectionStore.getState().getSessionModelSelection(sessionId)).toEqual({
+        providerId: 'current-provider',
+        modelId: 'current-model',
+      });
+      expect(useSelectionStore.getState().getAgentModelForSession(sessionId, 'build')).toEqual({
+        providerId: 'current-provider',
+        modelId: 'current-model',
+      });
+      expect(useSelectionStore.getState().getAgentModelVariantForSession(sessionId, 'build', 'current-provider', 'current-model')).toBe(undefined);
+      expect(useContextStore.getState().getSessionAgentSelection(sessionId)).toBe('build');
+      expect(useContextStore.getState().getSessionModelSelection(sessionId)).toEqual({
+        providerId: 'current-provider',
+        modelId: 'current-model',
+      });
+      expect(useContextStore.getState().getAgentModelVariantForSession(sessionId, 'build', 'current-provider', 'current-model')).toBe(undefined);
+    } finally {
+      useConfigStore.setState(previousConfig, true);
+    }
   });
 
   test('persists validated execution overrides to both stores before returning the worktree session', async () => {

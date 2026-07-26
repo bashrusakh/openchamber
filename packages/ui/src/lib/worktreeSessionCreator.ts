@@ -129,7 +129,9 @@ export const applyDefaultAgentAndModelSelection = (
     contextStore.saveSessionModelSelection(sessionId, selection.providerID, selection.modelID);
     contextStore.saveAgentModelForSession(sessionId, selection.agentName, selection.providerID, selection.modelID);
 
-    configState.setCurrentVariant(selection.variant);
+    if (selection.variant !== undefined) {
+      configState.setCurrentVariant(selection.variant);
+    }
     contextStore.saveAgentModelVariantForSession(
       sessionId,
       selection.agentName,
