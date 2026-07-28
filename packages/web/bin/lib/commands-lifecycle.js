@@ -356,6 +356,7 @@ async function restartCommand(options, serveCommand) {
           quiet: true,
           suppressUiPasswordWarning: true,
           suppressQuietOutput: true,
+          handoff: options.handoff !== false,
         });
         restarted.push({ fromPort: instance.port, toPort: restartedPort, launchMode, ok: true });
         restartSpin?.stop(`Restarted OpenChamber on port ${restartedPort}`);

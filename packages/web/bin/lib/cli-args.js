@@ -114,6 +114,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     timeout: undefined,
     lastAssistant: false,
     withStatus: false,
+    handoff: true,
   };
 
   const removedFlagErrors = [];
@@ -427,6 +428,12 @@ function parseArgs(argv = process.argv.slice(2)) {
       case 'with-status':
         options.withStatus = true;
         break;
+      case 'no-handoff':
+        options.handoff = false;
+        break;
+      case 'handoff':
+        options.handoff = true;
+        break;
       case 'role': {
         const { value, nextIndex } = consumeValue(i, inlineValue);
         i = nextIndex;
@@ -597,6 +604,8 @@ OPTIONS:
   --api-only              Start API routes only, without serving browser UI assets
   --foreground            Run server in foreground (use with systemd/process managers)
   --no-daemon             Alias for --foreground
+  --handoff               Allow guardian handoff restart of managed OpenCode (default)
+  --no-handoff            Skip guardian handoff; always use legacy restart
   -h, --help              Show help
   -v, --version           Show version
 
@@ -609,6 +618,7 @@ ENVIRONMENT:
   OPENCODE_PORT               Port of external OpenCode server to connect to
   OPENCODE_SKIP_START          Skip starting OpenCode, use external server
   OPENCHAMBER_OPENCODE_HOSTNAME  Bind hostname for managed OpenCode server (default: 127.0.0.1)
+  OPENCHAMBER_RESTART_HANDOFF   Set to "disabled" to skip guardian handoff restart (default: enabled)
 
 EXAMPLES:
   openchamber                    # Start in daemon mode on default port 3000 (or free port)

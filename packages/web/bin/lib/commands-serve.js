@@ -157,6 +157,13 @@ async function serveCommand(options) {
       }
       process.env.OPENCHAMBER_HOST = effectiveHost;
       process.env.OPENCHAMBER_RUNTIME = 'web';
+      // Default-true opt-out: when handoff is disabled, the server's
+      // restartOpenCode() must skip the guardian handoff branch and use the
+      // legacy restart path. Only override the env var when explicitly
+      // disabled so unrelated process.env values are preserved.
+      if (options.handoff === false) {
+        process.env.OPENCHAMBER_RESTART_HANDOFF = 'disabled';
+      }
 
       // In --quiet mode, redirect stdout/stderr to the log file so that
       // server runtime output (console.log calls) does not pollute the
@@ -276,6 +283,7 @@ async function serveCommand(options) {
         ...(effectiveUiPassword ? { OPENCHAMBER_UI_PASSWORD: effectiveUiPassword } : {}),
         ...(options.apiOnly === true ? { OPENCHAMBER_API_ONLY: 'true' } : {}),
         ...(process.env.OPENCODE_SKIP_START ? { OPENCHAMBER_SKIP_OPENCODE_START: process.env.OPENCODE_SKIP_START } : {}),
+        ...(options.handoff === false ? { OPENCHAMBER_RESTART_HANDOFF: 'disabled' } : {}),
       },
     });
 
