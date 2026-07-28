@@ -12,6 +12,8 @@ This module provides OpenCode server integration utilities for the web server ru
 - `packages/web/server/lib/opencode/routes.js`: OpenCode/provider settings and auth-related route registration.
 - `packages/web/server/lib/opencode/lifecycle.js`: OpenCode process lifecycle runtime (startup, restart, readiness, health monitoring). After readiness it warms the most recently used directories (`getWarmupDirectories` dep, sequential and best-effort) because OpenCode initializes each directory lazily on first request and that cost would otherwise be paid by the user's first interactive session open.
 - `packages/web/server/lib/opencode/provider-env-aliases.js`: mirrors known provider credential env aliases into the managed OpenCode process environment (for example `GEMINI_API_KEY` → `GOOGLE_GENERATIVE_AI_API_KEY`) so OpenCode connection detection and the upstream AI SDK agree on the same key names. Canonical implementation shared by web lifecycle and the VS Code managed spawn path (`packages/vscode/src/provider-env-aliases.ts` re-exports this module).
+- `packages/web/server/lib/opencode/managed-opencode-handoff-protocol.js`: standalone signed handoff-record protocol; it owns no process lifecycle, persistence, registry, auth-state, or runtime wiring.
+- `packages/web/server/lib/opencode/managed-opencode-handoff-v2/`: isolated Phase-2A Linux/POSIX v2 foundation for a private master secret, SQLite record fencing, and reservation/lease state. It is not wired to lifecycle, registry, routes, CLI, Electron, VS Code, UI, or session resume.
 - `packages/web/server/lib/opencode/env-runtime.js`: OpenCode CLI/binary resolution and shell environment runtime.
 - `packages/web/server/lib/opencode/env-config.js`: OpenCode-related environment variable parsing and validation (host/port/hostname).
 - `packages/web/server/lib/opencode/hmr-state-runtime.js`: HMR-persistent runtime state initialization, auth-state bootstrap, and HMR sync helpers.
@@ -149,6 +151,77 @@ macOS `say` voice enumeration starts concurrently with server composition. The s
 Transport-triggered health checks share the periodic monitor's failure accounting interval. Rapid WS reconnect callbacks therefore cannot exhaust the managed-process restart threshold using one cached unhealthy result; an exited managed process still restarts immediately.
 
 Managed health failures are classified as `timeout`, `connection_refused`, `connection_reset`, `invalid_response`, or `error`. The lifecycle retains the latest counted failure with a bounded detail string and source. Managed process wrappers continue capturing a sanitized, bounded stderr tail after readiness and retain exit code/signal. Before replacing a managed process, lifecycle snapshots the reason, latest health failure, process diagnostics/aliveness, busy-session count, and timestamp into `lastOpenCodeRestartDiagnostics`; successful startup does not clear this snapshot, and `/health` exposes it for post-restart diagnosis without process environment or credentials.
+
+## Public exports (managed-opencode-handoff-protocol.js)
+- `createManagedOpenCodeHandoffProtocol(dependencies)`: creates the isolated phase-1 handoff protocol.
+- `ManagedOpenCodeHandoffState`: state names: `launch-prepared`, `active`, `handoff-prepared`, `claimed`, `stopping`, and terminal `retired`.
+- `MANAGED_OPENCODE_HANDOFF_ALLOWED_TRANSITIONS`: the only permitted state edges. `handoff-prepared -> claimed` is available only through `claim()`.
+- `canonicalizeManagedOpenCodeHandoffRecord(record)`: fixed-order authority-field encoding used by the record MAC.
+
+### Managed OpenCode handoff protocol scope and invariants
+- Records are strict version-1 schemas. Unknown fields, malformed values, MAC failures, mismatched record keys, and expired records fail closed; none are interpreted as an absent or reusable child record. A valid terminal record remains readable/verifiable until expiry, but has no legal outgoing transition.
+- The injected binary master secret must come from a dedicated stable master-secret provider, independent of managed OpenCode auth-state/password persistence, and be at least 32 bytes. The module neither generates, persists, logs, returns, nor otherwise exposes that secret or a raw derived child credential.
+- Each `prepareLaunch()` call creates a random child incarnation, derives a child credential and a separate record-MAC key with HKDF-SHA-256 domain separation, records only the credential fingerprint, and authenticates every authority-bearing field with a timing-safe verified MAC over fixed-order bytes.
+- `claim()` requires both injected process and authenticated-health verifiers to attest to the same signed PID, port, incarnation, and fingerprint before it attempts a compare-and-swap. Verifiers receive only that identity object, never master, child, or claim secrets.
+- A claimant supplies a high-entropy raw `claimCapability` to `claim()` and retains it locally. The signed record persists only a separately keyed capability digest; public records and `readRecord()` expose neither the raw capability nor its digest. Claimed-state mutations require the correct claimant, raw capability, current revision, and exact child identity.
+- Storage is injected as `store.read({ incarnation })` and an actually cross-process atomic `store.compareAndSwap({ incarnation, expected, next, requireUnexpired })`. At write time the CAS implementation must atomically compare the expected revision/MAC/expiry and evaluate `requireUnexpired.expiresAt` against its authoritative clock. It must return exactly `{ status: 'applied' }`, `{ status: 'conflict' }`, or `{ status: 'expired' }`; any other result fails closed. The store/CAS provider is the fencing and expiry trust boundary—this module intentionally does not treat an in-memory `Map` or promise queue as cross-process atomicity.
+- This phase intentionally does **not** wire lifecycle/Electron/VS Code behavior, alter `managed-process-registry.js`, persist or generate auth state, change shutdown/UI behavior, add an admission journal, or implement V2 resume.
+
+## Public exports (managed-opencode-handoff-v2/)
+- `createManagedOpenCodeHandoffV2SecretProvider({ rootDir?, platform? })`: owns a v2-only 32-byte local master secret in closure. It exposes record-MAC derivation, a public credential fingerprint, and opaque one-shot lifecycle credential callbacks; it never accepts JWTs, user passwords, OpenCode server passwords, HMR state, CLI arguments, or environment overrides as secret input.
+- `createManagedOpenCodeHandoffV2Store({ rootDir?, busyTimeoutMs? })`: opens the separate v2 SQLite database and exposes async `read()`, `compareAndSwap()`, `hasV2Records()`, `cleanup()`, and `close()` operations. The store uses WAL, FULL synchronous mode, a busy timeout, exact schema validation, parent-directory fsync, and `BEGIN IMMEDIATE` fencing with SQLite's transaction-time clock. Its renewal callback form creates a signed next record from that transaction-time clock.
+- `createManagedOpenCodeHandoffV2Protocol({ secretProvider, store, now?, defaultLeaseMs? })`: returns `reserveLaunch()`, fenced `beginLaunch({ incarnation, expectedRevision, withCredential })`, `bindSpawnedProcess()`, bounded `renewLease()`, read/verify helpers, and explicit interruption/stopping/retirement transitions.
+- `ManagedOpenCodeHandoffV2State` and `MANAGED_OPENCODE_HANDOFF_V2_ALLOWED_TRANSITIONS`: v2 state names and the full future graph: `reserved -> launch-delivering -> launching -> active -> handoff-prepared -> claimed -> active`, with explicit `interrupted`, `stopping`, and `retired` rules.
+
+### Managed OpenCode handoff v2 Phase-2A scope and invariants
+- The v2 root defaults to `~/.local/state/openchamber/managed-opencode-handoff-v2/`, is private (`0700`), and contains regular owner-only (`0600`) `master-secret.bin`, durable `master-secret.initialized` evidence, and `records.sqlite3`. Evidence is atomically published before first secret creation, so concurrent initializers converge. A missing/corrupt secret after evidence **or a secret without evidence** fails closed and is never repaired by backfilling evidence. Deleting the root (or both the evidence and secret) destroys that evidence and is the unavoidable fresh-initialization boundary.
+- The raw master remains in the provider closure. Derived record-MAC keys and one-shot lifecycle credentials are zeroed after use. `beginLaunch()` arms opaque material before it atomically moves `reserved -> launch-delivering`; only the owner may complete that short-lived fenced state to `launching`. Public terminal transitions are rejected while delivery is fenced, and pre-callback authority checks revoke material on expiry, callback failure, or a lost fence. Raw credentials never appear in public records, SQLite rows, diagnostics, or logs.
+- SQLite records hold only version/state, random incarnation, credential fingerprint, optional post-spawn process identity, lease/revision, and MAC fields. The store requires its exact strict table, primary-key/index layout, checks, metadata, and absence of triggers/views; user objects whose names merely resemble SQLite internals are still rejected. Malformed, corrupt, or under-constrained schema blocks use rather than becoming an absent/free record. POSIX parent-directory fsync failure is fatal. Cleanup removes only expired records, so valid terminal records remain authoritative until expiry. The database is separate from `managed-process-registry.js`, so legacy web/VS Code reapers cannot parse or reap v2 state.
+- Phase 2A implements reservation, fenced material delivery, `reserved -> launch-delivering -> launching -> active` identity binding, bounded active lease renewal from SQLite transaction time, interruption, stopping, and retirement. `handoff-prepared` and `claimed` exist only in the transition model; no handoff, adoption, guardian, process spawn, signals, lifecycle/startup/shutdown/CLI/route wiring, or session resume behavior is implemented.
+
+## Phase 2B/3 — Guardian Process Lifecycle Integration
+
+### Architecture
+- A Linux/POSIX-only standalone **guardian process** (`openchamber-guardian.js`) outlives the web server and manages OpenCode child processes via the Phase 2A v2 durable protocol.
+- The guardian communicates via a Unix domain socket at `~/.local/state/openchamber/managed-opencode-handoff-v2/guardian.sock` using a JSON line protocol.
+- Web server integration is **best-effort** and falls back to legacy lifecycle behavior whenever the guardian is unavailable.
+
+### Detection module (`guardian/detection.js`)
+- `isGuardianRunning(socketPath)`: Probes the Unix socket with a 100ms connect timeout.
+- `detectAndAdoptGuardianChild(socketPath)`: Connects via `GuardianClient`, queries active children, and returns the first active child as `{ incarnation, pid, port, url }` or `null`.
+- `getGuardianSocketPath(rootDir?)`: Returns the default guardian socket path.
+
+### Lifecycle integration (`lifecycle.js`)
+
+**`bootstrapOpenCodeAtStartup()`**
+- After orphan reaping and HMR state check, attempts to detect a guardian-managed child on non-Windows platforms.
+- If a guardian child is found:
+  - Sets `state.openCodeProcess = { pid }` (proxy object)
+  - Sets `state.openCodePort`, `state.isOpenCodeReady = true`, `state.currentIncarnation`
+  - Skips spawning a new child process
+- If no guardian child is found, falls through to existing legacy startup.
+
+**`restartOpenCode()`**
+- Before stopping the existing child, checks if the guardian is running (non-Windows).
+- If guardian is running:
+  1. Connects via `GuardianClient`
+  2. Prepares handoff for current incarnation via `client.prepareHandoff()`
+  3. Spawns successor via `client.spawn()`
+  4. Waits for successor health via `waitForReady()`
+  5. Stops old child via `client.stop()`
+  6. Updates `state.openCodeProcess`, `state.openCodePort`, `state.currentIncarnation`
+- If any guardian step fails, logs a warning and falls back to legacy stop-then-start restart.
+
+### CLI changes
+- `packages/web/bin/lib/cli-args.js`: Added `--handoff` flag parsing.
+- `packages/web/bin/lib/commands-lifecycle.js`: `restart` command passes `handoff: options.handoff === true` to `runServe()` so the server knows to prefer guardian handoff.
+
+### State tracking
+- `state.currentIncarnation` is tracked in the lifecycle state object when a guardian-managed child is adopted or spawned through handoff. This is optional and additive — existing fields are unchanged.
+
+### Platform constraints
+- Guardian detection and handoff are skipped entirely on Windows (`process.platform === 'win32'`).
+- Guardian is Linux/POSIX only by design.
 
 ## Public exports (env-runtime.js)
 - `createOpenCodeEnvRuntime(dependencies)`: creates runtime that owns OpenCode CLI environment and binary discovery state.
