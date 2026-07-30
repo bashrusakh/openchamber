@@ -197,8 +197,5 @@
   "patchedDependencies": {
     "@tanstack/virtual-core@3.17.3": "bun-patches/@tanstack+virtual-core+3.17.3.patch",
     "bun-pty@0.4.8": "bun-patches/bun-pty@0.4.8.patch"
-  },
-  "trustedDependencies": [
-    "node-pty"
-  ]
+  }
 }
