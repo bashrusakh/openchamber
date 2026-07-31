@@ -4,6 +4,8 @@ import {
   applyGlobalSessionStatusEvent,
   applyGlobalSessionStatusEvents,
   applyGlobalSessionStatusSnapshot,
+  areGlobalSessionStatusEventsEnabled,
+  resetGlobalSessionStatus,
   useGlobalSessionStatusStore,
   replaceGlobalSessionStatusById,
 } from "./global-session-status"
@@ -11,7 +13,7 @@ import { resetSessionOrdering, useSessionOrderingStore } from "./session-orderin
 import { resetSessionActivityTiming, useSessionActivityTimingStore } from "./session-activity-timing"
 
 beforeEach(() => {
-  replaceGlobalSessionStatusById(new Map())
+  resetGlobalSessionStatus()
   resetSessionOrdering()
   resetSessionActivityTiming()
 })
@@ -214,5 +216,19 @@ describe("global session status index", () => {
     expect(useGlobalSessionStatusStore.getState().statusById.has("session-a")).toBe(false)
     expect(useSessionOrderingStore.getState().rankById.has("session-a")).toBe(false)
     expect(useSessionActivityTimingStore.getState().startedAt.has("session-a")).toBe(false)
+  })
+
+  test("blocks old status events across a runtime boundary until a new snapshot arrives", () => {
+    resetGlobalSessionStatus({ blockEventUpdates: true })
+    expect(areGlobalSessionStatusEventsEnabled()).toBe(false)
+
+    applyGlobalSessionStatusEvent("/repo", {
+      type: "session.status",
+      properties: { sessionID: "session-a", status: { type: "busy" } },
+    } as Event)
+    expect(useGlobalSessionStatusStore.getState().statusById.has("session-a")).toBe(false)
+
+    applyGlobalSessionStatusSnapshot("/repo", {}, ["session-a"])
+    expect(areGlobalSessionStatusEventsEnabled()).toBe(true)
   })
 })
