@@ -25,7 +25,7 @@ vi.mock('../guardian/guardian-client.js', () => ({
       spawn: vi.fn(),
       stop: vi.fn(),
       prepareHandoff: vi.fn(),
-      list: vi.fn(),
+      list: vi.fn().mockResolvedValue([]),
       disconnect: vi.fn(),
     };
   }),
@@ -170,10 +170,11 @@ describe('Guardian integration', () => {
       return {
         socketPath,
         connect: vi.fn(),
+        health: vi.fn(async () => ({ healthy: true })),
         spawn: vi.fn(),
         stop: vi.fn(),
         prepareHandoff: vi.fn(),
-        list: vi.fn(),
+        list: vi.fn().mockResolvedValue([]),
         disconnect: vi.fn(),
       };
     });
@@ -193,28 +194,37 @@ describe('Guardian integration', () => {
         json: async () => ({ healthy: true }),
       });
 
-      const { runtime, state, deps } = createRuntime();
+      const restoreManagedOpenCodeCredential = vi.fn();
+      const { runtime, state, deps } = createRuntime({ restoreManagedOpenCodeCredential });
 
-      detectAndAdoptGuardianChild.mockResolvedValue({
-        incarnation: 'test-incarnation-123',
-        pid: 12345,
-        port: 4096,
-        url: 'http://127.0.0.1:4096',
-        owner: {
-          ownerInstanceId: 'owner-test-instance',
-          runtimeIdentity: 'runtime-test-instance',
-          launchFingerprint: 'adopted-fingerprint',
-        },
+      detectAndAdoptGuardianChild.mockImplementation(async (_socketPath, _portPath, options) => {
+        await options.restoreCredential({ username: 'opencode', password: 'adopted-password' });
+        return {
+          incarnation: 'test-incarnation-123',
+          pid: 12345,
+          port: 4096,
+          url: 'http://127.0.0.1:4096',
+          owner: {
+            ownerInstanceId: 'owner-test-instance',
+            runtimeIdentity: 'runtime-test-instance',
+            launchFingerprint: 'adopted-fingerprint',
+          },
+        };
       });
 
       await runtime.bootstrapOpenCodeAtStartup();
 
       expect(detectAndAdoptGuardianChild).toHaveBeenCalled();
-      expect(detectAndAdoptGuardianChild.mock.calls[0][2]).toEqual({
+      expect(detectAndAdoptGuardianChild.mock.calls[0][2]).toEqual(expect.objectContaining({
         expectedOwner: {
           ownerInstanceId: 'owner-test-instance',
           runtimeIdentity: 'runtime-test-instance',
         },
+        restoreCredential: restoreManagedOpenCodeCredential,
+      }));
+      expect(restoreManagedOpenCodeCredential).toHaveBeenCalledWith({
+        username: 'opencode',
+        password: 'adopted-password',
       });
       // M-3: adoption path stores a closeable proxy, not a bare { pid }.
       expect(state.openCodeProcess).toMatchObject({ pid: 12345, isGuardianManaged: true });
@@ -223,9 +233,49 @@ describe('Guardian integration', () => {
       // M-1: adoption path routes the port through setOpenCodePort.
       expect(deps.setOpenCodePort).toHaveBeenCalledWith(4096);
       expect(state.openCodePort).toBe(4096);
+      expect(state.openCodeBaseUrl).toBe('http://127.0.0.1:4096');
       expect(state.isOpenCodeReady).toBe(true);
       expect(state.isExternalOpenCode).toBe(false);
       expect(state.currentIncarnation).toBe('test-incarnation-123');
+    }, 10000);
+
+    it('uses the adopted launch origin when configured host changed, including IPv6', async () => {
+      const launchSpec = {
+        binary: 'opencode',
+        args: [],
+        hostname: '::1',
+        port: 4123,
+        cwd: '/tmp/project',
+      };
+      detectAndAdoptGuardianChild.mockResolvedValue({
+        incarnation: 'ipv6-adopted-incarnation',
+        pid: 12345,
+        port: 4123,
+        url: 'http://[::1]:4123',
+        owner: {
+          ownerInstanceId: 'owner-test-instance',
+          runtimeIdentity: 'runtime-test-instance',
+          launchFingerprint: 'ipv6-adopted-fingerprint',
+        },
+        launchSpec,
+      });
+
+      const { runtime, state } = createRuntime({
+        env: {
+          ENV_CONFIGURED_OPENCODE_PORT: undefined,
+          ENV_CONFIGURED_OPENCODE_HOST: null,
+          ENV_EFFECTIVE_PORT: undefined,
+          ENV_CONFIGURED_OPENCODE_HOSTNAME: '10.0.0.9',
+          ENV_SKIP_OPENCODE_START: false,
+        },
+      });
+      state.openCodeBaseUrl = 'http://10.0.0.9:4096';
+
+      await runtime.bootstrapOpenCodeAtStartup();
+
+      expect(state.openCodeBaseUrl).toBe('http://[::1]:4123');
+      expect(state.openCodePort).toBe(4123);
+      expect(state.isExternalOpenCode).toBe(false);
     }, 10000);
 
     it('falls back to legacy start when guardian not running', async () => {
@@ -305,10 +355,11 @@ describe('Guardian integration', () => {
         return {
           socketPath,
           connect: clientConnect,
+          health: vi.fn().mockResolvedValue({ healthy: true }),
           spawn: clientSpawn,
           stop: clientStop,
           prepareHandoff: vi.fn(),
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: vi.fn(),
         };
       });
@@ -346,8 +397,10 @@ describe('Guardian integration', () => {
       GuardianClient.mockImplementation(function () {
         return {
           connect: clientConnect,
+          health: vi.fn().mockResolvedValue({ healthy: true }),
           spawn: clientSpawn,
           stop: vi.fn(),
+          list: vi.fn().mockResolvedValue([]),
           disconnect: clientDisconnect,
         };
       });
@@ -367,6 +420,135 @@ describe('Guardian integration', () => {
         /Guardian is running but initial OpenCode launch failed; refusing legacy fallback/,
       );
     }, 10000);
+
+    it('fails closed when initial guardian cleanup receives a malformed child list', async () => {
+      const clientConnect = vi.fn().mockResolvedValue(undefined);
+      const clientSpawn = vi.fn().mockResolvedValue({
+        incarnation: 'initial-malformed-cleanup',
+        pid: 12346,
+        port: 45679,
+        url: 'not-a-valid-url',
+        owner: {
+          ownerInstanceId: 'owner-initial',
+          runtimeIdentity: 'runtime-initial',
+          launchFingerprint: 'fingerprint-initial',
+        },
+      });
+      const clientStop = vi.fn().mockResolvedValue(undefined);
+      const clientList = vi.fn().mockResolvedValue({ malformed: true });
+      const clientDisconnect = vi.fn();
+      GuardianClient.mockImplementation(function () {
+        return {
+          connect: clientConnect,
+          health: vi.fn().mockResolvedValue({ healthy: true }),
+          spawn: clientSpawn,
+          stop: clientStop,
+          list: clientList,
+          disconnect: clientDisconnect,
+        };
+      });
+
+      const { spawn } = await import('node:child_process');
+      const { runtime, state } = createRuntime();
+
+      await expect(runtime.bootstrapOpenCodeAtStartup()).rejects.toMatchObject({
+        code: 'GUARDIAN_CLEANUP_UNCERTAIN',
+      });
+      expect(clientStop).toHaveBeenCalledOnce();
+      expect(clientList).toHaveBeenCalledOnce();
+      expect(clientDisconnect).toHaveBeenCalledOnce();
+      expect(spawn).not.toHaveBeenCalled();
+      expect(runtime.__testManagedStartupSecretState()).toEqual({
+        leaseCount: 1,
+        secretCount: expect.any(Number),
+      });
+      expect(state.openCodeProcess).toMatchObject({
+        isGuardianManaged: true,
+        incarnation: 'initial-malformed-cleanup',
+      });
+    }, 10000);
+
+    it('releases initial guardian launch leases after spawn rejection with an authoritative empty list', async () => {
+      const clientConnect = vi.fn().mockResolvedValue(undefined);
+      const clientSpawn = vi.fn().mockRejectedValue(new Error('guardian launch rejected'));
+      const clientList = vi.fn().mockResolvedValue([]);
+      const clientDisconnect = vi.fn();
+      GuardianClient.mockImplementation(function () {
+        return {
+          connect: clientConnect,
+          health: vi.fn().mockResolvedValue({ healthy: true }),
+          spawn: clientSpawn,
+          stop: vi.fn(),
+          list: clientList,
+          disconnect: clientDisconnect,
+        };
+      });
+
+      const { spawn } = await import('node:child_process');
+      const { runtime } = createRuntime({
+        ensureLocalOpenCodeServerPassword: vi.fn(async () => 'initial-guardian-lease-secret'),
+      });
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await runtime.bootstrapOpenCodeAtStartup();
+        expect(runtime.__testManagedStartupSecretState()).toEqual({
+          leaseCount: 0,
+          secretCount: 0,
+        });
+      }
+
+      expect(clientSpawn).toHaveBeenCalledTimes(3);
+      expect(clientList).toHaveBeenCalledTimes(3);
+      expect(clientDisconnect).toHaveBeenCalledTimes(3);
+      expect(spawn).not.toHaveBeenCalled();
+    }, 10000);
+
+    it('retains a guardian startup lease while cleanup is uncertain and releases it after confirmed cleanup', async () => {
+      const incarnation = 'initial-retained-lease';
+      const clientList = vi.fn()
+        .mockResolvedValueOnce([{ incarnation, state: 'active' }])
+        .mockResolvedValueOnce([]);
+      const clientStop = vi.fn().mockResolvedValue(undefined);
+      const client = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        health: vi.fn().mockResolvedValue({ healthy: true }),
+        spawn: vi.fn().mockResolvedValue({
+          incarnation,
+          pid: 12346,
+          port: 45679,
+          owner: {
+            ownerInstanceId: 'owner-initial',
+            runtimeIdentity: 'runtime-initial',
+            launchFingerprint: 'fingerprint-initial',
+          },
+        }),
+        stop: clientStop,
+        list: clientList,
+        disconnect: vi.fn(),
+      };
+      GuardianClient.mockImplementation(function () { return client; });
+
+      const { runtime, state } = createRuntime({
+        ensureLocalOpenCodeServerPassword: vi.fn(async () => 'retained-guardian-lease-secret'),
+      });
+
+      await runtime.bootstrapOpenCodeAtStartup();
+      expect(runtime.__testManagedStartupSecretState().leaseCount).toBe(1);
+      expect(runtime.__testGuardianStartupSecretLeaseCount()).toBe(1);
+
+      await expect(state.openCodeProcess.close()).resolves.toBeUndefined();
+      expect(runtime.__testManagedStartupSecretState().leaseCount).toBe(1);
+      expect(runtime.__testManagedStartupSecretState().secretCount).toBeGreaterThan(0);
+      expect(runtime.__testGuardianStartupSecretLeaseCount()).toBe(1);
+
+      await expect(state.openCodeProcess.close()).resolves.toBeUndefined();
+      expect(runtime.__testManagedStartupSecretState()).toEqual({
+        leaseCount: 0,
+        secretCount: 0,
+      });
+      expect(runtime.__testGuardianStartupSecretLeaseCount()).toBe(0);
+      expect(clientStop).toHaveBeenCalledTimes(2);
+    }, 10000);
   });
 
   describe('restartOpenCode', () => {
@@ -385,10 +567,11 @@ describe('Guardian integration', () => {
       GuardianClient.mockImplementation(function () {
         return {
           connect: clientConnect,
+          health: vi.fn().mockResolvedValue({ healthy: true }),
           spawn: clientSpawn,
           stop: clientStop,
           prepareHandoff: clientPrepareHandoff,
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: clientDisconnect,
         };
       });
@@ -429,6 +612,7 @@ describe('Guardian integration', () => {
       expect(clientDisconnect).not.toHaveBeenCalled();
       // M-1: handoff-spawn routes the successor port through setOpenCodePort.
       expect(deps.setOpenCodePort).toHaveBeenCalledWith(45679);
+      expect(state.openCodeBaseUrl).toBe('http://127.0.0.1:45679');
       expect(deps.resetSessionRuntimeForOpenCodeReplacement).toHaveBeenCalledTimes(1);
       // M-3: the handoff-spawn proxy is a closeable, guardian-managed wrapper.
       expect(state.openCodeProcess).toMatchObject({ pid: 12346, isGuardianManaged: true });
@@ -454,10 +638,11 @@ describe('Guardian integration', () => {
       GuardianClient.mockImplementation(function () {
         return {
           connect: clientConnect,
+          health: vi.fn().mockResolvedValue({ healthy: true }),
           spawn: clientSpawn,
           stop: clientStop,
           prepareHandoff: clientPrepareHandoff,
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: clientDisconnect,
         };
       });
@@ -552,6 +737,10 @@ describe('Guardian integration', () => {
         connect: vi.fn().mockResolvedValue(undefined),
         prepareHandoff: vi.fn(async () => { order.push('prepare'); }),
         stop: vi.fn(async ({ incarnation }) => { order.push(`stop:${incarnation}`); }),
+        health: vi.fn(async () => {
+          order.push('health');
+          return { healthy: true };
+        }),
         spawn: vi.fn(async () => {
           order.push('spawn');
           return {
@@ -576,10 +765,7 @@ describe('Guardian integration', () => {
           order.push('release');
           return true;
         }),
-        waitForReady: vi.fn(async () => {
-          order.push('health');
-          return true;
-        }),
+        waitForReady: vi.fn(async () => true),
       });
       state.openCodeProcess = { pid: 12345, close: vi.fn() };
       state.openCodePort = 45678;
@@ -687,6 +873,39 @@ describe('Guardian integration', () => {
       expect(state.openCodeProcess).not.toBeNull();
     });
 
+    it('clears a retained successor lease from the guardian map after confirmed cleanup', async () => {
+      const client = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        prepareHandoff: vi.fn().mockResolvedValue(undefined),
+        spawn: vi.fn().mockResolvedValue({
+          incarnation: 'successor-invalid-origin',
+          pid: 12346,
+          port: 45679,
+          url: 'not-a-valid-url',
+        }),
+        health: vi.fn().mockResolvedValue({ healthy: true }),
+        stop: vi.fn().mockResolvedValue(undefined),
+        list: vi.fn().mockResolvedValue([]),
+        disconnect: vi.fn(),
+      };
+      GuardianClient.mockImplementation(function () { return client; });
+
+      const { runtime, state } = createRuntime({
+        ensureLocalOpenCodeServerPassword: vi.fn(async () => 'handoff-retained-lease-secret'),
+      });
+      state.openCodeProcess = { pid: 12345, close: vi.fn() };
+      state.openCodePort = 45678;
+      state.currentIncarnation = 'current-invalid-origin';
+      state.isOpenCodeReady = true;
+
+      await expect(runtime.restartOpenCode()).rejects.toThrow(/without a confirmed rollback/);
+      expect(runtime.__testManagedStartupSecretState()).toEqual({
+        leaseCount: 0,
+        secretCount: 0,
+      });
+      expect(runtime.__testGuardianStartupSecretLeaseCount()).toBe(0);
+    });
+
     it('does not call guardian handoff operations without a current incarnation', async () => {
       const client = {
         connect: vi.fn(),
@@ -779,7 +998,7 @@ describe('Guardian integration', () => {
         incarnation: 'dynamic-old-stop-failure',
         owner,
       });
-      expect(clientHealth).toHaveBeenCalledWith({ incarnation: 'dynamic-old-stop-failure' });
+      expect(clientHealth).toHaveBeenCalledWith({ incarnation: 'dynamic-old-stop-failure', owner });
       expect(captureOpenCodeAuthState).toHaveBeenCalledOnce();
       expect(restoreOpenCodeAuthState).toHaveBeenCalledOnce();
       expect(clientStop.oldStopAttempts).toBe(2);
@@ -808,20 +1027,25 @@ describe('Guardian integration', () => {
           prepareHandoff: clientPrepareHandoff,
           spawn: clientSpawn,
           stop: clientStop,
+          health: vi.fn().mockResolvedValue({ healthy: true }),
           list: vi.fn().mockResolvedValue([]),
           disconnect: clientDisconnect,
         };
       });
-      detectAndAdoptGuardianChild.mockResolvedValue({
-        incarnation: 'adopted-after-migration',
-        pid: 12345,
-        port: 45678,
-        url: 'http://127.0.0.1:45678',
-        owner: adoptedOwner,
+      const restoreManagedOpenCodeCredential = vi.fn();
+      detectAndAdoptGuardianChild.mockImplementation(async (_socketPath, _portPath, options) => {
+        await options.restoreCredential({ username: 'opencode', password: 'restart-adopted-password' });
+        return {
+          incarnation: 'adopted-after-migration',
+          pid: 12345,
+          port: 45678,
+          url: 'http://127.0.0.1:45678',
+          owner: adoptedOwner,
+        };
       });
 
       const { spawn } = await import('node:child_process');
-      const { runtime, state } = createRuntime();
+      const { runtime, state } = createRuntime({ restoreManagedOpenCodeCredential });
       state.openCodeProcess = null;
       state.openCodePort = null;
       state.currentIncarnation = null;
@@ -836,6 +1060,11 @@ describe('Guardian integration', () => {
           ownerInstanceId: 'owner-test-instance',
           runtimeIdentity: 'runtime-test-instance',
         },
+        restoreCredential: restoreManagedOpenCodeCredential,
+      });
+      expect(restoreManagedOpenCodeCredential).toHaveBeenCalledWith({
+        username: 'opencode',
+        password: 'restart-adopted-password',
       });
       expect(clientPrepareHandoff).toHaveBeenCalledWith({
         incarnation: 'adopted-after-migration',
@@ -934,7 +1163,7 @@ describe('Guardian integration', () => {
           spawn: vi.fn(),
           stop: vi.fn(),
           prepareHandoff: vi.fn(),
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: vi.fn(),
         };
       });
@@ -965,7 +1194,7 @@ describe('Guardian integration', () => {
           health: vi.fn().mockResolvedValue({ healthy: true }),
           spawn: clientSpawn,
           stop: vi.fn(),
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: clientDisconnect,
         };
       });
@@ -1005,6 +1234,34 @@ describe('Guardian integration', () => {
       expect(spawn).toHaveBeenCalled();
     }, 10000);
 
+    it('fails closed when successor fallback discovery receives a malformed child list', async () => {
+      const clientList = vi.fn().mockResolvedValue({ malformed: true });
+      const client = {
+        connect: vi.fn().mockResolvedValue(undefined),
+        prepareHandoff: vi.fn().mockResolvedValue(undefined),
+        abortHandoff: vi.fn(async ({ incarnation }) => createActiveRollbackRecord(incarnation)),
+        health: vi.fn().mockResolvedValue({ healthy: true }),
+        spawn: vi.fn().mockRejectedValue(new Error('successor failed')),
+        stop: vi.fn(),
+        list: clientList,
+        disconnect: vi.fn(),
+      };
+      GuardianClient.mockImplementation(function () { return client; });
+
+      const { spawn } = await import('node:child_process');
+      const { runtime, state } = createRuntime();
+      state.openCodeProcess = { pid: 12345, close: vi.fn() };
+      state.openCodePort = 45678;
+      state.currentIncarnation = 'current-malformed-successor';
+      state.isOpenCodeReady = true;
+
+      await expect(runtime.restartOpenCode()).rejects.toThrow(/without a confirmed rollback/);
+      expect(clientList).toHaveBeenCalledOnce();
+      expect(client.disconnect).toHaveBeenCalledOnce();
+      expect(spawn).not.toHaveBeenCalled();
+      expect(state.currentIncarnation).toBe('current-malformed-successor');
+    }, 10000);
+
     it('rolls a prepared handoff back before legacy fallback', async () => {
       const owner = {
         ownerInstanceId: 'owner-rollback',
@@ -1021,7 +1278,7 @@ describe('Guardian integration', () => {
           abortHandoff: clientAbortHandoff,
           spawn: clientSpawn,
           stop: vi.fn(),
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: vi.fn(),
         };
       });
@@ -1130,7 +1387,7 @@ describe('Guardian integration', () => {
             spawn: clientSpawn,
             stop: clientStop,
             prepareHandoff: clientPrepareHandoff,
-            list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
             disconnect: clientDisconnect,
           };
         });
@@ -1179,11 +1436,12 @@ describe('Guardian integration', () => {
       const clientStop = vi.fn().mockResolvedValue(undefined);
       GuardianClient.mockImplementation(function () {
         return {
-          connect: vi.fn(),
-          spawn: vi.fn(),
+        connect: vi.fn(),
+        health: vi.fn(async () => ({ healthy: true })),
+        spawn: vi.fn(),
           stop: clientStop,
           prepareHandoff: vi.fn(),
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: vi.fn(),
         };
       });
@@ -1239,9 +1497,10 @@ describe('Guardian integration', () => {
         return {
           connect: clientConnect,
           spawn: clientSpawn,
+          health: vi.fn().mockResolvedValue({ healthy: true }),
           stop: clientStop,
           prepareHandoff: clientPrepareHandoff,
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: clientDisconnect,
         };
       });
@@ -1298,9 +1557,10 @@ describe('Guardian integration', () => {
         return {
           connect: vi.fn(),
           spawn: vi.fn(),
+          health: vi.fn().mockResolvedValue({ healthy: true }),
           stop: clientStop,
           prepareHandoff: vi.fn(),
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: vi.fn(),
         };
       });
@@ -1361,6 +1621,11 @@ describe('Guardian integration', () => {
         pid: 88001,
         port: 14096,
         url: 'http://127.0.0.1:14096',
+        owner: {
+          ownerInstanceId: 'owner-test-instance',
+          runtimeIdentity: 'runtime-test-instance',
+          launchFingerprint: 'win-adopted-fingerprint',
+        },
       });
 
       const { runtime, state, deps } = createRuntime();
@@ -1398,9 +1663,10 @@ describe('Guardian integration', () => {
         return {
           connect: clientConnect,
           spawn: clientSpawn,
+          health: vi.fn().mockResolvedValue({ healthy: true }),
           stop: clientStop,
           prepareHandoff: clientPrepareHandoff,
-          list: vi.fn(),
+           list: vi.fn().mockResolvedValue([]),
           disconnect: clientDisconnect,
         };
       });
@@ -1461,7 +1727,7 @@ describe('Guardian integration', () => {
           spawn: clientSpawn,
           stop: vi.fn().mockResolvedValue(undefined),
           prepareHandoff: vi.fn().mockResolvedValue(undefined),
-          list: vi.fn(),
+          list: vi.fn().mockResolvedValue([]),
           disconnect: vi.fn(),
         };
       });
