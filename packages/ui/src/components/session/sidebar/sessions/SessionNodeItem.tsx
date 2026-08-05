@@ -22,7 +22,7 @@ import { isSessionPinned, useSessionPinnedStore } from '@/stores/useSessionPinne
 import { Icon } from "@/components/icon/Icon";
 import { buildExportFilename, downloadAsMarkdown, formatSessionAsMarkdown, getExportRevealLabelKey, revealExportedMarkdown, saveAsMarkdownDesktop } from '@/lib/exportSession';
 import type { ChildSessionExport } from '@/lib/exportSession';
-import { useGlobalSessionStatus, useSessionPermissions, useSessionQuestionCount } from '@/sync/sync-context';
+import { useSessionDisplayStatus, useSessionPermissions, useSessionQuestionCount } from '@/sync/sync-context';
 import { usePrefetchSessionMessages, useSessionMessageRecordsForExport } from '@/sync/use-sync';
 import { getSyncSessionMaterializationStatus } from '@/sync/sync-refs';
 import { useViewportStore, viewportSessionKey } from '@/sync/viewport-store';
@@ -450,8 +450,11 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   const isZombie = useViewportStore(
     React.useCallback((state) => Boolean(state.sessionMemoryState.get(viewportSessionKey(session.id))?.isZombie), [session.id]),
   );
-  const sessionStatus = useGlobalSessionStatus(session.id);
-  const statusType = sessionStatus?.type ?? 'idle';
+  const sessionDisplayStatus = useSessionDisplayStatus(session.id);
+  const statusType = sessionDisplayStatus.type;
+  // `reconnecting` (statusUnavailable + preserved busy/retry) is NOT confirmed
+  // active: no spinner. The last-known busy/retry data stays in rawStatus for
+  // when freshness returns, but is not presented as a running turn.
   const isStreaming = statusType === 'busy' || statusType === 'retry';
   // Read as a boolean, not as the value: the row must not re-render on every
   // tick of the counter it only decides to mount.
