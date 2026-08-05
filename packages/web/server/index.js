@@ -562,6 +562,11 @@ const initialOpenCodeAuthState = hmrStateRuntime.resolveOpenCodeAuthFromState({
 });
 let openCodeAuthPassword = initialOpenCodeAuthState.openCodeAuthPassword;
 let openCodeAuthSource = initialOpenCodeAuthState.openCodeAuthSource;
+let guardianOutcomeUnknownFence = hmrState.guardianOutcomeUnknownFence ?? null;
+let guardianOutcomeUnknownFences = Array.isArray(hmrState.guardianOutcomeUnknownFences)
+  ? hmrState.guardianOutcomeUnknownFences
+  : (guardianOutcomeUnknownFence ? [guardianOutcomeUnknownFence] : []);
+let guardianOutcomeUnknownLease = hmrState.guardianOutcomeUnknownLease ?? null;
 
 // Sync helper - call after modifying any HMR state variable
 const syncToHmrState = () => {
@@ -574,6 +579,9 @@ const syncToHmrState = () => {
     openCodeWorkingDirectory,
     openCodeAuthPassword,
     openCodeAuthSource,
+    guardianOutcomeUnknownFence,
+    guardianOutcomeUnknownFences,
+    guardianOutcomeUnknownLease,
   });
 };
 
@@ -591,6 +599,9 @@ const syncFromHmrState = () => {
   openCodeWorkingDirectory = restored.openCodeWorkingDirectory;
   openCodeAuthPassword = restored.openCodeAuthPassword;
   openCodeAuthSource = restored.openCodeAuthSource;
+  guardianOutcomeUnknownFence = restored.guardianOutcomeUnknownFence;
+  guardianOutcomeUnknownFences = restored.guardianOutcomeUnknownFences;
+  guardianOutcomeUnknownLease = restored.guardianOutcomeUnknownLease;
 };
 
 // Module-level variables that shadow HMR state
@@ -1103,6 +1114,18 @@ Object.defineProperties(openCodeLifecycleState, {
   currentRestartPromise: { get: () => currentRestartPromise, set: (value) => { currentRestartPromise = value; } },
   currentIncarnation: { get: () => currentIncarnation, set: (value) => { currentIncarnation = value; } },
   currentOwner: { get: () => currentOwner, set: (value) => { currentOwner = value; } },
+  guardianOutcomeUnknownFence: {
+    get: () => guardianOutcomeUnknownFence,
+    set: (value) => { guardianOutcomeUnknownFence = value; },
+  },
+  guardianOutcomeUnknownFences: {
+    get: () => guardianOutcomeUnknownFences,
+    set: (value) => { guardianOutcomeUnknownFences = Array.isArray(value) ? value : []; },
+  },
+  guardianOutcomeUnknownLease: {
+    get: () => guardianOutcomeUnknownLease,
+    set: (value) => { guardianOutcomeUnknownLease = value; },
+  },
   isRestartingOpenCode: { get: () => isRestartingOpenCode, set: (value) => { isRestartingOpenCode = value; } },
   openCodeApiPrefix: { get: () => openCodeApiPrefix, set: (value) => { openCodeApiPrefix = value; } },
   openCodeApiPrefixDetected: { get: () => openCodeApiPrefixDetected, set: (value) => { openCodeApiPrefixDetected = value; } },
