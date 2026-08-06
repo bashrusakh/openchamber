@@ -22,7 +22,7 @@ import { isSessionPinned, useSessionPinnedStore } from '@/stores/useSessionPinne
 import { Icon } from "@/components/icon/Icon";
 import { buildExportFilename, downloadAsMarkdown, formatSessionAsMarkdown, getExportRevealLabelKey, revealExportedMarkdown, saveAsMarkdownDesktop } from '@/lib/exportSession';
 import type { ChildSessionExport } from '@/lib/exportSession';
-import { useSessionDisplayStatus, useSessionPermissions, useSessionQuestionCount } from '@/sync/sync-context';
+import { useSessionDisplayStatus, useSessionKnownInactive, useSessionPermissions, useSessionQuestionCount } from '@/sync/sync-context';
 import { usePrefetchSessionMessages, useSessionMessageRecordsForExport } from '@/sync/use-sync';
 import { getSyncSessionMaterializationStatus } from '@/sync/sync-refs';
 import { useViewportStore, viewportSessionKey } from '@/sync/viewport-store';
@@ -466,6 +466,10 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   const [worktreeTargetsLoadFailed, setWorktreeTargetsLoadFailed] = React.useState(false);
   const worktreeSubmenuOpenRef = React.useRef(false);
   const worktreeLoadSequenceRef = React.useRef(0);
+  // Control predicate: move-to-worktree requires the session to be KNOWN
+  // inactive. `reconnecting` (unavailable + preserved busy/retry) means
+  // "current truth = unknown", NOT inactive — the operation must fail closed.
+  const isSessionKnownInactive = useSessionKnownInactive(session.id);
   const sessionPermissions = useSessionPermissions(session.id, sessionDirectory ?? undefined, { bootstrap: false });
   const sessionGoal = getSessionGoal(resolvedSession);
   const sessionGoalGlyph = sessionGoal ? (
@@ -1031,7 +1035,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
       {canShowSessionWorktreeMenu({ isSubtaskSession, archivedBucket: Boolean(archivedBucket), isVSCode, sessionDirectory }) ? (() => {
         const isWorktreeMenuDisabled = getSessionWorktreeMenuDisabled({
           sessionDirectory,
-          isStreaming,
+          isStreaming: isStreaming || !isSessionKnownInactive,
           isMovingToWorktree,
         });
         const worktreeMenuState = getSessionWorktreeMenuState({
@@ -1055,7 +1059,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
               <TooltipContent side="right" className="max-w-72">
                 {isMovingToWorktree
                   ? t('sessions.sidebar.session.moveToWorktree.tooltipMoving')
-                  : isStreaming
+                  : isStreaming || !isSessionKnownInactive
                     ? t('sessions.sidebar.session.moveToWorktree.tooltipBusy')
                     : t('sessions.sidebar.session.moveToWorktree.tooltipTargets')}
               </TooltipContent>
