@@ -469,7 +469,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   // Control predicate: move-to-worktree requires the session to be KNOWN
   // inactive. `reconnecting` (unavailable + preserved busy/retry) means
   // "current truth = unknown", NOT inactive — the operation must fail closed.
-  const isSessionKnownInactive = useSessionKnownInactive(session.id);
+   const isSessionKnownInactive = useSessionKnownInactive(session.id, sessionDirectory ?? '');
   const sessionPermissions = useSessionPermissions(session.id, sessionDirectory ?? undefined, { bootstrap: false });
   const sessionGoal = getSessionGoal(resolvedSession);
   const sessionGoalGlyph = sessionGoal ? (
