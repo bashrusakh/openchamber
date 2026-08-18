@@ -6,6 +6,8 @@ export const settingsDict = {
   'settings.providers.page.openCodeGo.authCookie': '인증 쿠키',
   'settings.providers.page.openCodeGo.apiKey': 'API 키',
   'settings.providers.page.openCodeGo.help': '대시보드 URL에서 워크스페이스 ID를, 브라우저 개발자 도구에서 auth 쿠키를 복사하세요. OpenChamber는 브라우저 쿠키 저장소를 검색하지 않습니다.',
+  'settings.providers.page.ollamaCloud.help': 'Paste the session cookie from ollama.com (look for session=... in your browser developer tools). This is not your local Ollama API key or endpoint. OpenChamber never scans browser cookie storage.',
+  'settings.providers.page.ollamaCloud.cookie': 'Session cookie',
   'settings.providers.page.openCodeGo.save': '저장 및 검증',
   'settings.providers.page.openCodeGo.replace': '교체',
   'settings.providers.page.openCodeGo.validate': '검증',

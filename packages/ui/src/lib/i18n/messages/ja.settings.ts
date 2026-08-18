@@ -6,6 +6,8 @@ export const settingsDict = {
   'settings.providers.page.openCodeGo.authCookie': '認証 Cookie',
   'settings.providers.page.openCodeGo.apiKey': 'API キー',
   'settings.providers.page.openCodeGo.help': 'ダッシュボード URL からワークスペース ID を、ブラウザーの開発者ツールから auth Cookie をコピーしてください。OpenChamber がブラウザーの Cookie を走査することはありません。',
+  'settings.providers.page.ollamaCloud.help': 'Paste the session cookie from ollama.com (look for session=... in your browser developer tools). This is not your local Ollama API key or endpoint. OpenChamber never scans browser cookie storage.',
+  'settings.providers.page.ollamaCloud.cookie': 'Session cookie',
   'settings.providers.page.openCodeGo.save': '保存して検証',
   'settings.providers.page.openCodeGo.replace': '置換',
   'settings.providers.page.openCodeGo.validate': '検証',
