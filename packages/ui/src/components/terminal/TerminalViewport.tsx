@@ -322,8 +322,9 @@ const TerminalViewport = React.forwardRef<TerminalController, Props>(({
         if (id < previous) break;
       }
       if (previousIndex < 0) {
+        // A replacement buffer, including an authoritative snapshot, drops old
+        // chunk ids. Reset the existing VT, then replay it immediately.
         recreateRenderer();
-        return;
       }
     }
     const isReplay = previousIndex < 0;
@@ -535,6 +536,9 @@ const TerminalViewport = React.forwardRef<TerminalController, Props>(({
   return (
     <div
       ref={containerRef}
+      autoCapitalize="off"
+      autoCorrect="off"
+      spellCheck={false}
       data-terminal-owner="main"
       className={cn('terminal-viewport-container h-full w-full overflow-hidden touch-none', className)}
     />
