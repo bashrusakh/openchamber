@@ -459,6 +459,51 @@ describe('openNewSessionDraft project binding', () => {
     expect(draft.directoryOverride).toBeNull();
   });
 
+  test('keeps an unresolved live directory from rewriting a Chat draft after async recovery', async () => {
+    const originalClientDirectory = opencodeClient.getDirectory();
+    const originalDirectory = useDirectoryStore.getState().currentDirectory;
+    const originalActivateDirectory = useConfigStore.getState().activateDirectory;
+    const activatedDirectories = [];
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_STORAGE_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: projectA.path }),
+    );
+    useDirectoryStore.getState().setDirectory('/external/worktree', { showOverlay: false });
+    opencodeClient.setDirectory('/external/worktree');
+    useConfigStore.setState({
+      activateDirectory: async (directory) => {
+        activatedDirectories.push(directory ?? null);
+      },
+    });
+
+    try {
+      useSessionUIStore.getState().openNewSessionDraft();
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'chat',
+        selectedProjectId: null,
+        directoryOverride: null,
+      });
+
+      activatedDirectories.length = 0;
+      await Bun.sleep(0);
+
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'chat',
+        selectedProjectId: null,
+        directoryOverride: null,
+      });
+      expect(JSON.parse(getDeferredSafeStorage().getItem(DRAFT_TARGET_STORAGE_KEY))).toEqual({
+        projectId: projectA.id,
+        directory: projectA.path,
+      });
+      expect(activatedDirectories).toEqual([]);
+    } finally {
+      useConfigStore.setState({ activateDirectory: originalActivateDirectory });
+      useDirectoryStore.getState().setDirectory(originalDirectory, { showOverlay: false });
+      opencodeClient.setDirectory(originalClientDirectory);
+    }
+  });
+
   test('prefers the live current directory over a persisted project for an implicit draft', () => {
     getDeferredSafeStorage().setItem(
       DRAFT_TARGET_STORAGE_KEY,
