@@ -1089,6 +1089,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       ? projects.find((p) => p.id === persistedTarget.projectId) ?? null
       : null
     const persistedProjectByDir = resolveDraftProjectForDirectory(projects, availableWorktreesByProject, persistedTarget?.directory ?? null)
+    const currentDirProject = resolveDraftProjectForDirectory(projects, availableWorktreesByProject, currentDirectory)
     // Only a user-initiated, unqualified New Session action may restore its
     // saved project. Explicit targets and the live directory take precedence
     // when choosing the project and directory below.
@@ -1096,6 +1097,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       && options?.target === undefined
       && options?.directoryOverride === undefined
       && options?.selectedProjectId === undefined
+      && (!currentDirectory || currentDirProject !== null)
       && Boolean(persistedProjectById || persistedProjectByDir)
 
     const explicitDirectory = options?.directoryOverride !== undefined
@@ -1120,8 +1122,6 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       if (projectsState.activeProjectId) return projects.find((p) => p.id === projectsState.activeProjectId) ?? null
       return projects[0] ?? null
     })()
-
-    const currentDirProject = resolveDraftProjectForDirectory(projects, availableWorktreesByProject, currentDirectory)
 
     const selectedProject = target === "chat" ? null : (() => {
       if (explicitProject) return explicitProject

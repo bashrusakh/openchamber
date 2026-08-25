@@ -444,6 +444,21 @@ describe('openNewSessionDraft project binding', () => {
     expect(draft.directoryOverride).toBeNull();
   });
 
+  test('keeps an unmatched current directory out of a persisted project draft', () => {
+    getDeferredSafeStorage().setItem(
+      DRAFT_TARGET_STORAGE_KEY,
+      JSON.stringify({ projectId: projectA.id, directory: projectA.path }),
+    );
+    useDirectoryStore.getState().setDirectory('/external/worktree', { showOverlay: false });
+
+    useSessionUIStore.getState().openNewSessionDraft();
+    const draft = useSessionUIStore.getState().newSessionDraft;
+
+    expect(draft.target).toBe('chat');
+    expect(draft.selectedProjectId).toBeNull();
+    expect(draft.directoryOverride).toBeNull();
+  });
+
   test('prefers the live current directory over a persisted project for an implicit draft', () => {
     getDeferredSafeStorage().setItem(
       DRAFT_TARGET_STORAGE_KEY,
