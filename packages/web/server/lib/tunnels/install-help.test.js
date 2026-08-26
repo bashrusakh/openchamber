@@ -12,6 +12,7 @@ describe('getTunnelDependencyInstallInfo', () => {
 
     expect(info.dependency).toBe('cloudflared');
     expect(info.installCommand).toBe('winget install --id Cloudflare.cloudflared');
+    expect(info.installUrl).toBe('https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/');
     expect(info.message).toContain('Cloudflare.cloudflared');
   });
 
@@ -27,5 +28,11 @@ describe('getTunnelDependencyInstallInfo', () => {
     const info = getTunnelDependencyInstallInfo(TUNNEL_PROVIDER_CLOUDFLARE, 'darwin');
 
     expect(info.installCommand).toBe('brew install cloudflared');
+  });
+
+  it('returns Cloudflare download guidance on Linux', () => {
+    const info = getTunnelDependencyInstallInfo(TUNNEL_PROVIDER_CLOUDFLARE, 'linux');
+
+    expect(info.installCommand).toBe('Download cloudflared from https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/');
   });
 });
