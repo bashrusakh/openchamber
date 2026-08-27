@@ -13,6 +13,7 @@ This module provides OpenCode server integration utilities for the web server ru
 - `packages/web/server/lib/opencode/lifecycle.js`: OpenCode process lifecycle runtime (startup, restart, readiness, health monitoring). After readiness it warms the most recently used directories (`getWarmupDirectories` dep, sequential and best-effort) because OpenCode initializes each directory lazily on first request and that cost would otherwise be paid by the user's first interactive session open.
 - `packages/web/server/lib/opencode/provider-env-aliases.js`: mirrors known provider credential env aliases into the managed OpenCode process environment (for example `GEMINI_API_KEY` → `GOOGLE_GENERATIVE_AI_API_KEY`) so OpenCode connection detection and the upstream AI SDK agree on the same key names. Canonical implementation shared by web lifecycle and the VS Code managed spawn path (`packages/vscode/src/provider-env-aliases.ts` re-exports this module).
 - `packages/web/server/lib/opencode/env-runtime.js`: OpenCode CLI/binary resolution and shell environment runtime.
+- `packages/web/server/lib/opencode/login-shell-env.js`: bounded login-shell and Windows environment capture/parsing shared by the web runtime and Electron startup.
 - `packages/web/server/lib/opencode/env-config.js`: OpenCode-related environment variable parsing and validation (host/port/hostname).
 - `packages/web/server/lib/opencode/hmr-state-runtime.js`: HMR-persistent runtime state initialization, auth-state bootstrap, and HMR sync helpers.
 - `packages/web/server/lib/opencode/bootstrap-runtime.js`: base app bootstrap runtime for status/auth/tts/notification/OpenChamber route wiring.
@@ -166,6 +167,13 @@ Managed health failures are classified as `timeout`, `connection_refused`, `conn
   - `isExecutable(filePath)`
   - `searchPathFor(binaryName, searchPath?)`: resolves an executable from the supplied PATH value, defaulting to the process PATH.
   - `clearResolvedOpenCodeBinary()`
+
+## Shared login-shell environment capture
+- `captureLoginShellEnvSnapshot(shellPath, runSpawnSync)`: captures a framed `env -0` result through a noninteractive login shell with a 5-second timeout and a 2 MiB raw capture limit. The framed payload still uses the parser's default 64 KiB input limit.
+- `parseBoundedNullSeparatedEnvSnapshot(raw, options?)` defaults to a 64 KiB input limit and keeps the retained `key=value` records under the same 64 KiB bound. The Windows PowerShell/cmd fallbacks pass the 2 MiB input limit and 32 KiB PATH allowance explicitly; framed POSIX captures pass the bounded PATH allowance explicitly, while keeping the 64 KiB retained limit. Generic records over 8 KiB are ignored; `PATH`/`Path` entries may be up to 32 KiB and reserve one bounded record slot plus their actual retained bytes when they appear late. Malformed/control-key records are ignored, and non-critical input beyond the first 256 valid records is truncated to a deterministic partial result.
+- `getLoginShellEnvCandidates(configuredShell)`: returns the ordered POSIX shell candidates used by web and Electron: the configured shell, `/bin/zsh`, `/bin/bash`, and `/bin/sh`.
+- `captureLoginShellEnvSnapshotFromCandidates(shellCandidates, runSpawnSync)`: tries candidates in order, skips nushell, and continues after failed or invalid captures.
+- The web runtime and Electron use this capture path before managed tooling starts. User-facing terminal PTY login shells are not part of this behavior.
 
 ## Public exports (env-config.js)
 - `resolveOpenCodeEnvConfig(options?)`: resolves and validates OpenCode host/port/hostname environment configuration.

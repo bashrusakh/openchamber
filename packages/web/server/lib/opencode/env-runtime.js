@@ -3,6 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { clearAppImageArgv0FromProcessEnv } from '../inherited-env.js';
+import {
+  captureLoginShellEnvSnapshotFromCandidates,
+  LOGIN_SHELL_ENV_MAX_CAPTURE_BYTES,
+  LOGIN_SHELL_ENV_MAX_WINDOWS_PATH_ENTRY_BYTES,
+  LOGIN_SHELL_ENV_TIMEOUT_MS,
+  getLoginShellEnvCandidates,
+  parseBoundedNullSeparatedEnvSnapshot,
+} from './login-shell-env.js';
 import { mergePathValues } from './path-utils.js';
 
 export const createOpenCodeEnvRuntime = (deps) => {
@@ -13,40 +21,6 @@ export const createOpenCodeEnvRuntime = (deps) => {
   } = deps;
   const runSpawnSync = typeof deps.spawnSync === 'function' ? deps.spawnSync : spawnSync;
   const resolveHomeDir = typeof deps.homedir === 'function' ? deps.homedir : () => os.homedir();
-
-  const parseNullSeparatedEnvSnapshot = (raw) => {
-    if (typeof raw !== 'string' || raw.length === 0) {
-      return null;
-    }
-
-    const result = {};
-    const entries = raw.split('\0');
-    for (const entry of entries) {
-      if (!entry) {
-        continue;
-      }
-      const idx = entry.indexOf('=');
-      if (idx <= 0) {
-        continue;
-      }
-      const key = entry.slice(0, idx);
-      const value = entry.slice(idx + 1);
-      result[key] = value;
-    }
-
-    if (Object.keys(result).length === 0) {
-      return null;
-    }
-
-    if (process.platform === 'win32' && typeof result.PATH !== 'string') {
-      const pathEntry = Object.entries(result).find(([key]) => key.toLowerCase() === 'path');
-      if (pathEntry && typeof pathEntry[1] === 'string') {
-        result.PATH = pathEntry[1];
-      }
-    }
-
-    return result;
-  };
 
   const isExecutable = (filePath) => {
     try {
@@ -132,9 +106,23 @@ export const createOpenCodeEnvRuntime = (deps) => {
   };
 
   const getWindowsShellEnvSnapshot = () => {
-    const parseResult = (stdout) => parseNullSeparatedEnvSnapshot(typeof stdout === 'string' ? stdout : '');
+    const parseResult = (stdout) => {
+      const snapshot = parseBoundedNullSeparatedEnvSnapshot(stdout, {
+        maxInputBytes: LOGIN_SHELL_ENV_MAX_CAPTURE_BYTES,
+        maxPathEntryBytes: LOGIN_SHELL_ENV_MAX_WINDOWS_PATH_ENTRY_BYTES,
+      });
+      if (!snapshot || snapshot.PATH) {
+        return snapshot;
+      }
+      const pathEntry = Object.entries(snapshot).find(([key]) => key.toLowerCase() === 'path');
+      if (pathEntry) {
+        snapshot.PATH = pathEntry[1];
+      }
+      return snapshot;
+    };
 
     const psScript = [
+      '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
       '$entries = [ordered]@{}',
       'Get-ChildItem Env: | ForEach-Object { $entries[$_.Name] = $_.Value }',
       "$pathValues = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User'), [Environment]::GetEnvironmentVariable('Path', 'Process')) | Where-Object { $_ }",
@@ -153,7 +141,8 @@ export const createOpenCodeEnvRuntime = (deps) => {
         const result = runSpawnSync(shellPath, ['-NoLogo', '-Command', psScript], {
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'pipe'],
-          maxBuffer: 10 * 1024 * 1024,
+          maxBuffer: LOGIN_SHELL_ENV_MAX_CAPTURE_BYTES,
+          timeout: LOGIN_SHELL_ENV_TIMEOUT_MS,
           windowsHide: true,
         });
         if (result.status !== 0) {
@@ -172,11 +161,13 @@ export const createOpenCodeEnvRuntime = (deps) => {
       const result = runSpawnSync(comspec, ['/d', '/s', '/c', 'set'], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
-        maxBuffer: 10 * 1024 * 1024,
+        maxBuffer: LOGIN_SHELL_ENV_MAX_CAPTURE_BYTES,
+        timeout: LOGIN_SHELL_ENV_TIMEOUT_MS,
         windowsHide: true,
       });
       if (result.status === 0 && typeof result.stdout === 'string' && result.stdout.length > 0) {
-        return parseNullSeparatedEnvSnapshot(result.stdout.replace(/\r?\n/g, '\0'));
+        const normalized = result.stdout.replace(/\r?\n/g, '\0');
+        return parseResult(normalized.endsWith('\0') ? normalized : `${normalized}\0`);
       }
     } catch {
     }
@@ -195,32 +186,16 @@ export const createOpenCodeEnvRuntime = (deps) => {
       return windowsSnapshot;
     }
 
-    const shellCandidates = [process.env.SHELL, '/bin/zsh', '/bin/bash', '/bin/sh'].filter(Boolean);
+    const shellCandidates = getLoginShellEnvCandidates(process.env.SHELL);
 
-    for (const shellPath of shellCandidates) {
-      if (!isExecutable(shellPath)) {
-        continue;
-      }
-
-      try {
-        const result = runSpawnSync(shellPath, ['-lic', 'env -0'], {
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-          maxBuffer: 10 * 1024 * 1024,
-          windowsHide: true,
-        });
-
-        if (result.status !== 0) {
-          continue;
-        }
-
-        const parsed = parseNullSeparatedEnvSnapshot(result.stdout || '');
-        if (parsed) {
-          state.cachedLoginShellEnvSnapshot = parsed;
-          return parsed;
-        }
-      } catch {
-      }
+    const executableShellCandidates = shellCandidates.filter((shellPath) => isExecutable(shellPath));
+    const snapshot = captureLoginShellEnvSnapshotFromCandidates(
+      executableShellCandidates,
+      runSpawnSync
+    );
+    if (snapshot) {
+      state.cachedLoginShellEnvSnapshot = snapshot;
+      return snapshot;
     }
 
     state.cachedLoginShellEnvSnapshot = null;

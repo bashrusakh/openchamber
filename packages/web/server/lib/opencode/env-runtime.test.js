@@ -3,10 +3,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createOpenCodeEnvRuntime } from './env-runtime.js';
+import {
+  LOGIN_SHELL_ENV_COMMAND,
+  LOGIN_SHELL_ENV_END_MARKER,
+  LOGIN_SHELL_ENV_MAX_CAPTURE_BYTES,
+  LOGIN_SHELL_ENV_MAX_ENTRY_BYTES,
+  LOGIN_SHELL_ENV_MAX_SNAPSHOT_BYTES,
+  LOGIN_SHELL_ENV_MAX_WINDOWS_PATH_ENTRY_BYTES,
+  LOGIN_SHELL_ENV_START_MARKER,
+  LOGIN_SHELL_ENV_TIMEOUT_MS,
+} from './login-shell-env.js';
 
 const originalOpencodeBinary = process.env.OPENCODE_BINARY;
 const originalComSpec = process.env.ComSpec;
 const originalPath = process.env.PATH;
+const originalShell = process.env.SHELL;
 const originalLocalAppData = process.env.LOCALAPPDATA;
 const originalSystemRoot = process.env.SystemRoot;
 const originalBundledOpencodeCliDir = process.env.OPENCHAMBER_BUNDLED_OPENCODE_CLI_DIR;
@@ -16,6 +27,9 @@ const originalOpenChamberWslBinary = process.env.OPENCHAMBER_WSL_BINARY;
 const originalPlatform = process.platform;
 const tempDirs = [];
 const itIf = (condition) => condition ? it : it.skip;
+const frameLoginShellEnv = (records) => (
+  `\0${LOGIN_SHELL_ENV_START_MARKER}\0${records}${LOGIN_SHELL_ENV_END_MARKER}\0`
+);
 
 const createTempDir = (prefix) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -54,6 +68,12 @@ afterEach(() => {
     process.env.PATH = originalPath;
   } else {
     delete process.env.PATH;
+  }
+
+  if (originalShell !== undefined) {
+    process.env.SHELL = originalShell;
+  } else {
+    delete process.env.SHELL;
   }
 
   if (typeof originalSystemRoot === 'string') {
@@ -166,6 +186,150 @@ describe('OpenCode env runtime', () => {
       if (previousArgv0 === undefined) delete process.env.ARGV0;
       else process.env.ARGV0 = previousArgv0;
     }
+  });
+
+  itIf(process.platform !== 'win32')('captures bounded noninteractive login-shell tooling values', () => {
+    const toolingKey = 'OPENCHAMBER_ENV_RUNTIME_TOOL_HOME';
+    const previousToolingValue = process.env[toolingKey];
+    const calls = [];
+    process.env.PATH = '/process/bin';
+    delete process.env[toolingKey];
+    const { runtime, state } = createRuntime({}, {
+      spawnSync: (command, args, options) => {
+        calls.push({ command, args, options });
+        return { status: 0, stdout: frameLoginShellEnv(`PATH=/login/bin\0${toolingKey}=/tools\0`) };
+      },
+    });
+    state.cachedLoginShellEnvSnapshot = undefined;
+
+    try {
+      runtime.applyLoginShellEnvSnapshot();
+
+      expect(process.env.PATH).toBe('/login/bin:/process/bin');
+      expect(process.env[toolingKey]).toBe('/tools');
+      expect(calls).toHaveLength(1);
+      expect(calls[0].args).toEqual(['-l', '-c', LOGIN_SHELL_ENV_COMMAND]);
+      expect(calls[0].args).not.toContain('-i');
+      expect(calls[0].options).toMatchObject({
+        maxBuffer: LOGIN_SHELL_ENV_MAX_CAPTURE_BYTES,
+        timeout: LOGIN_SHELL_ENV_TIMEOUT_MS,
+      });
+    } finally {
+      if (previousToolingValue === undefined) delete process.env[toolingKey];
+      else process.env[toolingKey] = previousToolingValue;
+    }
+  });
+
+  itIf(process.platform !== 'win32')('does not merge malformed login-shell records', () => {
+    const validKey = 'OPENCHAMBER_ENV_RUNTIME_VALID_TOOL';
+    const malformedKey = 'OPENCHAMBER-INVALID-ENV-KEY';
+    const previousValidValue = process.env[validKey];
+    const previousMalformedValue = process.env[malformedKey];
+    delete process.env[validKey];
+    delete process.env[malformedKey];
+    const { runtime, state } = createRuntime({}, {
+      spawnSync: () => ({
+        status: 0,
+        stdout: frameLoginShellEnv(`PATH=/login/bin\0${malformedKey}=unsafe\0${validKey}=/tools\0`),
+      }),
+    });
+    state.cachedLoginShellEnvSnapshot = undefined;
+
+    try {
+      runtime.applyLoginShellEnvSnapshot();
+
+      expect(process.env[validKey]).toBe('/tools');
+      expect(process.env[malformedKey]).toBeUndefined();
+    } finally {
+      if (previousValidValue === undefined) delete process.env[validKey];
+      else process.env[validKey] = previousValidValue;
+      if (previousMalformedValue === undefined) delete process.env[malformedKey];
+      else process.env[malformedKey] = previousMalformedValue;
+    }
+  });
+
+  itIf(process.platform !== 'win32')('skips nushell and falls through login-shell candidates', () => {
+    const configuredShellDir = createTempDir('openchamber-nushell-');
+    const configuredShell = path.join(configuredShellDir, 'nu');
+    fs.writeFileSync(configuredShell, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(configuredShell, 0o755);
+    process.env.SHELL = configuredShell;
+    const calls = [];
+    const { runtime, state } = createRuntime({}, {
+      spawnSync: (command) => {
+        calls.push(command);
+        if (command === '/bin/sh') {
+          return { status: 0, stdout: frameLoginShellEnv('PATH=/bin\0') };
+        }
+        return { status: 1, stdout: '' };
+      },
+    });
+    state.cachedLoginShellEnvSnapshot = undefined;
+
+    expect(runtime.getLoginShellEnvSnapshot()?.PATH).toBe('/bin');
+    expect(calls).not.toContain(configuredShell);
+    expect(calls.at(-1)).toBe('/bin/sh');
+  });
+
+  it('keeps a Windows Path snapshot available as PATH', () => {
+    setPlatform('win32');
+    const calls = [];
+    const pathValue = 'C:\\tooling;'.padEnd(LOGIN_SHELL_ENV_MAX_WINDOWS_PATH_ENTRY_BYTES - 'Path='.length, 'x');
+    const { runtime, state } = createRuntime({}, {
+      spawnSync: (command, args, options) => {
+        calls.push({ command, args, options });
+        return {
+          status: 0,
+          stdout: `NOISE=${'x'.repeat(LOGIN_SHELL_ENV_MAX_SNAPSHOT_BYTES)}\0Path=${pathValue}\0ProgramFiles(x86)=C:\\Program Files (x86)\0`,
+        };
+      },
+    });
+    state.cachedLoginShellEnvSnapshot = undefined;
+
+    expect(runtime.getLoginShellEnvSnapshot()).toMatchObject({
+      PATH: pathValue,
+      Path: pathValue,
+      'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args[2]).toContain('[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)');
+    expect(calls[0].options).toMatchObject({
+      encoding: 'utf8',
+      maxBuffer: LOGIN_SHELL_ENV_MAX_CAPTURE_BYTES,
+      timeout: LOGIN_SHELL_ENV_TIMEOUT_MS,
+      windowsHide: true,
+    });
+  });
+
+  it('terminates transformed Windows cmd output when set omits its final newline', () => {
+    setPlatform('win32');
+    const comspec = 'C:\\Windows\\System32\\cmd.exe';
+    const pathValue = 'C:\\tooling;'.padEnd(LOGIN_SHELL_ENV_MAX_WINDOWS_PATH_ENTRY_BYTES - 'Path='.length, 'x');
+    process.env.ComSpec = comspec;
+    const calls = [];
+    const { runtime, state } = createRuntime({}, {
+      spawnSync: (command, args, options) => {
+        calls.push({ command, args, options });
+        if (command === comspec) {
+          return { status: 0, stdout: `Path=${pathValue}\r\nDOT.KEY=ümlaut` };
+        }
+        return { status: 1, stdout: '', stderr: '' };
+      },
+    });
+    state.cachedLoginShellEnvSnapshot = undefined;
+
+    expect(runtime.getLoginShellEnvSnapshot()).toMatchObject({
+      PATH: pathValue,
+      'DOT.KEY': 'ümlaut',
+    });
+    const cmdCall = calls.find((call) => call.command === comspec);
+    expect(cmdCall).toBeDefined();
+    expect(cmdCall.options).toMatchObject({
+      encoding: 'utf8',
+      maxBuffer: LOGIN_SHELL_ENV_MAX_CAPTURE_BYTES,
+      timeout: LOGIN_SHELL_ENV_TIMEOUT_MS,
+      windowsHide: true,
+    });
   });
 
   it('throws a specific error for a missing configured OpenCode binary in strict mode', async () => {

@@ -34,6 +34,10 @@ import {
 import { unsupportedAppSpecificOpenError, validateLocalPath } from './path-open-utils.mjs';
 import { shouldAllowBrowserPanelCertificateError } from './browser-panel-security.mjs';
 import { mintOutsideFileGrant } from '@openchamber/web/server/lib/fs/routes.js';
+import {
+  captureLoginShellEnvSnapshotFromCandidates,
+  getLoginShellEnvCandidates,
+} from '@openchamber/web/server/lib/opencode/login-shell-env.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1384,36 +1388,8 @@ const mapUpdaterProgressEvent = (payload) => ({
   data: payload.data,
 });
 
-const SHELL_ENV_TIMEOUT_MS = 5_000;
 let cachedShellEnv = null;
 let shellEnvProbed = false;
-
-const isNushell = (shell) => {
-  const name = path.basename(shell).toLowerCase();
-  return name === 'nu' || name === 'nu.exe';
-};
-
-const parseShellEnv = (buf) => {
-  const result = {};
-  for (const line of buf.toString('utf8').split('\0')) {
-    if (!line) continue;
-    const idx = line.indexOf('=');
-    if (idx <= 0) continue;
-    result[line.slice(0, idx)] = line.slice(idx + 1);
-  }
-  return result;
-};
-
-const probeShellEnv = (shell, mode) => {
-  const result = spawnSync(shell, [mode, '-c', 'env -0'], {
-    stdio: ['ignore', 'pipe', 'ignore'],
-    timeout: SHELL_ENV_TIMEOUT_MS,
-    windowsHide: true,
-  });
-  if (result.error || result.status !== 0) return null;
-  const env = parseShellEnv(result.stdout);
-  return Object.keys(env).length > 0 ? env : null;
-};
 
 const queryWindowsRegistryValue = (key, name) => {
   const result = spawnSync('reg.exe', ['query', key, '/v', name], {
@@ -1455,7 +1431,7 @@ const loadWindowsEnv = () => {
 };
 
 // Finder-launched apps on macOS inherit a minimal PATH (no /opt/homebrew, mise, asdf, etc.).
-// Probe the user's login shell once so the sidecar sees the same PATH / tool env as `$SHELL -il`.
+// Probe the user's noninteractive login shell once so the in-process server gets its tool env.
 const loadShellEnv = () => {
   if (shellEnvProbed) return cachedShellEnv;
   shellEnvProbed = true;
@@ -1463,9 +1439,10 @@ const loadShellEnv = () => {
     cachedShellEnv = loadWindowsEnv();
     return cachedShellEnv;
   }
-  const shell = process.env.SHELL || '/bin/sh';
-  if (isNushell(shell)) return null;
-  cachedShellEnv = probeShellEnv(shell, '-il') || probeShellEnv(shell, '-l');
+  cachedShellEnv = captureLoginShellEnvSnapshotFromCandidates(
+    getLoginShellEnvCandidates(process.env.SHELL),
+    spawnSync
+  );
   return cachedShellEnv;
 };
 
