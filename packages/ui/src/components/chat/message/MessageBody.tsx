@@ -56,6 +56,7 @@ import { isEmbeddedSessionChat } from '@/components/layout/contextPanelEmbeddedC
 import { useProviderLogo } from '@/hooks/useProviderLogo';
 import { getAgentColor } from '@/lib/agentColors';
 import { isCapacitorMobileApp } from '@/apps/mobileNativeChrome';
+import { collectMessageTextExportSources } from './messageImageExport';
 
 
 const CONTAIN_LAYOUT_STYLE = { contain: 'layout' as const, transform: 'translateZ(0)' };
@@ -802,7 +803,7 @@ interface AssistantMessageActionButtonsProps {
         tooltip: string;
         onClick: () => void | Promise<void>;
     };
-    onShareImage: (sourceElement?: HTMLElement | null) => Promise<void>;
+    onShareImage: (sourceElements?: readonly HTMLElement[] | null) => Promise<void>;
     ttsText: string;
 }
 
@@ -911,9 +912,8 @@ const AssistantMessageActionButtons = React.memo(({
 
             setIsSharing(true);
             try {
-            const root = event.currentTarget.closest('[data-message-text-export-root]');
-            const sourceElement = root?.querySelector<HTMLElement>('[data-message-text-export-source]') ?? null;
-            await onShareImage(sourceElement);
+                const root = event.currentTarget.closest('[data-message-text-export-root]');
+                await onShareImage(collectMessageTextExportSources(root));
             } finally {
                 setIsSharing(false);
             }
@@ -1458,16 +1458,22 @@ const AssistantMessageBody = React.memo(({
     );
 
     const shareMessageAsImage = React.useCallback(
-        async (requestedSourceElement?: HTMLElement | null) => {
-            const sourceElement = requestedSourceElement ?? messageTextContentRef.current ?? messageContentRef.current;
-            if (!sourceElement) return;
+        async (requestedSourceElements?: readonly HTMLElement[] | null) => {
+            let sourceElements: readonly HTMLElement[];
+            if (requestedSourceElements === undefined || requestedSourceElements === null) {
+                const fallbackSourceElement = messageTextContentRef.current ?? messageContentRef.current;
+                sourceElements = fallbackSourceElement ? [fallbackSourceElement] : [];
+            } else {
+                sourceElements = requestedSourceElements;
+            }
+            const originalElement = sourceElements[0];
+            if (!originalElement) return;
 
             let wrapper: HTMLDivElement | null = null;
             try {
                 // Load the exporter before attaching its temporary clone so a slow
                 // chunk request cannot leave export-only content in the page layout.
                 const { toPng } = await import('html-to-image');
-                const originalElement = sourceElement;
                 const computedStyle = window.getComputedStyle(originalElement);
                 const rootStyle = window.getComputedStyle(document.documentElement);
                 const resolvedBackgroundColor =
@@ -1476,58 +1482,69 @@ const AssistantMessageBody = React.memo(({
                     window.getComputedStyle(document.body).backgroundColor;
                 const paddingSize = 24;
 
-                wrapper = document.createElement('div');
-                wrapper.setAttribute('data-message-image-export', 'true');
-                wrapper.style.cssText = `
+                const exportWrapper = document.createElement('div');
+                wrapper = exportWrapper;
+                exportWrapper.setAttribute('data-message-image-export', 'true');
+                exportWrapper.setAttribute('aria-hidden', 'true');
+                exportWrapper.inert = true;
+                exportWrapper.style.cssText = `
+                    position: fixed;
+                    top: -10000px;
+                    left: -10000px;
                     padding: ${paddingSize}px;
                     background-color: ${resolvedBackgroundColor};
                     display: inline-block;
                 `;
 
-                const clone = originalElement.cloneNode(true) as HTMLElement;
-                clone.style.cssText = `
-                    ${computedStyle.cssText}
-                    transform: none;
-                    contain: none;
-                `;
-
-                const actionRows = clone.querySelectorAll<HTMLElement>('[data-message-actions="true"]');
-                actionRows.forEach((row) => {
-                    row.style.display = 'none';
+                const clones = sourceElements.map((sourceElement) => {
+                    const clone = sourceElement.cloneNode(true) as HTMLElement;
+                    const sourceStyle = window.getComputedStyle(sourceElement);
+                    clone.style.cssText = `
+                        ${sourceStyle.cssText}
+                        transform: none;
+                        contain: none;
+                    `;
+                    return clone;
                 });
-                const actionGroups = clone.querySelectorAll<HTMLElement>('[data-message-action-group="true"]');
-                actionGroups.forEach((group) => {
-                    group.style.display = 'none';
-                });
-
-                const timestampElements = clone.querySelectorAll<HTMLElement>('[aria-label^="Message time:"]');
                 const footerRowsAdjusted = new Set<HTMLElement>();
-                timestampElements.forEach((element) => {
-                    const label = element.getAttribute('aria-label');
-                    const timestamp = label?.replace('Message time:', '').trim();
-                    if (!timestamp || element.textContent?.includes(timestamp)) {
-                        return;
-                    }
+                clones.forEach((clone) => {
+                    const actionRows = clone.querySelectorAll<HTMLElement>('[data-message-actions="true"]');
+                    actionRows.forEach((row) => {
+                        row.style.display = 'none';
+                    });
+                    const actionGroups = clone.querySelectorAll<HTMLElement>('[data-message-action-group="true"]');
+                    actionGroups.forEach((group) => {
+                        group.style.display = 'none';
+                    });
 
-                    const timestampText = document.createElement('span');
-                    timestampText.style.marginLeft = '4px';
-                    timestampText.textContent = timestamp;
-                    element.appendChild(timestampText);
+                    const timestampElements = clone.querySelectorAll<HTMLElement>('[aria-label^="Message time:"]');
+                    timestampElements.forEach((element) => {
+                        const label = element.getAttribute('aria-label');
+                        const timestamp = label?.replace('Message time:', '').trim();
+                        if (!timestamp || element.textContent?.includes(timestamp)) {
+                            return;
+                        }
 
-                    const metaGroup = element.parentElement;
-                    const footerRow = metaGroup?.parentElement as HTMLElement | null;
-                    if (!footerRow || footerRowsAdjusted.has(footerRow)) {
-                        return;
-                    }
+                        const timestampText = document.createElement('span');
+                        timestampText.style.marginLeft = '4px';
+                        timestampText.textContent = timestamp;
+                        element.appendChild(timestampText);
 
-                    footerRow.style.justifyContent = 'flex-start';
-                    footerRowsAdjusted.add(footerRow);
+                        const metaGroup = element.parentElement;
+                        const footerRow = metaGroup?.parentElement as HTMLElement | null;
+                        if (!footerRow || footerRowsAdjusted.has(footerRow)) {
+                            return;
+                        }
+
+                        footerRow.style.justifyContent = 'flex-start';
+                        footerRowsAdjusted.add(footerRow);
+                    });
                 });
 
-                wrapper.appendChild(clone);
-                document.body.appendChild(wrapper);
+                clones.forEach((clone) => exportWrapper.appendChild(clone));
+                document.body.appendChild(exportWrapper);
 
-                const dataUrl = await toPng(wrapper, {
+                const dataUrl = await toPng(exportWrapper, {
                     quality: 1,
                     pixelRatio: 2,
                     backgroundColor: resolvedBackgroundColor,
