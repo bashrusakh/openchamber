@@ -153,12 +153,21 @@ describe('terminal runtime', () => {
       expect(response.body).toEqual({ sessionId: 'term-1', cols: 120, rows: 40, status: 'running' });
       expect(harness.processes[0].options.cwd).toBe('/repo');
       expect(harness.processes[0].options.env.COLORFGBG).toBe('0;15');
-      expect(harness.processes[0].options.env.NODE_CHANNEL_FD).toBe('');
+      expect(harness.processes[0].options.env).not.toHaveProperty('NODE_CHANNEL_FD');
       expect(harness.processes[0].options.env).not.toHaveProperty('ARGV0');
       expect(harness.processes[0].options.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
-      if (process.platform === 'linux') {
+      expect(harness.processes[0].options.env).not.toHaveProperty('BASH_ENV');
+      expect(harness.processes[0].options.env).not.toHaveProperty('ENV');
+      expect(harness.processes[0].options.env).not.toHaveProperty('BASH_XTRACEFD');
+      if (process.platform !== 'win32') {
         expect(harness.processes[0].shell).toMatch(/\/env$/);
-        expect(harness.processes[0].args.slice(0, 3)).toEqual(['-u', 'ARGV0', expect.any(String)]);
+        expect(harness.processes[0].args.slice(0, 12)).toEqual([
+          '-u', 'ARGV0', '-u', 'NODE_CHANNEL_FD', '-u', 'ELECTRON_RUN_AS_NODE',
+          '-u', 'BASH_ENV', '-u', 'ENV', '-u', 'BASH_XTRACEFD',
+        ]);
+      } else {
+        expect(harness.processes[0].shell).toBe('/bin/sh');
+        expect(harness.processes[0].args).toEqual([]);
       }
       harness.processes[0].emitData('\u001b[?2031h\u001b]10;?\u0007\u001b]11;?\u0007\u001b[0c');
       expect(harness.processes[0].writes).toEqual(['\u001b]10;rgb:1b1b/1b1b/1b1b\u001b\\', '\u001b]11;rgb:fafa/f8f8/f0f0\u001b\\', '\u001b[?1;2c']);
@@ -205,23 +214,37 @@ describe('terminal runtime', () => {
     } finally { await harness.runtime.shutdown(); }
   });
 
-  it('strips AppImage ARGV0 from PTY child environments', async () => {
-    const previousArgv0 = process.env.ARGV0;
-    process.env.ARGV0 = '/path/to/OpenChamber/OpenChamber-1.17.2-linux-x86_64.AppImage';
+  it('strips host-private variables from PTY child environments', async () => {
+    const hostPrivateEnv = {
+      ARGV0: '/path/to/OpenChamber/OpenChamber-1.17.2-linux-x86_64.AppImage',
+      NODE_CHANNEL_FD: '99',
+      ELECTRON_RUN_AS_NODE: '1',
+      BASH_ENV: '/tmp/host-bash-env',
+      ENV: '/tmp/host-env',
+      BASH_XTRACEFD: '5',
+    };
+    const previousEnv = Object.fromEntries(Object.keys(hostPrivateEnv).map((name) => [name, process.env[name]]));
+    Object.assign(process.env, hostPrivateEnv);
     const harness = createHarness();
     try {
       const response = createResponse();
       await harness.routes.post.get('/api/terminal/create')({ body: { sessionId: 'term-argv0', cwd: '/repo', cols: 80, rows: 24 } }, response);
       expect(response.statusCode).toBe(200);
-      expect(harness.processes[0].options.env).not.toHaveProperty('ARGV0');
-      if (process.platform === 'linux') {
+      for (const name of Object.keys(hostPrivateEnv)) {
+        expect(harness.processes[0].options.env).not.toHaveProperty(name);
+      }
+      if (process.platform !== 'win32') {
         expect(harness.processes[0].shell).toMatch(/\/env$/);
-        expect(harness.processes[0].args[0]).toBe('-u');
-        expect(harness.processes[0].args[1]).toBe('ARGV0');
+        expect(harness.processes[0].args.slice(0, 12)).toEqual([
+          '-u', 'ARGV0', '-u', 'NODE_CHANNEL_FD', '-u', 'ELECTRON_RUN_AS_NODE',
+          '-u', 'BASH_ENV', '-u', 'ENV', '-u', 'BASH_XTRACEFD',
+        ]);
       }
     } finally {
-      if (previousArgv0 === undefined) delete process.env.ARGV0;
-      else process.env.ARGV0 = previousArgv0;
+      for (const [name, value] of Object.entries(previousEnv)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
       await harness.runtime.shutdown();
     }
   });
@@ -251,9 +274,12 @@ describe('terminal runtime', () => {
       const created = createResponse();
       await harness.routes.post.get('/api/terminal/create')({ body: { sessionId: 'term-shell', cwd: '/repo', shell: 'zsh', loginShell: true } }, created);
       expect(created.statusCode).toBe(200);
-      if (process.platform === 'linux') {
+      if (process.platform !== 'win32') {
         expect(harness.processes[0].shell).toMatch(/\/env$/);
-        expect(harness.processes[0].args).toEqual(['-u', 'ARGV0', '/bin/zsh', '-l']);
+        expect(harness.processes[0].args).toEqual([
+          '-u', 'ARGV0', '-u', 'NODE_CHANNEL_FD', '-u', 'ELECTRON_RUN_AS_NODE',
+          '-u', 'BASH_ENV', '-u', 'ENV', '-u', 'BASH_XTRACEFD', '/bin/zsh', '-l',
+        ]);
       } else {
         expect(harness.processes[0].shell).toBe('/bin/zsh');
         expect(harness.processes[0].args).toEqual(['-l']);
@@ -262,9 +288,12 @@ describe('terminal runtime', () => {
       const restarted = createResponse();
       await harness.routes.post.get('/api/terminal/:sessionId/restart')({ params: { sessionId: 'term-shell' }, body: { shell: 'bash', loginShell: true } }, restarted);
       expect(restarted.statusCode).toBe(200);
-      if (process.platform === 'linux') {
+      if (process.platform !== 'win32') {
         expect(harness.processes[1].shell).toMatch(/\/env$/);
-        expect(harness.processes[1].args).toEqual(['-u', 'ARGV0', '/bin/bash', '-l']);
+        expect(harness.processes[1].args).toEqual([
+          '-u', 'ARGV0', '-u', 'NODE_CHANNEL_FD', '-u', 'ELECTRON_RUN_AS_NODE',
+          '-u', 'BASH_ENV', '-u', 'ENV', '-u', 'BASH_XTRACEFD', '/bin/bash', '-l',
+        ]);
       } else {
         expect(harness.processes[1].shell).toBe('/bin/bash');
         expect(harness.processes[1].args).toEqual(['-l']);

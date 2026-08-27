@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   clearAppImageArgv0FromProcessEnv,
-  resolveLinuxPtyLaunch,
+  resolvePtyLaunch,
   stripAppImageArgv0Leak,
 } from './inherited-env.js';
 
@@ -46,18 +46,25 @@ describe('clearAppImageArgv0FromProcessEnv', () => {
   });
 });
 
-describe('resolveLinuxPtyLaunch', () => {
-  it('wraps the shell with env -u ARGV0 on Linux', () => {
-    if (process.platform !== 'linux') return;
-    expect(resolveLinuxPtyLaunch('/bin/zsh', ['-l'])).toEqual({
+describe('resolvePtyLaunch', () => {
+  it('wraps the shell with env -u for each protected variable on POSIX', () => {
+    if (process.platform === 'win32') return;
+    expect(resolvePtyLaunch('/bin/zsh', ['-l'], [
+      'ARGV0', 'NODE_CHANNEL_FD', 'ELECTRON_RUN_AS_NODE', 'BASH_ENV', 'ENV', 'BASH_XTRACEFD',
+    ])).toEqual({
       executable: expect.stringMatching(/\/env$/),
-      args: ['-u', 'ARGV0', '/bin/zsh', '-l'],
+      args: [
+        '-u', 'ARGV0', '-u', 'NODE_CHANNEL_FD', '-u', 'ELECTRON_RUN_AS_NODE',
+        '-u', 'BASH_ENV', '-u', 'ENV', '-u', 'BASH_XTRACEFD', '/bin/zsh', '-l',
+      ],
     });
   });
 
-  it('leaves non-Linux launches unchanged', () => {
-    if (process.platform === 'linux') return;
-    expect(resolveLinuxPtyLaunch('/bin/zsh', ['-l'])).toEqual({
+  it('leaves Windows launches unchanged', () => {
+    if (process.platform !== 'win32') return;
+    expect(resolvePtyLaunch('/bin/zsh', ['-l'], [
+      'ARGV0', 'NODE_CHANNEL_FD', 'ELECTRON_RUN_AS_NODE', 'BASH_ENV', 'ENV', 'BASH_XTRACEFD',
+    ])).toEqual({
       executable: '/bin/zsh',
       args: ['-l'],
     });

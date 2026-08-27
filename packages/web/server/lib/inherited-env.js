@@ -12,7 +12,7 @@
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
 
-const LINUX_ENV_BINARIES = ['/usr/bin/env', '/bin/env'];
+const ENV_BINARIES = ['/usr/bin/env', '/bin/env'];
 
 /**
  * Remove AppImage `ARGV0` from a mutable env object (or `process.env`).
@@ -49,26 +49,29 @@ export function clearAppImageArgv0FromProcessEnv() {
 }
 
 /**
- * Resolve a Linux PTY launch that drops native `ARGV0` before the shell starts.
+ * Resolve a PTY launch that drops selected native environment variables before
+ * the shell starts.
  *
- * `bun-pty` merges the OS environ into the child, so deleting `ARGV0` from the
- * JS env object alone is not enough. Wrapping with `env -u ARGV0` unsets it
- * before execing the real shell. No-op on non-Linux platforms.
+ * `bun-pty` merges the OS environ into the child, so deleting a variable from
+ * the JS env object alone is not enough. On POSIX, wrapping with `env -u`
+ * unsets each selected variable before execing the real shell. Windows has no
+ * compatible `env -u` wrapper, so it relies on the sanitized JS env object.
  *
  * @param {string} executable
  * @param {string[]} args
+ * @param {string[]} unsetEnv
  * @returns {{ executable: string, args: string[] }}
  */
-export function resolveLinuxPtyLaunch(executable, args = []) {
-  if (process.platform !== 'linux') {
+export function resolvePtyLaunch(executable, args = [], unsetEnv = []) {
+  if (process.platform === 'win32' || unsetEnv.length === 0) {
     return { executable, args };
   }
-  const envBinary = LINUX_ENV_BINARIES.find((candidate) => existsSync(candidate));
+  const envBinary = ENV_BINARIES.find((candidate) => existsSync(candidate));
   if (!envBinary) {
     return { executable, args };
   }
   return {
     executable: envBinary,
-    args: ['-u', 'ARGV0', executable, ...args],
+    args: [...unsetEnv.flatMap((name) => ['-u', name]), executable, ...args],
   };
 }

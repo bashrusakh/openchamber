@@ -10,7 +10,7 @@ import {
 import { sanitizeTerminalHistoryChunk } from './history.js';
 import { consumeTerminalThemeQueries, terminalThemeModeReport } from './theme-response.js';
 import { createTerminalShellResolver, getTerminalShellLoginArgs, normalizeTerminalShell } from './shells.js';
-import { stripAppImageArgv0Leak, resolveLinuxPtyLaunch } from '../inherited-env.js';
+import { stripAppImageArgv0Leak, resolvePtyLaunch } from '../inherited-env.js';
 
 const MAX_SESSIONS = 20;
 const MAX_HISTORY_BYTES = 512 * 1024;
@@ -63,14 +63,16 @@ export function createTerminalRuntime({
       if (!args) throw new Error(`Terminal shell "${resolvedShell.id}" does not support login mode`);
       try {
         const env = { ...process.env, PATH: buildAugmentedPath(), TERM: 'xterm-256color', COLORTERM: 'truecolor', COLORFGBG: themeMode === 'light' ? '0;15' : '15;0' };
-        // The daemon's IPC fd is closed inside the PTY. An explicit override is
-        // required because bun-pty also inherits Bun's native process environment.
-        env.NODE_CHANNEL_FD = '';
+        // The daemon's IPC fd is closed inside the PTY. Node treats even a blank
+        // value as an IPC setup request, so the variable must be absent.
+        delete env.NODE_CHANNEL_FD;
         delete env.BASH_XTRACEFD; delete env.BASH_ENV; delete env.ENV; delete env.ELECTRON_RUN_AS_NODE;
         // AppImage exports ARGV0; zsh would otherwise rewrite argv[0] for every command (#2588).
-        // bun-pty also merges the native OS environ, so wrap with `env -u ARGV0` on Linux.
+        // bun-pty can also reintroduce native values, so POSIX removes each one at exec time.
         stripAppImageArgv0Leak(env);
-        const launch = resolveLinuxPtyLaunch(executable, args);
+        const launch = resolvePtyLaunch(executable, args, [
+          'ARGV0', 'NODE_CHANNEL_FD', 'ELECTRON_RUN_AS_NODE', 'BASH_ENV', 'ENV', 'BASH_XTRACEFD',
+        ]);
         const options = { name: 'xterm-256color', cwd, cols, rows, env, ...(process.platform === 'win32' ? { useConpty: true } : {}) };
         return { process: provider.spawn(launch.executable, launch.args, options), backend: provider.backend, shell: resolvedShell.id, loginShell };
       } catch (error) { lastError = error; }
