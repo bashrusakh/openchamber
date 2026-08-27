@@ -30,6 +30,12 @@ const formatTimestamp = (timestamp: number | null, neverUsedText: string, timeFo
   }).format(timestamp);
 };
 
+export const PasskeyLabel: React.FC<{ label: string }> = ({ label }) => (
+  <span className="block min-w-0 truncate" title={label}>
+    {label}
+  </span>
+);
+
 export const PasskeySettings: React.FC = () => {
   const { t } = useI18n();
   const timeFormatPreference = useUIStore((state) => state.timeFormatPreference);
@@ -219,7 +225,7 @@ export const PasskeySettings: React.FC = () => {
             {passkeys.map((passkey) => (
               <SettingsFieldRow
                 key={passkey.id}
-                label={<span className="truncate">{passkey.label}</span>}
+                label={<PasskeyLabel label={passkey.label} />}
                 alignEnd={false}
                 controlClassName="justify-between sm:flex-1"
               >

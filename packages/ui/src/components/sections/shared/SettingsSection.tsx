@@ -311,7 +311,7 @@ export const SettingsFieldRow: React.FC<SettingsFieldRowProps> = ({
     >
       <div className="min-w-0 @xl:w-56 @xl:shrink-0">
         <div className="flex items-center gap-1.5">
-          <div className={SETTINGS_FIELD_LABEL_CLASS}>{label}</div>
+          <div className={cn(SETTINGS_FIELD_LABEL_CLASS, 'min-w-0')}>{label}</div>
           {info != null ? <SettingsInfoHint>{info}</SettingsInfoHint> : null}
         </div>
         {description != null ? (
