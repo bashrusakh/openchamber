@@ -1653,11 +1653,13 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             providerId,
             modelId,
             showProviderLogo,
+            providerLogoAriaHidden,
         }: {
             model: ProviderModel;
             providerId: string;
             modelId: string;
             showProviderLogo: boolean;
+            providerLogoAriaHidden?: boolean;
         }) => {
             const rowKey = buildModelRefKey(providerId, modelId);
             const isSelected = providerId === currentProviderId && modelId === currentModelId;
@@ -1681,6 +1683,9 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                 new Map([...capabilityIcons, ...modalityIcons].map((icon) => [icon.key, icon])).values()
             );
             const contextText = metadata?.limit?.context ? `${formatTokens(metadata.limit.context)} ctx` : null;
+            const providerLogo = showProviderLogo ? (
+                <ProviderLogo providerId={providerId} className="size-3.5 flex-shrink-0" />
+            ) : null;
 
             return (
                 <div
@@ -1701,9 +1706,11 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                         >
                             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                                 <div className="flex min-w-0 items-center gap-1.5">
-                                    {showProviderLogo ? (
-                                        <ProviderLogo providerId={providerId} className="size-3.5 flex-shrink-0" />
-                                    ) : null}
+                                    {providerLogoAriaHidden ? (
+                                        <span aria-hidden="true" className="flex size-3.5 flex-shrink-0 items-center justify-center">
+                                            {providerLogo}
+                                        </span>
+                                    ) : providerLogo}
                                     <span className="typography-meta font-medium text-foreground truncate">
                                         {getModelDisplayName(model)}
                                     </span>
@@ -1940,7 +1947,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                             model,
                                             providerId: provider.id as string,
                                             modelId: model.id as string,
-                                            showProviderLogo: false,
+                                            showProviderLogo: true,
+                                            providerLogoAriaHidden: true,
                                         }))}
                                     </div>
                                 )}
