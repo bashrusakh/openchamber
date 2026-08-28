@@ -7,11 +7,9 @@ import React from 'react';
  * - Left edge → centre  = open the sessions drawer
  * - Right edge → centre = open the most recent overflow surface
  *
- * Only `touchstart`/`touchend` are observed (both passive), so this never
- * interferes with vertical chat scrolling or the horizontal scroll inside code
- * blocks — it just reads where the gesture began and ended. The edge zone
- * keeps it clear of in-content horizontal scroll, which lives away from the
- * screen edges.
+ * Only passive touch listeners are used, so this never prevents native
+ * scrolling. A gesture that starts inside a horizontally scrollable ancestor
+ * stays with that container while it has room to scroll in the swipe direction.
  */
 
 const EDGE_ZONE = 32; // px from a side where the swipe must begin
@@ -21,6 +19,88 @@ const EDGE_ZONE = 32; // px from a side where the swipe must begin
 const ANDROID_EDGE_ZONE = 80;
 const MIN_DISTANCE = 64; // px of horizontal travel required to commit
 const MAX_OFF_AXIS_RATIO = 0.7; // |dy| must stay below |dx| * this (keep it horizontal)
+const SCROLL_BOUNDARY_EPSILON = 1;
+
+export type SwipePoint = { x: number; y: number };
+type HorizontalFingerDirection = 'left' | 'right';
+
+export const isValidHorizontalSwipe = (start: SwipePoint, end: SwipePoint): boolean => {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  return Math.abs(dx) >= MIN_DISTANCE && Math.abs(dy) <= Math.abs(dx) * MAX_OFF_AXIS_RATIO;
+};
+
+const isHorizontalScrollContainer = (element: HTMLElement): boolean => {
+  const style = window.getComputedStyle(element);
+  const overflowX = style.overflowX || style.overflow;
+  return (overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'overlay')
+    && element.scrollWidth > element.clientWidth;
+};
+
+const isTargetWithinBoundary = (target: EventTarget | null, boundary: HTMLElement): target is Node => (
+  target instanceof Node && boundary.contains(target)
+);
+
+const getHorizontalScrollAncestors = (target: EventTarget | null, boundary: HTMLElement): HTMLElement[] => {
+  if (!isTargetWithinBoundary(target, boundary)) return [];
+  const ancestors: HTMLElement[] = [];
+  let node: Element | null = target instanceof Element ? target : target.parentElement;
+  while (node) {
+    if (node instanceof HTMLElement && isHorizontalScrollContainer(node)) ancestors.push(node);
+    if (node === boundary) break;
+    node = node.parentElement;
+  }
+  return ancestors;
+};
+
+export const hasHorizontalScrollRoom = (
+  target: EventTarget | null,
+  boundary: HTMLElement,
+  fingerDirection: HorizontalFingerDirection,
+): boolean => {
+  const ancestors = getHorizontalScrollAncestors(target, boundary);
+  return ancestors.some((ancestor) => fingerDirection === 'right'
+    ? ancestor.scrollLeft > SCROLL_BOUNDARY_EPSILON
+    : ancestor.scrollLeft + ancestor.clientWidth < ancestor.scrollWidth - SCROLL_BOUNDARY_EPSILON);
+};
+
+const WORKSPACE_DISMISS_IGNORED_TARGET_SELECTOR = [
+  'a[href]',
+  'button',
+  'input',
+  'select',
+  'textarea',
+  '[contenteditable="true"]',
+  '[role="button"]',
+  '[role="combobox"]',
+  '[role="checkbox"]',
+  '[role="menuitem"]',
+  '[role="option"]',
+  '[role="switch"]',
+  '[role="tab"]',
+  '[role="textbox"]',
+  '[data-terminal-owner]',
+].join(',');
+
+const isWorkspaceDismissIgnoredTarget = (target: EventTarget | null): boolean => (
+  target instanceof Element && Boolean(target.closest(WORKSPACE_DISMISS_IGNORED_TARGET_SELECTOR))
+);
+
+export const shouldDismissWorkspaceDrawer = (
+  open: boolean,
+  variant: 'drawer' | 'panel',
+  start: SwipePoint | null,
+  end: SwipePoint | null,
+  target: EventTarget | null,
+  boundary: HTMLElement | null,
+): boolean => {
+  if (!open || variant !== 'drawer' || !start || !end || !boundary) return false;
+  if (!isTargetWithinBoundary(target, boundary)) return false;
+  if (!isValidHorizontalSwipe(start, end) || end.x <= start.x) return false;
+  if (window.getSelection()?.isCollapsed === false) return false;
+  if (isWorkspaceDismissIgnoredTarget(target)) return false;
+  return !hasHorizontalScrollRoom(target, boundary, 'right');
+};
 
 export interface EdgeSwipeOptions {
   /** Swipe that started at the left edge and travelled right. */
@@ -47,10 +127,12 @@ export const useEdgeSwipe = (
     let fromLeftEdge = false;
     let startX = 0;
     let startY = 0;
+    let startTarget: EventTarget | null = null;
 
     const onTouchStart = (event: TouchEvent) => {
       if (event.touches.length !== 1) {
         tracking = false;
+        startTarget = null;
         return;
       }
       const touch = event.touches[0];
@@ -61,31 +143,44 @@ export const useEdgeSwipe = (
       fromLeftEdge = nearLeft;
       startX = touch.clientX;
       startY = touch.clientY;
+      startTarget = tracking ? event.target : null;
     };
 
     const onTouchEnd = (event: TouchEvent) => {
       if (!tracking) return;
       tracking = false;
+      const touchTarget = startTarget;
+      startTarget = null;
+      if (event.touches.length !== 0 || event.changedTouches.length !== 1) return;
       const touch = event.changedTouches[0];
-      if (!touch) return;
 
       const dx = touch.clientX - startX;
-      const dy = touch.clientY - startY;
-      if (Math.abs(dx) < MIN_DISTANCE) return;
-      if (Math.abs(dy) > Math.abs(dx) * MAX_OFF_AXIS_RATIO) return;
+      if (!isValidHorizontalSwipe({ x: startX, y: startY }, { x: touch.clientX, y: touch.clientY })) return;
       // Must travel toward the centre: left edge → rightward, right edge → leftward.
       if (fromLeftEdge && dx <= 0) return;
       if (!fromLeftEdge && dx >= 0) return;
+      const fingerDirection: HorizontalFingerDirection = dx > 0 ? 'right' : 'left';
+      // Let a markdown table/code block consume an inward swipe while it can
+      // still scroll in that direction. At the boundary, the drawer gesture
+      // remains available as the fallback navigation action.
+      if (hasHorizontalScrollRoom(touchTarget, element, fingerDirection)) return;
 
       if (fromLeftEdge) optionsRef.current.onLeftEdgeSwipe?.();
       else optionsRef.current.onRightEdgeSwipe?.();
     };
 
+    const onTouchCancel = () => {
+      tracking = false;
+      startTarget = null;
+    };
+
     element.addEventListener('touchstart', onTouchStart, { passive: true });
     element.addEventListener('touchend', onTouchEnd, { passive: true });
+    element.addEventListener('touchcancel', onTouchCancel, { passive: true });
     return () => {
       element.removeEventListener('touchstart', onTouchStart);
       element.removeEventListener('touchend', onTouchEnd);
+      element.removeEventListener('touchcancel', onTouchCancel);
     };
   }, [ref]);
 };

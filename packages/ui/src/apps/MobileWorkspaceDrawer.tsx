@@ -17,6 +17,7 @@ import { useMcpStore } from '@/stores/useMcpStore';
 
 import { MobileChangesSurface } from './MobileChangesSurface';
 import { MobileFilesSurface } from './MobileFilesSurface';
+import { shouldDismissWorkspaceDrawer, type SwipePoint } from './useEdgeSwipe';
 
 const DRAWER_ROOT_ID = 'mobile-surface-root';
 const ENTER_DELAY_MS = 16;
@@ -175,6 +176,40 @@ export const MobileWorkspaceDrawer: React.FC<{
     };
   }, [open, variant]);
 
+  const dismissStartRef = React.useRef<SwipePoint | null>(null);
+  const dismissTargetRef = React.useRef<EventTarget | null>(null);
+  const dismissBoundaryRef = React.useRef<HTMLElement | null>(null);
+  const handleTouchStart = (event: React.TouchEvent<HTMLElement>) => {
+    if (!open || variant !== 'drawer' || event.touches.length !== 1) {
+      dismissStartRef.current = null;
+      dismissTargetRef.current = null;
+      dismissBoundaryRef.current = null;
+      return;
+    }
+    const touch = event.touches[0];
+    dismissStartRef.current = { x: touch.clientX, y: touch.clientY };
+    dismissTargetRef.current = event.target;
+    dismissBoundaryRef.current = event.currentTarget;
+  };
+  const handleTouchEnd = (event: React.TouchEvent<HTMLElement>) => {
+    const start = dismissStartRef.current;
+    const target = dismissTargetRef.current;
+    const boundary = dismissBoundaryRef.current;
+    dismissStartRef.current = null;
+    dismissTargetRef.current = null;
+    dismissBoundaryRef.current = null;
+    if (!start || event.touches.length !== 0 || event.changedTouches.length !== 1) return;
+    const touch = event.changedTouches[0];
+    if (shouldDismissWorkspaceDrawer(open, variant, start, { x: touch.clientX, y: touch.clientY }, target, boundary)) {
+      onCloseRef.current();
+    }
+  };
+  const handleTouchCancel = () => {
+    dismissStartRef.current = null;
+    dismissTargetRef.current = null;
+    dismissBoundaryRef.current = null;
+  };
+
   if (variant === 'drawer' && !rootRef.current) return null;
 
   const tabItems: SortableTabsStripItem[] = [
@@ -292,6 +327,9 @@ export const MobileWorkspaceDrawer: React.FC<{
         visibility: visible ? 'visible' : 'hidden',
         pointerEvents: open ? 'auto' : 'none',
       }}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchCancel}
     >
       {body}
     </section>,
