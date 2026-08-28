@@ -763,7 +763,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         ? createMessageQueueTarget(currentSessionId, currentSessionDirectoryForSync ?? currentDirectory)
         : null;
     const messageQueueKey = messageQueueTarget ? getMessageQueueKey(messageQueueTarget) : null;
-    const followUpBehavior = useMessageQueueStore((state) => state.followUpBehavior);
     const queuedMessages = useMessageQueueStore(
         React.useCallback(
             (state) => {
@@ -912,7 +911,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     type SubmitOptions = {
         queuedOnly?: boolean;
         queuedMessageId?: string;
-        delivery?: 'steer';
         /** Submit this text instead of the composer input. Used by preset
             starter chips: on mobile the collapsed pill has no mounted textarea,
             so the DOM-first input snapshot would read empty content. */
@@ -969,8 +967,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     }, []);
 
     const handleQueuedMessageSend = React.useCallback((messageId: string) => {
-        // Force-sending from the queue during a busy session counts as steer
-        void handleSubmitRef.current({ queuedOnly: true, queuedMessageId: messageId, delivery: 'steer' });
+        void handleSubmitRef.current({ queuedOnly: true, queuedMessageId: messageId });
     }, []);
 
     const handleOpenAgentPanel = React.useCallback(() => {
@@ -1004,7 +1001,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const submitRuntimeKey = getRuntimeKey();
         const queuedOnly = options?.queuedOnly ?? false;
         const queuedMessageId = options?.queuedMessageId;
-        const delivery = options?.delivery === 'steer' && sessionPhase !== 'idle' ? 'steer' : undefined;
         const capturedTarget = messageQueueTarget;
         // An expired session cannot deliver anything: keep the prompt in the
         // composer and point at the login banner instead of burning the send
@@ -1098,19 +1094,17 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             sessionId?: string;
             directory?: string;
             draftSnapshot?: NonNullable<typeof capturedDraftSnapshot>;
-            delivery?: 'steer';
         } | undefined;
         if (isBtwActive && btwSessionId && btwDirectory) {
             sendMessageOptions = {
                 sessionId: btwSessionId,
                 directory: btwDirectory,
             };
-        } else if (capturedTarget || capturedDraftSnapshot || delivery) {
+        } else if (capturedTarget || capturedDraftSnapshot) {
             sendMessageOptions = {};
             if (capturedTarget) sendMessageOptions.target = capturedTarget;
             if (capturedDraftSnapshot) sendMessageOptions.draftSnapshot = capturedDraftSnapshot;
         }
-        if (delivery && sendMessageOptions) sendMessageOptions.delivery = delivery;
 
         const preparedDocumentMentions = new Map<string, AttachedFile[]>();
         const reservedFilenames = new Set([
@@ -1526,18 +1520,16 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     // Update ref with latest handleSubmit on every render
     handleSubmitRef.current = handleSubmit;
 
-    // Primary action for send/queue button — respects selected follow-up behavior
+    // Primary action for send/queue button — a busy session always queues
     const handlePrimaryAction = React.useCallback(() => {
         const inputSnapshot = getCurrentInputSnapshot();
         const canQueue = !isBtwActive && inputMode === 'normal' && inputSnapshot.hasContent && currentSessionId && (currentSessionPhase !== 'idle' || autoReviewRunning);
-        if (followUpBehavior === 'queue' && canQueue) {
+        if (canQueue) {
             handleQueueMessage();
-        } else if (followUpBehavior === 'steer' && canQueue) {
-            void handleSubmitRef.current({ delivery: 'steer' });
         } else {
             void handleSubmitRef.current();
         }
-    }, [inputMode, getCurrentInputSnapshot, currentSessionId, currentSessionPhase, autoReviewRunning, followUpBehavior, handleQueueMessage, isBtwActive]);
+    }, [inputMode, getCurrentInputSnapshot, currentSessionId, currentSessionPhase, autoReviewRunning, handleQueueMessage, isBtwActive]);
 
     // Draft welcome presets: submit immediately.
     const submitPresetPrompt = React.useCallback((text: string, type: 'command' | 'skill') => {
@@ -1720,33 +1712,22 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             return;
         }
 
-        // Handle Enter/Ctrl+Enter based on selected follow-up behavior. On
-        // mobile, and in desktop focus mode, plain Enter writes a newline and
-        // only Cmd/Ctrl+Enter sends: both are surfaces for composing long
-        // prompts, where an accidental send costs more than an extra keypress.
+        // Handle Enter/Ctrl+Enter. On mobile, and in desktop focus mode, plain
+        // Enter writes a newline and only Cmd/Ctrl+Enter sends: both are
+        // surfaces for composing long prompts, where an accidental send costs
+        // more than an extra keypress.
         const requiresModifierToSend = isMobile || isDesktopExpanded;
         if (e.key === 'Enter' && !e.shiftKey && (!requiresModifierToSend || e.ctrlKey || e.metaKey)) {
             e.preventDefault();
 
-            const isCtrlEnter = e.ctrlKey || e.metaKey;
-
-            // Queueing / steering only works when there's an existing busy
-            // session (or an active auto-review run).
+            // Queueing only works when there's an existing busy session (or an
+            // active auto-review run); a busy session always queues.
             const canQueue = !isBtwActive && inputMode === 'normal' && hasContent && currentSessionId && (currentSessionPhase !== 'idle' || autoReviewRunning);
 
-            if (followUpBehavior === 'queue') {
-                if (isCtrlEnter || !canQueue) {
-                    handleSubmit();
-                } else {
-                    handleQueueMessage();
-                }
+            if (canQueue) {
+                handleQueueMessage();
             } else {
-                // steer: Enter steers into the running turn, Ctrl+Enter sends now.
-                if (isCtrlEnter || !canQueue) {
-                    handleSubmit();
-                } else {
-                    handleSubmit({ delivery: 'steer' });
-                }
+                handleSubmit();
             }
         }
     };

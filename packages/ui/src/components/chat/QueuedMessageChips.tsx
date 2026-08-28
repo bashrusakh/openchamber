@@ -17,7 +17,10 @@ import { CSS } from '@dnd-kit/utilities';
 import { createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore, type MessageQueueTarget, type QueuedMessage } from '@/stores/messageQueueStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useInputStore } from '@/sync/input-store';
+import { useSessionActivity } from '@/hooks/useSessionActivity';
 import { useI18n } from '@/lib/i18n';
+import { getRuntimeKey } from '@/lib/runtime-switch';
+import { useAutoReviewStore } from '@/stores/useAutoReviewStore';
 import { Icon } from "@/components/icon/Icon";
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -27,9 +30,10 @@ interface QueuedMessageChipProps {
     target: MessageQueueTarget;
     onEdit: (message: QueuedMessage) => void;
     onSend: (message: QueuedMessage) => void;
+    isBusy: boolean;
 }
 
-const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessageChipProps) => {
+const QueuedMessageChip = memo(({ message, target, onEdit, onSend, isBusy }: QueuedMessageChipProps) => {
     const { t } = useI18n();
     const removeFromQueue = useMessageQueueStore((state) => state.removeFromQueue);
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: message.id });
@@ -82,6 +86,7 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessa
                 type="button"
                 variant="secondary"
                 size="xs"
+                disabled={isBusy}
                 onClick={() => onSend(message)}
             >
                 <Icon name="send-plane" className="h-3 w-3" aria-hidden="true" />
@@ -120,6 +125,15 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: Queued
             [currentSessionId],
         ),
     );
+    const { phase: sessionPhase } = useSessionActivity(currentSessionId, currentSessionDirectory ?? undefined);
+    // Same busy derivation as ChatInput's canQueue: an active auto-review run
+    // keeps the session busy even when the session phase is idle.
+    const autoReviewRunning = useAutoReviewStore(React.useCallback((state) => {
+        if (!currentSessionId) return false;
+        const run = state.runsByOriginalSessionID[currentSessionId];
+        return run?.status === 'running' && run.runtimeKey === getRuntimeKey();
+    }, [currentSessionId]));
+    const isBusy = sessionPhase !== 'idle' || autoReviewRunning;
     const target = currentSessionId ? createMessageQueueTarget(currentSessionId, currentSessionDirectory) : null;
     const queueKey = target ? getMessageQueueKey(target) : null;
     const queuedMessages = useMessageQueueStore(
@@ -175,7 +189,14 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: Queued
                     <span className="typography-ui-label font-medium text-foreground flex-shrink-0">
                         {t('chat.queuedMessage.title')} {queuedMessages.length}
                     </span>
-                    <Icon name="time" className="ml-auto h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                    {isBusy ? (
+                        <>
+                            <Icon name="loader-4" className="ml-auto h-4 w-4 animate-spin text-muted-foreground" aria-hidden="true" />
+                            <span className="typography-ui-label flex-shrink-0 text-muted-foreground">{t('chat.queuedMessage.waiting')}</span>
+                        </>
+                    ) : (
+                        <Icon name="time" className="ml-auto h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                    )}
                 </div>
                 <DndContext
                     sensors={sensors}
@@ -194,6 +215,7 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: Queued
                                     target={target}
                                     onEdit={handleEdit}
                                     onSend={handleSend}
+                                    isBusy={isBusy}
                                 />
                             ))}
                         </div>
