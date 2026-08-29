@@ -108,7 +108,7 @@ describe('checkPullRequestSourceAvailability', () => {
     const result = await checkPullRequestSourceAvailability(
       repo.runner,
       repo.path,
-      null as unknown as PullRequestSourceInput,
+      null,
     );
     expect(result).toBeNull();
   });

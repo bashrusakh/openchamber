@@ -32,19 +32,17 @@ export const createChildProcessGitRunner = (
   const windowsHide = options.windowsHide ?? true;
   const maxBuffer = options.maxBuffer ?? 20 * 1024 * 1024;
 
-  const parseErrorMessage = (error: unknown): string => {
-    const candidate = error as {
-      stderr?: string;
-      stdout?: string;
-    } | null;
-    if (!candidate) {
+  const parseErrorMessage = (error: Error | null): string => {
+    if (!error) {
       return '';
     }
     // Note: we intentionally do NOT include `error.message` because
     // `execFile` populates it with the full command line (including
     // any sensitive refspecs or URLs). Align with the VS Code
     // extension's behaviour which uses only stderr/stdout.
-    return [candidate.stderr, candidate.stdout]
+    const stderr = 'stderr' in error ? error.stderr : '';
+    const stdout = 'stdout' in error ? error.stdout : '';
+    return [stderr, stdout]
       .map((value) => String(value ?? '').trim())
       .filter(Boolean)
       .join('\n')
@@ -67,18 +65,14 @@ export const createChildProcessGitRunner = (
           stderr: String(stderr ?? ''),
         };
       } catch (error) {
-        const execError = error as {
-          code?: unknown;
-          stdout?: string;
-          stderr?: string;
-        } | null;
-        const code = execError?.code;
+        const execError = error instanceof Error ? error : null;
+        const code = execError && 'code' in execError ? execError.code : undefined;
         return {
           success: false,
-          exitCode: typeof code === 'number' ? code : 1,
-          stdout: String(execError?.stdout ?? ''),
-          stderr: String(execError?.stderr ?? ''),
-          message: parseErrorMessage(error),
+          exitCode: Number.isInteger(code) ? Number(code) : 1,
+          stdout: String(execError && 'stdout' in execError ? execError.stdout : ''),
+          stderr: String(execError && 'stderr' in execError ? execError.stderr : ''),
+          message: parseErrorMessage(execError),
         };
       }
     },

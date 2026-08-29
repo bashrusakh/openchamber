@@ -131,7 +131,7 @@ const resolvePrWorktreeConfig = (pr: GitHubPullRequestSummary) => {
   const ownerFromLabel = String(pr.headLabel || '').split(':')[0]?.trim();
   const remoteSeed = pr.headRepo?.owner || ownerFromLabel || 'pr-head';
   const remoteName = `pr-${sanitizeRemoteName(remoteSeed)}`;
-  const remoteUrl = pr.headRepo?.sshUrl || pr.headRepo?.cloneUrl || '';
+  const remoteUrl = pr.headRepo?.cloneUrl || pr.headRepo?.sshUrl || '';
   const sourceLabel = String(pr.headLabel || '').trim().replace(':', '/') || headBranch;
 
   if (!remoteUrl) {
@@ -977,7 +977,7 @@ export function NewWorktreeDialog({
           ...(sourceBranch && mode === 'new-branch' ? { startRef: sourceBranch } : {}),
         };
       })();
-      
+
       const resolvedArgs = await withWorktreeUpstreamDefaults(
         projectDirectory,
         args,

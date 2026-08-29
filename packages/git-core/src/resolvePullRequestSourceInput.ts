@@ -11,15 +11,15 @@ import type { PullRequestFork, PullRequestSourceInput } from './types.js';
  * payload's full type.
  */
 export interface CreateGitWorktreePrFields {
-  prNumber?: unknown;
-  upstreamBranch?: unknown;
-  existingBranch?: unknown;
-  ensureRemoteName?: unknown;
-  ensureRemoteUrl?: unknown;
-  baseRemote?: unknown;
+  prNumber?: number | string | null;
+  upstreamBranch?: string | null;
+  existingBranch?: string | null;
+  ensureRemoteName?: string | null;
+  ensureRemoteUrl?: string | null;
+  baseRemote?: string | null;
 }
 
-const trimmed = (value: unknown): string => String(value || '').trim();
+const trimmed = (value: string | null | undefined): string => String(value || '').trim();
 
 export const hasPullRequestIdentity = (input: CreateGitWorktreePrFields | null | undefined): boolean => {
   const value = input?.prNumber;

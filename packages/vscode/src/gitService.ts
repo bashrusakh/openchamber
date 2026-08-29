@@ -1625,16 +1625,16 @@ const ensureRemoteWithUrl = async (primaryWorktree: string, remoteName: string, 
     return;
   }
 
-  const getUrl = await runGitCommand(primaryWorktree, ['remote', 'get-url', name]);
+  const getUrl = await runGitCommand(primaryWorktree, ['remote', 'get-url', '--', name]);
   if (getUrl.success) {
     const currentUrl = String(getUrl.stdout || '').trim();
     if (currentUrl !== url) {
-      await runGitCommandOrThrow(primaryWorktree, ['remote', 'set-url', name, url], 'Failed to update git remote URL');
+      await runGitCommandOrThrow(primaryWorktree, ['remote', 'set-url', '--', name, url], 'Failed to update git remote URL');
     }
     return;
   }
 
-  await runGitCommandOrThrow(primaryWorktree, ['remote', 'add', name, url], 'Failed to add git remote');
+  await runGitCommandOrThrow(primaryWorktree, ['remote', 'add', '--', name, url], 'Failed to add git remote');
 };
 
 // PR-resolution helpers now live in `@openchamber/git-core`. The local
@@ -1873,7 +1873,7 @@ export async function validateWorktreeCreate(directory: string, input: CreateGit
       if (!upstreamRemote || !upstreamBranch) {
         errors.push({ code: 'upstream_incomplete', message: 'upstreamRemote and upstreamBranch are required when setUpstream is true' });
       } else {
-        const remoteExists = await runGitCommand(context.primaryWorktree, ['remote', 'get-url', upstreamRemote]);
+        const remoteExists = await runGitCommand(context.primaryWorktree, ['remote', 'get-url', '--', upstreamRemote]);
         if (!remoteExists.success && (!ensureRemoteName || ensureRemoteName !== upstreamRemote)) {
           errors.push({ code: 'remote_not_found', message: `Remote not found: ${upstreamRemote}` });
         }
@@ -2049,12 +2049,6 @@ async function attachGitWorktreeToCandidate(
 
   if (resolvedPullRequestSource && !resolvedPullRequestSource.upstream) {
     await clearBranchTracking(candidate.directory, localBranch);
-  }
-
-  try {
-    await syncProjectSandboxAdd(context.projectID, context.primaryWorktree, candidate.directory);
-  } catch (error) {
-    console.warn('[GitService] Failed to sync OpenCode sandbox metadata (add):', error instanceof Error ? error.message : String(error));
   }
 
   const shouldSetUpstream = Boolean(input?.setUpstream)
@@ -2923,7 +2917,7 @@ export async function gitPull(
   const beforeHead = await execGit(['rev-parse', 'HEAD'], directory);
   const args = ['pull'];
   if (options?.rebase === true) args.push('--rebase');
-  if (options?.remote) args.push(options.remote);
+  if (options?.remote) args.push('--', options.remote);
   if (options?.branch) args.push(options.branch);
 
   const result = await execGit(args, directory);

@@ -65,21 +65,23 @@ const args = process.argv.slice(2);
 const marker = process.env.OPENCHAMBER_TEST_GIT_FAILURE_MARKER;
 const failure = process.env.OPENCHAMBER_TEST_GIT_FAILURE_PATH;
 const realGit = process.env.OPENCHAMBER_TEST_REAL_GIT;
+const fetchRemote = args[1] === '--' ? args[2] : args[1];
 const failFetch = marker
   && fs.existsSync(marker)
   && args[0] === 'fetch'
-  && (args[1] === 'pr-race' || args[1] === 'base');
+  && (fetchRemote === 'pr-race' || fetchRemote === 'base');
 if (failFetch) {
-  if (failure && args[1] === 'base') fs.writeFileSync(failure, args.join(' '));
+  if (failure && fetchRemote === 'base') fs.writeFileSync(failure, args.join(' '));
   process.stderr.write('simulated git command failure\\n');
   process.exit(1);
 }
 const result = spawnSync(realGit, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' });
+const remoteName = args[2] === '--' ? args[3] : args[2];
 if (
   marker
   && args[0] === 'remote'
   && (args[1] === 'add' || args[1] === 'get-url')
-  && args[2] === 'pr-race'
+  && remoteName === 'pr-race'
   && result.status === 0
 ) {
   fs.writeFileSync(marker, 'attachment started');

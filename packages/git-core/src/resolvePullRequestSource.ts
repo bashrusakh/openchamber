@@ -20,6 +20,7 @@ export const fetchPullRequestHeadRef = async (
   const destinationRef = `refs/remotes/${source.baseRemote}/pull/${source.pullRequest.number}/head`;
   const fetched = await runner.run(primaryWorktree, [
     'fetch',
+    '--',
     source.baseRemote,
     `+${source.pullRequest.sourceRef}:${destinationRef}`,
   ]);

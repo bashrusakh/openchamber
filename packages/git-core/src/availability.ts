@@ -42,7 +42,7 @@ export const checkPullRequestHeadRefExists = async (
 export const checkPullRequestSourceAvailability = async (
   runner: GitRunner,
   primaryWorktree: string,
-  source: PullRequestSourceInput,
+  source: PullRequestSourceInput | null | undefined,
 ): Promise<Pick<PullRequestSource, 'headBranch' | 'upstream'> | null> => {
   if (!source) {
     return null;

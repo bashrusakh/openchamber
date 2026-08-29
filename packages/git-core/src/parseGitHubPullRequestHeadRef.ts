@@ -7,8 +7,10 @@ import type { PullRequestHeadRef } from './types.js';
  * for missing, blank, or non-positive values so callers can decide
  * whether "no PR attached" is a no-op or an error.
  */
-export const parseGitHubPullRequestHeadRef = (value: unknown): PullRequestHeadRef | null => {
-  const number = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+export const parseGitHubPullRequestHeadRef = (
+  value: number | string | null | undefined,
+): PullRequestHeadRef | null => {
+  const number = Number(String(value ?? '').trim());
   if (!Number.isSafeInteger(number) || number <= 0) {
     return null;
   }

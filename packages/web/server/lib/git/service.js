@@ -867,7 +867,7 @@ const hasRemote = async (git, directory, remoteName) => {
   }
 
   const exists = await git
-    .raw(['remote', 'get-url', remote])
+    .raw(['remote', 'get-url', '--', remote])
     .then((value) => String(value || '').trim().length > 0)
     .catch(() => false);
 
@@ -1897,16 +1897,16 @@ const ensureRemoteWithUrl = async (primaryWorktree, remoteName, remoteUrl) => {
     return;
   }
 
-  const getUrl = await runGitCommand(primaryWorktree, ['remote', 'get-url', name]);
+  const getUrl = await runGitCommand(primaryWorktree, ['remote', 'get-url', '--', name]);
   if (getUrl.success) {
     const currentUrl = String(getUrl.stdout || '').trim();
     if (currentUrl !== url) {
-      await runGitCommandOrThrow(primaryWorktree, ['remote', 'set-url', name, url], 'Failed to update git remote URL');
+      await runGitCommandOrThrow(primaryWorktree, ['remote', 'set-url', '--', name, url], 'Failed to update git remote URL');
     }
     return;
   }
 
-  await runGitCommandOrThrow(primaryWorktree, ['remote', 'add', name, url], 'Failed to add git remote');
+  await runGitCommandOrThrow(primaryWorktree, ['remote', 'add', '--', name, url], 'Failed to add git remote');
 };
 
 // PR-resolution helpers now live in `@openchamber/git-core` and are imported
@@ -1966,6 +1966,7 @@ const applyUpstreamConfiguration = async (args) => {
     return;
   }
 
+  let fetched = true;
   try {
     await fetchRemoteBranchRef(primaryWorktree, upstream.remote, upstream.branch);
   } catch {
@@ -3385,7 +3386,7 @@ export async function fetch(directory, options = {}) {
 
     if (remote && !branch) {
       // simple-git drops the remote when branch is omitted, so use raw to preserve `git fetch <remote>`.
-      await git.raw(['fetch', ...buildRawGitOptions(fetchOptions), remote]);
+      await git.raw(['fetch', ...buildRawGitOptions(fetchOptions), '--', remote]);
     } else {
       await git.fetch(
         remote || 'origin',
@@ -3993,13 +3994,33 @@ export async function validateWorktreeCreate(directory, input = {}) {
       }
     } else if (mode === 'existing') {
       try {
-        const resolved = await resolveExistingWorktreeSource(context.primaryWorktree, input, 'validate');
-        localBranch = resolved.localBranch || '';
-        if (resolved.upstream) {
+        const requestedExistingBranch = String(input?.existingBranch || '').trim();
+        const parsedExistingRemote = await resolveRemoteBranchRef(context.primaryWorktree, requestedExistingBranch);
+        if (parsedExistingRemote && ensureRemoteName && ensureRemoteUrl && ensureRemoteName === parsedExistingRemote.remote) {
+          const lsRemote = await runGitCommand(
+            context.primaryWorktree,
+            ['ls-remote', '--heads', ensureRemoteUrl, `refs/heads/${parsedExistingRemote.branch}`]
+          );
+          if (!lsRemote.success) {
+            throw new Error(`Unable to query remote ${ensureRemoteName}`);
+          }
+          if (!String(lsRemote.stdout || '').trim()) {
+            throw new Error(`Remote branch not found: ${parsedExistingRemote.remoteRef}`);
+          }
+          localBranch = cleanBranchName(preferredBranchName || parsedExistingRemote.branch);
           inferredUpstream = {
-            remote: resolved.upstream.remote,
-            branch: resolved.upstream.branch,
+            remote: parsedExistingRemote.remote,
+            branch: parsedExistingRemote.branch,
           };
+        } else {
+          const resolved = await resolveBranchForExistingMode(context.primaryWorktree, requestedExistingBranch, preferredBranchName);
+          localBranch = resolved.localBranch || '';
+          if (resolved.remoteRef) {
+            inferredUpstream = {
+              remote: resolved.remoteRef.remote,
+              branch: resolved.remoteRef.branch,
+            };
+          }
         }
       } catch (error) {
         errors.push({
@@ -4104,7 +4125,7 @@ export async function validateWorktreeCreate(directory, input = {}) {
           message: 'upstreamRemote and upstreamBranch are required when setUpstream is true',
         });
       } else {
-        const remoteExists = await runGitCommand(context.primaryWorktree, ['remote', 'get-url', upstreamRemote]);
+        const remoteExists = await runGitCommand(context.primaryWorktree, ['remote', 'get-url', '--', upstreamRemote]);
         if (!remoteExists.success && (!ensureRemoteName || ensureRemoteName !== upstreamRemote)) {
           errors.push({
             code: 'remote_not_found',
@@ -4173,6 +4194,7 @@ export async function previewWorktreeCreate(directory, input = {}) {
 
 async function attachGitWorktreeToCandidate(context, candidate, input = {}) {
   const mode = input?.mode === 'existing' ? 'existing' : 'new';
+  const preferredBranchName = cleanBranchName(String(input?.branchName || '').trim());
   const startRef = normalizeStartRef(input?.startRef);
   const ensureRemoteName = String(input?.ensureRemoteName || '').trim();
   const ensureRemoteUrl = String(input?.ensureRemoteUrl || '').trim();
@@ -4215,7 +4237,6 @@ async function attachGitWorktreeToCandidate(context, candidate, input = {}) {
 
     const resolved = await resolveBranchForExistingMode(context.primaryWorktree, requestedExistingBranch, preferredBranchName);
     localBranch = resolved.localBranch;
-    shouldSetUpstream = resolved.setUpstream;
 
     const inUse = await findBranchInUse(context.primaryWorktree, localBranch);
     if (inUse) {
@@ -4227,10 +4248,10 @@ async function attachGitWorktreeToCandidate(context, candidate, input = {}) {
     }
     worktreeAddArgs.push(candidate.directory, resolved.checkoutRef);
 
-    if (resolved.upstream) {
+    if (resolved.remoteRef) {
       inferredUpstream = {
-        remote: resolved.upstream.remote,
-        branch: resolved.upstream.branch,
+        remote: resolved.remoteRef.remote,
+        branch: resolved.remoteRef.branch,
       };
     }
   } else {
@@ -4278,12 +4299,6 @@ async function attachGitWorktreeToCandidate(context, candidate, input = {}) {
 
   if (resolvedPullRequestSource && !resolvedPullRequestSource.upstream) {
     await clearBranchTracking(candidate.directory, localBranch);
-  }
-
-  try {
-    await syncProjectSandboxAdd(context.projectID, context.primaryWorktree, candidate.directory);
-  } catch (error) {
-    console.warn('Failed to sync OpenCode sandbox metadata (add):', error instanceof Error ? error.message : String(error));
   }
 
   const shouldSetUpstream = Boolean(input?.setUpstream)

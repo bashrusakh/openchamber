@@ -32,7 +32,7 @@ export const resolvePullRequestForkRemote = async (
       continue;
     }
 
-    const configured = await runner.run(primaryWorktree, ['remote', 'get-url', candidate]);
+    const configured = await runner.run(primaryWorktree, ['remote', 'get-url', '--', candidate]);
     if (configured.success) {
       if (configured.stdout.trim() === source.fork.url) {
         return { ...source.fork, remote: candidate };
@@ -40,12 +40,12 @@ export const resolvePullRequestForkRemote = async (
       continue;
     }
 
-    const added = await runner.run(primaryWorktree, ['remote', 'add', candidate, source.fork.url]);
+    const added = await runner.run(primaryWorktree, ['remote', 'add', '--', candidate, source.fork.url]);
     if (added.success) {
       return { ...source.fork, remote: candidate };
     }
 
-    const rechecked = await runner.run(primaryWorktree, ['remote', 'get-url', candidate]);
+    const rechecked = await runner.run(primaryWorktree, ['remote', 'get-url', '--', candidate]);
     if (rechecked.success && rechecked.stdout.trim() === source.fork.url) {
       return { ...source.fork, remote: candidate };
     }

@@ -32,7 +32,6 @@ import {
   applyHunk,
   getDiff,
   getFileDiff,
-  validateWorktreeCreate,
   parseBranchCreationSource,
   getRangeFiles,
 } from './service.js';
@@ -1154,6 +1153,28 @@ describe('linked pull request worktrees', () => {
 
       expect(getGitConfig(created.path, 'branch.feature/broken-upstream.remote')).toBeNull();
       expect(getGitConfig(created.path, 'branch.feature/broken-upstream.merge')).toBeNull();
+    });
+  });
+
+  it('configures tracking after a deferred upstream fetch succeeds', async () => {
+    if (!canRunGit()) return;
+
+    await withTestDataHome(async () => {
+      const fixture = createPullRequestFixture();
+      const created = await createWorktree(fixture.repository, {
+        mode: 'new',
+        worktreeName: 'deferred-upstream',
+        branchName: 'feature/deferred-upstream',
+        setUpstream: true,
+        upstreamRemote: 'base',
+        upstreamBranch: 'main',
+        returnAfterDirectoryCreated: true,
+      });
+
+      await waitForWorktreeBootstrap(created.path);
+
+      expect(getGitConfig(created.path, 'branch.feature/deferred-upstream.remote')).toBe('base');
+      expect(getGitConfig(created.path, 'branch.feature/deferred-upstream.merge')).toBe('refs/heads/main');
     });
   });
 

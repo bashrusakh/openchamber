@@ -5,7 +5,7 @@ between the web server runtime and the VS Code extension host.
 
 ## Why this package exists
 
-Prior to extraction, the same six functions lived verbatim in
+Prior to extraction, the same pull-request resolution helpers lived verbatim in
 `packages/web/server/lib/git/service.js` and
 `packages/vscode/src/gitService.ts`:
 
@@ -57,7 +57,7 @@ __tests__/              # vitest unit tests against real temp git repos
 
 ## Public API
 
-All functions are pure of host-runtime concerns. Pass a `GitRunner` and
+All functions are independent of host-runtime concerns. Pass a `GitRunner` and
 the absolute path to the git working directory; the core never reads
 `process.env`, never reaches into `vscode`, and never imports Express.
 
@@ -89,6 +89,8 @@ import { resolvePullRequestSource } from '@openchamber/git-core';
 try {
   const resolved = await resolvePullRequestSource(runner, primaryWorktree, source);
   // resolved.checkoutRef, resolved.headBranch, resolved.upstream
+  // A fork is preferred; otherwise the base remote's refs/pull/<n>/head ref
+  // is fetched into refs/remotes/<base>/pull/<n>/head.
 } catch (error) {
   if (error instanceof PullRequestSourceUnavailableError) {
     // Map to `pull_request_unavailable` transport code.

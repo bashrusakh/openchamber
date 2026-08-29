@@ -13,8 +13,6 @@ const listCalls: string[] = [];
 const listResolvers: Array<(value: WorktreeListEntry[]) => void> = [];
 const listRejecters: Array<(reason: Error) => void> = [];
 let listImplementation: ((directory: string) => Promise<WorktreeListEntry[]>) | undefined;
-const createPayloads: unknown[] = [];
-const validatePayloads: unknown[] = [];
 const createdWorktree = {
   head: 'abc123',
   name: 'feature',
@@ -109,7 +107,14 @@ mock.module('@/lib/gitApi', () => ({
   },
 }));
 
-const { createWorktree, getLatestWorktreeMetadata, listProjectWorktrees, validateWorktreeCreate, worktreeMapsEqual } = await import('./worktreeManager');
+const {
+  createWorktree,
+  getLatestWorktreeMetadata,
+  listProjectWorktrees,
+  partitionWorktreesByRegisteredProject,
+  validateWorktreeCreate,
+  worktreeMapsEqual,
+} = await import('./worktreeManager');
 
 const waitForListCallCount = async (count: number): Promise<void> => {
   for (let attempt = 0; attempt < 10; attempt += 1) {
