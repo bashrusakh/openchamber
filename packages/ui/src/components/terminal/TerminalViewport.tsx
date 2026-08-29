@@ -536,9 +536,6 @@ const TerminalViewport = React.forwardRef<TerminalController, Props>(({
   return (
     <div
       ref={containerRef}
-      autoCapitalize="off"
-      autoCorrect="off"
-      spellCheck={false}
       data-terminal-owner="main"
       className={cn('terminal-viewport-container h-full w-full overflow-hidden touch-none', className)}
     />
