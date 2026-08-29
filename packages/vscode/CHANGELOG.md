@@ -1,7 +1,3 @@
-## [Unreleased]
-
-- The "Open New Session in Editor" button in the editor title bar now starts the session in the currently open workspace folder instead of the folder of the last session.
-
 ## [1.21.1] - 2026-08-29
 
 - **Turkish interface:** OpenChamber can now be used in Turkish (thanks to @fitzgpt).

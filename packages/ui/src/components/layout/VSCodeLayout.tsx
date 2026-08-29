@@ -17,7 +17,7 @@ import { SessionSwitcherDropdown } from '@/components/session/SessionSwitcherDro
 import { SessionsTabTitle } from '@/components/session/SessionsTabTitle';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
-import { getVSCodeBootstrapConfig } from '@/lib/vscodeBootstrap';
+import { getVSCodeBootstrapWorkspaceFolder } from '@/lib/vscodeBootstrap';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -101,8 +101,7 @@ export const VSCodeLayout: React.FC = () => {
   }, []);
 
   const bootstrapWorkspaceFolder = React.useMemo<string | null>(() => {
-    const configured = getVSCodeBootstrapConfig()?.workspaceFolder;
-    return typeof configured === 'string' && configured.trim().length > 0 ? configured.trim() : null;
+    return getVSCodeBootstrapWorkspaceFolder();
   }, []);
 
   const hasAppliedInitialSession = React.useRef(false);

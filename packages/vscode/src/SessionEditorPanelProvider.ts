@@ -109,7 +109,7 @@ export class SessionEditorPanelProvider {
     this._createPanel(sessionId, sessionTitle, sessionId);
   }
 
-  private _createPanel(panelId: string, title: string, initialSessionId: string | null): SessionPanelState {
+  private _createPanel(panelId: string, title: string, initialSessionId: string | null): void {
     const distUri = vscode.Uri.joinPath(this._extensionUri, 'dist');
 
     const panel = vscode.window.createWebviewPanel(
@@ -193,8 +193,6 @@ export class SessionEditorPanelProvider {
         void vscode.commands.executeCommand('openchamber.internal.settingsSynced', response.data);
       }
     }, null, this._context.subscriptions);
-
-    return state;
   }
 
   public updateTheme(kind: vscode.ColorThemeKind) {
