@@ -74,18 +74,16 @@ describe('SessionEditorPanelProvider.createOrShowNewSession', () => {
     workspaceFolders = [{ name: 'alpha', uri: { fsPath: '/work/alpha' } }];
   });
 
-  it('posts a newSession command with the current workspace folder', () => {
+  it('embeds the current workspace folder for automatic draft initialization', () => {
     const provider = createProvider();
     provider.createOrShowNewSession();
 
     const newSessionMessage = postMessages.find(
       (message) => message.type === 'command' && message.command === 'newSession'
     );
-    expect(newSessionMessage).toBeDefined();
-    expect(newSessionMessage.payload).toEqual({
-      directory: '/work/alpha',
-      workspaceFolders: [{ name: 'alpha', path: '/work/alpha' }],
-    });
+    expect(newSessionMessage).toBeUndefined();
+    expect(panel.webview.html).toContain('workspaceFolder: "/work/alpha"');
+    expect(panel.webview.html).toContain('workspaceFolders: [{"name":"alpha","path":"/work/alpha"}]');
   });
 
   it('does not open a panel or post a newSession command when no workspace folder is open', () => {

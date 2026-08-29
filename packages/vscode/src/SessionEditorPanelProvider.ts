@@ -75,20 +75,7 @@ export class SessionEditorPanelProvider {
 
     // Generate unique panel ID for new session drafts
     const panelId = `new_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const state = this._createPanel(panelId, t('New Session'), null);
-
-    // Start the new session against the currently open workspace folder — the
-    // same `newSession` command the sidebar flow posts. Without it the draft
-    // falls back to the last session's directory in shared UI state.
-    const workspaceFolders = resolveWorkspaceFolders(vscode.workspace.workspaceFolders ?? []);
-    state.panel.webview.postMessage({
-      type: 'command',
-      command: 'newSession',
-      payload: {
-        directory: normalizeWindowsDriveLetter(firstFolder.uri.fsPath),
-        workspaceFolders,
-      },
-    });
+    this._createPanel(panelId, t('New Session'), null);
   }
 
   public createOrShow(sessionId: string, title?: string): void {
