@@ -8,7 +8,7 @@ const layoutSource = readFileSync(join(__dirname, '..', 'VSCodeLayout.tsx'), 'ut
 
 describe('VS Code editor new-session directory bootstrap', () => {
   test('passes the bootstrap workspace folder to the automatic draft initializer', () => {
-    expect(layoutSource).toContain("import { getVSCodeBootstrapConfig } from '@/stores/utils/vscodeRuntime';");
+    expect(layoutSource).toContain("import { getVSCodeBootstrapConfig } from '@/lib/vscodeBootstrap';");
     expect(layoutSource).toContain('const bootstrapWorkspaceFolder = React.useMemo<string | null>(() => {');
     expect(layoutSource).toContain('const configured = getVSCodeBootstrapConfig()?.workspaceFolder;');
     expect(layoutSource).toContain('openNewSessionDraft({ automatic: true, directoryOverride: bootstrapWorkspaceFolder });');

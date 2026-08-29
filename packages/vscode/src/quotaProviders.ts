@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fetchOpenCodeGoUsage } from './opencodeGoQuota';
-import { fetchCommandCodeUsage } from './commandCodeQuota';
 import { deleteLegacyOpenCodeGoCredential, readCredential } from './quotaCredentials';
 import { getProviderAuth, updateProviderAuth } from './opencodeAuth';
 
@@ -72,13 +71,31 @@ type ZaiLimit = {
   type?: string;
   number?: number;
   unit?: number;
+  usage?: number;
+  currentValue?: number;
+  remaining?: number;
   nextResetTime?: number;
   percentage?: number;
+};
+
+// CREDIT_LIMIT entries carry `usage` (total credits) and `currentValue` (consumed);
+// TOKENS_LIMIT entries only carry a percentage.
+const formatZaiCreditAmount = (value: number): string => {
+  if (value < 1000) return value.toLocaleString('en-US');
+  return `${Math.round(value / 100) / 10}k`;
+};
+
+const formatZaiCreditValueLabel = (limit: ZaiLimit): string | null => {
+  const used = toNumber(limit.currentValue);
+  const total = toNumber(limit.usage);
+  if (used === null || total === null) return null;
+  return `${formatZaiCreditAmount(used)} / ${formatZaiCreditAmount(total)} credits`;
 };
 
 type ZaiPayload = {
   data?: {
     limits?: ZaiLimit[];
+    level?: string;
   };
 };
 
@@ -411,15 +428,20 @@ const buildResult = (data: {
   configured: boolean;
   usage?: ProviderUsage | null;
   error?: string;
-}): ProviderResult => ({
-  providerId: data.providerId,
-  providerName: data.providerName,
-  ok: data.ok,
-  configured: data.configured,
-  usage: data.usage ?? null,
-  ...(data.error ? { error: data.error } : {}),
-  fetchedAt: Date.now(),
-});
+  planLabel?: string | null;
+}): ProviderResult => {
+  const result: ProviderResult = {
+    providerId: data.providerId,
+    providerName: data.providerName,
+    ok: data.ok,
+    configured: data.configured,
+    usage: data.usage ?? null,
+    ...(data.error ? { error: data.error } : {}),
+    fetchedAt: Date.now(),
+  };
+  if (data.planLabel) result.planLabel = data.planLabel;
+  return result;
+};
 
 const resolveXaiAuth = (): XaiAuthEntry | null => {
   const entry = getProviderAuth('xai');
@@ -750,9 +772,6 @@ export const listConfiguredQuotaProviders = () => {
   const configured = new Set<string>();
   const openCodeGoAuth = normalizeAuthEntry(getAuthEntry(auth, ['opencode-go']));
   if (openCodeGoAuth && (typeof openCodeGoAuth.key === 'string' || typeof openCodeGoAuth.token === 'string')) configured.add('opencode-go');
-  const commandCodeAuth = normalizeAuthEntry(getAuthEntry(auth, ['command-code']));
-  if (commandCodeAuth && (typeof commandCodeAuth.key === 'string' || typeof commandCodeAuth.access === 'string' || typeof commandCodeAuth.token === 'string')) configured.add('command-code');
-  if (process.env.COMMAND_CODE_API_KEY?.trim()) configured.add('command-code');
   if (readCredential('ollama-cloud')) configured.add('ollama-cloud');
   if (readCredential('cursor')) configured.add('cursor');
 
@@ -1291,7 +1310,7 @@ const buildClaudeRateLimitResult = (): ProviderResult => (
         providerName: 'Claude',
         ok: false,
         configured: true,
-        error: 'Rate limited by Anthropic. Retrying shortly.',
+        error: 'Rate limited. Retrying soon.',
       })
 );
 
@@ -1446,14 +1465,35 @@ const buildCopilotWindows = (payload: Record<string, unknown>) => {
   const resetAt = toTimestamp(payload.quota_reset_date);
   const windows: Record<string, UsageWindow> = {};
 
+  // Mirrors the quota semantics of microsoft/vscode-copilot-chat
+  // (CopilotUserQuotaInfo): each snapshot carries entitlement, remaining,
+  // unlimited, and percent_remaining. Unlimited plans report no usable
+  // entitlement; percent_remaining is a server-computed fallback.
   const addWindow = (label: string, snapshot?: Record<string, unknown>) => {
     if (!snapshot) return;
+
+    if (snapshot.unlimited === true) {
+      windows[label] = toUsageWindow({
+        usedPercent: null,
+        windowSeconds: null,
+        resetAt,
+        valueLabel: 'Unlimited',
+      });
+      return;
+    }
+
     const entitlement = toNumber(snapshot.entitlement);
     const remaining = toNumber(snapshot.remaining);
-    const usedPercent = entitlement && remaining !== null
-      ? Math.max(0, Math.min(100, 100 - (remaining / entitlement) * 100))
+    let usedPercent = entitlement !== null && entitlement > 0 && remaining !== null
+      ? Math.min(100, Math.max(0, 100 - (remaining / entitlement) * 100))
       : null;
-    const valueLabel = entitlement !== null && remaining !== null
+    if (usedPercent === null) {
+      const percentRemaining = toNumber(snapshot.percent_remaining);
+      if (percentRemaining !== null) {
+        usedPercent = Math.min(100, Math.max(0, 100 - percentRemaining));
+      }
+    }
+    const valueLabel = entitlement !== null && entitlement > 0 && remaining !== null
       ? `${remaining.toFixed(0)} / ${entitlement.toFixed(0)} left`
       : null;
     windows[label] = toUsageWindow({
@@ -1464,9 +1504,7 @@ const buildCopilotWindows = (payload: Record<string, unknown>) => {
     });
   };
 
-  addWindow('chat', quota.chat as Record<string, unknown> | undefined);
-  addWindow('completions', quota.completions as Record<string, unknown> | undefined);
-  addWindow('premium', quota.premium_interactions as Record<string, unknown> | undefined);
+  addWindow('premium_interactions', quota.premium_interactions as Record<string, unknown> | undefined);
 
   return windows;
 };
@@ -1563,15 +1601,12 @@ const fetchCopilotAddonQuota = async (): Promise<ProviderResult> => {
     }
 
     const payload = await response.json() as Record<string, unknown>;
-    const windows = buildCopilotWindows(payload);
-    const premium = windows.premium ? { premium: windows.premium } : windows;
-
     return buildResult({
       providerId: 'github-copilot-addon',
       providerName: 'GitHub Copilot Add-on',
       ok: true,
       configured: true,
-      usage: { windows: premium },
+      usage: { windows: buildCopilotWindows(payload) },
     });
   } catch (error) {
     return buildResult({
@@ -2059,16 +2094,19 @@ const fetchZaiQuota = async (): Promise<ProviderResult> => {
     const payload = await response.json() as ZaiPayload;
     const limits = Array.isArray(payload?.data?.limits) ? payload.data.limits : [];
     const windows: Record<string, UsageWindow> = {};
-    for (const tokensLimit of limits.filter((limit) => limit?.type === 'TOKENS_LIMIT')) {
-      const windowSeconds = resolveWindowSeconds(tokensLimit as Record<string, unknown>);
+    // The API renamed TOKENS_LIMIT to CREDIT_LIMIT; field semantics stayed the same,
+    // so both limit types map to the same windows.
+    for (const limit of limits.filter((entry) => entry?.type === 'TOKENS_LIMIT' || entry?.type === 'CREDIT_LIMIT')) {
+      const windowSeconds = resolveWindowSeconds(limit as Record<string, unknown>);
       const windowLabel = resolveWindowLabel(windowSeconds);
-      const resetAt = tokensLimit.nextResetTime ? normalizeTimestamp(tokensLimit.nextResetTime) : null;
-      const usedPercent = typeof tokensLimit.percentage === 'number' ? tokensLimit.percentage : null;
+      const resetAt = limit.nextResetTime ? normalizeTimestamp(limit.nextResetTime) : null;
+      const usedPercent = typeof limit.percentage === 'number' ? limit.percentage : null;
 
       windows[windowLabel] = toUsageWindow({
         usedPercent,
         windowSeconds,
         resetAt,
+        valueLabel: formatZaiCreditValueLabel(limit),
       });
     }
 
@@ -2087,6 +2125,7 @@ const fetchZaiQuota = async (): Promise<ProviderResult> => {
       ok: true,
       configured: true,
       usage: { windows },
+      planLabel: payload?.data?.level || null,
     });
   } catch (error) {
     return buildResult({
@@ -2846,18 +2885,6 @@ const fetchQuotaForProviderUncoalesced = async (providerId: string): Promise<Pro
         return buildResult({ providerId, providerName: 'OpenCode Go', ok: true, configured: true, usage: { windows: await fetchOpenCodeGoUsage({ apiKey }) } });
       } catch (error) {
         return buildResult({ providerId, providerName: 'OpenCode Go', ok: false, configured: true, error: error instanceof Error ? error.message : 'Request failed' });
-      }
-    }
-    case 'command-code': {
-      try {
-        const entry = normalizeAuthEntry(getAuthEntry(readAuthFile(), ['command-code']));
-        const stored = typeof entry?.key === 'string' ? entry.key : typeof entry?.access === 'string' ? entry.access : typeof entry?.token === 'string' ? entry.token : null;
-        const environment = process.env.COMMAND_CODE_API_KEY?.trim() || null;
-        const apiKey = stored?.trim() || environment;
-        if (!apiKey) return buildResult({ providerId, providerName: 'Command Code', ok: false, configured: false, error: 'Not configured' });
-        return buildResult({ providerId, providerName: 'Command Code', ok: true, configured: true, usage: { windows: await fetchCommandCodeUsage(apiKey) } });
-      } catch (error) {
-        return buildResult({ providerId, providerName: 'Command Code', ok: false, configured: true, error: error instanceof Error ? error.message : 'Request failed' });
       }
     }
     case 'cursor':

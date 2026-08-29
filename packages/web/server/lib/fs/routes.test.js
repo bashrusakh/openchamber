@@ -3,6 +3,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { mintOutsideFileGrant, registerFsRoutes } from './routes.js';
+import { createProjectDirectoryRuntime } from '../opencode/project-directory-runtime.js';
 
 const createRouteRegistry = () => {
   const routes = new Map();
@@ -164,7 +165,7 @@ const registerUpload = (fsPromises) => {
   return getRoute('POST', '/api/fs/upload');
 };
 
-const registerRead = (fsPromises) => {
+const registerRead = (fsPromises, resolveProjectDirectory = async () => ({ directory: '/repo' })) => {
   const { app, getRoute } = createRouteRegistry();
   registerFsRoutes(app, {
     os: { homedir: () => '/home/user' },
@@ -176,7 +177,7 @@ const registerRead = (fsPromises) => {
     spawn: vi.fn(),
     crypto: { randomUUID: () => 'job-0' },
     normalizeDirectoryPath: (p) => p,
-    resolveProjectDirectory: async () => ({ directory: '/repo' }),
+    resolveProjectDirectory,
     buildAugmentedPath: () => '/usr/bin',
     resolveGitBinaryForSpawn: () => 'git',
     openchamberUserConfigRoot: '/home/user/.config',
@@ -681,8 +682,94 @@ describe('fs read', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Read retry exhausted for /repo/file.txt'));
     warn.mockRestore();
   });
-});
 
+  it('reads files inside the workspace whose canonical path escapes through a symlinked directory', async () => {
+    // ~/test_folder -> /outside/shared: the requested path is lexically inside
+    // the workspace, the realpath is not. The read must follow the symlink
+    // instead of rejecting it as an outside path.
+    const fsPromises = {
+      realpath: vi.fn(async (targetPath) => {
+        if (targetPath === '/repo/link/file.txt') return '/outside/shared/file.txt';
+        return targetPath;
+      }),
+      stat: vi.fn(async () => ({ isFile: () => true, size: 5 })),
+      readFile: vi.fn(async () => 'hello'),
+    };
+    const handler = registerRead(fsPromises);
+
+    const res = await callRead(handler, { path: '/repo/link/file.txt' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe('hello');
+    expect(fsPromises.readFile).toHaveBeenCalledWith('/outside/shared/file.txt', 'utf8');
+  });
+
+  it('rejects reads of canonical paths outside the workspace that no workspace symlink reaches', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fsPromises = {
+      stat: vi.fn(async () => ({ isFile: () => true, size: 6 })),
+      readFile: vi.fn(async () => 'secret'),
+    };
+    const handler = registerRead(fsPromises);
+
+    const res = await callRead(handler, { path: '/outside/shared/file.txt' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toEqual({ error: 'Path is outside of active workspace' });
+    expect(fsPromises.readFile).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('reads files under a symlinked project root addressed via the client-sent lexical directory', async () => {
+    // /home/user/proj -> /real/proj: the validated base is canonical but the
+    // client (and the file tree) address files under the lexical root.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fsPromises = {
+      realpath: vi.fn(async (targetPath) => {
+        if (targetPath === '/home/user/proj') return '/real/proj';
+        if (targetPath === '/home/user/proj/file.txt') return '/real/proj/file.txt';
+        return targetPath;
+      }),
+      stat: vi.fn(async () => ({ isFile: () => true, size: 4 })),
+      readFile: vi.fn(async () => 'data'),
+    };
+    const handler = registerRead(fsPromises, async () => ({
+      directory: '/real/proj',
+      requestedDirectory: '/home/user/proj',
+    }));
+    const res = createMockResponse();
+
+    await handler({
+      query: { path: '/home/user/proj/file.txt' },
+      get: (name) => (name === 'x-opencode-directory' ? '/home/user/proj' : undefined),
+    }, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe('data');
+    expect(fsPromises.readFile).toHaveBeenCalledWith('/real/proj/file.txt', 'utf8');
+    warn.mockRestore();
+  });
+
+  it('rejects path traversal that escapes the workspace even when it passes through a symlinked directory', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fsPromises = {
+      realpath: vi.fn(async (targetPath) => {
+        if (targetPath === '/repo/link') return '/outside/shared';
+        return targetPath;
+      }),
+      stat: vi.fn(async () => ({ isFile: () => true, size: 6 })),
+      readFile: vi.fn(async () => 'secret'),
+    };
+    const handler = registerRead(fsPromises);
+
+    const res = await callRead(handler, { path: '/repo/sub/../../etc/passwd' });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toEqual({ error: 'Path is outside of active workspace' });
+    expect(fsPromises.readFile).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
 describe('fs reveal', () => {
   it.each([
     ['linux', 'xdg-open', ['/repo']],
@@ -1047,4 +1134,79 @@ describe('fs list symlink path space (issue 2627)', () => {
       expect(res.body).toEqual({ error: 'Access to directory denied', reason: 'os-permission' });
     });
   }
+});
+
+describe('fs stat directory scope (issue 3019)', () => {
+  // Wires the real project-directory runtime so the stat route resolves the
+  // workspace exactly as the server does: explicit x-opencode-directory header
+  // first, then the settings.lastDirectory fallback. The renderer's file
+  // reference probes must send the header because lastDirectory reflects the
+  // directory the UI last browsed, not the session's directory.
+  const registerStatWithProjectDirectoryRuntime = () => {
+    const projectDirectoryRuntime = createProjectDirectoryRuntime({
+      fsPromises: {
+        stat: async (targetPath) => {
+          if (targetPath === '/repo-a' || targetPath === '/repo-b') {
+            return { isDirectory: () => true };
+          }
+          return { isDirectory: () => false, isFile: () => true, size: 12 };
+        },
+        realpath: async (targetPath) => targetPath,
+      },
+      path: { resolve: (p) => path.posix.resolve(p) },
+      normalizeDirectoryPath: (p) => p,
+      readSettingsFromDiskMigrated: async () => ({ lastDirectory: '/repo-a', projects: [] }),
+      getReadSettingsFromDiskMigrated: undefined,
+      sanitizeProjects: (input) => input,
+    });
+
+    const { app, getRoute } = createRouteRegistry();
+    registerFsRoutes(app, {
+      os: { homedir: () => '/home/user' },
+      path: path.posix,
+      fsPromises: {
+        realpath: async (targetPath) => targetPath,
+        stat: async () => ({ isFile: () => true, size: 12 }),
+      },
+      spawn: vi.fn(),
+      crypto: { randomUUID: () => 'job-0' },
+      normalizeDirectoryPath: (p) => p,
+      resolveProjectDirectory: projectDirectoryRuntime.resolveProjectDirectory,
+      buildAugmentedPath: () => '/usr/bin',
+      resolveGitBinaryForSpawn: () => 'git',
+      openchamberUserConfigRoot: '/home/user/.config',
+    });
+    return getRoute('GET', '/api/fs/stat');
+  };
+
+  const callStat = async (handler, { headers = {}, query }) => {
+    const res = createMockResponse();
+    const req = {
+      query,
+      get: (name) => headers[name.toLowerCase()] ?? undefined,
+    };
+    await handler(req, res);
+    return res;
+  };
+
+  it('rejects a stat for a file under the session directory when only lastDirectory resolves the workspace', async () => {
+    const handler = registerStatWithProjectDirectoryRuntime();
+
+    const res = await callStat(handler, { query: { path: '/repo-b/src/index.ts', optional: 'true' } });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toEqual({ error: 'Path is outside of active workspace' });
+  });
+
+  it('accepts the same stat when the session directory rides the x-opencode-directory header', async () => {
+    const handler = registerStatWithProjectDirectoryRuntime();
+
+    const res = await callStat(handler, {
+      headers: { 'x-opencode-directory': '/repo-b' },
+      query: { path: '/repo-b/src/index.ts', optional: 'true' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.isFile).toBe(true);
+  });
 });
