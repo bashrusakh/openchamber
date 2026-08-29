@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { Part } from '@opencode-ai/sdk/v2';
 
-import { flattenAssistantTextParts, suggestPlanTitleFromText } from './messageText';
+import { flattenAssistantTextParts, flattenUserTextParts, suggestPlanTitleFromText } from './messageText';
 
 // SAFETY: the fixture supplies every required SDK TextPart field, and its `type: 'text'` discriminant selects that Part variant.
 const textPart = (id: string, text: string): Part => ({
@@ -13,6 +13,12 @@ const textPart = (id: string, text: string): Part => ({
 } as Part);
 
 const textParts = (...texts: string[]): Part[] => texts.map((text, index) => textPart(`part-${index}`, text));
+
+// SAFETY: shellAction is the existing display-only bridge property attached to text parts by MessageList.
+const shellPart = (id: string, shellAction: { output?: string; command?: string }): Part => ({
+  ...textPart(id, ''),
+  shellAction,
+} as Part);
 
 describe('flattenAssistantTextParts', () => {
   test('preserves fenced-code blank lines while normalizing Markdown boundaries', () => {
@@ -129,6 +135,39 @@ describe('flattenAssistantTextParts', () => {
       'const second = 2;',
       '```',
     ].join('\n'));
+  });
+});
+
+describe('flattenUserTextParts', () => {
+  test('keeps plain text block separators', () => {
+    expect(flattenUserTextParts(textParts('First paragraph\n\n\nSecond paragraph', 'Next paragraph')))
+      .toBe('First paragraph\n\n\nSecond paragraph\n\nNext paragraph');
+  });
+
+  test('prefers shell output and joins separate outputs with blank lines', () => {
+    const parts = [
+      textPart('plain', 'ignored when shell output exists'),
+      shellPart('shell-command', { command: 'ls -la' }),
+      shellPart('shell-output-1', { output: '  file-a\nfile-b  ' }),
+      shellPart('shell-output-2', { output: 'done' }),
+    ];
+
+    expect(flattenUserTextParts(parts)).toBe('file-a\nfile-b\n\ndone');
+  });
+
+  test('falls back to shell commands when no output is available', () => {
+    const parts = [
+      shellPart('command-1', { command: ' bun install ' }),
+      shellPart('command-2', { command: 'bun test' }),
+      textPart('plain', 'ignored when commands exist'),
+    ];
+
+    expect(flattenUserTextParts(parts)).toBe('bun install\nbun test');
+  });
+
+  test('returns empty text when no visible text parts exist', () => {
+    expect(flattenUserTextParts([])).toBe('');
+    expect(flattenUserTextParts(textParts('  '))).toBe('');
   });
 });
 
