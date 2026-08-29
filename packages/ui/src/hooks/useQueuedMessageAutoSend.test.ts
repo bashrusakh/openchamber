@@ -1,8 +1,13 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
-import type { Agent, Message } from '@opencode-ai/sdk/v2';
-import type { QueuedMessage } from '../stores/messageQueueStore';
+import { beforeEach, afterEach, describe, expect, mock, test } from 'bun:test';
+import type { Agent, Message, SessionStatus } from '@opencode-ai/sdk/v2';
+import { Window } from 'happy-dom';
+import React, { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
 import { ChildStoreManager } from '@/sync/child-store';
-import { setSyncRefs } from '@/sync/sync-refs';
+import type { State } from '@/sync/types';
+import { getDirectoryState, setSyncRefs } from '@/sync/sync-refs';
+import { createMessageQueueTarget, useMessageQueueStore, type QueuedMessage } from '../stores/messageQueueStore';
+import { getRuntimeKey } from '@/lib/runtime-switch';
 
 let visibleAgents: Agent[] = [];
 const sendMessageCalls: unknown[][] = [];
@@ -29,6 +34,75 @@ mock.module('@/sync/session-ui-store', () => ({
   },
 }));
 
+type AutoReviewRunStub = {
+  status: 'running' | 'completed' | 'stopped' | 'error';
+};
+
+type AutoReviewStateStub = {
+  runsByOriginalSessionID: Record<string, AutoReviewRunStub>;
+  isRunningForSession: (sessionId: string) => boolean;
+};
+
+const autoReviewMockState: AutoReviewStateStub = {
+  runsByOriginalSessionID: {},
+  isRunningForSession: (sessionId) => autoReviewMockState.runsByOriginalSessionID[sessionId]?.status === 'running',
+};
+
+const useAutoReviewStoreMock = Object.assign(
+  <T,>(selector: (state: AutoReviewStateStub) => T): T => selector(autoReviewMockState),
+  { getState: (): AutoReviewStateStub => autoReviewMockState },
+);
+
+mock.module('@/stores/useAutoReviewStore', () => ({
+  useAutoReviewStore: useAutoReviewStoreMock,
+}));
+
+// The hook reads live status two ways: the effect loop subscribes through
+// useDirectorySync, and the dispatch-time re-check reads the directory child
+// store via getSyncRefs' getDirectoryState. Back the useDirectorySync mock
+// with the same real child store so both observations share one source of
+// truth and a status flip drives the effect like a live snapshot would.
+const DIRECTORY = '/repo-auto';
+
+const EMPTY_DIRECTORY_STATE: DirectorySyncState = { session_status: {}, message: {} };
+
+// The hook only reads session_status and message from the directory state;
+// these are the exact slices resolveQueuedSessionStatusType and the effect
+// loop consume from the real child-store State.
+type DirectorySyncState = Pick<State, 'session_status' | 'message'> & {
+  session_status: Record<string, { type: 'idle' | 'busy' | 'retry' } | undefined>;
+};
+
+let directoryChildStores: ChildStoreManager | null = null;
+
+const setDirectorySessionStatus = (sessionId: string, type: 'idle' | 'busy' | 'retry') => {
+  const manager = directoryChildStores;
+  const store = manager?.ensureChild(DIRECTORY, { bootstrap: false });
+  if (!store) throw new Error('directory child store not bootstrapped');
+  const status: SessionStatus = type === 'busy' ? { type: 'busy' } : type === 'retry' ? { type: 'retry', attempt: 1, message: 'test', next: 0 } : { type: 'idle' };
+  store.setState({ status: 'complete', session_status: { [sessionId]: status }, message: {} });
+};
+
+const readDirectorySyncState = (): DirectorySyncState => {
+  // SAFETY: getDirectoryState returns the real child-store State; the test
+  // only writes idle/busy/retry entries and Message objects through
+  // setDirectorySessionStatus/store.setState, so the state it reads back is
+  // exactly the DirectorySyncState slice shape this mock hands to selectors.
+  const state = getDirectoryState(DIRECTORY) as DirectorySyncState | undefined;
+  return state ?? EMPTY_DIRECTORY_STATE;
+};
+
+// The real useDirectorySync passes the selector's own generic through, so the
+// mock mirrors that contract instead of forcing selectors to unknown.
+mock.module('@/sync/sync-context', () => ({
+  useDirectorySync: <T,>(selector: (state: DirectorySyncState) => T): T => selector(readDirectorySyncState()),
+}));
+
+mock.module('@/stores/useDirectoryStore', () => ({
+  useDirectoryStore: <T,>(selector: (state: { currentDirectory: string }) => T): T =>
+    selector({ currentDirectory: DIRECTORY }),
+}));
+
 import {
   buildQueuedAutoSendPayload,
   createQueuedAutoSendRetryScheduler,
@@ -37,6 +111,7 @@ import {
   resolveQueuedSessionStatusType,
   sendQueuedAutoSendPayload,
   shouldDispatchQueuedAutoSend,
+  useQueuedMessageAutoSend,
 } from './useQueuedMessageAutoSend';
 
 describe('queued auto-send retry scheduler', () => {
@@ -302,5 +377,110 @@ describe('buildQueuedAutoSendPayload', () => {
         },
       },
     ]);
+  });
+});
+
+describe('useQueuedMessageAutoSend integration', () => {
+  let windowInstance: Window;
+  let host: HTMLDivElement;
+  let root: Root;
+
+  const HookHost = () => {
+    useQueuedMessageAutoSend(true);
+    return null;
+  };
+
+  const mountHook = async () => {
+    await act(async () => {
+      root.render(React.createElement(HookHost));
+    });
+  };
+
+  const rerenderHook = async () => {
+    await act(async () => {
+      root.render(React.createElement(HookHost));
+    });
+  };
+
+  const primeQueue = (sessionId: string) => {
+    const target = createMessageQueueTarget(sessionId, DIRECTORY, getRuntimeKey());
+    if (!target) throw new Error('queue target derivation failed');
+    // Send config captured at queue time — the hook must send with this exact
+    // configuration instead of re-resolving from current config stores.
+    useMessageQueueStore.getState().addToQueue(target, {
+      content: 'queued prompt',
+      sendConfig: { providerID: 'provider-1', modelID: 'model-1' },
+    });
+    return target;
+  };
+
+  const queueOf = (sessionId: string): QueuedMessage[] => {
+    const target = createMessageQueueTarget(sessionId, DIRECTORY, getRuntimeKey());
+    if (!target) throw new Error('queue target derivation failed');
+    return useMessageQueueStore.getState().getQueueForTarget(target);
+  };
+
+  beforeEach(() => {
+    windowInstance = new Window();
+
+    Object.assign(globalThis, {
+      window: windowInstance,
+      document: windowInstance.document,
+      HTMLElement: windowInstance.HTMLElement,
+      Element: windowInstance.Element,
+      Node: windowInstance.Node,
+      PointerEvent: windowInstance.PointerEvent,
+      IS_REACT_ACT_ENVIRONMENT: true,
+    });
+
+    host = document.createElement('div');
+    document.body.append(host);
+    root = createRoot(host);
+
+    visibleAgents = [];
+    sendMessageCalls.length = 0;
+    directoryChildStores = new ChildStoreManager();
+    // SAFETY: setSyncRefs only stores the sdk reference, never calls it; the
+    // hook under test reads child-store state exclusively, so an empty stub
+    // client is never dereferenced.
+    setSyncRefs({} as never, directoryChildStores, DIRECTORY);
+    setDirectorySessionStatus('ses_auto', 'busy');
+    useMessageQueueStore.setState({
+      queuedMessages: {},
+      sendingIds: {},
+      quarantinedLegacyMessages: {},
+    });
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    windowInstance.close();
+  });
+
+  test('dispatches the first queued item when a busy session turns idle and removes it from the queue', async () => {
+    primeQueue('ses_auto');
+    await mountHook();
+    expect(sendMessageCalls.length).toBe(0);
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls.length).toBe(1);
+    expect(sendMessageCalls[0]?.[0]).toBe('queued prompt');
+    expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
+  test('keeps the queue intact while the session stays busy across renders', async () => {
+    primeQueue('ses_auto');
+    await mountHook();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await rerenderHook();
+      expect(sendMessageCalls.length).toBe(0);
+    }
+
+    expect(queueOf('ses_auto')).toHaveLength(1);
   });
 });
