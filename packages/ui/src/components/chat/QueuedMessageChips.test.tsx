@@ -31,7 +31,10 @@ type SessionUIStateStub = {
 
 const sessionUIState: SessionUIStateStub = {
   currentSessionId: 'ses_test',
-  getDirectoryForSession: (_sessionId: string): string | null => '/repo',
+  getDirectoryForSession: (sessionId: string): string | null => {
+    void sessionId;
+    return '/repo';
+  },
 };
 
 mock.module('@/sync/session-ui-store', () => ({
@@ -46,9 +49,9 @@ mock.module('@/lib/runtime-switch', () => ({
   getRuntimeKey: () => 'test-runtime',
 }));
 
-// The component reads only runsByOriginalSessionID for the current session.
-type AutoReviewStateStub = {
-  runsByOriginalSessionID: Record<string, { status: string; runtimeKey: string }>;
+  // The component reads only runsByOriginalSessionID for the current session.
+  type AutoReviewStateStub = {
+  runsByOriginalSessionID: Record<string, { originalSessionID: string; directory: string; status: string; runtimeKey: string }>;
 };
 
 const autoReviewMockState: AutoReviewStateStub = { runsByOriginalSessionID: {} };
@@ -59,10 +62,10 @@ mock.module('@/stores/useAutoReviewStore', () => ({
 
 // Real stores: message queue and input.
 import {
-  createMessageQueueTarget,
-  getMessageQueueKey,
-  useMessageQueueStore,
-  type MessageQueueTarget,
+    createMessageQueueTarget,
+    useMessageQueueStore,
+    type MessageQueueTarget,
+    type QueuedMessage,
 } from '@/stores/messageQueueStore';
 import { QueuedMessageChips } from './QueuedMessageChips';
 
@@ -85,9 +88,16 @@ describe('QueuedMessageChips', () => {
   let host: HTMLDivElement;
   let root: Root;
 
-  const renderChips = async () => {
+  const renderChips = async (
+    onEditMessage: (
+      content: string,
+      attachments?: QueuedMessage['attachments'],
+      additionalParts?: QueuedMessage['additionalParts'],
+    ) => void = () => {},
+    onSendMessage: (messageId: string) => void = () => {},
+  ) => {
     await act(async () => {
-      root.render(<QueuedMessageChips onEditMessage={() => {}} onSendMessage={() => {}} />);
+      root.render(<QueuedMessageChips onEditMessage={onEditMessage} onSendMessage={onSendMessage} />);
     });
   };
 
@@ -165,6 +175,73 @@ describe('QueuedMessageChips', () => {
     expect(sendButton?.disabled).toBe(false);
   });
 
+  test('only enables the queue head and disables all chips while it is in flight', async () => {
+    const target = buildTarget();
+    act(() => {
+      useMessageQueueStore.getState().addToQueue(target, { content: 'head prompt' });
+      useMessageQueueStore.getState().addToQueue(target, { content: 'later prompt' });
+    });
+
+    await renderChips();
+
+    const sendButtons = () => Array.from(host.querySelectorAll('button')).filter(
+      (button) => button.textContent === 'chat.queuedMessage.send',
+    );
+    expect(sendButtons()).toHaveLength(2);
+    expect(sendButtons()[0]?.disabled).toBe(false);
+    expect(sendButtons()[1]?.disabled).toBe(true);
+
+    const [head] = useMessageQueueStore.getState().getQueueForTarget(target);
+    if (!head) throw new Error('queue head was not created');
+    act(() => {
+      useMessageQueueStore.getState().markSending(target, head.id);
+    });
+    await renderChips();
+
+    expect(sendButtons()[0]?.disabled).toBe(true);
+    expect(sendButtons()[1]?.disabled).toBe(true);
+    expect(useMessageQueueStore.getState().getQueueForTarget(target)).toHaveLength(2);
+
+    const editButtons = () => Array.from(host.querySelectorAll('button')).filter(
+      (button) => button.textContent === 'chat.queuedMessage.edit',
+    );
+    const removeButtons = () => Array.from(host.querySelectorAll('button')).filter(
+      (button) => button.getAttribute('aria-label') === 'chat.queuedMessage.removeAria',
+    );
+    expect(editButtons()[0]?.disabled).toBe(true);
+    expect(editButtons()[1]?.disabled).toBe(false);
+    expect(removeButtons()[0]?.disabled).toBe(true);
+    expect(removeButtons()[1]?.disabled).toBe(false);
+  });
+
+  test('preserves queued additional parts when editing a message', async () => {
+    const target = buildTarget();
+    const additionalParts = [{ text: 'rendered magic instructions', synthetic: true }];
+    act(() => {
+      useMessageQueueStore.getState().addToQueue(target, {
+        content: 'rendered magic prompt',
+        additionalParts,
+      });
+    });
+
+    let edited: {
+      content: string;
+      additionalParts?: QueuedMessage['additionalParts'];
+    } | null = null;
+    await renderChips((content, _attachments, parts) => {
+      edited = { content, additionalParts: parts };
+    });
+
+    const editButton = Array.from(host.querySelectorAll('button')).find(
+      (button) => button.textContent === 'chat.queuedMessage.edit',
+    );
+    if (!editButton) throw new Error('queued edit button was not rendered');
+    await act(async () => editButton.click());
+
+    expect(edited).toEqual({ content: 'rendered magic prompt', additionalParts });
+    expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([]);
+  });
+
   test('busy→idle transition clears waiting and enables send', async () => {
     activityMockState.phase = 'busy';
     const target = buildTarget();
@@ -193,7 +270,7 @@ describe('QueuedMessageChips', () => {
   test('auto-review run keeps the send disabled while the session phase is idle', async () => {
     activityMockState.phase = 'idle';
     autoReviewMockState.runsByOriginalSessionID = {
-      ses_test: { status: 'running', runtimeKey: 'test-runtime' },
+      ses_test: { originalSessionID: 'ses_test', directory: DIRECTORY, status: 'running', runtimeKey: 'test-runtime' },
     };
     const target = buildTarget();
     act(() => {

@@ -5,38 +5,55 @@ import type { AttachedFile } from './types/sessionTypes';
 import { updateDesktopSettings } from '@/lib/persistence';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { normalizePath } from '@/lib/pathNormalization';
+import type { ContextPartMetadata } from '@/lib/messages/contextParts';
 
 export type FollowUpBehavior = 'steer' | 'queue';
 
+type PersistedFollowUpBehavior = FollowUpBehavior | 'immediate' | null | undefined;
+
 export const DEFAULT_FOLLOW_UP_BEHAVIOR: FollowUpBehavior = 'queue';
 
-export const isFollowUpBehavior = (value: unknown): value is FollowUpBehavior => (
-    value === 'steer' || value === 'queue'
-);
+type MainSessionSendIntent = 'composer' | 'queued';
+type MainSessionSendDisposition = 'send' | 'queue' | 'preserve-queued';
 
-export const normalizeFollowUpBehavior = (
-    value: unknown,
-    legacyQueueModeEnabled?: boolean | null,
-): FollowUpBehavior => {
-    // "immediate" was removed: on a busy session it was wire-identical to
-    // "steer" (OpenCode only supports delivery "steer" | "queue", defaulting
-    // to "steer"), so collapse any persisted/legacy "immediate" onto "steer".
-    if (value === 'immediate') {
-        return 'steer';
+type MessageQueueDispatchState = {
+    head: QueuedMessage | null;
+    sendingIds: string[];
+};
+
+export const resolveMainSessionSendDisposition = (input: {
+    intent: MainSessionSendIntent;
+    hasMainSession: boolean;
+    isBtwActive: boolean;
+    isBusy: boolean;
+    canQueue: boolean;
+    hasQueuedMessageInFlight?: boolean;
+}): MainSessionSendDisposition => {
+    if (!input.hasMainSession || input.isBtwActive) {
+        return 'send';
     }
 
-    if (isFollowUpBehavior(value)) {
-        return value;
-    }
-
-    if (legacyQueueModeEnabled === false) {
-        return 'steer';
-    }
-
-    if (legacyQueueModeEnabled === true) {
+    // An unresolved queue send owns this target. Queue normal composer input
+    // when possible; otherwise preserve it rather than allowing a different
+    // input mode to merge later queue items into a direct request.
+    if (input.hasQueuedMessageInFlight) {
+        if (input.intent === 'queued' || !input.canQueue) return 'preserve-queued';
         return 'queue';
     }
 
+    if (!input.isBusy || !input.canQueue) return 'send';
+
+    return input.intent === 'queued' ? 'preserve-queued' : 'queue';
+};
+
+export const normalizeFollowUpBehavior = (
+    value: PersistedFollowUpBehavior,
+    legacyQueueModeEnabled?: boolean | null,
+): FollowUpBehavior => {
+    // Keep accepting the old values at the persistence boundary, but the
+    // queue-only hotfix has no direct-send or steer behavior to select.
+    void value;
+    void legacyQueueModeEnabled;
     return DEFAULT_FOLLOW_UP_BEHAVIOR;
 };
 
@@ -44,6 +61,9 @@ export interface QueuedMessage {
     id: string;
     content: string;
     attachments?: AttachedFile[];
+    additionalParts?: QueuedMessagePart[];
+    /** Context was captured when this item was queued and is stored on the item. Omitted on legacy entries. */
+    contextClaimed?: boolean;
     createdAt: number;
     /** Send config captured at queue time — used as-is when auto-sending */
     sendConfig?: {
@@ -53,6 +73,13 @@ export interface QueuedMessage {
         variant?: string;
     };
 }
+
+export type QueuedMessagePart = {
+    text: string;
+    attachments?: AttachedFile[];
+    synthetic?: boolean;
+    metadata?: ContextPartMetadata;
+};
 
 export type MessageQueueTarget = {
     runtimeKey: string;
@@ -76,6 +103,15 @@ export const createMessageQueueTarget = (
 export const getMessageQueueKey = (target: MessageQueueTarget): string =>
     `${target.runtimeKey}\n${target.directory}\n${target.sessionId}`;
 
+export const isQueueMessageDispatchable = (
+    queue: QueuedMessage[],
+    sendingIds: string[],
+    messageId: string,
+): boolean => sendingIds.length === 0 && queue[0]?.id === messageId;
+
+export const isQueueMessageInFlight = (sendingIds: string[], messageId: string): boolean =>
+    sendingIds.includes(messageId);
+
 export const parseMessageQueueKey = (key: string): MessageQueueTarget | null => {
     const [runtimeKey, directory, ...sessionParts] = key.split('\n');
     return createMessageQueueTarget(sessionParts.join('\n'), directory, runtimeKey);
@@ -92,7 +128,7 @@ interface MessageQueueState {
      * dispatch and resolution it is still visible to every other reader — and
      * a composer submit merges the whole queue into its own send. Over a relay
      * that window is seconds, long enough for the same message to be delivered
-     * twice. Dispatchers must skip entries listed here.
+     * twice. While any entry is listed here, no later entry is sendable.
      *
      * Never persisted: a restart has no in-flight sends, and a stale flag would
      * strand a queued message permanently.
@@ -107,9 +143,11 @@ interface MessageQueueActions {
     popToInput: (target: MessageQueueTarget, messageId: string) => QueuedMessage | null;
     clearQueue: (target: MessageQueueTarget) => void;
     clearAllQueues: () => void;
-    markSending: (target: MessageQueueTarget, messageId: string) => void;
+    markSending: (target: MessageQueueTarget, messageId: string) => boolean;
     clearSending: (target: MessageQueueTarget, messageId: string) => void;
+    completeSending: (target: MessageQueueTarget, messageId: string) => void;
     getSendableQueue: (target: MessageQueueTarget) => QueuedMessage[];
+    getQueueDispatchState: (target: MessageQueueTarget) => MessageQueueDispatchState;
     setFollowUpBehavior: (behavior: FollowUpBehavior) => void;
     getQueueForTarget: (target: MessageQueueTarget) => QueuedMessage[];
 }
@@ -152,15 +190,26 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         id,
                         content: message.content,
                         attachments: message.attachments,
+                        additionalParts: message.additionalParts,
+                        contextClaimed: message.contextClaimed,
                         createdAt: Date.now(),
                         sendConfig: message.sendConfig,
                     };
 
                     set((state) => {
                         const currentQueue = state.queuedMessages[key] ?? [];
+                        const nextQueue = [...currentQueue, queuedMessage];
+                        const sendingIds = new Set(state.sendingIds[key] ?? []);
+                        const overflow = Math.max(0, nextQueue.length - MAX_MESSAGES_PER_QUEUE);
+                        const droppedIds = new Set(
+                            nextQueue
+                                .filter((item) => !sendingIds.has(item.id))
+                                .slice(0, overflow)
+                                .map((item) => item.id),
+                        );
                         const queuedMessages = {
                             ...state.queuedMessages,
-                            [key]: [...currentQueue, queuedMessage].slice(-MAX_MESSAGES_PER_QUEUE),
+                            [key]: nextQueue.filter((item) => !droppedIds.has(item.id)),
                         };
                         const keys = Object.keys(queuedMessages);
                         if (keys.length > MAX_QUEUE_TARGETS) {
@@ -178,6 +227,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                 removeFromQueue: (target, messageId) => {
                     const key = getMessageQueueKey(target);
                     set((state) => {
+                        if (isQueueMessageInFlight(state.sendingIds[key] ?? [], messageId)) return state;
                         const currentQueue = state.queuedMessages[key] ?? [];
                         const newQueue = currentQueue.filter((m) => m.id !== messageId);
                         
@@ -202,6 +252,10 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     set((state) => {
                         const currentQueue = state.queuedMessages[key];
                         if (!currentQueue) return state;
+                        // Keep an in-flight head ahead of every later item. A
+                        // reorder during its unresolved request must not let a
+                        // later item overtake it if the request fails.
+                        if ((state.sendingIds[key] ?? []).length > 0) return state;
                         const fromIndex = currentQueue.findIndex((m) => m.id === fromId);
                         const toIndex = currentQueue.findIndex((m) => m.id === toId);
                         if (fromIndex === -1 || toIndex === -1) return state;
@@ -221,17 +275,12 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
 
                 popToInput: (target, messageId) => {
                     const key = getMessageQueueKey(target);
-                    const state = get();
-                    const currentQueue = state.queuedMessages[key] ?? [];
-                    const message = currentQueue.find((m) => m.id === messageId);
-                    
-                    if (!message) {
-                        return null;
-                    }
-
-                    // Remove from queue
+                    let message: QueuedMessage | null = null;
                     set((prevState) => {
+                        if (isQueueMessageInFlight(prevState.sendingIds[key] ?? [], messageId)) return prevState;
                         const queue = prevState.queuedMessages[key] ?? [];
+                        message = queue.find((m) => m.id === messageId) ?? null;
+                        if (!message) return prevState;
                         const newQueue = queue.filter((m) => m.id !== messageId);
                         
                         if (newQueue.length === 0) {
@@ -243,7 +292,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         return {
                             queuedMessages: {
                                 ...prevState.queuedMessages,
-                                    [key]: newQueue,
+                                [key]: newQueue,
                             },
                         };
                     });
@@ -269,16 +318,28 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                 },
 
                 clearAllQueues: () => {
-                    set({ queuedMessages: {}, sendingIds: {} });
+                    set((state) => {
+                        const queuedMessages: Record<string, QueuedMessage[]> = {};
+                        for (const [key, sending] of Object.entries(state.sendingIds)) {
+                            const retained = (state.queuedMessages[key] ?? [])
+                                .filter((message) => sending.includes(message.id));
+                            if (retained.length > 0) queuedMessages[key] = retained;
+                        }
+                        return { queuedMessages };
+                    });
                 },
 
                 markSending: (target, messageId) => {
                     const key = getMessageQueueKey(target);
+                    let claimed = false;
                     set((state) => {
                         const current = state.sendingIds[key] ?? [];
-                        if (current.includes(messageId)) return state;
+                        const queue = state.queuedMessages[key] ?? [];
+                        if (!isQueueMessageDispatchable(queue, current, messageId)) return state;
+                        claimed = true;
                         return { sendingIds: { ...state.sendingIds, [key]: [...current, messageId] } };
                     });
+                    return claimed;
                 },
 
                 clearSending: (target, messageId) => {
@@ -296,18 +357,51 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     });
                 },
 
+                completeSending: (target, messageId) => {
+                    const key = getMessageQueueKey(target);
+                    set((state) => {
+                        const currentSending = state.sendingIds[key] ?? [];
+                        if (!isQueueMessageInFlight(currentSending, messageId)) return state;
+
+                        const currentQueue = state.queuedMessages[key] ?? [];
+                        const nextQueue = currentQueue.filter((message) => message.id !== messageId);
+                        const nextSending = currentSending.filter((id) => id !== messageId);
+                        const queuedMessages = { ...state.queuedMessages };
+                        const sendingIds = { ...state.sendingIds };
+
+                        if (nextQueue.length === 0) delete queuedMessages[key];
+                        else queuedMessages[key] = nextQueue;
+                        if (nextSending.length === 0) delete sendingIds[key];
+                        else sendingIds[key] = nextSending;
+
+                        return { queuedMessages, sendingIds };
+                    });
+                },
+
                 getSendableQueue: (target) => {
                     const key = getMessageQueueKey(target);
                     const state = get();
                     const queue = state.queuedMessages[key] ?? [];
                     const sending = state.sendingIds[key];
-                    if (!sending || sending.length === 0) return queue;
-                    return queue.filter((message) => !sending.includes(message.id));
+                    // The in-flight head stays visible until its request
+                    // resolves, so no later item is sendable in the meantime.
+                    if (sending && sending.length > 0) return [];
+                    return queue;
                 },
 
-                setFollowUpBehavior: (behavior) => {
-                    set({ followUpBehavior: behavior });
-                    void updateDesktopSettings({ followUpBehavior: behavior });
+                getQueueDispatchState: (target) => {
+                    const key = getMessageQueueKey(target);
+                    const state = get();
+                    return {
+                        head: (state.queuedMessages[key] ?? [])[0] ?? null,
+                        sendingIds: state.sendingIds[key] ?? [],
+                    };
+                },
+
+                 setFollowUpBehavior: (behavior) => {
+                    const normalized = normalizeFollowUpBehavior(behavior);
+                    set({ followUpBehavior: normalized });
+                    void updateDesktopSettings({ followUpBehavior: normalized });
                 },
 
                 getQueueForTarget: (target) => {

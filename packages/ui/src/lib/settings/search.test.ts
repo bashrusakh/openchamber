@@ -64,4 +64,15 @@ describe('settings search', () => {
     expect(results.some((result) => result.id === 'integrations.linear.add-workspace')).toBe(false);
     expect(results.some((result) => result.id === 'integrations.linear.mapping')).toBe(false);
   });
+
+  test('does not expose the removed follow-up behavior setting', () => {
+    const results = buildSettingsSearchResults({
+      query: 'follow up steer queue send immediately',
+      runtimeCtx,
+      t,
+      getPageTitle: (page) => page,
+    });
+
+    expect(results.some((result) => result.id === 'chat.follow-up-behavior')).toBe(false);
+  });
 });

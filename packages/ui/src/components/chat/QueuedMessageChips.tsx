@@ -14,13 +14,13 @@ import {
     verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore, type MessageQueueTarget, type QueuedMessage } from '@/stores/messageQueueStore';
+import { createMessageQueueTarget, getMessageQueueKey, isQueueMessageDispatchable, isQueueMessageInFlight, useMessageQueueStore, type MessageQueueTarget, type QueuedMessage } from '@/stores/messageQueueStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useInputStore } from '@/sync/input-store';
 import { useSessionActivity } from '@/hooks/useSessionActivity';
 import { useI18n } from '@/lib/i18n';
 import { getRuntimeKey } from '@/lib/runtime-switch';
-import { useAutoReviewStore } from '@/stores/useAutoReviewStore';
+import { isAutoReviewRunActiveForTarget, useAutoReviewStore } from '@/stores/useAutoReviewStore';
 import { Icon } from "@/components/icon/Icon";
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -30,13 +30,14 @@ interface QueuedMessageChipProps {
     target: MessageQueueTarget;
     onEdit: (message: QueuedMessage) => void;
     onSend: (message: QueuedMessage) => void;
-    isBusy: boolean;
+    canSend: boolean;
+    isInFlight: boolean;
 }
 
-const QueuedMessageChip = memo(({ message, target, onEdit, onSend, isBusy }: QueuedMessageChipProps) => {
+const QueuedMessageChip = memo(({ message, target, onEdit, onSend, canSend, isInFlight }: QueuedMessageChipProps) => {
     const { t } = useI18n();
     const removeFromQueue = useMessageQueueStore((state) => state.removeFromQueue);
-    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: message.id });
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: message.id, disabled: isInFlight });
 
     // Get first line of message, truncated
     const firstLine = React.useMemo(() => {
@@ -62,7 +63,8 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend, isBusy }: Que
                 type="button"
                 {...attributes}
                 {...listeners}
-                className="flex flex-shrink-0 cursor-grab touch-none select-none items-center justify-center text-muted-foreground hover:text-foreground active:cursor-grabbing"
+                disabled={isInFlight}
+                className="flex flex-shrink-0 cursor-grab touch-none select-none items-center justify-center text-muted-foreground hover:text-foreground active:cursor-grabbing disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label={t('chat.queuedMessage.reorderAria')}
             >
                 <Icon name="draggable" className="h-4 w-4" aria-hidden="true" />
@@ -77,6 +79,7 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend, isBusy }: Que
                 type="button"
                 variant="secondary"
                 size="xs"
+                disabled={isInFlight}
                 onClick={() => onEdit(message)}
             >
                 <Icon name="edit" className="h-3 w-3" aria-hidden="true" />
@@ -86,7 +89,7 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend, isBusy }: Que
                 type="button"
                 variant="secondary"
                 size="xs"
-                disabled={isBusy}
+                disabled={!canSend}
                 onClick={() => onSend(message)}
             >
                 <Icon name="send-plane" className="h-3 w-3" aria-hidden="true" />
@@ -94,8 +97,9 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend, isBusy }: Que
             </Button>
             <button
                 type="button"
+                disabled={isInFlight}
                 onClick={() => removeFromQueue(target, message.id)}
-                className="flex items-center justify-center h-6 w-6 flex-shrink-0 hover:bg-[var(--interactive-hover)] rounded-full transition-colors"
+                className="flex items-center justify-center h-6 w-6 flex-shrink-0 hover:bg-[var(--interactive-hover)] rounded-full transition-colors disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label={t('chat.queuedMessage.removeAria')}
             >
                 <Icon name="close" className="h-4 w-4 text-muted-foreground" />
@@ -107,11 +111,16 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend, isBusy }: Que
 QueuedMessageChip.displayName = 'QueuedMessageChip';
 
 interface QueuedMessageChipsProps {
-    onEditMessage: (content: string, attachments?: QueuedMessage['attachments']) => void;
+    onEditMessage: (
+        content: string,
+        attachments?: QueuedMessage['attachments'],
+        additionalParts?: QueuedMessage['additionalParts'],
+    ) => void;
     onSendMessage: (messageId: string) => void;
 }
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
+const EMPTY_SENDING_IDS: string[] = [];
 
 export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: QueuedMessageChipsProps) => {
     const { t } = useI18n();
@@ -126,15 +135,18 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: Queued
         ),
     );
     const { phase: sessionPhase } = useSessionActivity(currentSessionId, currentSessionDirectory ?? undefined);
+    const runtimeKey = getRuntimeKey();
+    const target = React.useMemo(
+        () => currentSessionId ? createMessageQueueTarget(currentSessionId, currentSessionDirectory, runtimeKey) : null,
+        [currentSessionDirectory, currentSessionId, runtimeKey],
+    );
     // Same busy derivation as ChatInput's canQueue: an active auto-review run
     // keeps the session busy even when the session phase is idle.
     const autoReviewRunning = useAutoReviewStore(React.useCallback((state) => {
-        if (!currentSessionId) return false;
-        const run = state.runsByOriginalSessionID[currentSessionId];
-        return run?.status === 'running' && run.runtimeKey === getRuntimeKey();
-    }, [currentSessionId]));
+        if (!target) return false;
+        return isAutoReviewRunActiveForTarget(state.runsByOriginalSessionID[target.sessionId], target);
+    }, [target]));
     const isBusy = sessionPhase !== 'idle' || autoReviewRunning;
-    const target = currentSessionId ? createMessageQueueTarget(currentSessionId, currentSessionDirectory) : null;
     const queueKey = target ? getMessageQueueKey(target) : null;
     const queuedMessages = useMessageQueueStore(
         React.useCallback(
@@ -144,6 +156,15 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: Queued
             },
             [queueKey]
         )
+    );
+    const sendingIds = useMessageQueueStore(
+        React.useCallback(
+            (state) => {
+                if (!queueKey) return EMPTY_SENDING_IDS;
+                return state.sendingIds[queueKey] ?? EMPTY_SENDING_IDS;
+            },
+            [queueKey],
+        ),
     );
     const popToInput = useMessageQueueStore((state) => state.popToInput);
     const reorderQueue = useMessageQueueStore((state) => state.reorderQueue);
@@ -170,7 +191,7 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: Queued
                 const currentAttachments = useInputStore.getState().attachedFiles;
                 useInputStore.getState().setAttachedFiles([...currentAttachments, ...popped.attachments]);
             }
-            onEditMessage(popped.content, popped.attachments);
+            onEditMessage(popped.content, popped.attachments, popped.additionalParts);
         }
     }, [target, popToInput, onEditMessage]);
 
@@ -215,7 +236,11 @@ export const QueuedMessageChips = memo(({ onEditMessage, onSendMessage }: Queued
                                     target={target}
                                     onEdit={handleEdit}
                                     onSend={handleSend}
-                                    isBusy={isBusy}
+                                    isInFlight={isQueueMessageInFlight(sendingIds, message.id)}
+                                    canSend={
+                                        !isBusy
+                                        && isQueueMessageDispatchable(queuedMessages, sendingIds, message.id)
+                                    }
                                 />
                             ))}
                         </div>

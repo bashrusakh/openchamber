@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { strToU8, zipSync } from "fflate"
-import { useInputStore } from "./input-store"
+import { useInputStore, type PendingSyntheticPartsTarget } from "./input-store"
 
 class MockFileReader {
   result: string | ArrayBuffer | null = null
@@ -58,6 +58,8 @@ describe("input-store attachments", () => {
       pendingInputText: null,
       pendingInputMode: "replace",
       pendingSyntheticParts: null,
+      pendingSyntheticPartsTarget: null,
+      pendingSyntheticPartsByTarget: new Map(),
       activeEditorFile: null,
     })
     useInputStore.getState().setAttachedFiles([])
@@ -369,5 +371,42 @@ describe("input-store attachments", () => {
     // Removing the text entry cascades to the slide image
     useInputStore.getState().removeAttachedFile(files[0].id)
     expect(useInputStore.getState().attachedFiles).toEqual([])
+  })
+})
+
+describe("pending synthetic parts ownership", () => {
+  const target = (sessionId: string): PendingSyntheticPartsTarget => ({
+    runtimeKey: "runtime-a",
+    directory: "/repo",
+    sessionId,
+  })
+
+  test("claims and consumes synthetic context only for its runtime, directory, and session", () => {
+    const owner = target("session-a")
+    const other = target("session-b")
+    const parts = [{ text: "conflict context", synthetic: true }]
+
+    useInputStore.getState().setPendingSyntheticParts(parts)
+    expect(useInputStore.getState().claimPendingSyntheticPartsTarget(owner)).toBe(true)
+    expect(useInputStore.getState().claimPendingSyntheticPartsTarget(other)).toBe(false)
+    expect(useInputStore.getState().consumePendingSyntheticParts(other)).toBeNull()
+    expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toEqual(parts)
+    expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toBeNull()
+  })
+
+  test("keeps targeted context separate when another target is added", () => {
+    const owner = target("session-a")
+    const other = target("session-b")
+    const ownerParts = [{ text: "owner context", synthetic: true }]
+    const otherParts = [{ text: "other context", synthetic: true }]
+
+    useInputStore.getState().setPendingSyntheticParts(ownerParts, owner)
+    expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toEqual(ownerParts)
+
+    useInputStore.getState().setPendingSyntheticParts(otherParts, other)
+    useInputStore.getState().restorePendingSyntheticParts(ownerParts, owner)
+
+    expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toEqual(ownerParts)
+    expect(useInputStore.getState().consumePendingSyntheticParts(other)).toEqual(otherParts)
   })
 })

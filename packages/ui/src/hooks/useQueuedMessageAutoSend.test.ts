@@ -6,11 +6,17 @@ import { createRoot, type Root } from 'react-dom/client';
 import { ChildStoreManager } from '@/sync/child-store';
 import type { State } from '@/sync/types';
 import { getDirectoryState, setSyncRefs } from '@/sync/sync-refs';
-import { createMessageQueueTarget, useMessageQueueStore, type QueuedMessage } from '../stores/messageQueueStore';
+import { useInputStore } from '@/sync/input-store';
+import { useInlineCommentDraftStore, type InlineCommentDraft } from '@/stores/useInlineCommentDraftStore';
+import { CONTEXT_METADATA_KEY } from '@/lib/messages/contextParts';
+import { captureComposerContextForQueue } from '@/components/chat/composer/submit/contextHandoff';
+import { createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore, type QueuedMessage } from '../stores/messageQueueStore';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 
 let visibleAgents: Agent[] = [];
 const sendMessageCalls: unknown[][] = [];
+let sendMessageOutcome: Promise<void> = Promise.resolve();
+let sendMessageOutcomes: Promise<void>[] = [];
 
 const getVisibleAgentsMock = mock(() => visibleAgents);
 
@@ -27,7 +33,7 @@ mock.module('@/sync/session-ui-store', () => ({
     getState: () => ({
       sendMessage: (...args: unknown[]) => {
         sendMessageCalls.push(args);
-        return Promise.resolve();
+        return sendMessageOutcomes.shift() ?? sendMessageOutcome;
       },
       sessionAbortFlags: new Map(),
     }),
@@ -35,7 +41,10 @@ mock.module('@/sync/session-ui-store', () => ({
 }));
 
 type AutoReviewRunStub = {
+  originalSessionID: string;
+  directory: string;
   status: 'running' | 'completed' | 'stopped' | 'error';
+  runtimeKey: string;
 };
 
 type AutoReviewStateStub = {
@@ -64,6 +73,13 @@ mock.module('@/stores/useAutoReviewStore', () => ({
 // truth and a status flip drives the effect like a live snapshot would.
 const DIRECTORY = '/repo-auto';
 
+const assistantMessage = (id: string, completed?: number, sessionID = 'ses_1'): Message => {
+  const time = completed === undefined ? { created: 1 } : { created: 1, completed };
+
+  // SAFETY: This fixture supplies the fields the hook reads from an assistant Message.
+  return { id, role: 'assistant', sessionID, time } as Message;
+};
+
 const EMPTY_DIRECTORY_STATE: DirectorySyncState = { session_status: {}, message: {} };
 
 // The hook only reads session_status and message from the directory state;
@@ -75,12 +91,12 @@ type DirectorySyncState = Pick<State, 'session_status' | 'message'> & {
 
 let directoryChildStores: ChildStoreManager | null = null;
 
-const setDirectorySessionStatus = (sessionId: string, type: 'idle' | 'busy' | 'retry') => {
+const setDirectorySessionStatus = (sessionId: string, type: 'idle' | 'busy' | 'retry', messages: Message[] = []) => {
   const manager = directoryChildStores;
   const store = manager?.ensureChild(DIRECTORY, { bootstrap: false });
   if (!store) throw new Error('directory child store not bootstrapped');
   const status: SessionStatus = type === 'busy' ? { type: 'busy' } : type === 'retry' ? { type: 'retry', attempt: 1, message: 'test', next: 0 } : { type: 'idle' };
-  store.setState({ status: 'complete', session_status: { [sessionId]: status }, message: {} });
+  store.setState({ status: 'complete', session_status: { [sessionId]: status }, message: messages.length > 0 ? { [sessionId]: messages } : {} });
 };
 
 const readDirectorySyncState = (): DirectorySyncState => {
@@ -108,6 +124,7 @@ import {
   createQueuedAutoSendRetryScheduler,
   getQueuedAutoSendRetryDelayMs,
   isQueuedAutoSendBackedOff,
+  isQueuedSendBlockedForTarget,
   resolveQueuedSessionStatusType,
   sendQueuedAutoSendPayload,
   shouldDispatchQueuedAutoSend,
@@ -200,13 +217,6 @@ describe('queued auto-send retry backoff', () => {
 describe('resolveQueuedSessionStatusType', () => {
   const DIRECTORY = '/repo';
 
-  const assistantMessage = (id: string, completed?: number): Message => ({
-    id,
-    role: 'assistant',
-    sessionID: 'ses_1',
-    time: { created: 1, ...(completed !== undefined ? { completed } : {}) },
-  } as Message);
-
   let childStores: ChildStoreManager;
 
   beforeEach(() => {
@@ -248,12 +258,24 @@ describe('resolveQueuedSessionStatusType', () => {
     expect(resolveQueuedSessionStatusType('ses_1', DIRECTORY)).toBe('idle');
     expect(resolveQueuedSessionStatusType('ses_unknown', DIRECTORY)).toBe('idle');
   });
+
+  test('explicit idle takes precedence over an unfinished trailing assistant message', () => {
+    const store = childStores.ensureChild(DIRECTORY, { bootstrap: false });
+    store.setState({
+      session_status: { ses_1: { type: 'idle' } },
+      message: { ses_1: [assistantMessage('msg_unfinished')] },
+    });
+
+    expect(resolveQueuedSessionStatusType('ses_1', DIRECTORY)).toBe('idle');
+  });
 });
 
 describe('buildQueuedAutoSendPayload', () => {
   beforeEach(() => {
     visibleAgents = [];
     sendMessageCalls.length = 0;
+    sendMessageOutcome = Promise.resolve();
+    sendMessageOutcomes = [];
   });
 
   test('returns only the first queued message for auto-send', () => {
@@ -378,6 +400,31 @@ describe('buildQueuedAutoSendPayload', () => {
       },
     ]);
   });
+
+  test('passes normalized synthetic parts through auto-send', async () => {
+    const payload = buildQueuedAutoSendPayload([
+      {
+        id: 'queued-magic',
+        content: 'rendered prompt',
+        createdAt: 1,
+        additionalParts: [{ text: 'rendered instructions', synthetic: true }],
+      },
+    ]);
+
+    expect(payload).not.toBeNull();
+    await sendQueuedAutoSendPayload({
+      runtimeKey: 'runtime-magic',
+      sessionId: 'session-magic',
+      directory: '/repo',
+    }, payload!, {
+      providerID: 'provider-magic',
+      modelID: 'model-magic',
+    });
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(sendMessageCalls[0]?.[0]).toBe('rendered prompt');
+    expect(sendMessageCalls[0]?.[6]).toEqual([{ text: 'rendered instructions', synthetic: true }]);
+  });
 });
 
 describe('useQueuedMessageAutoSend integration', () => {
@@ -390,9 +437,13 @@ describe('useQueuedMessageAutoSend integration', () => {
     return null;
   };
 
-  const mountHook = async () => {
+  const mountHook = async (instances = 1) => {
     await act(async () => {
-      root.render(React.createElement(HookHost));
+      root.render(React.createElement(
+        React.Fragment,
+        null,
+        ...Array.from({ length: instances }, (_, index) => React.createElement(HookHost, { key: index })),
+      ));
     });
   };
 
@@ -420,6 +471,24 @@ describe('useQueuedMessageAutoSend integration', () => {
     return useMessageQueueStore.getState().getQueueForTarget(target);
   };
 
+  const primeContext = (sessionId: string) => {
+    useInputStore.getState().setPendingSyntheticParts([{ text: 'pending synthetic context', synthetic: true }]);
+    const target = createMessageQueueTarget(sessionId, DIRECTORY, getRuntimeKey());
+    if (!target) throw new Error('queue target derivation failed');
+    expect(useInputStore.getState().claimPendingSyntheticPartsTarget(target)).toBe(true);
+    const draft: Omit<InlineCommentDraft, 'id' | 'createdAt' | 'sessionKey'> = {
+      source: 'diff',
+      fileLabel: 'src/example.ts',
+      startLine: 2,
+      endLine: 2,
+      side: 'modified',
+      code: 'const answer = 41;',
+      language: 'ts',
+      text: 'please update this',
+    };
+    useInlineCommentDraftStore.getState().addDraft({ directory: DIRECTORY, sessionKey: sessionId }, draft);
+  };
+
   beforeEach(() => {
     windowInstance = new Window();
 
@@ -439,12 +508,21 @@ describe('useQueuedMessageAutoSend integration', () => {
 
     visibleAgents = [];
     sendMessageCalls.length = 0;
+    sendMessageOutcome = Promise.resolve();
+    sendMessageOutcomes = [];
+    autoReviewMockState.runsByOriginalSessionID = {};
     directoryChildStores = new ChildStoreManager();
     // SAFETY: setSyncRefs only stores the sdk reference, never calls it; the
     // hook under test reads child-store state exclusively, so an empty stub
     // client is never dereferenced.
     setSyncRefs({} as never, directoryChildStores, DIRECTORY);
     setDirectorySessionStatus('ses_auto', 'busy');
+    useInputStore.setState({
+      pendingSyntheticParts: null,
+      pendingSyntheticPartsTarget: null,
+      pendingSyntheticPartsByTarget: new Map(),
+    });
+    useInlineCommentDraftStore.setState({ drafts: {}, touchedAt: {} });
     useMessageQueueStore.setState({
       queuedMessages: {},
       sendingIds: {},
@@ -472,6 +550,50 @@ describe('useQueuedMessageAutoSend integration', () => {
     expect(queueOf('ses_auto')).toHaveLength(0);
   });
 
+  test('dispatches when the server says idle despite an unfinished assistant fallback', async () => {
+    primeQueue('ses_auto');
+    await mountHook();
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle', [assistantMessage('msg_unfinished', undefined, 'ses_auto')]);
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
+  test('sends queued store context once and clears it after success', async () => {
+    primeQueue('ses_auto');
+    primeContext('ses_auto');
+    await mountHook();
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    const sentAdditionalParts = sendMessageCalls[0]?.[6];
+    if (!Array.isArray(sentAdditionalParts)) throw new Error('additional parts were not sent');
+    expect(sentAdditionalParts[0]?.text).toContain('please update this');
+    expect(sentAdditionalParts[1]).toEqual({ text: 'pending synthetic context', synthetic: true });
+    expect(sentAdditionalParts[0]?.metadata?.[CONTEXT_METADATA_KEY]).toEqual({
+      kind: 'code-comment',
+      source: 'diff',
+      fileLabel: 'src/example.ts',
+      startLine: 2,
+      endLine: 2,
+      side: 'modified',
+      language: 'ts',
+      code: 'const answer = 41;',
+      text: 'please update this',
+    });
+    expect(useInlineCommentDraftStore.getState().getDrafts({ directory: DIRECTORY, sessionKey: 'ses_auto' })).toEqual([]);
+    expect(useInputStore.getState().pendingSyntheticParts).toBeNull();
+    expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
   test('keeps the queue intact while the session stays busy across renders', async () => {
     primeQueue('ses_auto');
     await mountHook();
@@ -482,5 +604,369 @@ describe('useQueuedMessageAutoSend integration', () => {
     }
 
     expect(queueOf('ses_auto')).toHaveLength(1);
+  });
+
+  test('defers queued-chip dispatch when the target becomes busy after the async guard', async () => {
+    const target = primeQueue('ses_auto');
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+
+    expect(isQueuedSendBlockedForTarget(target)).toBe(false);
+    await Promise.resolve();
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'busy');
+    });
+
+    if (!isQueuedSendBlockedForTarget(target)) {
+      const payload = buildQueuedAutoSendPayload(useMessageQueueStore.getState().getSendableQueue(target));
+      if (payload && useMessageQueueStore.getState().markSending(target, payload.queuedMessageId)) {
+        await sendQueuedAutoSendPayload(target, payload, {
+          providerID: 'provider-1',
+          modelID: 'model-1',
+        });
+      }
+    }
+
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf('ses_auto')).toHaveLength(1);
+    expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+  });
+
+  test('defers queued-chip dispatch when a matching auto-review starts after the async guard', async () => {
+    const target = primeQueue('ses_auto');
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+
+    expect(isQueuedSendBlockedForTarget(target)).toBe(false);
+    await Promise.resolve();
+    autoReviewMockState.runsByOriginalSessionID = {
+      ses_auto: {
+        originalSessionID: 'ses_auto',
+        directory: DIRECTORY,
+        runtimeKey: getRuntimeKey(),
+        status: 'running',
+      },
+    };
+
+    if (!isQueuedSendBlockedForTarget(target)) {
+      const payload = buildQueuedAutoSendPayload(useMessageQueueStore.getState().getSendableQueue(target));
+      if (payload && useMessageQueueStore.getState().markSending(target, payload.queuedMessageId)) {
+        await sendQueuedAutoSendPayload(target, payload, {
+          providerID: 'provider-1',
+          modelID: 'model-1',
+        });
+      }
+    }
+
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf('ses_auto')).toHaveLength(1);
+    expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+  });
+
+  test('keeps a queue blocked by an auto-review run in the same runtime', async () => {
+    autoReviewMockState.runsByOriginalSessionID = {
+      ses_auto: {
+        originalSessionID: 'ses_auto',
+        directory: DIRECTORY,
+        runtimeKey: getRuntimeKey(),
+        status: 'running',
+      },
+    };
+    primeQueue('ses_auto');
+    await mountHook();
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf('ses_auto')).toHaveLength(1);
+  });
+
+  test('does not let a stale auto-review run in another runtime block a colliding session queue', async () => {
+    autoReviewMockState.runsByOriginalSessionID = {
+      ses_auto: {
+        originalSessionID: 'ses_auto',
+        directory: DIRECTORY,
+        runtimeKey: 'stale-runtime',
+        status: 'running',
+      },
+    };
+    primeQueue('ses_auto');
+    await mountHook();
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
+  test('does not let an auto-review run in another directory block a colliding session queue', async () => {
+    autoReviewMockState.runsByOriginalSessionID = {
+      ses_auto: {
+        originalSessionID: 'ses_auto',
+        directory: '/other-directory',
+        runtimeKey: getRuntimeKey(),
+        status: 'running',
+      },
+    };
+    primeQueue('ses_auto');
+    await mountHook();
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
+  test('claims a queued item once while its send is in flight', async () => {
+    let resolveSend: (() => void) | undefined;
+    sendMessageOutcome = new Promise<void>((resolve) => {
+      resolveSend = resolve;
+    });
+    primeQueue('ses_auto');
+    await mountHook();
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf('ses_auto')).toHaveLength(1);
+
+    await act(async () => {
+      resolveSend?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
+  test('does not dispatch a later item while the queue head is unresolved', async () => {
+    let resolveFirst: (() => void) | undefined;
+    const firstAttempt = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    sendMessageOutcomes = [firstAttempt, Promise.resolve()];
+
+    const target = primeQueue('ses_auto');
+    useMessageQueueStore.getState().addToQueue(target, {
+      content: 'later queued prompt',
+      sendConfig: { providerID: 'provider-2', modelID: 'model-2' },
+    });
+
+    await mountHook();
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(sendMessageCalls[0]?.[0]).toBe('queued prompt');
+    expect(queueOf('ses_auto')).toHaveLength(2);
+    expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([
+      queueOf('ses_auto')[0]?.id,
+    ]);
+
+    await rerenderHook();
+    expect(sendMessageCalls).toHaveLength(1);
+
+    await act(async () => {
+      resolveFirst?.();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(2);
+    expect(sendMessageCalls[1]?.[0]).toBe('later queued prompt');
+    expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
+  test('does not consume context twice when idle notifications race', async () => {
+    let resolveSend: (() => void) | undefined;
+    sendMessageOutcome = new Promise<void>((resolve) => {
+      resolveSend = resolve;
+    });
+    primeQueue('ses_auto');
+    primeContext('ses_auto');
+    await mountHook(2);
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(useInlineCommentDraftStore.getState().getDrafts({ directory: DIRECTORY, sessionKey: 'ses_auto' })).toEqual([]);
+    expect(useInputStore.getState().pendingSyntheticParts).toBeNull();
+
+    await act(async () => {
+      resolveSend?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
+  test('keeps a failed queued item visible and clears its sending claim', async () => {
+    let rejectSend: ((error: Error) => void) | undefined;
+    sendMessageOutcome = new Promise<void>((_resolve, reject) => {
+      rejectSend = reject;
+    });
+    primeQueue('ses_auto');
+    await mountHook();
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+    await act(async () => {
+      rejectSend?.(new Error('test send failure'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const target = createMessageQueueTarget('ses_auto', DIRECTORY, getRuntimeKey());
+    if (!target) throw new Error('queue target derivation failed');
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf('ses_auto')).toHaveLength(1);
+    expect(useMessageQueueStore.getState().sendingIds[getMessageQueueKey(target)]).toBe(undefined);
+  });
+
+  test('restores context on failure and sends it once on retry', async () => {
+    let rejectSend: ((error: Error) => void) | undefined;
+    sendMessageOutcome = new Promise<void>((_resolve, reject) => {
+      rejectSend = reject;
+    });
+    primeQueue('ses_auto');
+    primeContext('ses_auto');
+    await mountHook();
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+    await act(async () => {
+      rejectSend?.(new Error('test send failure'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(queueOf('ses_auto')).toHaveLength(1);
+    expect(useInlineCommentDraftStore.getState().getDrafts({ directory: DIRECTORY, sessionKey: 'ses_auto' })).toHaveLength(1);
+    sendMessageOutcome = Promise.resolve();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+      await Promise.resolve();
+    });
+
+    expect(sendMessageCalls).toHaveLength(2);
+    const retriedAdditionalParts = sendMessageCalls[1]?.[6];
+    if (!Array.isArray(retriedAdditionalParts)) throw new Error('retry additional parts were not sent');
+    expect(retriedAdditionalParts[0]?.text).toContain('please update this');
+    expect(retriedAdditionalParts[1]).toEqual({ text: 'pending synthetic context', synthetic: true });
+    expect(useInlineCommentDraftStore.getState().getDrafts({ directory: DIRECTORY, sessionKey: 'ses_auto' })).toEqual([]);
+    expect(useInputStore.getState().pendingSyntheticParts).toBeNull();
+    expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
+  test('keeps same-target context on its queued item across an earlier failure', async () => {
+    let rejectFirst: ((error: Error) => void) | undefined;
+    const firstAttempt = new Promise<void>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    sendMessageOutcomes = [firstAttempt, Promise.resolve(), Promise.resolve()];
+
+    const target = createMessageQueueTarget('ses_auto', DIRECTORY, getRuntimeKey());
+    if (!target) throw new Error('queue target derivation failed');
+    const draftTarget = { directory: DIRECTORY, sessionKey: target.sessionId };
+    const captureQueueContext = (label: string) => {
+      useInputStore.getState().setPendingSyntheticParts([{ text: `synthetic ${label}`, synthetic: true }]);
+      useInlineCommentDraftStore.getState().addDraft(draftTarget, {
+        source: 'diff',
+        fileLabel: `src/${label}.ts`,
+        startLine: 1,
+        endLine: 1,
+        code: `const ${label} = true;`,
+        language: 'ts',
+        text: `inline ${label}`,
+      });
+      return captureComposerContextForQueue(target, draftTarget);
+    };
+    const contextA = captureQueueContext('A');
+    useMessageQueueStore.getState().addToQueue(target, {
+      content: 'queued A',
+      additionalParts: contextA,
+      contextClaimed: true,
+      sendConfig: { providerID: 'provider-a', modelID: 'model-a' },
+    });
+    const contextB = captureQueueContext('B');
+    useMessageQueueStore.getState().addToQueue(target, {
+      content: 'queued B',
+      additionalParts: contextB,
+      contextClaimed: true,
+      sendConfig: { providerID: 'provider-b', modelID: 'model-b' },
+    });
+    expect(useInlineCommentDraftStore.getState().getDrafts(draftTarget)).toEqual([]);
+
+    await mountHook();
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(sendMessageCalls[0]?.[0]).toBe('queued A');
+    const firstAdditionalParts = sendMessageCalls[0]?.[6];
+    if (!Array.isArray(firstAdditionalParts)) throw new Error('first context was not sent');
+    expect(firstAdditionalParts[0]?.text).toContain('inline A');
+    expect(firstAdditionalParts[1]).toEqual({ text: 'synthetic A', synthetic: true });
+
+    await act(async () => {
+      rejectFirst?.(new Error('test send failure'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Model the failed send's context being restored to the target-scoped
+    // handoff bucket. The next queue item must not consume it.
+    useInputStore.getState().setPendingSyntheticParts([{ text: 'restored A', synthetic: true }], target);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sendMessageCalls).toHaveLength(3);
+    expect(sendMessageCalls[1]?.[0]).toBe('queued A');
+    const retriedAdditionalParts = sendMessageCalls[1]?.[6];
+    if (!Array.isArray(retriedAdditionalParts)) throw new Error('retried context was not sent');
+    expect(retriedAdditionalParts[0]?.text).toContain('inline A');
+    expect(retriedAdditionalParts[1]).toEqual({ text: 'synthetic A', synthetic: true });
+    expect(sendMessageCalls[2]?.[0]).toBe('queued B');
+    const secondAdditionalParts = sendMessageCalls[2]?.[6];
+    if (!Array.isArray(secondAdditionalParts)) throw new Error('second context was not sent');
+    expect(secondAdditionalParts[0]?.text).toContain('inline B');
+    expect(secondAdditionalParts[1]).toEqual({ text: 'synthetic B', synthetic: true });
+    expect(useInputStore.getState().consumePendingSyntheticParts(target)).toEqual([
+      { text: 'restored A', synthetic: true },
+    ]);
+    expect(queueOf('ses_auto')).toHaveLength(0);
   });
 });

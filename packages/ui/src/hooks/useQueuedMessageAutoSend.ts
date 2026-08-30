@@ -4,12 +4,14 @@ import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useContextStore } from '@/stores/contextStore';
-import { useAutoReviewStore } from '@/stores/useAutoReviewStore';
+import { isAutoReviewRunActiveForTarget, useAutoReviewStore } from '@/stores/useAutoReviewStore';
 import { parseAgentMentions } from '@/lib/messages/agentMentions';
 import { getDirectoryState } from '@/sync/sync-refs';
 import { useDirectorySync } from '@/sync/sync-context';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
+import { buildContextParts } from '@/components/chat/composer/submit/buildOutgoingMessage';
+import { consumeComposerContext, queuedContextTarget, type ComposerContextSnapshot } from '@/components/chat/composer/submit/contextHandoff';
 
 type SessionStatusType = 'idle' | 'busy' | 'retry';
 
@@ -76,7 +78,10 @@ const getAbortHoldUntil = (sessionId: string): number | null => {
   return Date.now() < holdUntil ? holdUntil : null;
 };
 
-export const buildQueuedAutoSendPayload = (queue: QueuedMessage[]) => {
+export const buildQueuedAutoSendPayload = (
+  queue: QueuedMessage[],
+  context: ComposerContextSnapshot = { inlineComments: [], syntheticParts: [] },
+) => {
   const queued = queue[0];
   if (!queued) {
     return null;
@@ -85,11 +90,18 @@ export const buildQueuedAutoSendPayload = (queue: QueuedMessage[]) => {
   const agents = useConfigStore.getState().getVisibleAgents();
   const { sanitizedText, mention } = parseAgentMentions(queued.content, agents);
 
+  const contextParts = buildContextParts(context.inlineComments, context.syntheticParts);
+  const queuedAdditionalParts = queued.additionalParts;
+  const additionalParts = contextParts.length === 0
+    ? queuedAdditionalParts
+    : [...(queuedAdditionalParts ?? []), ...contextParts];
+
   return {
     queuedMessageId: queued.id,
     primaryText: sanitizedText,
     primaryAttachments: queued.attachments ?? [],
     agentMentionName: mention?.name,
+    additionalParts,
     sendConfig: queued.sendConfig,
   };
 };
@@ -114,7 +126,7 @@ export const sendQueuedAutoSendPayload = (
     resolved.agent,
     payload.primaryAttachments,
     payload.agentMentionName,
-    undefined,
+    payload.additionalParts,
     resolved.variant,
     'normal',
     { target },
@@ -191,7 +203,7 @@ export const resolveQueuedSessionStatusType = (
 ): SessionStatusType => {
   const state = getDirectoryState(directory);
   const statusType = state?.session_status?.[sessionId]?.type;
-  if (statusType === 'busy' || statusType === 'retry') {
+  if (statusType === 'busy' || statusType === 'retry' || statusType === 'idle') {
     return statusType;
   }
   const sessionMessages = state?.message?.[sessionId];
@@ -200,16 +212,23 @@ export const resolveQueuedSessionStatusType = (
     : undefined;
   if (
     lastMessage?.role === 'assistant'
-    && typeof (lastMessage as { time?: { completed?: number } }).time?.completed !== 'number'
+    && lastMessage.time?.completed === undefined
   ) {
     return 'busy';
   }
   return 'idle';
 };
 
+export const isQueuedSendBlockedForTarget = (target: MessageQueueTarget): boolean => {
+  const autoReviewRun = useAutoReviewStore.getState().runsByOriginalSessionID[target.sessionId];
+  return resolveQueuedSessionStatusType(target.sessionId, target.directory) !== 'idle'
+    || isAutoReviewRunActiveForTarget(autoReviewRun, target);
+};
+
 export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?: boolean }) {
   const enabled = typeof enabledOrOptions === 'boolean' ? enabledOrOptions : (enabledOrOptions?.enabled ?? true);
   const queuedMessages = useMessageQueueStore((state) => state.queuedMessages);
+  const sendingIds = useMessageQueueStore((state) => state.sendingIds);
   const autoReviewRuns = useAutoReviewStore((state) => state.runsByOriginalSessionID);
   const sessionStatusRecord = useDirectorySync((state) => state.session_status);
   // Message completion clears the in-flight fallback in
@@ -221,7 +240,7 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
   const inFlightSessionsRef = React.useRef<Set<string>>(new Set());
   const sendFailuresRef = React.useRef<Map<string, QueuedAutoSendFailure>>(new Map());
   const previousStatusRef = React.useRef<Map<string, SessionStatusType>>(new Map());
-  const autoReviewBlockedSessionsRef = React.useRef<Set<string>>(new Set());
+  const autoReviewBlockedTargetsRef = React.useRef<Set<string>>(new Set());
   const [retryTick, setRetryTick] = React.useState(0);
   const retryScheduler = React.useMemo(
     () => createQueuedAutoSendRetryScheduler(() => setRetryTick((value) => value + 1)),
@@ -249,8 +268,9 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
         retryScheduler.schedule(abortHoldUntil);
         return;
       }
-      if (useAutoReviewStore.getState().isRunningForSession(sessionId)) {
-        autoReviewBlockedSessionsRef.current.add(sessionId);
+      const autoReviewRun = useAutoReviewStore.getState().runsByOriginalSessionID[sessionId];
+      if (isAutoReviewRunActiveForTarget(autoReviewRun, target)) {
+        autoReviewBlockedTargetsRef.current.add(targetKey);
         return;
       }
 
@@ -259,8 +279,8 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
         return;
       }
 
-      // Read the queue back at dispatch time and skip anything already being
-      // delivered, rather than trusting the render-time snapshot.
+      // Read the queue back at dispatch time. The store returns no sendable
+      // item while this target already has an unresolved queued send.
       const payload = buildQueuedAutoSendPayload(useMessageQueueStore.getState().getSendableQueue(target));
       if (!payload) {
         return;
@@ -291,19 +311,39 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
       // The ref only guards this hook. Publish the dispatch to the store so the
       // composer cannot merge the same item into a parallel send while this one
       // is still awaiting the server.
-      useMessageQueueStore.getState().markSending(target, payload.queuedMessageId);
+      if (!useMessageQueueStore.getState().markSending(target, payload.queuedMessageId)) {
+        inFlightSessionsRef.current.delete(targetKey);
+        return;
+      }
+
+      const claimedMessage = useMessageQueueStore.getState().getQueueForTarget(target)
+        .find((message) => message.id === payload.queuedMessageId);
+      const context = claimedMessage?.contextClaimed
+        ? { inlineComments: [], syntheticParts: [], restore: () => undefined }
+        : consumeComposerContext(target, queuedContextTarget(target));
+      const payloadWithContext = buildQueuedAutoSendPayload(
+        claimedMessage ? [claimedMessage] : [],
+        context,
+      );
+      if (!payloadWithContext || payloadWithContext.queuedMessageId !== payload.queuedMessageId) {
+        context.restore();
+        useMessageQueueStore.getState().clearSending(target, payload.queuedMessageId);
+        inFlightSessionsRef.current.delete(targetKey);
+        return;
+      }
 
       try {
-        await sendQueuedAutoSendPayload(target, payload, {
+        await sendQueuedAutoSendPayload(target, payloadWithContext, {
           providerID: resolved.providerID,
           modelID: resolved.modelID,
           agent: resolved.agent,
           variant: resolved.variant,
         });
-        useMessageQueueStore.getState().removeFromQueue(target, payload.queuedMessageId);
+        useMessageQueueStore.getState().completeSending(target, payload.queuedMessageId);
         sendFailuresRef.current.delete(targetKey);
       } catch (error) {
         console.warn('[queue] queued auto-send failed:', error);
+        context.restore();
         const priorFailures = failure?.messageId === payload.queuedMessageId ? failure.failures : 0;
         const failures = priorFailures + 1;
         const nextAttemptAt = Date.now() + getQueuedAutoSendRetryDelayMs(failures);
@@ -319,13 +359,7 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
       }
     };
 
-    const statusRecord = sessionStatusRecord ?? {};
     const nextStatusMap = new Map(previousStatusRef.current);
-    for (const [sessionId, status] of Object.entries(statusRecord)) {
-      if (status) {
-        nextStatusMap.set(sessionId, status.type as SessionStatusType);
-      }
-    }
 
     const queueEntries = Object.entries(queuedMessages);
     queueEntries.forEach(([key, queue]) => {
@@ -333,13 +367,15 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
       if (!target || target.runtimeKey !== getRuntimeKey() || target.directory !== currentDirectory) return;
       const { sessionId } = target;
       const currentStatusType = resolveQueuedSessionStatusType(sessionId, target.directory);
-      const previousStatusType = previousStatusRef.current.get(sessionId);
-      const wasAutoReviewBlocked = autoReviewBlockedSessionsRef.current.has(sessionId);
-      const isAutoReviewRunning = useAutoReviewStore.getState().isRunningForSession(sessionId);
+      const targetKey = getMessageQueueKey(target);
+      const previousStatusType = previousStatusRef.current.get(targetKey);
+      const wasAutoReviewBlocked = autoReviewBlockedTargetsRef.current.has(targetKey);
+      const autoReviewRun = useAutoReviewStore.getState().runsByOriginalSessionID[sessionId];
+      const isAutoReviewRunning = isAutoReviewRunActiveForTarget(autoReviewRun, target);
       if (isAutoReviewRunning) {
-        autoReviewBlockedSessionsRef.current.add(sessionId);
+        autoReviewBlockedTargetsRef.current.add(targetKey);
       } else if (wasAutoReviewBlocked) {
-        autoReviewBlockedSessionsRef.current.delete(sessionId);
+        autoReviewBlockedTargetsRef.current.delete(targetKey);
       }
 
       if (queue.length > 0 && (
@@ -349,9 +385,9 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
         void dispatchSessionQueue(target, queue);
       }
 
-      nextStatusMap.set(sessionId, currentStatusType);
+      nextStatusMap.set(targetKey, currentStatusType);
     });
 
     previousStatusRef.current = nextStatusMap;
-  }, [enabled, queuedMessages, sessionStatusRecord, sessionMessages, autoReviewRuns, currentDirectory, retryTick, retryScheduler]);
+  }, [enabled, queuedMessages, sendingIds, sessionStatusRecord, sessionMessages, autoReviewRuns, currentDirectory, retryTick, retryScheduler]);
 }
