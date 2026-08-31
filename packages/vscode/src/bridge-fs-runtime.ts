@@ -3,6 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { BridgeResponse } from './bridge';
+import { runWithGitExecutionScope } from './git-execution-scope';
+import { parseGitCheckIgnoreResult } from './bridge-fs-helpers-runtime';
 
 type BridgeMessageInput = {
   id: string;
@@ -106,13 +108,14 @@ type FsDeps = {
   resolveUserPath: (value: string, baseDirectory: string) => string;
   listDirectoryEntries: (directoryPath: string) => Promise<DirectoryEntry[]>;
   normalizeFsPath: (value: string) => string;
-  execGit: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  execGit: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }>;
   searchDirectory: (
     directory: string,
     query: string,
     limit: number | undefined,
     includeHidden: boolean,
     respectGitignore: boolean,
+    runGitRead?: <T>(cwd: string, task: () => Promise<T> | T) => Promise<T>,
   ) => Promise<Array<{ name: string; path: string; relativePath: string; extension: string | undefined }>>;
   resolveFileReadPath: (inputPath: string) => Promise<
     | { ok: true; resolvedPath: string }
@@ -120,21 +123,26 @@ type FsDeps = {
   >;
   parseDroppedFileReference: (rawReference: string) => DroppedReferenceParse;
   readUriAsAttachment: (uri: vscode.Uri, name: string) => Promise<ReadUriAsAttachmentResult>;
+  runGitRead?: <T>(cwd: string, task: () => Promise<T> | T) => Promise<T>;
 };
 
 const runGitCheckIgnore = async (
   execGit: FsDeps['execGit'],
   args: string[],
   cwd: string,
-): Promise<{ stdout: string; stderr: string; exitCode: number } | null> => {
+  runGitRead?: FsDeps['runGitRead'],
+): Promise<{ stdout: string; stderr: string; exitCode: number; code?: string } | null> => {
+  const read = () => runGitRead
+    ? runGitRead(cwd, () => execGit(args, cwd))
+    : runWithGitExecutionScope(true, () => execGit(args, cwd));
   if (GIT_CHECK_IGNORE_TIMEOUT_MS <= 0) {
-    return execGit(args, cwd);
+    return read();
   }
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      execGit(args, cwd),
+      read(),
       new Promise<null>((resolve) => {
         timeout = setTimeout(() => resolve(null), GIT_CHECK_IGNORE_TIMEOUT_MS);
       }),
@@ -207,23 +215,18 @@ export async function handleFsBridgeMessage(
         return { id, type, success: true, data: { entries, directory: normalized, path: normalized } };
       }
 
-      try {
-        const result = await runGitCheckIgnore(deps.execGit, ['check-ignore', '--', ...pathsToCheck], normalized);
-        if (!result) {
-          return { id, type, success: true, data: { entries, directory: normalized, path: normalized } };
-        }
-        const ignoredNames = new Set(
-          result.stdout
-            .split('\n')
-            .map((name) => name.trim())
-            .filter(Boolean)
-        );
+      const ignoredNames = parseGitCheckIgnoreResult(
+        await runGitCheckIgnore(
+          deps.execGit,
+          ['check-ignore', '--', ...pathsToCheck],
+          normalized,
+          deps.runGitRead,
+        ),
+        normalized,
+      );
 
-        const filteredEntries = entries.filter((entry) => !ignoredNames.has(entry.name));
-        return { id, type, success: true, data: { entries: filteredEntries, directory: normalized, path: normalized } };
-      } catch {
-        return { id, type, success: true, data: { entries, directory: normalized, path: normalized } };
-      }
+      const filteredEntries = entries.filter((entry) => !ignoredNames.has(entry.name));
+      return { id, type, success: true, data: { entries: filteredEntries, directory: normalized, path: normalized } };
     }
 
     case 'api:fs:search': {
@@ -234,7 +237,14 @@ export async function handleFsBridgeMessage(
         includeHidden?: boolean;
         respectGitignore?: boolean;
       };
-      const files = await deps.searchDirectory(directory, query, limit, Boolean(includeHidden), respectGitignore !== false);
+      const files = await deps.searchDirectory(
+        directory,
+        query,
+        limit,
+        Boolean(includeHidden),
+        respectGitignore !== false,
+        deps.runGitRead,
+      );
       return { id, type, success: true, data: { files } };
     }
 

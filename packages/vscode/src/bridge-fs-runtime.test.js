@@ -17,6 +17,8 @@ execMock[promisify.custom] = (command, options) => {
 
 mock.module('child_process', () => ({
   exec: execMock,
+  execFile: mock(),
+  spawn: mock(),
 }));
 
 mock.module('vscode', () => ({
@@ -84,5 +86,47 @@ describe('bridge fs exec git read cache', () => {
     await handleFsBridgeMessage({ id: '2', type: 'api:fs:exec', payload: { commands: [command], cwd } }, deps);
 
     expect(execCalls).toHaveLength(2);
+  });
+
+  it('uses the execution adapter for gitignore checks', async () => {
+    const readCalls = [];
+    const result = await handleFsBridgeMessage(
+      { id: '1', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
+      {
+        ...deps,
+        listDirectoryEntries: async () => [
+          { name: 'ignored.ts', path: '/repo/ignored.ts', isDirectory: false },
+          { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+        ],
+        execGit: async () => ({ stdout: 'ignored.ts\n', stderr: '', exitCode: 0 }),
+        runGitRead: async (cwd, task) => {
+          readCalls.push(cwd);
+          return task();
+        },
+      },
+    );
+
+    expect(readCalls).toEqual(['/repo']);
+    expect(result?.data?.entries).toEqual([
+      { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+    ]);
+  });
+
+  it('returns a failure when Gitignore discovery fails', async () => {
+    await expect(handleFsBridgeMessage(
+      { id: 'gitignore-failure', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
+      {
+        ...deps,
+        listDirectoryEntries: async () => [
+          { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+        ],
+        execGit: async () => ({
+          stdout: '',
+          stderr: 'EACCES: permission denied while checking Gitignore',
+          exitCode: 1,
+          code: 'EACCES',
+        }),
+      },
+    )).rejects.toThrow('Gitignore discovery failed');
   });
 });

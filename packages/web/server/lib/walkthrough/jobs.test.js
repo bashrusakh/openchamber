@@ -8,12 +8,26 @@ process.env.OPENCHAMBER_DATA_DIR = TEMP_DATA_DIR;
 
 // Mocking git rather than this module's own source loading: fewer of our own
 // seams faked means the test exercises the real digest and prompt path.
-vi.mock('../git/service.js', () => ({
+vi.mock('../git/execution-service.js', () => ({
   getRepositoryRoot: vi.fn(async () => '/repo'),
   getDiff: vi.fn(),
   getRangeDiff: vi.fn(),
   getUntrackedDiffs: vi.fn(async () => []),
   listUntrackedPaths: vi.fn(async () => []),
+  resolver: {
+    resolve: vi.fn(async () => ({
+      isRepository: true,
+      requestedDirectory: '/repo',
+      topLevel: '/repo',
+      gitDir: '/repo/.git',
+      commonDir: '/repo/.git',
+      commonId: '/repo/.git',
+      worktreeId: '/repo',
+    })),
+  },
+  createGit: vi.fn(async () => ({
+    raw: vi.fn(async () => '/repo\n/repo/.git\n/repo/.git\n'),
+  })),
 }));
 vi.mock('../small-model/index.js', () => ({
   describeSmallModel: vi.fn(),
@@ -27,7 +41,7 @@ const {
   __testing: walkthroughTesting,
 } = await import('./index.js');
 const { describeSmallModel, generateSmallModelText } = await import('../small-model/index.js');
-const { getDiff } = await import('../git/service.js');
+const { getDiff } = await import('../git/execution-service.js');
 
 // bun's vitest shim has no `vi.waitFor`.
 const waitFor = async (predicate, { timeout = 2_000, interval = 5 } = {}) => {

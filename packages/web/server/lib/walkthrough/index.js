@@ -1,4 +1,4 @@
-import { getRepositoryRoot } from '../git/service.js';
+import { getRepositoryRoot } from '../git/execution-service.js';
 import { describeSmallModel, generateSmallModelText } from '../small-model/index.js';
 import { buildDigest } from './digest.js';
 import { indexHunks } from './hunks.js';
