@@ -1,4 +1,7 @@
-import { getDiff, getRangeDiff, getCommitDiff, getUntrackedDiffs, listUntrackedPaths } from '../git/service.js';
+import { getCommitDiff } from '../git/service.js';
+import { getDiff, getRangeDiff, getUntrackedDiffs, listUntrackedPaths } from '../git/execution-service.js';
+import assert from 'node:assert/strict';
+import { getDiff, getRangeDiff, getCommitDiff, getUntrackedDiffs, listUntrackedPaths } from '../git/execution-service.js';
 import assert from 'node:assert/strict';
 
 // A walkthrough source resolves to one or more diff *sections*. A section is a

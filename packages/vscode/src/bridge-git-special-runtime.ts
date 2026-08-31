@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { OpenCode, type OpenCodeClient } from '@opencode/client';
 import * as gitService from './gitService';
 import { chooseBridgeGitGenerationModel, type BridgeGitGenerationPayloadModel } from './bridge-git-generation-model';
+import { gitExecutionRuntime } from './git-execution-runtime';
 import type { BridgeContext, BridgeResponse } from './bridge';
 
 type BridgeMessageInput = {
@@ -137,6 +138,22 @@ const parseJsonObjectSafe = (value: string): Record<string, unknown> | null => {
   }
 };
 
+const readGitRangeFiles = async (directory: string, base: string, head: string): Promise<string[]> => {
+  const context = await gitExecutionRuntime.discover(directory);
+  if (!context.isRepository) {
+    return [];
+  }
+
+  const listed = await gitExecutionRuntime.withRawRead(
+    directory,
+    () => gitService.getGitRangeFiles(directory, base, head),
+  );
+  if (!Array.isArray(listed)) {
+    throw new Error('Git range file discovery returned an invalid result');
+  }
+  return listed;
+};
+
 export async function handleSpecialGitBridgeMessage(
   message: BridgeMessageInput,
   ctx: BridgeContext | undefined,
@@ -162,13 +179,7 @@ export async function handleSpecialGitBridgeMessage(
         return { id, type, success: false, error: 'base and head are required' };
       }
 
-      let files: string[] = [];
-      try {
-        const listed = await gitService.getGitRangeFiles(directory, base, head);
-        files = Array.isArray(listed) ? listed : [];
-      } catch {
-        files = [];
-      }
+      const files = await readGitRangeFiles(directory, base, head);
 
       if (files.length === 0) {
         return { id, type, success: false, error: 'No diffs available for base...head' };
@@ -176,14 +187,16 @@ export async function handleSpecialGitBridgeMessage(
 
       let diffSummaries = '';
       for (const file of files) {
-        try {
-          const diff = await gitService.getGitRangeDiff(directory, base, head, file, 3);
-          const raw = typeof diff?.diff === 'string' ? diff.diff : '';
-          if (!raw.trim()) continue;
-          diffSummaries += `FILE: ${file}\n${raw}\n\n`;
-        } catch {
-          // ignore
+        const diff = await gitExecutionRuntime.withRawRead(
+          directory,
+          () => gitService.getGitRangeDiff(directory, base, head, file, 3),
+        );
+        if (!diff || typeof diff.diff !== 'string') {
+          throw new Error(`Git range diff returned an invalid result for ${file}`);
         }
+        const raw = diff.diff;
+        if (!raw.trim()) continue;
+        diffSummaries += `FILE: ${file}\n${raw}\n\n`;
       }
 
       if (!diffSummaries.trim()) {
@@ -244,22 +257,34 @@ export async function handleSpecialGitBridgeMessage(
       }
 
       try {
-        const statusResult = await deps.execGit(['status', '--porcelain'], directory);
+        const statusResult = await gitExecutionRuntime.withRawRead(
+          directory,
+          () => deps.execGit(['status', '--porcelain'], directory),
+        );
         const statusPorcelain = statusResult.stdout;
 
-        const unmergedResult = await deps.execGit(['diff', '--name-only', '--diff-filter=U'], directory);
+        const unmergedResult = await gitExecutionRuntime.withRawRead(
+          directory,
+          () => deps.execGit(['diff', '--name-only', '--diff-filter=U'], directory),
+        );
         const unmergedFiles = unmergedResult.stdout
           .split('\n')
           .map((line) => line.trim())
           .filter(Boolean);
 
-        const diffResult = await deps.execGit(['diff'], directory);
+        const diffResult = await gitExecutionRuntime.withRawRead(
+          directory,
+          () => deps.execGit(['diff'], directory),
+        );
         const diff = diffResult.stdout;
 
         let operation: 'merge' | 'rebase' = 'merge';
         let headInfo = '';
 
-        const mergeHeadResult = await deps.execGit(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], directory);
+        const mergeHeadResult = await gitExecutionRuntime.withRawRead(
+          directory,
+          () => deps.execGit(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], directory),
+        );
         const mergeHeadExists = mergeHeadResult.exitCode === 0;
 
         if (mergeHeadExists) {
@@ -274,7 +299,10 @@ export async function handleSpecialGitBridgeMessage(
           }
           headInfo = `MERGE_HEAD: ${mergeHead}${mergeMsg ? '\n' + mergeMsg : ''}`;
         } else {
-          const rebaseHeadResult = await deps.execGit(['rev-parse', '--verify', '--quiet', 'REBASE_HEAD'], directory);
+          const rebaseHeadResult = await gitExecutionRuntime.withRawRead(
+            directory,
+            () => deps.execGit(['rev-parse', '--verify', '--quiet', 'REBASE_HEAD'], directory),
+          );
           const rebaseHeadExists = rebaseHeadResult.exitCode === 0;
 
           if (rebaseHeadExists) {
