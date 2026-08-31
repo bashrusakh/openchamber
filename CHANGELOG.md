@@ -238,9 +238,6 @@ All notable changes to this project will be documented in this file.
 - Server: foreground installs managed by a user systemd service now update through a separate transient service instead of being interrupted by the server restart (thanks to @SYU8384).
 - Security: updated archive extraction to address GHSA-xcpc-8h2w-3j85 (thanks to @mel0nyrame).
 - UI: dialogs, dropdowns, popovers, and tooltips now use consistent glass styling; the macOS vibrancy option was removed to reduce rendering overhead.
-- **Guardian:** cross-platform (Linux/POSIX + Windows). The Linux/POSIX path uses a Unix-domain socket at `mode 0600` (same as before). The Windows path uses loopback TCP at `127.0.0.1:<ephemeral>` with an `icacls`-granted per-user ACL on the discovery file under `%LOCALAPPDATA%\openchamber\managed-opencode-handoff-v2\port`. Live children use their process handles; rehydrated children use a hidden PowerShell/.NET handle helper that verifies persisted identity before terminating, with no PID-only fallback.
-- **Guardian/restart:** owner identity is persisted in each OpenChamber instance's metadata and propagated through `OPENCHAMBER_GUARDIAN_OWNER_ID`; restart detaches from the matching child, while ordinary stop is owner-scoped and `openchamber guardian stop` remains the explicit administrative shutdown.
-- **Guardian/downgrade hint:** downgrading from a Windows-aware guardian build to an older build leaves the Windows discovery file as a harmless orphan; remove it with `Remove-Item "$env:LOCALAPPDATA\openchamber\managed-opencode-handoff-v2\port"` in PowerShell if desired. No automatic migration is required.
 
 ## [1.18.1] - 2026-08-04
 

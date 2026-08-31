@@ -21,6 +21,7 @@ import { formatSessionWorktreeBadge } from '@/sync/session-worktree-contract';
 import { buildSessionMessageRecordsSnapshot, useDirectoryStore, useSessionKnownInactive, useSessionMessagesResolved } from '@/sync/sync-context';
 import { useDirectoryStore as useAppDirectoryStore } from '@/stores/useDirectoryStore';
 import { isChatDirectoryForHome } from '@/lib/chatDirectories';
+import { normalizeProjectPath } from '@/lib/projectResolution';
 import { useSync } from '@/sync/use-sync';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useQuotaAutoRefresh, useQuotaStore } from '@/stores/useQuotaStore';
@@ -273,9 +274,7 @@ const formatCompactHeaderLabel = (value: string): string => {
 
 
 const normalize = (value: string): string => {
-  if (!value) return '';
-  const replaced = value.replace(/\\/g, '/');
-  return replaced === '/' ? '/' : replaced.replace(/\/+$/, '');
+  return normalizeProjectPath(value) ?? '';
 };
 
 const getActiveContextMode = (panelState: {

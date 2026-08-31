@@ -43,6 +43,7 @@ import { syncDebug } from "./debug"
 import { getReconnectCandidateSessionIds, mergeBootstrapSessions } from "./reconnect-recovery"
 import { messagesBefore } from "./message-ordering"
 import { opencodeClient } from "@/lib/opencode/client"
+import { normalizeProjectPath } from "@/lib/projectResolution"
 import { usePermissionStore } from "@/stores/permissionStore"
 import {
   processVSCodePermissionAutoAccept,
@@ -285,11 +286,12 @@ export function useGlobalSessionStatus(sessionId: string): SessionStatus | undef
  * treated as fresh for control decisions.
  */
 export function useSessionStatusFresh(sessionId: string, directory: string): boolean {
+  const normalizedDirectory = normalizeProjectPath(directory) ?? directory
   return useGlobalSessionStatusStore(
     useCallback((state) => {
-      if (!directory) return true;
-      return !state.unavailableDirectories.has(directory);
-    }, [directory]),
+      if (!normalizedDirectory) return true;
+      return !state.unavailableDirectories.has(normalizedDirectory);
+    }, [normalizedDirectory]),
   )
 }
 

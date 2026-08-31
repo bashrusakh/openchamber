@@ -3916,6 +3916,18 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
       }
 
       syncFromHmrState();
+      if (env.ENV_SKIP_OPENCODE_START && !env.ENV_EFFECTIVE_PORT) {
+        state.openCodeProcess = null;
+        state.openCodePort = null;
+        state.openCodeBaseUrl = null;
+        state.currentIncarnation = null;
+        state.currentOwner = null;
+        state.isOpenCodeReady = false;
+        state.isExternalOpenCode = false;
+        state.openCodeNotReadySince = Date.now();
+        syncToHmrState();
+        throw new Error('OpenCode skip-start mode requires an effective port');
+      }
       const fenceResolution = await reconcileGuardianOutcomeUnknownFenceForLifecycle();
       if (fenceResolution.resolved && fenceResolution.adopted) {
         if (state.expressApp) {

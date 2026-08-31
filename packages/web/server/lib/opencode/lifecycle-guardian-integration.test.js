@@ -492,6 +492,33 @@ describe('Guardian integration', () => {
       expect(deps.setOpenCodePort).toHaveBeenCalledWith(45678);
     }, 10000);
 
+    it('fails closed when skip-start has no effective port', async () => {
+      const { spawn } = await import('node:child_process');
+      const fetchMock = vi.fn();
+      globalThis.fetch = fetchMock;
+      const { runtime, state } = createRuntime({
+        env: {
+          ENV_CONFIGURED_OPENCODE_PORT: undefined,
+          ENV_CONFIGURED_OPENCODE_HOST: null,
+          ENV_EFFECTIVE_PORT: undefined,
+          ENV_CONFIGURED_OPENCODE_HOSTNAME: '127.0.0.1',
+          ENV_SKIP_OPENCODE_START: true,
+        },
+      });
+
+      await runtime.bootstrapOpenCodeAtStartup();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(isGuardianRunning).not.toHaveBeenCalled();
+      expect(detectAndAdoptGuardianChild).not.toHaveBeenCalled();
+      expect(spawn).not.toHaveBeenCalled();
+      expect(state.openCodeProcess).toBeNull();
+      expect(state.openCodePort).toBeNull();
+      expect(state.isOpenCodeReady).toBe(false);
+      expect(state.isExternalOpenCode).toBe(false);
+      expect(state.lastOpenCodeError).toBe('OpenCode skip-start mode requires an effective port');
+    }, 10000);
+
     it('uses the adopted launch origin when configured host changed, including IPv6', async () => {
       const launchSpec = {
         binary: 'opencode',

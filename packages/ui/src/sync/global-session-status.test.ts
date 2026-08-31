@@ -491,6 +491,12 @@ describe("isSessionStatusFresh (directory-scoped freshness)", () => {
     expect(isSessionStatusFresh("session-a", "/repo")).toBe(false)
   })
 
+  test("matches normalized Windows directory aliases", () => {
+    markDirectoryStatusUnavailable("C:/Repo")
+
+    expect(isSessionStatusFresh("session-a", "c:\\Repo\\")).toBe(false)
+  })
+
   test("returns true when the directory is not in unavailableDirectories (fresh), even with no statusById entry", () => {
     expect(isSessionStatusFresh("never-seen", "/repo")).toBe(true)
   })
