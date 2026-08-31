@@ -111,10 +111,11 @@ before touching the filesystem). Rationale: metadata rides every
    - terminal checks, cheapest first: assistant turn error → `blocked`;
      `tokensUsed >= tokenBudget` → `budgetLimited`;
      `turnsUsed >= MAX_AUTO_TURNS` (20) → `blocked`;
-   - if the latest message is a compaction summary, skip the audit and
-     continue unconditionally — running into the context window mid-work is
-     by definition "in progress, not finished" (the summary is a retelling,
-     not evidence, and must not be judged);
+    - if the latest message is a compaction summary or was cut off by output
+      token limits (finish: "length"), skip the audit and continue
+      unconditionally — running into the context/output window mid-work is
+      by definition "in progress, not finished" (a truncated reply is not
+      evidence, and must not be judged);
    - otherwise, small-model audit of the objective + the last assistant turn
      only — no conversation history and no continuation prompts
      (`restrictToPreferredProvider`, session's own provider/model preferred):

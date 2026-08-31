@@ -178,4 +178,131 @@ describe('session goal live activity gate', () => {
     });
     runtime.stop();
   });
+
+  it('skips audit and sends continuation prompt when assistant message finishes with length stop', async () => {
+    const requests = [];
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      requests.push({ pathname, method: init.method ?? 'GET', body: init.body });
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') return jsonResponse(session);
+      if (pathname === `/session/${SESSION_ID}`) return jsonResponse(session);
+      if (pathname === '/session/status') return jsonResponse({});
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) return jsonResponse({ ok: true });
+      if (pathname === `/session/${SESSION_ID}/message`) {
+        return jsonResponse([{
+          info: {
+            id: 'msg_assistant_len',
+            sessionID: SESSION_ID,
+            role: 'assistant',
+            providerID: 'provider',
+            modelID: 'model',
+            finish: 'length',
+            time: { completed: 2 },
+            tokens: { input: 100, output: 4096, reasoning: 4096, cache: { read: 0 } },
+          },
+          parts: [{ type: 'reasoning', text: 'Drafting extensive implementation...' }],
+        }]);
+      }
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    const service = {
+      generateSmallModelText: vi.fn(),
+    };
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => service,
+      idleQuietMs: 10,
+    });
+
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Audit must be skipped on length-truncated turn
+    expect(service.generateSmallModelText).not.toHaveBeenCalled();
+
+    // Goal accounting is persisted and turnsUsed incremented
+    const patch = requests.find((request) => request.pathname === `/session/${SESSION_ID}` && request.method === 'PATCH');
+    expect(patch).toBeDefined();
+    const writtenGoal = JSON.parse(patch.body).metadata.openchamber.goal;
+    expect(writtenGoal).toMatchObject({
+      status: 'active',
+      turnsUsed: 2,
+    });
+
+    // Continuation prompt is dispatched
+    const promptAsync = requests.find((request) => request.pathname === `/session/${SESSION_ID}/prompt_async` && request.method === 'POST');
+    expect(promptAsync).toBeDefined();
+    const promptBody = JSON.parse(promptAsync.body);
+    expect(promptBody.parts[0].text).toContain('Continue working toward the active session goal.');
+    runtime.stop();
+  });
+
+  it('skips audit and sends continuation prompt when assistant message carries MessageOutputLengthError', async () => {
+    const requests = [];
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      requests.push({ pathname, method: init.method ?? 'GET', body: init.body });
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') return jsonResponse(session);
+      if (pathname === `/session/${SESSION_ID}`) return jsonResponse(session);
+      if (pathname === '/session/status') return jsonResponse({});
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) return jsonResponse({ ok: true });
+      if (pathname === `/session/${SESSION_ID}/message`) {
+        return jsonResponse([{
+          info: {
+            id: 'msg_assistant_len_err',
+            sessionID: SESSION_ID,
+            role: 'assistant',
+            providerID: 'provider',
+            modelID: 'model',
+            error: { name: 'MessageOutputLengthError', message: 'Maximum token limit reached' },
+            time: { completed: 2 },
+            tokens: { input: 100, output: 4096, reasoning: 4096, cache: { read: 0 } },
+          },
+          parts: [{ type: 'reasoning', text: 'Drafting extensive implementation...' }],
+        }]);
+      }
+      throw new Error(`Unexpected request: ${pathname}`);
+    });
+    const service = {
+      generateSmallModelText: vi.fn(),
+    };
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => service,
+      idleQuietMs: 10,
+    });
+
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // Audit must be skipped on MessageOutputLengthError
+    expect(service.generateSmallModelText).not.toHaveBeenCalled();
+
+    // Goal remains active and turnsUsed incremented
+    const patch = requests.find((request) => request.pathname === `/session/${SESSION_ID}` && request.method === 'PATCH');
+    expect(patch).toBeDefined();
+    const writtenGoal = JSON.parse(patch.body).metadata.openchamber.goal;
+    expect(writtenGoal).toMatchObject({
+      status: 'active',
+      turnsUsed: 2,
+    });
+
+    // Continuation prompt is dispatched
+    const promptAsync = requests.find((request) => request.pathname === `/session/${SESSION_ID}/prompt_async` && request.method === 'POST');
+    expect(promptAsync).toBeDefined();
+    runtime.stop();
+  });
 });
+

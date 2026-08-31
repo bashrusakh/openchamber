@@ -609,6 +609,9 @@ export const createSessionGoalRuntime = ({
     // falls through to the continuation below (skipping the audit — an
     // aborted reply is not evidence of anything).
     const abortedTail = lastAssistantInfo.error?.name === 'MessageAbortedError';
+    const lengthTail = lastAssistantInfo.finish === 'length'
+      || lastAssistantInfo.stopReason === 'length'
+      || lastAssistantInfo.error?.name === 'MessageOutputLengthError';
     if (abortedTail && goal.statusReason !== 'resumed') {
       await writeGoal(sessionId, directory, goal.id, () => ({
         status: 'paused',
@@ -623,7 +626,8 @@ export const createSessionGoalRuntime = ({
     }
 
     // Turn error → blocked (prevents runaway auto-continuation into failures).
-    if (!abortedTail && lastAssistantInfo.error && typeof lastAssistantInfo.error === 'object') {
+    // Length cutoffs are in-progress continuations, not hard failures.
+    if (!abortedTail && !lengthTail && lastAssistantInfo.error && typeof lastAssistantInfo.error === 'object') {
       const reason = typeof lastAssistantInfo.error.name === 'string' && lastAssistantInfo.error.name
         ? lastAssistantInfo.error.name
         : 'assistant turn failed';
@@ -653,13 +657,14 @@ export const createSessionGoalRuntime = ({
     // stops above (turn error, budget, continuation cap). The working agent
     // has no channel to settle its own goal.
     //
-    // Exception: when the latest message is a compaction summary, the agent
-    // by definition ran into the context window mid-work — that IS
-    // "in progress, not finished". No audit call; continue unconditionally.
+    // Exception: when the latest message is a compaction summary or was cut off
+    // by the output token limit (length stop), the agent by definition ran into
+    // the context/output limit mid-work — that IS "in progress, not finished".
+    // No audit call; continue unconditionally.
     let audit = null;
     let blockedStreak = 0;
     let auditFailStreak = goal.auditFailStreak;
-    if (lastAssistantInfo.summary === true || abortedTail) {
+    if (lastAssistantInfo.summary === true || abortedTail || lengthTail) {
       blockedStreak = goal.blockedStreak;
     } else {
       audit = await runAudit({ goal: { ...goal, objective: effectiveObjective }, assistantText, directory, lastAssistantInfo: executionInfo ?? lastAssistantInfo });
