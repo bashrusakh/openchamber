@@ -4,21 +4,22 @@ import type { Part } from '@opencode-ai/sdk/v2';
 import { flattenAssistantTextParts, flattenUserTextParts, suggestPlanTitleFromText } from './messageText';
 
 // SAFETY: the fixture supplies every required SDK TextPart field, and its `type: 'text'` discriminant selects that Part variant.
-const textPart = (id: string, text: string): Part => ({
-  id,
-  sessionID: 'session-1',
-  messageID: 'message-1',
+const basePart = (overrides: Record<string, unknown>): Part => ({
+  id: 'p1',
+  sessionID: 's',
+  messageID: 'm',
   type: 'text',
-  text,
+  text: '',
+  ...overrides,
 } as Part);
+
+const textPart = (id: string, text: string): Part => basePart({ id, text });
 
 const textParts = (...texts: string[]): Part[] => texts.map((text, index) => textPart(`part-${index}`, text));
 
 // SAFETY: shellAction is the existing display-only bridge property attached to text parts by MessageList.
-const shellPart = (id: string, shellAction: { output?: string; command?: string }): Part => ({
-  ...textPart(id, ''),
-  shellAction,
-} as Part);
+const shellPart = (id: string, shellAction: { output?: string; command?: string }): Part =>
+  basePart({ id, shellAction });
 
 describe('flattenAssistantTextParts', () => {
   test('preserves fenced-code blank lines while normalizing Markdown boundaries', () => {
