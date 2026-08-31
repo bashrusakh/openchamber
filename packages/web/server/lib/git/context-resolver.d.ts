@@ -31,6 +31,7 @@ export type GitContextResolverOptions = {
     args: string[],
   ) => Promise<GitDiscoveryCommandResult | string | Buffer>;
   realpath?: (value: string) => Promise<string>;
+  pathExists?: (value: string) => Promise<boolean>;
   discoveryConcurrency?: number;
   maxPendingDiscoveries?: number;
   maxInFlightAliases?: number;

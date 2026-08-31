@@ -123,7 +123,16 @@ const isPathInside = (candidatePath: string, parentPath: string): boolean => {
 
 export const normalizeFsPath = (value: string) => value.replace(/\\/g, '/');
 
-type GitReadRunner = <T>(cwd: string, task: () => Promise<T> | T) => Promise<T>;
+type GitReadOptions = {
+  signal?: AbortSignal;
+  queueTimeoutMs?: number;
+};
+
+type GitReadRunner = <T>(
+  cwd: string,
+  task: () => Promise<T> | T,
+  options?: GitReadOptions,
+) => Promise<T>;
 
 export type GitCheckIgnoreResult = {
   stdout: string;
@@ -149,6 +158,11 @@ const isConfirmedNonRepository = (result: GitCheckIgnoreResult): boolean => (
     `${result.stderr}\n${result.stdout}`,
   )
 );
+
+const reportGitignoreFailure = (cwd: string, error: unknown): void => {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.warn(`Gitignore filtering skipped for ${cwd}: ${detail}`);
+};
 
 export const parseGitCheckIgnoreResult = (
   result: GitCheckIgnoreResult | null,
@@ -185,8 +199,12 @@ const execGitCheckIgnore = async (
   cwd: string,
   runGitRead?: GitReadRunner,
 ): Promise<GitCheckIgnoreResult | null> => {
+  const controller = GIT_CHECK_IGNORE_TIMEOUT_MS > 0 ? new AbortController() : undefined;
+  const readOptions = controller
+    ? { signal: controller.signal, queueTimeoutMs: GIT_CHECK_IGNORE_TIMEOUT_MS }
+    : undefined;
   const read = () => runGitRead
-    ? runGitRead(cwd, () => execGit(args, cwd))
+    ? runGitRead(cwd, () => execGit(args, cwd), readOptions)
     : runWithGitExecutionScope(true, () => execGit(args, cwd));
   if (GIT_CHECK_IGNORE_TIMEOUT_MS <= 0) {
     return read();
@@ -197,7 +215,10 @@ const execGitCheckIgnore = async (
     return await Promise.race([
       read(),
       new Promise<null>((resolve) => {
-        timeout = setTimeout(() => resolve(null), GIT_CHECK_IGNORE_TIMEOUT_MS);
+        timeout = setTimeout(() => {
+          controller?.abort('Gitignore discovery timed out');
+          resolve(null);
+        }, GIT_CHECK_IGNORE_TIMEOUT_MS);
       }),
     ]);
   } finally {
@@ -227,6 +248,32 @@ const gitCheckIgnorePaths = async (cwd: string, paths: string[], runGitRead?: Gi
     await execGitCheckIgnore(['check-ignore', '--', ...paths], cwd, runGitRead),
     cwd,
   );
+};
+
+const safeGitCheckIgnoreNames = async (
+  cwd: string,
+  names: string[],
+  runGitRead?: GitReadRunner,
+): Promise<Set<string>> => {
+  try {
+    return await gitCheckIgnoreNames(cwd, names, runGitRead);
+  } catch (error) {
+    reportGitignoreFailure(cwd, error);
+    return new Set();
+  }
+};
+
+const safeGitCheckIgnorePaths = async (
+  cwd: string,
+  paths: string[],
+  runGitRead?: GitReadRunner,
+): Promise<Set<string>> => {
+  try {
+    return await gitCheckIgnorePaths(cwd, paths, runGitRead);
+  } catch (error) {
+    reportGitignoreFailure(cwd, error);
+    return new Set();
+  }
 };
 
 const expandTildePath = (value: string) => {
@@ -389,7 +436,7 @@ const searchFilesystemFiles = async (
       const dirents = dirLists[index];
 
       const ignoredNames = respectGitignore
-        ? await gitCheckIgnoreNames(normalizeFsPath(currentDir.fsPath), dirents.map(([name]) => name), runGitRead)
+        ? await safeGitCheckIgnoreNames(normalizeFsPath(currentDir.fsPath), dirents.map(([name]) => name), runGitRead)
         : new Set<string>();
 
       for (const [entryName, entryType] of dirents) {
@@ -518,7 +565,7 @@ export const searchDirectory = async (
       return relative || path.basename(file.fsPath);
     });
 
-    const ignored = await gitCheckIgnorePaths(rootPath, relativePaths, runGitRead);
+    const ignored = await safeGitCheckIgnorePaths(rootPath, relativePaths, runGitRead);
     if (ignored.size === 0) {
       return results;
     }

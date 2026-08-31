@@ -48,7 +48,9 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
   - Uses shared FS helpers via injected dependencies.
   - Gitignore checks use the shared Git read-admission adapter when called
     through `bridge.ts`; direct test/helper callers retain the read-only
-    environment fallback.
+    environment fallback. The optional filter has a bounded admission and
+    execution wait, and list/search keep their filesystem results when it
+    fails or times out.
 
 - `bridge-fs-helpers-runtime.ts`
   - Filesystem/path/search helper functions:
@@ -62,8 +64,9 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
     - Directory-search Gitignore checks accept the same shared Git read adapter
       so filesystem search does not bypass Git execution coordination.
     - Gitignore exit code `1` (no matches) and a confirmed non-repository are
-      empty results; timeouts, permission failures, and other Git execution
-      failures propagate instead of returning unfiltered entries.
+      empty results. Timeouts, permission failures, and other Git execution
+      failures remain visible to the parser and diagnostics, while list/search
+      return their existing unfiltered entries.
   - Read paths are authorized in the requested workspace path space before symlink resolution, matching the web runtime; directly requested outside-workspace paths remain denied.
 
 The webview CSP permits `blob:` only for `worker-src` so shared UI parsers can run bounded local decompression off the main thread. Blob scripts remain disallowed by `script-src`.

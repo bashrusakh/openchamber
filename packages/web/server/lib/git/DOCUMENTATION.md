@@ -185,7 +185,7 @@ Git API and raw Git process adapters runtime-specific.
 ### Working directory (simple-git)
 - Repository operations always pass an explicit `baseDir` (the opened project/directory path) into simple-git. Omitting `baseDir` would default to `process.cwd()`, which breaks when the server was launched from a neutral directory (e.g. `$HOME`) while the opened project lives elsewhere.
 - Global identity reads use the user home directory as `baseDir` (they do not need a repository).
-- A structured non-repository result from status or check must not abort project/session enumeration: routes return a soft non-repo payload and log a warning. Permission, missing-Git, and other execution failures remain errors even when their text mentions a missing repository.
+- A structured non-repository result from status or check must not abort project/session enumeration: routes return a soft non-repo payload and log a warning. A requested directory that no longer exists is also a soft non-repository result. Permission, missing-Git, malformed-discovery, and other execution failures remain errors even when their text mentions a missing repository.
 
 ### Worktree Naming
 - Worktree names are slugified via `slugWorktreeName`.

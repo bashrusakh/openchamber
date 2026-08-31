@@ -226,8 +226,12 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
     }, () => runWithGitExecutionScope(kind === GIT_OPERATION_KIND.READ, task));
   };
 
-  const withRawRead = <T>(directory: string, task: () => Promise<T> | T): Promise<T> => (
-    discover(directory).then((context) => {
+  const withRawRead = <T>(
+    directory: string,
+    task: () => Promise<T> | T,
+    options: Pick<OperationOptions, 'signal' | 'queueTimeoutMs'> = {},
+  ): Promise<T> => (
+    discover(directory, { signal: options.signal }).then((context) => {
       if (!context.isRepository) {
         return runDirectoryFallbackRead(directory, task);
       }
@@ -236,6 +240,8 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
         kind: GIT_OPERATION_KIND.READ,
         targetWorktree: true,
         label: 'raw-read',
+        signal: options.signal,
+        queueTimeoutMs: options.queueTimeoutMs,
       }, () => runWithGitExecutionScope(true, task));
     })
   );
