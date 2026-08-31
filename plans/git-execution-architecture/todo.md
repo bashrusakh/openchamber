@@ -1,7 +1,0 @@
-- [x] Add structured execution errors and Git context resolver.
-- [x] Add bounded coordinator with operation, status, and clone admission.
-- [x] Integrate web Git service operations without changing public envelopes.
-- [x] Integrate VS Code facade/runtime while preserving built-in API preference.
-- [x] Add focused regression tests for scheduling, cancellation, identity, and fallback behavior.
-- [x] Run focused package checks and review the changed runtime paths.
-- [ ] Review the complete final diff for unrelated changes.

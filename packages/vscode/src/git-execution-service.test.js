@@ -13,6 +13,10 @@ mock.module('./gitService', () => core);
 mock.module('./git-execution-runtime', () => ({ gitExecutionRuntime: runtime }));
 
 const { createGitExecutionService } = await import('./git-execution-service');
+const {
+  GIT_OPERATION_PROFILE,
+  getGitServiceOperationClassification,
+} = await import('./git-operation-classification');
 
 describe('VS Code Git execution service discovery fallback', () => {
   beforeEach(() => {
@@ -56,5 +60,12 @@ describe('VS Code Git execution service discovery fallback', () => {
       .resolves.toBe(true);
     expect(runtime.runDirectoryFallbackRead).toHaveBeenCalledWith('/repo', expect.any(Function));
     expect(core.checkIsGitRepository).toHaveBeenCalledWith('/repo');
+  });
+
+  it('classifies branch and commit checkout as worktree-scoped writes', () => {
+    expect(getGitServiceOperationClassification('checkoutBranch').profile)
+      .toBe(GIT_OPERATION_PROFILE.WORKTREE_WRITE);
+    expect(getGitServiceOperationClassification('checkoutCommit').profile)
+      .toBe(GIT_OPERATION_PROFILE.WORKTREE_WRITE);
   });
 });

@@ -20,19 +20,20 @@ const { createGitExecutionRuntime } = await import('./git-execution-runtime');
 describe('VS Code Git execution runtime discovery', () => {
   it('runs discovery as a read and preserves process error codes', async () => {
     calls.length = 0;
+    const directory = process.cwd();
 
     const runtime = createGitExecutionRuntime();
 
-    await expect(runtime.discover('/repo')).rejects.toMatchObject({
+    await expect(runtime.discover(directory)).rejects.toMatchObject({
       code: 'EACCES',
       details: {
         operation: 'git-context-discovery',
-        cwd: '/repo',
+        cwd: directory,
       },
     });
     expect(calls).toEqual([{
       args: ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'],
-      cwd: '/repo',
+      cwd: directory,
       env: { GIT_OPTIONAL_LOCKS: '0' },
     }]);
   });
@@ -55,5 +56,39 @@ describe('VS Code Git execution runtime discovery', () => {
       worktreeId: '/repo',
       kind: 'read',
     }));
+  });
+
+  it('passes Gitignore waiter cancellation and queue deadlines to coordinated reads', async () => {
+    const resolver = {
+      resolve: mock(async () => ({
+        isRepository: true,
+        requestedDirectory: '/repo',
+        topLevel: '/repo',
+        gitDir: '/repo/.git',
+        commonDir: '/repo/.git',
+        commonId: '/repo/.git',
+        worktreeId: '/repo',
+      })),
+    };
+    const coordinator = {
+      run: mock(async (options, task) => task({ active: true, ...options })),
+    };
+    const runtime = createGitExecutionRuntime({ resolver, coordinator });
+    const controller = new AbortController();
+
+    await expect(runtime.withRawRead(
+      '/repo',
+      async () => 'read',
+      { signal: controller.signal, queueTimeoutMs: 25 },
+    )).resolves.toBe('read');
+
+    expect(coordinator.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'read',
+        signal: controller.signal,
+        queueTimeoutMs: 25,
+      }),
+      expect.any(Function),
+    );
   });
 });

@@ -20,6 +20,18 @@ const normalizeDirectory = (directory) => {
   return path.resolve(directory.trim());
 };
 
+const defaultPathExists = async (value) => {
+  try {
+    await fsp.stat(value);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') {
+      return false;
+    }
+    throw error;
+  }
+};
+
 const normalizeCommandResult = (result) => {
   if (Buffer.isBuffer(result)) {
     return { success: true, stdout: result.toString(), stderr: '' };
@@ -59,14 +71,16 @@ const gitErrorText = (error) => [
   .filter(Boolean)
   .join('\n');
 
+const gitErrorCode = (error) => String(
+  error?.code
+    || error?.error?.code
+    || error?.details?.code
+    || error?.details?.error?.code
+    || '',
+).toUpperCase();
+
 const isExecutionFailure = (error) => {
-  const code = String(
-    error?.code
-      || error?.error?.code
-      || error?.details?.code
-      || error?.details?.error?.code
-      || '',
-  ).toUpperCase();
+  const code = gitErrorCode(error);
   if (code === 'EACCES' || code === 'EPERM' || code === 'ENOENT') {
     return true;
   }
@@ -264,6 +278,7 @@ export class GitContextResolver {
 
     this.runGit = options.runGit;
     this.realpath = options.realpath || ((value) => fsp.realpath(value));
+    this.pathExists = options.pathExists || defaultPathExists;
     this.discoveryConcurrency = Math.max(1, Math.floor(options.discoveryConcurrency ?? DEFAULTS.discoveryConcurrency));
     this.maxPendingDiscoveries = Math.max(0, Math.floor(options.maxPendingDiscoveries ?? DEFAULTS.maxPendingDiscoveries));
     this.maxInFlightAliases = Math.max(1, Math.floor(options.maxInFlightAliases ?? DEFAULTS.maxInFlightAliases));
@@ -317,11 +332,11 @@ export class GitContextResolver {
         () => this.runGit(directory, ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir']),
       ));
     } catch (error) {
-      if (isConfirmedNonRepository(error)) {
-        return { isRepository: false, requestedDirectory, reason: 'not-a-repository' };
-      }
       if (error instanceof GitExecutionCancelledError || error instanceof GitExecutionOverloadedError) {
         throw error;
+      }
+      if (isConfirmedNonRepository(error)) {
+        return { isRepository: false, requestedDirectory, reason: 'not-a-repository' };
       }
       throw createDiscoveryError(error, directory);
     }
@@ -387,7 +402,7 @@ export class GitContextResolver {
       return Promise.reject(abortError(options.signal));
     }
 
-    return this.canonicalize(requestedDirectory).catch((error) => {
+    const resolveExistingDirectory = () => this.canonicalize(requestedDirectory).catch((error) => {
       throw createDiscoveryError(error, requestedDirectory);
     }).then((canonicalDirectory) => {
       if (options.signal?.aborted) {
@@ -429,6 +444,16 @@ export class GitContextResolver {
         });
       this.inFlightAliases.set(canonicalDirectory, discovery);
       return raceAbort(discovery, options.signal);
+    });
+
+    return this.pathExists(requestedDirectory).then((exists) => {
+      if (options.signal?.aborted) {
+        throw abortError(options.signal);
+      }
+      if (!exists) {
+        return { isRepository: false, requestedDirectory, reason: 'not-a-repository' };
+      }
+      return resolveExistingDirectory();
     });
   }
 

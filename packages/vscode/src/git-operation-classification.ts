@@ -31,7 +31,7 @@ export const GIT_SERVICE_OPERATION_CLASSIFICATION = Object.freeze({
   isLinkedWorktree: operation(GIT_OPERATION_PROFILE.READ),
   getGitStatus: operation(GIT_OPERATION_PROFILE.READ),
   getGitBranches: operation(GIT_OPERATION_PROFILE.READ),
-  checkoutBranch: operation(GIT_OPERATION_PROFILE.COMMON_WORKTREE_WRITE),
+  checkoutBranch: operation(GIT_OPERATION_PROFILE.WORKTREE_WRITE),
   createBranch: operation(GIT_OPERATION_PROFILE.COMMON_WORKTREE_WRITE),
   deleteGitBranch: operation(GIT_OPERATION_PROFILE.COMMON_WRITE),
   deleteRemoteBranch: operation(GIT_OPERATION_PROFILE.COMMON_WRITE, GIT_NETWORK_USAGE.REQUIRED),

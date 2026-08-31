@@ -35,7 +35,9 @@ mock.module('vscode', () => ({
   window: {},
 }));
 
+process.env.OPENCHAMBER_GIT_CHECK_IGNORE_TIMEOUT_MS = '10';
 const { clearGitReadCacheForTests, handleFsBridgeMessage } = await import('./bridge-fs-runtime');
+delete process.env.OPENCHAMBER_GIT_CHECK_IGNORE_TIMEOUT_MS;
 
 const deps = {
   resolveUserPath: (value) => value,
@@ -90,6 +92,7 @@ describe('bridge fs exec git read cache', () => {
 
   it('uses the execution adapter for gitignore checks', async () => {
     const readCalls = [];
+    const readOptions = [];
     const result = await handleFsBridgeMessage(
       { id: '1', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
       {
@@ -99,22 +102,49 @@ describe('bridge fs exec git read cache', () => {
           { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
         ],
         execGit: async () => ({ stdout: 'ignored.ts\n', stderr: '', exitCode: 0 }),
-        runGitRead: async (cwd, task) => {
+        runGitRead: async (cwd, task, options) => {
           readCalls.push(cwd);
+          readOptions.push(options);
           return task();
         },
       },
     );
 
     expect(readCalls).toEqual(['/repo']);
+    expect(readOptions[0]).toEqual({
+      signal: expect.any(AbortSignal),
+      queueTimeoutMs: 10,
+    });
     expect(result?.data?.entries).toEqual([
       { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
     ]);
   });
 
-  it('returns a failure when Gitignore discovery fails', async () => {
-    await expect(handleFsBridgeMessage(
+  it('returns existing entries when Gitignore admission fails', async () => {
+    const result = await handleFsBridgeMessage(
       { id: 'gitignore-failure', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
+      {
+        ...deps,
+        listDirectoryEntries: async () => [
+          { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+        ],
+        runGitRead: async () => {
+          throw Object.assign(new Error('Git execution queue wait timed out'), {
+            code: 'GIT_EXECUTION_QUEUE_TIMEOUT',
+          });
+        },
+      },
+    );
+
+    expect(result?.success).toBe(true);
+    expect(result?.data?.entries).toEqual([
+      { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+    ]);
+  });
+
+  it('returns existing entries when Gitignore execution fails', async () => {
+    const result = await handleFsBridgeMessage(
+      { id: 'gitignore-execution-failure', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
       {
         ...deps,
         listDirectoryEntries: async () => [
@@ -127,6 +157,36 @@ describe('bridge fs exec git read cache', () => {
           code: 'EACCES',
         }),
       },
-    )).rejects.toThrow('Gitignore discovery failed');
+    );
+
+    expect(result?.success).toBe(true);
+    expect(result?.data?.entries).toEqual([
+      { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+    ]);
+  });
+
+  it('returns existing entries when Gitignore execution times out and aborts its waiter', async () => {
+    let aborted = false;
+    const result = await handleFsBridgeMessage(
+      { id: 'gitignore-timeout', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
+      {
+        ...deps,
+        listDirectoryEntries: async () => [
+          { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+        ],
+        runGitRead: async (_cwd, _task, options) => {
+          options?.signal?.addEventListener('abort', () => {
+            aborted = true;
+          });
+          return new Promise(() => {});
+        },
+      },
+    );
+
+    expect(result?.success).toBe(true);
+    expect(result?.data?.entries).toEqual([
+      { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+    ]);
+    expect(aborted).toBe(true);
   });
 });
