@@ -71,6 +71,29 @@ type SdkResult<T> = {
 
 type DirectoryAvailability = "available" | "missing" | "unknown";
 
+/**
+ * Runtime guard for one native V2 question item before it crosses into the
+ * shared `QuestionRequest` contract. The SDK types the payload, but the
+ * pending-question UI treats this read as authoritative, so a misbehaving
+ * server must fail over to V1 instead of surfacing malformed items.
+ * Mirrors the minimal per-item checks the V1 merge loop already applies.
+ */
+const parseQuestionV2Item = (value: unknown): QuestionRequest | null => {
+  if (!value || typeof value !== 'object') return null;
+  // SAFETY: shape probe only — each field below is re-validated before it
+  // is copied into the trusted contract.
+  const candidate = value as Partial<QuestionRequest>;
+  if (typeof candidate.id !== 'string' || candidate.id.length === 0) return null;
+  if (typeof candidate.sessionID !== 'string') return null;
+  if (!Array.isArray(candidate.questions)) return null;
+  return {
+    id: candidate.id,
+    sessionID: candidate.sessionID,
+    questions: candidate.questions,
+    tool: candidate.tool,
+  };
+};
+
 const isMissingDirectoryError = (error: unknown): boolean => {
   if (error instanceof FilesystemError) {
     return error.reason === "not-found" || error.reason === "not-directory";
@@ -1439,6 +1462,13 @@ class OpencodeService {
 
     const fetchForDirectory = async (directory?: string | null): Promise<QuestionRequest[]> => {
       const trimmed = typeof directory === 'string' ? directory.trim() : '';
+      // Native V2 read first; the V1 `question.list` call below stays as the
+      // fallback for pre-1.18 servers and any V2 failure (see
+      // {@link fetchPendingQuestionsV2}).
+      const viaV2 = await this.fetchPendingQuestionsV2(trimmed || undefined);
+      if (viaV2) {
+        return viaV2;
+      }
       const result = await this.client.question.list(trimmed ? { directory: trimmed } : undefined);
       if (result.error) {
         throw new Error(`question.list failed: ${formatSdkError(result.error)}`);
@@ -1477,6 +1507,43 @@ class OpencodeService {
     }
 
     return merged;
+  }
+
+  /**
+   * Native V2 question read introduced in OpenCode SDK v1.18.25. Wraps
+   * `question.request.list` (unscoped for global pending items, or scoped
+   * via `location.directory`).
+   *
+   * Returns the pending questions on success, or `null` on any failure
+   * (network error, 4xx/5xx response, missing/unexpected payload, or a
+   * pre-1.18 server without the V2 endpoint) so the caller can use the
+   * V1 `question.list` path unchanged. Each item is validated minimally
+   * (string `id`/`sessionID`, array `questions`) before being accepted —
+   * any malformed item fails the whole V2 attempt conservatively.
+   */
+  private async fetchPendingQuestionsV2(directory?: string): Promise<QuestionRequest[] | null> {
+    try {
+      const response = await this.client.v2.question.request.list(
+        directory ? { location: { directory } } : undefined,
+      );
+      // HeyApi `RequestResult` discriminates on `error`/`data`; the 200
+      // payload nests the array under its own `data` field.
+      if (response.error !== undefined) return null;
+      const items = response.data?.data;
+      if (!Array.isArray(items)) return null;
+      const validated: QuestionRequest[] = [];
+      for (const item of items) {
+        const parsed = parseQuestionV2Item(item);
+        // Malformed item: reject the whole V2 attempt conservatively — the
+        // caller falls back to V1 instead of returning partial data.
+        if (!parsed) return null;
+        validated.push(parsed);
+      }
+      return validated;
+    } catch {
+      // Network failure, pre-V2 server, or runtimeFetch throwing → fall back.
+      return null;
+    }
   }
 
   // Configuration
