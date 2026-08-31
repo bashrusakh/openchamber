@@ -852,6 +852,59 @@ function getRequestReplyClient(
   return getSessionReplyClient(sessionId)
 }
 
+/**
+ * Try the native V2 question reply endpoint (SDK 1.18.25,
+ * `session.question.reply`) against the same directory-resolved client the V1
+ * path uses. The V2 route is addressed by `sessionID` + `requestID` — no
+ * `directory` parameter exists there — so the caller must pass the
+ * directory-resolved client.
+ *
+ * Resolves `true` only when the server answered through V2 without an error.
+ * Anything else — HTTP error, throw, or unexpected result shape — resolves
+ * `false` so the caller falls back to the unchanged V1 call. This mirrors the
+ * permission V2 adoption (#1982): try V2, fall back cleanly, no version gate;
+ * a pre-V2 server simply takes the V1 path. A V2 404 also falls back, so the
+ * V1 call re-answers not-found for the stale-request recovery path.
+ */
+async function tryV2QuestionReply(
+  client: OpencodeClient,
+  sessionId: string,
+  requestId: string,
+  answers: string[][],
+): Promise<boolean> {
+  try {
+    const result = await client.v2.session.question.reply({
+      sessionID: sessionId,
+      requestID: requestId,
+      questionV2Reply: { answers },
+    })
+    // Success is a 204 with no body: the discriminated union collapses to
+    // "no error" on the data branch (see fetchPermission in client.ts).
+    return result.error === undefined
+  } catch {
+    // Old server without the V2 route, network failure, or SDK throw — the
+    // V1 path decides the outcome.
+    return false
+  }
+}
+
+/** See {@link tryV2QuestionReply} — reject has the same shape minus answers. */
+async function tryV2QuestionReject(
+  client: OpencodeClient,
+  sessionId: string,
+  requestId: string,
+): Promise<boolean> {
+  try {
+    const result = await client.v2.session.question.reject({
+      sessionID: sessionId,
+      requestID: requestId,
+    })
+    return result.error === undefined
+  } catch {
+    return false
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Session CRUD
 // ---------------------------------------------------------------------------
@@ -1850,7 +1903,23 @@ export async function respondToQuestion(
       : Array.isArray(answers[0])
         ? answers as string[][]
         : [answers as string[]]
-    const result = await getRequestReplyClient("question", sessionId, requestId).question.reply({
+    const replyClient = getRequestReplyClient("question", sessionId, requestId)
+    // V2 first (native `question.v2` surface). The V2 route has no directory
+    // parameter — the scoped client itself addresses the owning instance, so
+    // the same directory resolution the V1 call uses is preserved. Any V2
+    // failure falls through to the unchanged V1 call below.
+    if (await tryV2QuestionReply(replyClient, sessionId, requestId, normalizedAnswers)) {
+      // A successful reply is authoritative: the backend resolved the question,
+      // so clear it from the local store deterministically instead of waiting
+      // for the SSE `question.replied` event. A lost event (SSE gap) would leave
+      // the question pending forever, which keeps the session in "waiting for
+      // answer" — the next task's thinking and final response never render
+      // (issues #2911, #2448). The later SSE event is a no-op (the reducer only
+      // removes when present).
+      removeQuestionRequestFromChildStores(sessionId, requestId)
+      return
+    }
+    const result = await replyClient.question.reply({
       requestID: requestId,
       answers: normalizedAnswers,
       ...(directory ? { directory } : {}),
@@ -1884,7 +1953,17 @@ export async function rejectQuestion(
     || getSessionDirectory(sessionId)
     || dir()
   try {
-    const result = await getRequestReplyClient("question", sessionId, requestId).question.reject({
+    const rejectClient = getRequestReplyClient("question", sessionId, requestId)
+    // V2 first with the same guarded fallback as respondToQuestion above.
+    if (await tryV2QuestionReject(rejectClient, sessionId, requestId)) {
+      // A successful rejection is authoritative: the backend resolved the
+      // question, so clear it from the local store deterministically (see
+      // respondToQuestion for the lost-SSE-event rationale — issues #2911,
+      // #2448). The later SSE `question.rejected` event is a no-op.
+      removeQuestionRequestFromChildStores(sessionId, requestId)
+      return
+    }
+    const result = await rejectClient.question.reject({
       requestID: requestId,
       ...(directory ? { directory } : {}),
     })
