@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import type { API as GitAPI, Repository, GitExtension, Status } from './git.d';
+import { getGitExecutionEnv } from './git-execution-scope';
 
 let gitApi: GitAPI | null = null;
 let gitExtensionEnabled = false;
@@ -234,6 +235,12 @@ async function getGitApi(): Promise<GitAPI | null> {
   return initGitExtension();
 }
 
+export async function getGitExecutablePath(): Promise<string | undefined> {
+  const api = await getGitApi();
+  const configuredPath = api?.git.path;
+  return typeof configuredPath === 'string' && configuredPath.trim() ? configuredPath : undefined;
+}
+
 /**
  * Get repository for a given directory
  */
@@ -308,14 +315,13 @@ function cleanBranchName(branch: string): string {
  * Execute a raw git command and return the output
  */
 async function execGit(args: string[], cwd: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const normalizedCwd = normalizePath(cwd);
   return new Promise((resolve) => {
-    const normalizedCwd = normalizePath(cwd);
-    const gitPath = gitApi?.git.path || 'git';
-
-    buildGitEnv().then((env) => {
+    Promise.all([buildGitEnv(), getGitExecutablePath()]).then(([env, configuredPath]) => {
+      const gitPath = configuredPath?.trim() || 'git';
       const proc = spawn(gitPath, args, {
         cwd: normalizedCwd,
-        env,
+        env: { ...env, ...getGitExecutionEnv() },
         windowsHide: true,
       });
 
@@ -341,6 +347,11 @@ async function execGit(args: string[], cwd: string): Promise<{ stdout: string; s
       resolve({ stdout: '', stderr: error instanceof Error ? error.message : String(error), exitCode: 1 });
     });
   });
+}
+
+function createGitCommandFailure(operation: string, directory: string, args: string[], result: { stderr: string; exitCode: number }): Error {
+  const detail = result.stderr.trim() || `Git exited with code ${result.exitCode}`;
+  return new Error(`${operation} failed in ${directory}: ${detail} (git ${args.join(' ')})`);
 }
 
 function isValidCommitHash(hash: string): boolean {
@@ -881,6 +892,19 @@ export interface CreateGitWorktreePayload {
   ensureRemoteUrl?: string;
   returnAfterDirectoryCreated?: boolean;
 }
+
+export type GitWorktreeBackgroundOperation = 'worktreeAttachment' | 'worktreeBootstrap';
+
+export type GitWorktreeExecutionOptions = {
+  scheduleBackground?: <T>(
+    request: {
+      operation: GitWorktreeBackgroundOperation;
+      contextDirectory: string;
+      network?: boolean;
+    },
+    task: () => Promise<T>,
+  ) => Promise<T> | void;
+};
 
 export interface RemoveGitWorktreePayload {
   directory: string;
@@ -1559,6 +1583,7 @@ const queueWorktreeBootstrap = (args: {
   ensureRemoteName: string;
   ensureRemoteUrl: string;
   startCommand: string | undefined;
+  scheduleBackground?: GitWorktreeExecutionOptions['scheduleBackground'];
 }) => {
   const {
     directory,
@@ -1571,31 +1596,38 @@ const queueWorktreeBootstrap = (args: {
     ensureRemoteName,
     ensureRemoteUrl,
     startCommand,
+    scheduleBackground,
   } = args;
-  const task = new Promise<void>((resolve) => setTimeout(resolve, 0))
-    .then(async () => {
-      await populateWorktreeWithLockRecovery(directory);
-      await runPostCheckoutHook(directory);
-      if (setUpstream) {
-        await applyUpstreamConfiguration({
-          primaryWorktree,
-          worktreeDirectory: directory,
-          localBranch,
-          setUpstream,
-          upstreamRemote,
-          upstreamBranch,
-          ensureRemoteName,
-          ensureRemoteUrl,
-        }).catch((error) => {
-          console.warn('[GitService] Worktree upstream configuration failed:', error instanceof Error ? error.message : String(error));
-        });
-      }
-      setWorktreeBootstrapState(directory, WORKTREE_BOOTSTRAP_PENDING, WORKTREE_PHASE_GIT_READY);
-      await runWorktreeStartScripts(directory, projectID, startCommand).catch((error) => {
-        console.warn('[GitService] Worktree start script task failed:', error instanceof Error ? error.message : String(error));
+  const bootstrap = async () => {
+    await populateWorktreeWithLockRecovery(directory);
+    await runPostCheckoutHook(directory);
+    if (setUpstream) {
+      await applyUpstreamConfiguration({
+        primaryWorktree,
+        worktreeDirectory: directory,
+        localBranch,
+        setUpstream,
+        upstreamRemote,
+        upstreamBranch,
+        ensureRemoteName,
+        ensureRemoteUrl,
+      }).catch((error) => {
+        console.warn('[GitService] Worktree upstream configuration failed:', error instanceof Error ? error.message : String(error));
       });
-      setWorktreeBootstrapState(directory, WORKTREE_BOOTSTRAP_READY, WORKTREE_PHASE_SETUP_READY);
-    })
+    }
+    setWorktreeBootstrapState(directory, WORKTREE_BOOTSTRAP_PENDING, WORKTREE_PHASE_GIT_READY);
+    await runWorktreeStartScripts(directory, projectID, startCommand).catch((error) => {
+      console.warn('[GitService] Worktree start script task failed:', error instanceof Error ? error.message : String(error));
+    });
+    setWorktreeBootstrapState(directory, WORKTREE_BOOTSTRAP_READY, WORKTREE_PHASE_SETUP_READY);
+  };
+  const task = (scheduleBackground
+    ? Promise.resolve(scheduleBackground({
+      operation: 'worktreeBootstrap',
+      contextDirectory: directory,
+      network: Boolean(setUpstream || (ensureRemoteName && ensureRemoteUrl)),
+    }, bootstrap))
+    : new Promise<void>((resolve) => setTimeout(resolve, 0)).then(bootstrap))
     .catch((error) => {
       setWorktreeBootstrapFailure(directory, error);
       console.warn('[GitService] Worktree bootstrap task failed:', error instanceof Error ? error.message : String(error));
@@ -1909,6 +1941,7 @@ async function attachGitWorktreeToCandidate(
   context: Awaited<ReturnType<typeof resolveWorktreeProjectContext>>,
   candidate: { name: string; directory: string; branch: string },
   input: CreateGitWorktreePayload = {},
+  options: GitWorktreeExecutionOptions = {},
 ): Promise<GitWorktreeInfo> {
   const mode = input?.mode === 'existing' ? 'existing' : 'new';
   const preferredBranchName = cleanBranchName(String(input?.branchName || '').trim());
@@ -2016,6 +2049,7 @@ async function attachGitWorktreeToCandidate(
     ensureRemoteName,
     ensureRemoteUrl,
     startCommand: input?.startCommand,
+    scheduleBackground: options.scheduleBackground,
   });
 
   const headResult = await runGitCommand(candidate.directory, ['rev-parse', 'HEAD']);
@@ -2031,7 +2065,11 @@ async function attachGitWorktreeToCandidate(
   };
 }
 
-export async function createWorktree(directory: string, input: CreateGitWorktreePayload = {}): Promise<GitWorktreeInfo> {
+export async function createWorktree(
+  directory: string,
+  input: CreateGitWorktreePayload = {},
+  options: GitWorktreeExecutionOptions = {},
+): Promise<GitWorktreeInfo> {
   const mode = input?.mode === 'existing' ? 'existing' : 'new';
   const context = await resolveWorktreeProjectContext(directory);
 
@@ -2068,7 +2106,14 @@ export async function createWorktree(directory: string, input: CreateGitWorktree
       ? cleanBranchName(String(input?.branchName || input?.existingBranch || candidate.branch || '').trim())
       : candidate.branch;
 
-    const task = attachGitWorktreeToCandidate(context, candidate, input).catch(async (error) => {
+    const attach = () => attachGitWorktreeToCandidate(context, candidate, input, options);
+    const task = (options.scheduleBackground
+      ? Promise.resolve(options.scheduleBackground({
+        operation: 'worktreeAttachment',
+        contextDirectory: context.primaryWorktree,
+        network: Boolean(input?.setUpstream || (input?.ensureRemoteName && input?.ensureRemoteUrl)),
+      }, attach))
+      : attach()).catch(async (error) => {
       setWorktreeBootstrapFailure(candidate.directory, error);
       await cleanupFailedFastWorktreeCreate(context, candidate);
       console.warn('[GitService] Background worktree creation failed:', error instanceof Error ? error.message : String(error));
@@ -2085,7 +2130,7 @@ export async function createWorktree(directory: string, input: CreateGitWorktree
     };
   }
 
-  return attachGitWorktreeToCandidate(context, candidate, input);
+  return attachGitWorktreeToCandidate(context, candidate, input, options);
 }
 
 export async function getWorktreeBootstrapStatus(directory: string): Promise<WorktreeBootstrapStatus> {
@@ -2219,6 +2264,9 @@ export async function getGitRangeDiff(
 
   const args = ['diff', '--no-color', `-U${Math.max(0, contextLines)}`, `${resolvedBase}...${headRef}`, '--', filePath];
   const result = await execGit(args, directory);
+  if (result.exitCode !== 0) {
+    throw createGitCommandFailure('Git range diff', directory, args, result);
+  }
   return { diff: result.stdout };
 }
 
@@ -2248,7 +2296,9 @@ export async function getGitRangeFiles(
 
   const args = ['diff', '--name-only', `${resolvedBase}...${headRef}`];
   const result = await execGit(args, directory);
-  if (result.exitCode !== 0) return [];
+  if (result.exitCode !== 0) {
+    throw createGitCommandFailure('Git range file discovery', directory, args, result);
+  }
   return String(result.stdout || '')
     .split('\n')
     .map((l) => l.trim())

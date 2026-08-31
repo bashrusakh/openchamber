@@ -1,4 +1,4 @@
-import { getDiff, getRangeDiff, getUntrackedDiffs, listUntrackedPaths } from '../git/service.js';
+import { getDiff, getRangeDiff, getUntrackedDiffs, listUntrackedPaths } from '../git/execution-service.js';
 
 // A walkthrough source resolves to one or more diff *sections*. A section is a
 // patch plus the scope its hunk ids live in; keeping staged and working-tree

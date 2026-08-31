@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { execGit } from './bridge-git-process-runtime';
+import { runWithGitExecutionScope } from './git-execution-scope';
 
 const MAX_FILE_ATTACH_SIZE_BYTES = 20 * 1024 * 1024;
 
@@ -122,15 +123,79 @@ const isPathInside = (candidatePath: string, parentPath: string): boolean => {
 
 export const normalizeFsPath = (value: string) => value.replace(/\\/g, '/');
 
-const execGitCheckIgnore = async (args: string[], cwd: string): Promise<{ stdout: string; stderr: string; exitCode: number } | null> => {
+type GitReadRunner = <T>(cwd: string, task: () => Promise<T> | T) => Promise<T>;
+
+export type GitCheckIgnoreResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  code?: string;
+};
+
+const isGitExecutionFailure = (result: GitCheckIgnoreResult): boolean => {
+  const code = String(result.code || '').toUpperCase();
+  if (code === 'EACCES' || code === 'EPERM' || code === 'ENOENT') {
+    return true;
+  }
+
+  return /access is denied|command not found|cannot execute|failed to spawn|no such file or directory|permission denied|spawn .*\b(?:eacces|enoent)\b/i.test(
+    `${result.stderr}\n${result.stdout}`,
+  );
+};
+
+const isConfirmedNonRepository = (result: GitCheckIgnoreResult): boolean => (
+  !isGitExecutionFailure(result)
+  && /not a git repository|not inside (?:a )?work tree|this operation must be run in a work tree/i.test(
+    `${result.stderr}\n${result.stdout}`,
+  )
+);
+
+export const parseGitCheckIgnoreResult = (
+  result: GitCheckIgnoreResult | null,
+  cwd: string,
+): Set<string> => {
+  if (!result) {
+    throw new Error(`Gitignore discovery timed out for ${cwd}`);
+  }
+
+  if (result.exitCode === 0) {
+    return new Set(
+      result.stdout
+        .split('\n')
+        .map((name: string) => name.trim())
+        .filter(Boolean),
+    );
+  }
+
+  // check-ignore uses exit code 1 when no path matched an ignore rule.
+  if (result.exitCode === 1 && !result.stderr.trim() && !isGitExecutionFailure(result)) {
+    return new Set();
+  }
+
+  if (isConfirmedNonRepository(result)) {
+    return new Set();
+  }
+
+  const detail = result.stderr.trim() || result.stdout.trim() || `Git exited with code ${result.exitCode}`;
+  throw new Error(`Gitignore discovery failed for ${cwd}: ${detail}`);
+};
+
+const execGitCheckIgnore = async (
+  args: string[],
+  cwd: string,
+  runGitRead?: GitReadRunner,
+): Promise<GitCheckIgnoreResult | null> => {
+  const read = () => runGitRead
+    ? runGitRead(cwd, () => execGit(args, cwd))
+    : runWithGitExecutionScope(true, () => execGit(args, cwd));
   if (GIT_CHECK_IGNORE_TIMEOUT_MS <= 0) {
-    return execGit(args, cwd);
+    return read();
   }
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      execGit(args, cwd),
+      read(),
       new Promise<null>((resolve) => {
         timeout = setTimeout(() => resolve(null), GIT_CHECK_IGNORE_TIMEOUT_MS);
       }),
@@ -142,45 +207,25 @@ const execGitCheckIgnore = async (args: string[], cwd: string): Promise<{ stdout
   }
 };
 
-const gitCheckIgnoreNames = async (cwd: string, names: string[]): Promise<Set<string>> => {
+const gitCheckIgnoreNames = async (cwd: string, names: string[], runGitRead?: GitReadRunner): Promise<Set<string>> => {
   if (names.length === 0) {
     return new Set();
   }
 
-  const result = await execGitCheckIgnore(['check-ignore', '--', ...names], cwd);
-  if (!result) {
-    return new Set();
-  }
-  if (result.exitCode !== 0 || !result.stdout) {
-    return new Set();
-  }
-
-  return new Set(
-    result.stdout
-      .split('\n')
-      .map((name: string) => name.trim())
-      .filter(Boolean),
+  return parseGitCheckIgnoreResult(
+    await execGitCheckIgnore(['check-ignore', '--', ...names], cwd, runGitRead),
+    cwd,
   );
 };
 
-const gitCheckIgnorePaths = async (cwd: string, paths: string[]): Promise<Set<string>> => {
+const gitCheckIgnorePaths = async (cwd: string, paths: string[], runGitRead?: GitReadRunner): Promise<Set<string>> => {
   if (paths.length === 0) {
     return new Set();
   }
 
-  const result = await execGitCheckIgnore(['check-ignore', '--', ...paths], cwd);
-  if (!result) {
-    return new Set();
-  }
-  if (result.exitCode !== 0 || !result.stdout) {
-    return new Set();
-  }
-
-  return new Set(
-    result.stdout
-      .split('\n')
-      .map((name: string) => name.trim())
-      .filter(Boolean),
+  return parseGitCheckIgnoreResult(
+    await execGitCheckIgnore(['check-ignore', '--', ...paths], cwd, runGitRead),
+    cwd,
   );
 };
 
@@ -314,6 +359,7 @@ const searchFilesystemFiles = async (
   includeHidden: boolean,
   respectGitignore: boolean,
   timeBudgetMs?: number,
+  runGitRead?: GitReadRunner,
 ) => {
   const normalizedQuery = (query || '').trim().toLowerCase();
   const matchAll = normalizedQuery.length === 0;
@@ -343,7 +389,7 @@ const searchFilesystemFiles = async (
       const dirents = dirLists[index];
 
       const ignoredNames = respectGitignore
-        ? await gitCheckIgnoreNames(normalizeFsPath(currentDir.fsPath), dirents.map(([name]) => name))
+        ? await gitCheckIgnoreNames(normalizeFsPath(currentDir.fsPath), dirents.map(([name]) => name), runGitRead)
         : new Set<string>();
 
       for (const [entryName, entryType] of dirents) {
@@ -433,6 +479,7 @@ export const searchDirectory = async (
   limit = 60,
   includeHidden = false,
   respectGitignore = true,
+  runGitRead?: GitReadRunner,
 ) => {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || os.homedir();
   const rootPath = directory
@@ -442,7 +489,7 @@ export const searchDirectory = async (
 
   const sanitizedQuery = query?.trim() || '';
   if (!sanitizedQuery) {
-    return searchFilesystemFiles(rootPath, '', limit, includeHidden, respectGitignore);
+    return searchFilesystemFiles(rootPath, '', limit, includeHidden, respectGitignore, undefined, runGitRead);
   }
 
   const escapeGlob = (value: string) => value
@@ -471,7 +518,7 @@ export const searchDirectory = async (
       return relative || path.basename(file.fsPath);
     });
 
-    const ignored = await gitCheckIgnorePaths(rootPath, relativePaths);
+    const ignored = await gitCheckIgnorePaths(rootPath, relativePaths, runGitRead);
     if (ignored.size === 0) {
       return results;
     }
@@ -479,44 +526,40 @@ export const searchDirectory = async (
     return results.filter((_, index) => !ignored.has(relativePaths[index]));
   };
 
-  try {
-    const escapedQuery = escapeGlob(sanitizedQuery);
-    const pattern = `**/*${escapedQuery}*`;
-    const results = await vscode.workspace.findFiles(
-      new vscode.RelativePattern(vscode.Uri.file(rootPath), pattern),
-      exclude,
-      limit,
-    );
+  const findFiles = async (pattern: string): Promise<vscode.Uri[]> => {
+    try {
+      return await vscode.workspace.findFiles(
+        new vscode.RelativePattern(vscode.Uri.file(rootPath), pattern),
+        exclude,
+        limit,
+      );
+    } catch {
+      return [];
+    }
+  };
 
-    if (Array.isArray(results) && results.length > 0) {
-      const visible = includeHidden ? results : results.filter((file) => !path.basename(file.fsPath).startsWith('.'));
+  const escapedQuery = escapeGlob(sanitizedQuery);
+  const results = await findFiles(`**/*${escapedQuery}*`);
+  if (results.length > 0) {
+    const visible = includeHidden ? results : results.filter((file) => !path.basename(file.fsPath).startsWith('.'));
+    const filtered = await filterGitIgnored(visible);
+    if (filtered.length > 0) {
+      return mapResults(filtered);
+    }
+  }
+
+  if (sanitizedQuery.length >= 2 && sanitizedQuery.length <= 32) {
+    const fuzzyResults = await findFiles(`**/*${escapedQuery.split('').join('*')}*`);
+    if (fuzzyResults.length > 0) {
+      const visible = includeHidden ? fuzzyResults : fuzzyResults.filter((file) => !path.basename(file.fsPath).startsWith('.'));
       const filtered = await filterGitIgnored(visible);
       if (filtered.length > 0) {
         return mapResults(filtered);
       }
     }
-
-    if (sanitizedQuery.length >= 2 && sanitizedQuery.length <= 32) {
-      const fuzzyPattern = `**/*${escapedQuery.split('').join('*')}*`;
-      const fuzzyResults = await vscode.workspace.findFiles(
-        new vscode.RelativePattern(vscode.Uri.file(rootPath), fuzzyPattern),
-        exclude,
-        limit,
-      );
-
-      if (Array.isArray(fuzzyResults) && fuzzyResults.length > 0) {
-        const visible = includeHidden ? fuzzyResults : fuzzyResults.filter((file) => !path.basename(file.fsPath).startsWith('.'));
-        const filtered = await filterGitIgnored(visible);
-        if (filtered.length > 0) {
-          return mapResults(filtered);
-        }
-      }
-    }
-  } catch {
-    // Fall through to filesystem traversal.
   }
 
-  return searchFilesystemFiles(rootPath, sanitizedQuery, limit, includeHidden, respectGitignore, 1500);
+  return searchFilesystemFiles(rootPath, sanitizedQuery, limit, includeHidden, respectGitignore, 1500, runGitRead);
 };
 
 export const fetchModelsMetadata = async () => {

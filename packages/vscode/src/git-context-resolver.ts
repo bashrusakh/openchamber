@@ -1,0 +1,14 @@
+export {
+  GitContextResolver,
+  createGitContextResolver,
+} from '../../web/server/lib/git/context-resolver.js';
+
+export type {
+  GitContextResolveOptions,
+  GitContextResolverOptions,
+  GitContextResolverStats,
+  GitDiscoveryCommandResult,
+  GitNonRepositoryContext,
+  GitRepositoryContext,
+  GitResolvedContext,
+} from '../../web/server/lib/git/context-resolver.js';

@@ -5,7 +5,9 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import yaml from 'yaml';
 
+import { getGitExecutablePath } from './gitService';
 import { discoverSkills } from './opencodeConfig';
+import { gitExecutionRuntime } from './git-execution-runtime';
 
 const execFileAsync = promisify(execFile);
 
@@ -108,9 +110,17 @@ function looksLikeAuthError(message: string): boolean {
   );
 }
 
-async function runGit(args: string[], options?: { cwd?: string; timeoutMs?: number }) {
+type GitExecutableResolver = () => Promise<string | undefined>;
+
+async function runGit(
+  args: string[],
+  options?: { cwd?: string; timeoutMs?: number },
+  resolveGitExecutable: GitExecutableResolver = getGitExecutablePath,
+) {
   try {
-    const { stdout, stderr } = await execFileAsync('git', args, {
+    const configuredPath = await resolveGitExecutable();
+    const gitExecutable = configuredPath?.trim() || 'git';
+    const { stdout, stderr } = await execFileAsync(gitExecutable, args, {
       cwd: options?.cwd,
       timeout: options?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       maxBuffer: DEFAULT_MAX_BUFFER,
@@ -231,28 +241,34 @@ async function safeRm(dir: string) {
 }
 
 async function cloneRepo(cloneUrl: string, targetDir: string) {
-  const preferred = ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', cloneUrl, targetDir];
-  const fallback = ['clone', '--depth', '1', '--no-checkout', cloneUrl, targetDir];
+  return gitExecutionRuntime.coordinator.runClone(
+    { destination: targetDir, label: 'skills-catalog/clone-repository' },
+    async (lease) => {
+      const preferred = ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', cloneUrl, targetDir];
+      const fallback = ['clone', '--depth', '1', '--no-checkout', cloneUrl, targetDir];
 
-  const result = await runGit(preferred, { timeoutMs: 60_000 });
-  if (result.ok) return { ok: true as const };
+      const result = await runGit(preferred, { timeoutMs: 60_000 });
+      if (result.ok) return { ok: true as const };
 
-  const fallbackResult = await runGit(fallback, { timeoutMs: 60_000 });
-  if (fallbackResult.ok) return { ok: true as const };
+      const fallbackResult = await runGit(fallback, { timeoutMs: 60_000 });
+      if (fallbackResult.ok) return { ok: true as const };
 
-  const combined = `${fallbackResult.stderr}\n${fallbackResult.message}`.trim();
-  if (looksLikeAuthError(combined)) {
-    return {
-      ok: false as const,
-      error: {
-        kind: 'authRequired' as const,
-        message: 'Private repositories are not supported in VS Code yet. Use Desktop/Web.',
-        sshOnly: true,
-      },
-    };
-  }
+      const combined = `${fallbackResult.stderr}\n${fallbackResult.message}`.trim();
+      if (looksLikeAuthError(combined)) {
+        return {
+          ok: false as const,
+          error: {
+            kind: 'authRequired' as const,
+            message: 'Private repositories are not supported in VS Code yet. Use Desktop/Web.',
+            sshOnly: true,
+          },
+        };
+      }
 
-  return { ok: false as const, error: { kind: 'networkError' as const, message: combined || 'Failed to clone repository' } };
+      lease.releaseNetwork();
+      return { ok: false as const, error: { kind: 'networkError' as const, message: combined || 'Failed to clone repository' } };
+    },
+  );
 }
 
 export async function scanSkillsRepository(options: { source: string; subpath?: string; defaultSubpath?: string }): Promise<SkillsRepoScanResult> {

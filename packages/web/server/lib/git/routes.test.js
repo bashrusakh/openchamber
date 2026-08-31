@@ -173,6 +173,8 @@ describe('git routes status discovery', () => {
     gitLibraries.isGitRepository.mockResolvedValue(true);
     gitLibraries.getStatus.mockRejectedValue(
       Object.assign(new Error('fatal: not a git repository (or any of the parent directories): .git'), {
+        code: 'GIT_NOT_A_REPOSITORY',
+        reason: 'not-a-repository',
         task: { commands: ['status'] },
       }),
     );
@@ -188,6 +190,25 @@ describe('git routes status discovery', () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toMatchObject({ isGitRepository: false });
     expect(gitLibraries.getStatus).toHaveBeenCalledWith('/opened/project', { mode: undefined });
+  });
+
+  it('does not soften a permission error that mentions a non-repository', async () => {
+    gitLibraries.isGitRepository.mockRejectedValue(
+      Object.assign(new Error('EACCES: permission denied while checking (not a git repository)'), {
+        code: 'EACCES',
+      }),
+    );
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const response = createMockResponse();
+
+    await getRoute('GET', '/api/git/check')(
+      { query: { directory: '/protected-repo' } },
+      response,
+    );
+
+    expect(response.statusCode).toBe(500);
+    expect(response.body).toEqual({ error: 'Failed to check git repository' });
   });
 
   it('uses the opened project path from query arrays without falling back to cwd', async () => {
