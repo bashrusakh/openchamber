@@ -25,6 +25,24 @@ const globalRemovedSessionIds: string[] = []
 const deletedCleanupIdentities: Array<{ runtimeKey: string; directory: string; sessionId: string }> = []
 const movedSessionDirectories: Array<{ sessionID: string; directory: string }> = []
 
+// Controls the V2 question surface on mockScopedClient. The default "throw"
+// models a pre-V2 server (route absent → SDK call throws) so existing V1
+// tests exercise the production fallback path unchanged; individual V2 tests
+// opt into "ok" or "error".
+let v2QuestionReplyBehavior: "throw" | "ok" | "error" = "throw"
+let v2QuestionRejectBehavior: "throw" | "ok" | "error" = "throw"
+
+// QuestionV2CallParams / QuestionV2SdkResult mirror the surface session-actions
+// consumes on `client.v2.session.question.reply/reject`: reply/reject take
+// { sessionID, requestID, questionV2Reply? } and answer 204 with no body
+// (RequestResult collapses that to `{ data: undefined, error: undefined }`).
+type QuestionV2CallParams = {
+  sessionID?: string
+  requestID?: string
+  questionV2Reply?: { answers: string[][] }
+}
+type QuestionV2SdkResult = { data?: undefined; error?: { message?: string }; response?: { status?: number } }
+
 const mockScopedClient = {
   permission: {
     reply: mock((params: Record<string, unknown>) => {
@@ -51,6 +69,33 @@ const mockScopedClient = {
       }
       return Promise.resolve({ data: true })
     }),
+  },
+  v2: {
+    session: {
+      question: {
+        reply: mock((params: QuestionV2CallParams): Promise<QuestionV2SdkResult> => {
+          if (v2QuestionReplyBehavior === "throw") {
+            throw new Error("v2 route missing (pre-V2 server)")
+          }
+          replyCalls.push({ method: "question.v2.reply", params })
+          if (v2QuestionReplyBehavior === "error") {
+            return Promise.resolve({ error: { message: "rejected" }, response: { status: 500 } })
+          }
+          // V2 reply answers 204 with no body (QuestionV2ReplyResponses.204 = void).
+          return Promise.resolve({ data: undefined, error: undefined })
+        }),
+        reject: mock((params: QuestionV2CallParams): Promise<QuestionV2SdkResult> => {
+          if (v2QuestionRejectBehavior === "throw") {
+            throw new Error("v2 route missing (pre-V2 server)")
+          }
+          replyCalls.push({ method: "question.v2.reject", params })
+          if (v2QuestionRejectBehavior === "error") {
+            return Promise.resolve({ error: { message: "rejected" }, response: { status: 500 } })
+          }
+          return Promise.resolve({ data: undefined, error: undefined })
+        }),
+      },
+    },
   },
 }
 
@@ -2189,5 +2234,154 @@ describe("dismissOpenPermissionsForSession", () => {
     } finally {
       console.error = originalError
     }
+  })
+})
+
+describe("native V2 question reply/reject with V1 fallback", () => {
+  beforeEach(() => {
+    replyCalls.length = 0
+    scopedClientDirectories.length = 0
+    questionReplyError = null
+    questionRejectError = null
+    v2QuestionReplyBehavior = "throw"
+    v2QuestionRejectBehavior = "throw"
+  })
+
+  const questionSessionStore = (questionId: string) => {
+    const question = buildQuestion(questionId, "session-a")
+    return createStore({}, {
+      session: [sessionFixture("session-a")],
+      question: { "session-a": [question] },
+    })
+  }
+
+  test("V2 reply success resolves through v2.session.question.reply and skips V1", async () => {
+    const store = questionSessionStore("q-1")
+    const childStores = createChildStores([["/test/project", store]])
+    v2QuestionReplyBehavior = "ok"
+
+    const { setActionRefs, respondToQuestion } = await import("./session-actions")
+    setActionRefs(actionsSdk(), childStores, () => "/test/project")
+
+    await respondToQuestion("session-a", "q-1", [["Yes"]])
+
+    const v2Calls = replyCalls.filter((call) => call.method === "question.v2.reply")
+    const v1Calls = replyCalls.filter((call) => call.method === "question.reply")
+    expect(v2Calls).toHaveLength(1)
+    expect(v1Calls).toHaveLength(0)
+    // The V2 route is addressed by sessionID + requestID and carries the same
+    // normalized string[][] answers the V1 path sends.
+    expect(v2Calls[0].params).toEqual({
+      sessionID: "session-a",
+      requestID: "q-1",
+      questionV2Reply: { answers: [["Yes"]] },
+    })
+    // A confirmed V2 reply is authoritative: the pending request clears from
+    // the local store exactly as the V1 success path clears it.
+    expect(store.getState().question["session-a"]).toBe(undefined)
+  })
+
+  test("V2 reply error falls back to the V1 call with the same answers and directory", async () => {
+    const store = questionSessionStore("q-1")
+    const childStores = createChildStores([["/test/project", store]])
+    v2QuestionReplyBehavior = "error"
+
+    const { setActionRefs, respondToQuestion } = await import("./session-actions")
+    setActionRefs(actionsSdk(), childStores, () => "/test/project")
+
+    await respondToQuestion("session-a", "q-1", [["Yes"]])
+
+    expect(replyCalls.filter((call) => call.method === "question.v2.reply")).toHaveLength(1)
+    const v1Calls = replyCalls.filter((call) => call.method === "question.reply")
+    expect(v1Calls).toHaveLength(1)
+    expect(v1Calls[0].params.requestID).toBe("q-1")
+    expect(v1Calls[0].params.answers).toEqual([["Yes"]])
+    expect(v1Calls[0].params.directory).toBe("/test/project")
+    // The V1 fallback answered successfully, so pending state clears.
+    expect(store.getState().question["session-a"]).toBe(undefined)
+  })
+
+  test("V2 reply throw (pre-V2 server) falls back to the V1 call", async () => {
+    const store = questionSessionStore("q-1")
+    const childStores = createChildStores([["/test/project", store]])
+
+    const { setActionRefs, respondToQuestion } = await import("./session-actions")
+    setActionRefs(actionsSdk(), childStores, () => "/test/project")
+
+    await respondToQuestion("session-a", "q-1", [["Yes"]])
+
+    // The default behavior throws inside the SDK surface, so no V2 call is
+    // recorded; the V1 reply carries the same normalized answers.
+    expect(replyCalls.filter((call) => call.method === "question.v2.reply")).toHaveLength(0)
+    const v1Calls = replyCalls.filter((call) => call.method === "question.reply")
+    expect(v1Calls).toHaveLength(1)
+    expect(v1Calls[0].params.answers).toEqual([["Yes"]])
+    expect(store.getState().question["session-a"]).toBe(undefined)
+  })
+
+  test("V2 reply 404 still falls back so the stale-request recovery path survives", async () => {
+    const store = questionSessionStore("q-stale")
+    const childStores = createChildStores([["/test/project", store]])
+    v2QuestionReplyBehavior = "error"
+    questionReplyError = Object.assign(new Error("question.reply failed (404): QuestionNotFoundError"), { status: 404 })
+
+    const { setActionRefs, respondToQuestion } = await import("./session-actions")
+    setActionRefs(actionsSdk(), childStores, () => "/test/project")
+
+    await expect(respondToQuestion("session-a", "q-stale", [["Yes"]])).rejects.toThrow()
+    // The V1 fallback re-answered not-found, keeping the existing recovery:
+    // the stale entry clears and the reply surfaces as an error.
+    expect(store.getState().question["session-a"]).toBe(undefined)
+  })
+
+  test("V2 reject success resolves through v2.session.question.reject and skips V1", async () => {
+    const store = questionSessionStore("q-1")
+    const childStores = createChildStores([["/test/project", store]])
+    v2QuestionRejectBehavior = "ok"
+
+    const { setActionRefs, rejectQuestion } = await import("./session-actions")
+    setActionRefs(actionsSdk(), childStores, () => "/test/project")
+
+    await rejectQuestion("session-a", "q-1")
+
+    const v2Calls = replyCalls.filter((call) => call.method === "question.v2.reject")
+    const v1Calls = replyCalls.filter((call) => call.method === "question.reject")
+    expect(v2Calls).toHaveLength(1)
+    expect(v1Calls).toHaveLength(0)
+    expect(v2Calls[0].params).toEqual({ sessionID: "session-a", requestID: "q-1" })
+    expect(store.getState().question["session-a"]).toBe(undefined)
+  })
+
+  test("V2 reject error falls back to the V1 call", async () => {
+    const store = questionSessionStore("q-1")
+    const childStores = createChildStores([["/test/project", store]])
+    v2QuestionRejectBehavior = "error"
+
+    const { setActionRefs, rejectQuestion } = await import("./session-actions")
+    setActionRefs(actionsSdk(), childStores, () => "/test/project")
+
+    await rejectQuestion("session-a", "q-1")
+
+    expect(replyCalls.filter((call) => call.method === "question.v2.reject")).toHaveLength(1)
+    const v1Calls = replyCalls.filter((call) => call.method === "question.reject")
+    expect(v1Calls).toHaveLength(1)
+    expect(v1Calls[0].params.requestID).toBe("q-1")
+    expect(store.getState().question["session-a"]).toBe(undefined)
+  })
+
+  test("V2 reject throw (pre-V2 server) falls back to the V1 call", async () => {
+    const store = questionSessionStore("q-1")
+    const childStores = createChildStores([["/test/project", store]])
+
+    const { setActionRefs, rejectQuestion } = await import("./session-actions")
+    setActionRefs(actionsSdk(), childStores, () => "/test/project")
+
+    await rejectQuestion("session-a", "q-1")
+
+    expect(replyCalls.filter((call) => call.method === "question.v2.reject")).toHaveLength(0)
+    const v1Calls = replyCalls.filter((call) => call.method === "question.reject")
+    expect(v1Calls).toHaveLength(1)
+    expect(v1Calls[0].params.requestID).toBe("q-1")
+    expect(store.getState().question["session-a"]).toBe(undefined)
   })
 })
