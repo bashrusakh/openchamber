@@ -1,6 +1,8 @@
 import type { ContextPartMetadata } from '@/lib/messages/contextParts';
 import { createOpencodeClient, OpencodeClient } from "@opencode-ai/sdk/v2";
 import type { PermissionV2Request, PermissionV2Effect, PermissionV2Source } from "@opencode-ai/sdk/v2/client";
+import type { QuestionV2Request } from "@opencode-ai/sdk/v2/client";
+import { z } from 'zod';
 import type { FilesAPI } from "../api/types";
 import { getDesktopHomeDirectory } from "../desktop";
 import type {
@@ -72,26 +74,58 @@ type SdkResult<T> = {
 type DirectoryAvailability = "available" | "missing" | "unknown";
 
 /**
- * Runtime guard for one native V2 question item before it crosses into the
- * shared `QuestionRequest` contract. The SDK types the payload, but the
+ * Parses one native V2 question item before it crosses into the shared
+ * `QuestionRequest` contract. The SDK types the payload, but the
  * pending-question UI treats this read as authoritative, so a misbehaving
- * server must fail over to V1 instead of surfacing malformed items.
- * Mirrors the minimal per-item checks the V1 merge loop already applies.
+ * server must fail over to V1 instead of surfacing malformed items. The
+ * schema validates every field the UI-consumed shape actually carries
+ * (see `QuestionRequest` consumers) — values are mapped fresh from the
+ * parsed payload, nothing is passed through unvalidated.
  */
-const parseQuestionV2Item = (value: unknown): QuestionRequest | null => {
-  if (!value || typeof value !== 'object') return null;
-  // SAFETY: shape probe only — each field below is re-validated before it
-  // is copied into the trusted contract.
-  const candidate = value as Partial<QuestionRequest>;
-  if (typeof candidate.id !== 'string' || candidate.id.length === 0) return null;
-  if (typeof candidate.sessionID !== 'string') return null;
-  if (!Array.isArray(candidate.questions)) return null;
-  return {
-    id: candidate.id,
-    sessionID: candidate.sessionID,
-    questions: candidate.questions,
-    tool: candidate.tool,
+const questionV2ItemSchema = z.object({
+  id: z.string().min(1),
+  sessionID: z.string(),
+  questions: z.array(
+    z.object({
+      question: z.string(),
+      header: z.string(),
+      options: z.array(
+        z.object({
+          label: z.string(),
+          description: z.string(),
+        }),
+      ),
+      multiple: z.boolean().optional(),
+    }),
+  ),
+  tool: z
+    .object({
+      messageID: z.string(),
+      callID: z.string(),
+    })
+    .optional(),
+});
+
+const parseQuestionV2Item = (item: QuestionV2Request): QuestionRequest | null => {
+  const parsed = questionV2ItemSchema.safeParse(item);
+  if (!parsed.success) return null;
+  const request: QuestionRequest = {
+    id: parsed.data.id,
+    sessionID: parsed.data.sessionID,
+    questions: parsed.data.questions.map((question) => ({
+      question: question.question,
+      header: question.header,
+      multiple: question.multiple,
+      options: question.options.map((option) => ({
+        label: option.label,
+        description: option.description,
+      })),
+    })),
   };
+  if (parsed.data.tool) {
+    request.tool = parsed.data.tool;
+  }
+  return request;
 };
 
 const isMissingDirectoryError = (error: unknown): boolean => {
@@ -1517,9 +1551,9 @@ class OpencodeService {
    * Returns the pending questions on success, or `null` on any failure
    * (network error, 4xx/5xx response, missing/unexpected payload, or a
    * pre-1.18 server without the V2 endpoint) so the caller can use the
-   * V1 `question.list` path unchanged. Each item is validated minimally
-   * (string `id`/`sessionID`, array `questions`) before being accepted —
-   * any malformed item fails the whole V2 attempt conservatively.
+   * V1 `question.list` path unchanged. Each item is schema-validated
+   * before being accepted (see {@link parseQuestionV2Item}) — any
+   * malformed item fails the whole V2 attempt conservatively.
    */
   private async fetchPendingQuestionsV2(directory?: string): Promise<QuestionRequest[] | null> {
     try {

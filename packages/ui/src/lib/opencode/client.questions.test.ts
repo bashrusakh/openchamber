@@ -233,6 +233,35 @@ describe('opencodeClient.listPendingQuestions (V2 read adoption)', () => {
     expect(v2ListArgs).toEqual([undefined, { location: { directory: '/repo' } }]);
   });
 
+  test('rejects the V2 attempt when a nested question entry is malformed and falls back conservatively', async () => {
+    // Valid top-level item, but its `questions` array contains a malformed
+    // entry (a bare string): the nested validation under test must reject
+    // the whole call; V1 answers unscoped while the scoped V2 call still
+    // succeeds per call.
+    const scopedQuestion = makeQuestion('v2q');
+    const v1Question = makeQuestion('v1q');
+    v1ListResult = makeV1ListResult([v1Question]);
+
+    const promise = opencodeClient.listPendingQuestions({ directories: ['/repo'] });
+    resolveV2Calls([
+      {
+        kind: 'ok',
+        items: [
+          // SAFETY: the malformed-item test intentionally feeds a payload
+          // that violates the QuestionFixture contract; the parser under
+          // test must reject it.
+          { ...makeQuestion('broken'), questions: ['not-a-question'] },
+        ],
+      },
+      { kind: 'ok', items: [scopedQuestion] },
+    ]);
+    const result = await promise;
+
+    expect(result).toEqual([v1Question, scopedQuestion]);
+    expect(v1ListArgs).toEqual([undefined]);
+    expect(v2ListArgs).toEqual([undefined, { location: { directory: '/repo' } }]);
+  });
+
   test('keeps the V2 unscoped + per-directory call pattern when V2 succeeds empty', async () => {
     const promise = opencodeClient.listPendingQuestions({ directories: ['/repo'] });
     resolveV2Calls([
