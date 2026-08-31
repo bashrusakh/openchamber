@@ -113,17 +113,13 @@ jobs:
         # integration suite run on the real Windows runner. They
         # run on Windows because (a) vitest itself is cross-platform
         # and (b) the guardian tests use only in-process mocks for
-        # `process.platform` and `net.createServer`. The `npx vitest`
-        # invocation is intentional: `bun run test` would dispatch to
-        # the bun vitest-compat runner, and at least one existing
-        # integration test (lifecycle-guardian-integration.test.js)
-        # comments that `vi.stubGlobal` is not available there.
+        # `process.platform` and `net.createServer`.
         # These unit/injected paths do not claim native restart or
         # rehydration evidence; the real Windows smoke and a future native
         # rehydration run remain separate evidence gates.
         working-directory: packages/web
         run: >-
-          npx vitest run
+          bun run test --
           server/lib/guardian/
           server/lib/opencode/lifecycle-guardian-integration.test.js
           server/lib/opencode/shutdown-runtime.test.js
@@ -155,7 +151,7 @@ jobs:
         # they mock `process.platform` and `child_process.spawnSync`
         # in-process; no real `node` child is launched.
         working-directory: packages/web
-        run: npx vitest run bin/cli.test.js
+        run: bun run test -- bin/cli.test.js
 
       - name: Type-check the web package on Windows
         working-directory: packages/web
