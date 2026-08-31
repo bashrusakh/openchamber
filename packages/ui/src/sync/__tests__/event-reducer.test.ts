@@ -431,4 +431,19 @@ describe("applyDirectoryEvent", () => {
     expect(applyDirectoryEvent(draft, questionRepliedEvent("ques_1"))).toBe(true)
     expect(draft.question.ses_1).toEqual([])
   })
+
+  test("a late question.v2.asked after a terminal event re-registers the request", () => {
+    const draft = state()
+
+    expect(applyDirectoryEvent(draft, questionAskedEvent("question.v2.asked", "ques_1"))).toBe(true)
+    expect(applyDirectoryEvent(draft, questionRepliedEvent("ques_1"))).toBe(true)
+    expect(draft.question.ses_1).toEqual([])
+
+    // The reducer keeps no tombstone or last-status bookkeeping: asked is an
+    // unconditional upsert, so a replayed or late asked re-inserts after a
+    // terminal removal. This is intentional for the ordered SSE stream — it is
+    // what makes replayed asks self-harmless — never a stale-request guard.
+    expect(applyDirectoryEvent(draft, questionAskedEvent("question.v2.asked", "ques_1"))).toBe(true)
+    expect(draft.question.ses_1.map((item) => item.id)).toEqual(["ques_1"])
+  })
 })
