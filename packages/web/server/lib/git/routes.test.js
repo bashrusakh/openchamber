@@ -3,15 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const gitLibraries = {
   stageFiles: vi.fn(),
   unstageFiles: vi.fn(),
-  createWorktree: vi.fn(),
-  getWorktreeBootstrapStatus: vi.fn(),
+  isGitRepository: vi.fn(),
+  getStatus: vi.fn(),
 };
 
 vi.mock('./index.js', () => ({
   stageFiles: gitLibraries.stageFiles,
   unstageFiles: gitLibraries.unstageFiles,
-  createWorktree: gitLibraries.createWorktree,
-  getWorktreeBootstrapStatus: gitLibraries.getWorktreeBootstrapStatus,
+  isGitRepository: gitLibraries.isGitRepository,
+  getStatus: gitLibraries.getStatus,
 }));
 
 const { registerGitRoutes } = await import('./routes.js');
@@ -65,8 +65,8 @@ describe('git routes index mutations', () => {
   beforeEach(() => {
     gitLibraries.stageFiles.mockReset();
     gitLibraries.unstageFiles.mockReset();
-    gitLibraries.createWorktree.mockReset();
-    gitLibraries.getWorktreeBootstrapStatus.mockReset();
+    gitLibraries.isGitRepository.mockReset();
+    gitLibraries.getStatus.mockReset();
   });
 
   it('accepts legacy stage path payloads', async () => {
@@ -141,54 +141,70 @@ describe('git routes index mutations', () => {
   });
 });
 
-describe('git routes linked worktree failures', () => {
+describe('git routes status discovery', () => {
   beforeEach(() => {
-    gitLibraries.createWorktree.mockReset();
-    gitLibraries.getWorktreeBootstrapStatus.mockReset();
+    gitLibraries.isGitRepository.mockReset();
+    gitLibraries.getStatus.mockReset();
   });
 
-  it('preserves the structured pull-request source code in create errors', async () => {
+  it('returns a soft non-repo payload for non-git folders', async () => {
+    gitLibraries.isGitRepository.mockResolvedValue(false);
     const { app, getRoute } = createRouteRegistry();
     registerGitRoutes(app);
     const response = createMockResponse();
-    gitLibraries.createWorktree.mockRejectedValue(Object.assign(
-      new Error('pull_request_unavailable'),
-      { code: 'pull_request_unavailable' },
-    ));
 
-    await getRoute('POST', '/api/git/worktrees')(
-      { query: { directory: '/repo' }, body: { worktreeName: 'pr-race' } },
-      response,
-    );
-
-    expect(response.statusCode).toBe(500);
-    expect(response.body).toEqual({
-      error: 'pull_request_unavailable',
-      code: 'pull_request_unavailable',
-    });
-  });
-
-  it('preserves the structured pull-request source code in bootstrap status', async () => {
-    const { app, getRoute } = createRouteRegistry();
-    registerGitRoutes(app);
-    const response = createMockResponse();
-    gitLibraries.getWorktreeBootstrapStatus.mockResolvedValue({
-      status: 'failed',
-      phase: 'directory-created',
-      error: 'pull_request_unavailable',
-      code: 'pull_request_unavailable',
-      updatedAt: 1,
-    });
-
-    await getRoute('GET', '/api/git/worktrees/bootstrap-status')(
-      { query: { directory: '/repo-pr-race' } },
+    await getRoute('GET', '/api/git/status')(
+      { query: { directory: '/tmp/not-a-repo' } },
       response,
     );
 
     expect(response.statusCode).toBe(200);
-    expect(response.body).toMatchObject({
-      status: 'failed',
-      code: 'pull_request_unavailable',
+    expect(response.body).toEqual({
+      isGitRepository: false,
+      files: [],
+      branch: null,
+      ahead: 0,
+      behind: 0,
     });
+    expect(gitLibraries.getStatus).not.toHaveBeenCalled();
+  });
+
+  it('does not abort when getStatus throws a non-repo GitError', async () => {
+    gitLibraries.isGitRepository.mockResolvedValue(true);
+    gitLibraries.getStatus.mockRejectedValue(
+      Object.assign(new Error('fatal: not a git repository (or any of the parent directories): .git'), {
+        task: { commands: ['status'] },
+      }),
+    );
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const response = createMockResponse();
+
+    await getRoute('GET', '/api/git/status')(
+      { query: { directory: '/opened/project' } },
+      response,
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toMatchObject({ isGitRepository: false });
+    expect(gitLibraries.getStatus).toHaveBeenCalledWith('/opened/project', { mode: undefined });
+  });
+
+  it('uses the opened project path from query arrays without falling back to cwd', async () => {
+    gitLibraries.isGitRepository.mockResolvedValue(true);
+    gitLibraries.getStatus.mockResolvedValue({ current: 'main', files: [], isClean: true, ahead: 0, behind: 0 });
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const response = createMockResponse();
+
+    await getRoute('GET', '/api/git/status')(
+      { query: { directory: ['/opened/git-project', '/ignored'] } },
+      response,
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(gitLibraries.isGitRepository).toHaveBeenCalledWith('/opened/git-project');
+    expect(gitLibraries.getStatus).toHaveBeenCalledWith('/opened/git-project', { mode: undefined });
+    expect(response.body).toMatchObject({ current: 'main' });
   });
 });
