@@ -101,7 +101,7 @@ jobs:
         # lifecycle and real-process smoke gates below; failures remain hard.
         working-directory: packages/web
         run: >-
-          npx vitest run
+          bun run test --
           server/lib/opencode/managed-opencode-handoff-v2/credential-store.test.js
           server/lib/opencode/managed-opencode-handoff-v2/secret-provider.test.js
           server/lib/opencode/managed-opencode-handoff-v2/protocol.test.js
