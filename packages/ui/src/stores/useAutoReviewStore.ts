@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { createDeferredSafeJSONStorage } from '@/stores/utils/safeStorage';
-import { normalizePath } from '@/lib/pathNormalization';
+import { canonicalizePathIdentity } from '@/lib/pathNormalization';
 
 type AutoReviewPhase = 'waiting_for_reviewer' | 'waiting_for_implementer';
 type AutoReviewStatus = 'running' | 'completed' | 'stopped' | 'error';
@@ -42,8 +42,8 @@ export const isAutoReviewRunActiveForTarget = (
     return false;
   }
 
-  const runDirectory = normalizePath(run.directory);
-  const targetDirectory = normalizePath(target.directory);
+  const runDirectory = canonicalizePathIdentity(run.directory);
+  const targetDirectory = canonicalizePathIdentity(target.directory);
   return runDirectory !== null && targetDirectory !== null && runDirectory === targetDirectory;
 };
 

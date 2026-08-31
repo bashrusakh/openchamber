@@ -5,6 +5,7 @@
 
 import { create } from "zustand"
 import type { ContextPartMetadata } from '@/lib/messages/contextParts'
+import { canonicalizePathIdentity } from '@/lib/pathNormalization'
 import type { AttachedFile } from "@/stores/types/sessionTypes"
 import { prepareAttachmentFiles } from "./attachment-files"
 
@@ -125,9 +126,12 @@ export type PendingSyntheticPartsTarget = {
   sessionId: string
 }
 
+const pendingSyntheticPartsDirectoryIdentity = (directory: string): string =>
+  canonicalizePathIdentity(directory) ?? directory
+
 const pendingSyntheticPartsKey = (target: PendingSyntheticPartsTarget): string => JSON.stringify([
   target.runtimeKey,
-  target.directory,
+  pendingSyntheticPartsDirectoryIdentity(target.directory),
   target.sessionId,
 ])
 
@@ -135,7 +139,7 @@ const samePendingSyntheticPartsTarget = (
   left: PendingSyntheticPartsTarget,
   right: PendingSyntheticPartsTarget,
 ): boolean => left.runtimeKey === right.runtimeKey
-  && left.directory === right.directory
+  && pendingSyntheticPartsDirectoryIdentity(left.directory) === pendingSyntheticPartsDirectoryIdentity(right.directory)
   && left.sessionId === right.sessionId
 
 export type VSCodeActiveEditorFile = {

@@ -686,6 +686,28 @@ describe('useQueuedMessageAutoSend integration', () => {
     expect(queueOf('ses_auto')).toHaveLength(1);
   });
 
+  test('blocks a queue when auto-review uses a Windows directory casing alias', async () => {
+    const windowsDirectory = 'C:/Repo';
+    const target = primeQueue('ses_windows', windowsDirectory);
+    autoReviewMockState.runsByOriginalSessionID = {
+      [target.sessionId]: {
+        originalSessionID: target.sessionId,
+        directory: 'c:/repo',
+        runtimeKey: getRuntimeKey(),
+        status: 'running',
+      },
+    };
+    act(() => {
+      setDirectorySessionStatus(target.sessionId, 'idle', [], windowsDirectory);
+    });
+
+    await mountHook();
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf(target.sessionId, windowsDirectory)).toHaveLength(1);
+  });
+
   test('does not let a stale auto-review run in another runtime block a colliding session queue', async () => {
     autoReviewMockState.runsByOriginalSessionID = {
       ses_auto: {

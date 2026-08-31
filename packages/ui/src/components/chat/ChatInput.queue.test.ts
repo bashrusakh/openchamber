@@ -117,4 +117,30 @@ describe('ChatInput busy-path queueing', () => {
             canQueue: true,
         })).toBe('queue');
     });
+
+    test('matches Windows directory aliases but keeps POSIX paths case-sensitive', () => {
+        const run = (directory: string, sessionId = target.sessionId) => ({
+            originalSessionID: sessionId,
+            directory,
+            runtimeKey: target.runtimeKey,
+            status: 'running' as const,
+        });
+
+        expect(isAutoReviewRunActiveForTarget(
+            run('C:/Repo'),
+            { ...target, directory: 'c:\\repo' },
+        )).toBe(true);
+        expect(isAutoReviewRunActiveForTarget(
+            run('//Server/Share/Repo'),
+            { ...target, directory: '\\\\server\\share\\repo' },
+        )).toBe(true);
+        expect(isAutoReviewRunActiveForTarget(
+            run('/Repo'),
+            { ...target, directory: '/repo' },
+        )).toBe(false);
+        expect(isAutoReviewRunActiveForTarget(
+            run('C:/Repo', 'other-session'),
+            { ...target, directory: 'c:/repo' },
+        )).toBe(false);
+    });
 });

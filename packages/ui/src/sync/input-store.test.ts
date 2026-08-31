@@ -409,4 +409,29 @@ describe("pending synthetic parts ownership", () => {
     expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toEqual(ownerParts)
     expect(useInputStore.getState().consumePendingSyntheticParts(other)).toEqual(otherParts)
   })
+
+  test("uses Windows path identity for targeted context without merging POSIX case variants", () => {
+    const driveOwner = { ...target("session-drive"), directory: "C:/Repo" }
+    const driveAlias = { ...driveOwner, directory: "c:\\repo" }
+    const driveParts = [{ text: "drive context", synthetic: true }]
+
+    useInputStore.getState().setPendingSyntheticParts(driveParts)
+    expect(useInputStore.getState().claimPendingSyntheticPartsTarget(driveOwner)).toBe(true)
+    expect(useInputStore.getState().consumePendingSyntheticParts(driveAlias)).toEqual(driveParts)
+
+    const uncOwner = { ...target("session-unc"), directory: "//Server/Share/Repo" }
+    const uncAlias = { ...uncOwner, directory: "\\\\server\\share\\repo" }
+    const uncParts = [{ text: "UNC context", synthetic: true }]
+
+    useInputStore.getState().setPendingSyntheticParts(uncParts, uncOwner)
+    expect(useInputStore.getState().consumePendingSyntheticParts(uncAlias)).toEqual(uncParts)
+
+    const posixOwner = { ...target("session-posix"), directory: "/Repo" }
+    const posixAlias = { ...posixOwner, directory: "/repo" }
+    const posixParts = [{ text: "POSIX context", synthetic: true }]
+
+    useInputStore.getState().setPendingSyntheticParts(posixParts, posixOwner)
+    expect(useInputStore.getState().consumePendingSyntheticParts(posixAlias)).toBeNull()
+    expect(useInputStore.getState().consumePendingSyntheticParts(posixOwner)).toEqual(posixParts)
+  })
 })
