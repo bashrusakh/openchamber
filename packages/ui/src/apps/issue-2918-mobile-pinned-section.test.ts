@@ -11,9 +11,11 @@
  *
  * Fix (issue #2918): `MobileSessionsSheet` now renders a global "Pinned"
  * section above the project tree (mirroring the desktop sidebar), built from
- * the existing local pin store via `isSessionPinned`. Rows carry a pushpin
- * marker and a pin/unpin swipe action (desktop parity), so pinned sessions
- * are visible and manageable without touching the recency-ordered buckets.
+ * the existing local pin store via `isSessionPinned`. Phone-drawer rows carry
+ * a pushpin marker and a pin/unpin swipe action (desktop parity), and pinned
+ * roots keep their complete in-snapshot child tree reachable through the same
+ * expansion behavior as the project tree. The iPad/sidebar variant keeps its
+ * prior affordances.
  *
  * Note: pins are persisted per-device in `localStorage`
  * (`oc.sessions.pinned.v2`, keyed by `[runtimeKey, directory, sessionId]`),
@@ -36,6 +38,7 @@ import {
   orderSessionsByLifecycleScopes,
   resetSessionOrdering,
 } from '@/sync/session-ordering';
+import { partitionSidebarSessions } from '@/components/session/sidebar/list/sessionCollection';
 import { collectSessionSubtreeIds, getSessionParentId, selectPinnedRootSessionIds } from './mobileSessionGrouping';
 
 // --- Constants mirroring packages/ui/src/apps/MobileSessionsSheet.tsx -------
@@ -139,6 +142,77 @@ describe('issue #2918: global Pinned section on the mobile sessions sheet', () =
     );
   });
 
+  test('keeps a pinned root child and grandchild in the shared Pinned tree render bucket', () => {
+    const sessions = [
+      treeSession('root'),
+      treeSession('child', 'root'),
+      treeSession('grandchild', 'child'),
+      treeSession('other-root'),
+    ];
+    const pinnedRootIds = selectPinnedRootSessionIds(sessions, (entry) => entry.id === 'root');
+    const pinnedSessionSubtreeIds = collectSessionSubtreeIds(sessions, pinnedRootIds);
+    const pinnedBucketSessions = sessions.filter((entry) => pinnedSessionSubtreeIds.has(entry.id));
+
+    expect(pinnedBucketSessions.map((entry) => entry.id)).toEqual(['root', 'child', 'grandchild']);
+
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(path.join(__dirname, 'MobileSessionsSheet.tsx'), 'utf8');
+    const pinnedSectionIndex = source.indexOf("t('directoryTree.section.pinned')");
+    const pinnedRendererIndex = source.indexOf('renderBucketSessions(', pinnedSectionIndex);
+
+    expect(pinnedSectionIndex).toBeGreaterThanOrEqual(0);
+    expect(pinnedRendererIndex).toBeGreaterThan(pinnedSectionIndex);
+    expect(source.indexOf('PINNED_SESSION_BUCKET_KEY', pinnedRendererIndex)).toBeGreaterThan(pinnedRendererIndex);
+    expect(source).toContain('sessions.filter((session) => pinnedSessionSubtreeIds.has(session.id))');
+    expect(source).toContain('{ paginateRoots: false, rootContextLabel: buildSessionContextLabel }');
+    expect(source).toContain('const renderedSessionIds = new Set<string>();');
+    expect(source).toContain('if (renderedSessionIds.has(session.id)) return null;');
+  });
+
+  test('owns a pinned managed Chat root and child in Pinned instead of Chats', () => {
+    const now = Date.now();
+    const pinnedChatDirectory = '/home/user/.config/openchamber/chats/2026-08-31/session-pinned';
+    const pinnedChatRoot = session('pinned-chat-root', now, pinnedChatDirectory);
+    const pinnedChatChild = {
+      ...session('pinned-chat-child', now - 1, pinnedChatDirectory),
+      parentID: pinnedChatRoot.id,
+    };
+    const unpinnedChat = session(
+      'unpinned-chat',
+      now - 2,
+      '/home/user/.config/openchamber/chats/2026-08-31/session-unpinned',
+    );
+    const sessions = [pinnedChatRoot, pinnedChatChild, unpinnedChat];
+
+    useSessionPinnedStore.getState().toggle({ directory: pinnedChatDirectory, sessionId: pinnedChatRoot.id });
+    const pinnedSessionIds = useSessionPinnedStore.getState().ids;
+    const managedChatSessions = partitionSidebarSessions(sessions, false).chatSessions;
+    const pinnedRootIds = selectPinnedRootSessionIds(
+      sessions,
+      (entry) => isSessionPinned(pinnedSessionIds, entry.directory, entry.id),
+    );
+    const pinnedSessionSubtreeIds = collectSessionSubtreeIds(sessions, pinnedRootIds);
+    const chatsBucketSessions = managedChatSessions.filter((entry) => !pinnedSessionSubtreeIds.has(entry.id));
+    const pinnedBucketSessions = sessions.filter((entry) => pinnedSessionSubtreeIds.has(entry.id));
+    const renderedIds = [...chatsBucketSessions, ...pinnedBucketSessions].map((entry) => entry.id);
+
+    expect(chatsBucketSessions.map((entry) => entry.id)).toEqual(['unpinned-chat']);
+    expect(pinnedBucketSessions.map((entry) => entry.id)).toEqual(['pinned-chat-root', 'pinned-chat-child']);
+    expect(new Set(renderedIds)).toEqual(new Set(['unpinned-chat', 'pinned-chat-root', 'pinned-chat-child']));
+    expect(renderedIds).toHaveLength(3);
+
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(path.join(__dirname, 'MobileSessionsSheet.tsx'), 'utf8');
+    const chatProjectionIndex = source.indexOf('const chatSessions = React.useMemo(');
+    const chatFilterIndex = source.indexOf(
+      'managedChatSessions.filter((session) => !pinnedSessionSubtreeIds.has(session.id))',
+      chatProjectionIndex,
+    );
+
+    expect(chatProjectionIndex).toBeGreaterThanOrEqual(0);
+    expect(chatFilterIndex).toBeGreaterThan(chatProjectionIndex);
+  });
+
   test('excludes a pinned root from the drawer tree but keeps it in the project total', () => {
     const now = Date.now();
     const sessions = [
@@ -187,11 +261,12 @@ describe('issue #2918: global Pinned section on the mobile sessions sheet', () =
 
     // A rendered Pinned section above the project tree: the i18n key
     // `directoryTree.section.pinned` ('Pinned') drives the section header and
-    // the section is rendered from `pinnedSessions` before `orderedNodes.map`.
+    // the section is rendered from the complete pinned bucket before
+    // `orderedNodes.map`.
     expect(source).toContain("t('directoryTree.section.pinned')");
-    expect(source).toContain('pinnedSessions.map');
+    expect(source).toContain('pinnedSessionBucket');
     const treeRenderIndex = source.indexOf('orderedNodes.map');
-    const pinnedSectionIndex = source.indexOf('pinnedSessions.map');
+    const pinnedSectionIndex = source.indexOf("t('directoryTree.section.pinned')");
     expect(pinnedSectionIndex).toBeGreaterThanOrEqual(0);
     expect(treeRenderIndex).toBeGreaterThan(pinnedSectionIndex);
 
@@ -227,5 +302,34 @@ describe('issue #2918: global Pinned section on the mobile sessions sheet', () =
     expect(projectCountIndex).toBeGreaterThan(resolvedNodeGuardIndex);
     expect(projectCountIndex).toBeLessThan(drawerExclusionIndex);
     expect(source.match(/node\.totalSessions \+= 1;/g) ?? []).toHaveLength(1);
+  });
+
+  test('structural: managed Chats keeps its collapsible paginated section before the project tree', () => {
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(path.join(__dirname, 'MobileSessionsSheet.tsx'), 'utf8');
+
+    expect(source).toContain('const chatsExpanded = projectExpandedMap[CHAT_DRAFT_PROJECT_ID] ?? true');
+    expect(source).toContain('toggleProject(CHAT_DRAFT_PROJECT_ID, chatsExpanded)');
+    expect(source).toContain('renderBucketSessions(chatsBucketKey, chatsBucket, PROJECT_SESSION_INDENT)');
+    expect(source).toContain("t('sessions.sidebar.activity.chatsEmpty')");
+    expect(source).toContain("getSessionParentId(session)).length");
+
+    const chatsIndex = source.indexOf('const chatsExpanded = projectExpandedMap[CHAT_DRAFT_PROJECT_ID] ?? true');
+    const pinnedIndex = source.indexOf("t('directoryTree.section.pinned')");
+    const treeIndex = source.indexOf('orderedNodes.map');
+    expect(chatsIndex).toBeGreaterThanOrEqual(0);
+    expect(pinnedIndex).toBeGreaterThan(chatsIndex);
+    expect(treeIndex).toBeGreaterThan(pinnedIndex);
+  });
+
+  test('structural: pin markers and swipe actions are isolated to the phone drawer', () => {
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(path.join(__dirname, 'MobileSessionsSheet.tsx'), 'utf8');
+
+    expect(source).toContain("pinned={variant === 'drawer' && isSessionPinned(");
+    expect(source).toContain("onTogglePinned={variant === 'drawer'");
+    expect(source).toContain("{variant === 'drawer' && pinnedSessions.length > 0 ? (");
+    expect(source).toContain('const actionsWidth = onTogglePinned ? ROW_ACTIONS_WIDTH : ROW_ACTIONS_WIDTH - PIN_ACTION_WIDTH;');
+    expect(source).toContain('style={{ width: actionsWidth }}');
   });
 });
