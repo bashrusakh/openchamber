@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createGitContextResolver } from './context-resolver.js';
 
@@ -17,6 +17,7 @@ describe('GitContextResolver', () => {
   it('uses one structured discovery command and derives linked-worktree identity', async () => {
     const calls = [];
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async (cwd, args) => {
         calls.push({ cwd, args });
         return { success: true, stdout: '/repo/worktree\n/repo/.git/worktrees/feature\n/repo/.git\n' };
@@ -42,6 +43,7 @@ describe('GitContextResolver', () => {
 
   it('returns a non-repository context without inventing an identity', async () => {
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async () => ({ success: false, stderr: 'fatal: not a git repository' }),
     });
 
@@ -52,8 +54,39 @@ describe('GitContextResolver', () => {
     });
   });
 
+  it('returns a missing requested directory as non-repository without invoking Git', async () => {
+    const runGit = vi.fn();
+    const resolver = createGitContextResolver({
+      realpath: async (value) => value,
+      pathExists: async () => false,
+      runGit,
+    });
+
+    await expect(resolver.resolve('/deleted-worktree')).resolves.toEqual({
+      isRepository: false,
+      requestedDirectory: '/deleted-worktree',
+      reason: 'not-a-repository',
+    });
+    expect(runGit).not.toHaveBeenCalled();
+  });
+
+  it('propagates requested-directory stat failures without invoking Git', async () => {
+    const statError = Object.assign(new Error('permission denied while checking directory'), {
+      code: 'EACCES',
+    });
+    const runGit = vi.fn();
+    const resolver = createGitContextResolver({
+      pathExists: async () => { throw statError; },
+      runGit,
+    });
+
+    await expect(resolver.resolve('/protected-repo')).rejects.toBe(statError);
+    expect(runGit).not.toHaveBeenCalled();
+  });
+
   it('accepts a structured non-repository discovery result', async () => {
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async () => ({
         success: false,
         code: 'GIT_NOT_A_REPOSITORY',
@@ -70,6 +103,7 @@ describe('GitContextResolver', () => {
 
   it('keeps permission failures as structured discovery errors', async () => {
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async () => ({
         success: false,
         code: 'EACCES',
@@ -91,6 +125,7 @@ describe('GitContextResolver', () => {
     const error = new Error('permission denied while reading repository metadata');
     error.code = 'EACCES';
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async () => { throw error; },
     });
 
@@ -106,6 +141,7 @@ describe('GitContextResolver', () => {
 
   it('keeps missing Git failures as structured discovery errors', async () => {
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async () => ({
         success: false,
         code: 'ENOENT',
@@ -127,6 +163,7 @@ describe('GitContextResolver', () => {
 
   it('keeps incomplete discovery output as an error', async () => {
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async () => ({
         success: true,
         stdout: '/repo\n/repo/.git\n',
@@ -145,6 +182,7 @@ describe('GitContextResolver', () => {
 
   it('rejects complete-looking discovery output without a valid repository identity', async () => {
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async () => ({
         success: true,
         stdout: 'repository\n.git\n.git\n',
@@ -162,6 +200,7 @@ describe('GitContextResolver', () => {
 
   it('rejects a partial relative identity mixed with absolute discovery output', async () => {
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async () => ({
         success: true,
         stdout: '/repo\n.git\n.git\n',
@@ -175,6 +214,7 @@ describe('GitContextResolver', () => {
 
   it('resolves relative common-directory output from the discovery CWD', async () => {
     const resolver = createGitContextResolver({
+      pathExists: async () => true,
       runGit: async () => ({
         success: true,
         stdout: '../\n../../.git/worktrees/feature\n./.git\n',
@@ -192,6 +232,7 @@ describe('GitContextResolver', () => {
     const calls = [];
     const resolver = createGitContextResolver({
       realpath: async (value) => value.replace('/link', ''),
+      pathExists: async () => true,
       runGit: async (cwd) => {
         calls.push(cwd);
         return { success: true, stdout: '/repo/src\n/repo/.git\n/repo/.git\n' };
@@ -213,6 +254,7 @@ describe('GitContextResolver', () => {
     let calls = 0;
     const resolver = createGitContextResolver({
       realpath: async (value) => value,
+      pathExists: async () => true,
       runGit: async () => {
         calls += 1;
         return discovery;
@@ -252,6 +294,7 @@ describe('GitContextResolver', () => {
     });
     const resolver = createGitContextResolver({
       realpath: async (value) => value,
+      pathExists: async () => true,
       runGit: async () => discovery,
     });
 

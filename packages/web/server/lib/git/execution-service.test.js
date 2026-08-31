@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createGitExecutionService } from './execution-service.js';
+import { GIT_OPERATION_KIND } from './execution-coordinator.js';
 import { getGitExecutionEnv } from './execution-scope.js';
 
 const contextFor = (directory) => ({
@@ -49,12 +50,13 @@ describe('Git execution service', () => {
 
   it('applies optional-lock suppression only inside coordinated read execution', async () => {
     const observations = [];
+    const directory = process.cwd();
     let service;
     const raw = {
       createGit: async (cwd, options) => {
         observations.push({ type: 'discovery', cwd, env: options?.envOverrides });
         return {
-          raw: async () => '/repo\n/repo/.git\n/repo/.git\n',
+          raw: async () => `${directory}\n${directory}/.git\n${directory}/.git\n`,
         };
       },
       getDiff: async () => {
@@ -75,13 +77,13 @@ describe('Git execution service', () => {
     };
     service = createGitExecutionService({ raw });
 
-    await expect(service.getDiff('/repo', 'file.ts')).resolves.toBe('diff');
-    await expect(service.stageFile('/repo', 'file.ts')).resolves.toBeUndefined();
+    await expect(service.getDiff(directory, 'file.ts')).resolves.toBe('diff');
+    await expect(service.stageFile(directory, 'file.ts')).resolves.toBeUndefined();
 
     expect(observations).toEqual([
       {
         type: 'discovery',
-        cwd: '/repo',
+        cwd: directory,
         env: { GIT_OPTIONAL_LOCKS: '0' },
       },
       {
@@ -156,6 +158,72 @@ describe('Git execution service', () => {
       userEmail: 'user@example.test',
     });
     expect(calls).toEqual(['/not-a-repo']);
+  });
+
+  it('keeps deleted-directory checks and status on the soft raw fallback path', async () => {
+    const calls = [];
+    const raw = {
+      getStatus: async (directory, options) => {
+        calls.push({ directory, options });
+        return { isGitRepository: false, files: [] };
+      },
+    };
+    const service = createGitExecutionService({
+      raw,
+      resolver: { resolve: async (directory) => ({
+        isRepository: false,
+        requestedDirectory: directory,
+        reason: 'not-a-repository',
+      }) },
+    });
+
+    await expect(service.isGitRepository('/deleted-worktree')).resolves.toBe(false);
+    await expect(service.getStatus('/deleted-worktree')).resolves.toEqual({
+      isGitRepository: false,
+      files: [],
+    });
+    expect(calls).toEqual([{
+      directory: '/deleted-worktree',
+      options: undefined,
+    }]);
+  });
+
+  it('propagates a missing Git executable discovery failure', async () => {
+    const failure = Object.assign(new Error('Git executable is unavailable'), {
+      code: 'ENOENT',
+      details: { operation: 'git-context-discovery' },
+    });
+    const service = createGitExecutionService({
+      raw: {},
+      resolver: { resolve: async () => { throw failure; } },
+    });
+
+    await expect(service.isGitRepository('/repo')).rejects.toBe(failure);
+  });
+
+  it('classifies branch and commit checkout as worktree-scoped writes', async () => {
+    const kinds = [];
+    const raw = {
+      checkoutBranch: async () => 'branch',
+      checkoutCommit: async () => 'commit',
+    };
+    const service = createGitExecutionService({
+      raw,
+      coordinator: {
+        run: async (options, task) => {
+          kinds.push(options.kind);
+          return task();
+        },
+      },
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+
+    await expect(service.checkoutBranch('/repo', 'feature')).resolves.toBe('branch');
+    await expect(service.checkoutCommit('/repo', '0123456789abcdef')).resolves.toBe('commit');
+    expect(kinds).toEqual([
+      GIT_OPERATION_KIND.WORKTREE_WRITE,
+      GIT_OPERATION_KIND.WORKTREE_WRITE,
+    ]);
   });
 
   it('resolves integration operations from their repository input', async () => {

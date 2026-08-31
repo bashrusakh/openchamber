@@ -47,6 +47,17 @@ type FsExecCommandResult = {
   error?: string;
 };
 
+type GitReadOptions = {
+  signal?: AbortSignal;
+  queueTimeoutMs?: number;
+};
+
+type GitReadRunner = <T>(
+  cwd: string,
+  task: () => Promise<T> | T,
+  options?: GitReadOptions,
+) => Promise<T>;
+
 const createGitReadCacheTtlMs = () => {
   const raw = Number(process.env.OPENCHAMBER_GIT_READ_CACHE_TTL_MS);
   if (Number.isFinite(raw) && raw >= 0) return raw;
@@ -115,7 +126,7 @@ type FsDeps = {
     limit: number | undefined,
     includeHidden: boolean,
     respectGitignore: boolean,
-    runGitRead?: <T>(cwd: string, task: () => Promise<T> | T) => Promise<T>,
+    runGitRead?: GitReadRunner,
   ) => Promise<Array<{ name: string; path: string; relativePath: string; extension: string | undefined }>>;
   resolveFileReadPath: (inputPath: string) => Promise<
     | { ok: true; resolvedPath: string }
@@ -123,7 +134,7 @@ type FsDeps = {
   >;
   parseDroppedFileReference: (rawReference: string) => DroppedReferenceParse;
   readUriAsAttachment: (uri: vscode.Uri, name: string) => Promise<ReadUriAsAttachmentResult>;
-  runGitRead?: <T>(cwd: string, task: () => Promise<T> | T) => Promise<T>;
+  runGitRead?: GitReadRunner;
 };
 
 const runGitCheckIgnore = async (
@@ -132,8 +143,12 @@ const runGitCheckIgnore = async (
   cwd: string,
   runGitRead?: FsDeps['runGitRead'],
 ): Promise<{ stdout: string; stderr: string; exitCode: number; code?: string } | null> => {
+  const controller = GIT_CHECK_IGNORE_TIMEOUT_MS > 0 ? new AbortController() : undefined;
+  const readOptions = controller
+    ? { signal: controller.signal, queueTimeoutMs: GIT_CHECK_IGNORE_TIMEOUT_MS }
+    : undefined;
   const read = () => runGitRead
-    ? runGitRead(cwd, () => execGit(args, cwd))
+    ? runGitRead(cwd, () => execGit(args, cwd), readOptions)
     : runWithGitExecutionScope(true, () => execGit(args, cwd));
   if (GIT_CHECK_IGNORE_TIMEOUT_MS <= 0) {
     return read();
@@ -144,7 +159,10 @@ const runGitCheckIgnore = async (
     return await Promise.race([
       read(),
       new Promise<null>((resolve) => {
-        timeout = setTimeout(() => resolve(null), GIT_CHECK_IGNORE_TIMEOUT_MS);
+        timeout = setTimeout(() => {
+          controller?.abort('Gitignore discovery timed out');
+          resolve(null);
+        }, GIT_CHECK_IGNORE_TIMEOUT_MS);
       }),
     ]);
   } finally {
@@ -152,6 +170,11 @@ const runGitCheckIgnore = async (
       clearTimeout(timeout);
     }
   }
+};
+
+const reportGitignoreFailure = (cwd: string, error: unknown): void => {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.warn(`Gitignore filtering skipped for ${cwd}: ${detail}`);
 };
 
 export async function handleFsBridgeMessage(
@@ -215,15 +238,20 @@ export async function handleFsBridgeMessage(
         return { id, type, success: true, data: { entries, directory: normalized, path: normalized } };
       }
 
-      const ignoredNames = parseGitCheckIgnoreResult(
-        await runGitCheckIgnore(
-          deps.execGit,
-          ['check-ignore', '--', ...pathsToCheck],
+      let ignoredNames = new Set<string>();
+      try {
+        ignoredNames = parseGitCheckIgnoreResult(
+          await runGitCheckIgnore(
+            deps.execGit,
+            ['check-ignore', '--', ...pathsToCheck],
+            normalized,
+            deps.runGitRead,
+          ),
           normalized,
-          deps.runGitRead,
-        ),
-        normalized,
-      );
+        );
+      } catch (error) {
+        reportGitignoreFailure(normalized, error);
+      }
 
       const filteredEntries = entries.filter((entry) => !ignoredNames.has(entry.name));
       return { id, type, success: true, data: { entries: filteredEntries, directory: normalized, path: normalized } };
