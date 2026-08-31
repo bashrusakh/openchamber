@@ -135,13 +135,6 @@ const pendingSyntheticPartsKey = (target: PendingSyntheticPartsTarget): string =
   target.sessionId,
 ])
 
-const samePendingSyntheticPartsTarget = (
-  left: PendingSyntheticPartsTarget,
-  right: PendingSyntheticPartsTarget,
-): boolean => left.runtimeKey === right.runtimeKey
-  && pendingSyntheticPartsDirectoryIdentity(left.directory) === pendingSyntheticPartsDirectoryIdentity(right.directory)
-  && left.sessionId === right.sessionId
-
 export type VSCodeActiveEditorFile = {
   filePath: string
   fileName: string
@@ -153,10 +146,8 @@ export type VSCodeActiveEditorFile = {
 export type InputState = {
   pendingInputText: string | null
   pendingInputMode: "replace" | "append" | "append-inline"
-  /** Unassigned context, kept until a queue target claims it. */
+  /** Unassigned context, kept until a send target consumes it. */
   pendingSyntheticParts: SyntheticContextPart[] | null
-  /** Legacy owner for the unassigned bucket; targeted context uses the map. */
-  pendingSyntheticPartsTarget: PendingSyntheticPartsTarget | null
   /** Context consumed or produced concurrently, keyed by its send target. */
   pendingSyntheticPartsByTarget: Map<string, SyntheticContextPart[]>
   /**
@@ -173,7 +164,6 @@ export type InputState = {
   requestPresetSubmit: (text: string, type: "command" | "skill") => void
   consumePendingPresetSubmit: () => { text: string; type: "command" | "skill" } | null
   setPendingSyntheticParts: (parts: SyntheticContextPart[] | null, target?: PendingSyntheticPartsTarget) => void
-  claimPendingSyntheticPartsTarget: (target: PendingSyntheticPartsTarget) => boolean
   consumePendingSyntheticParts: (target?: PendingSyntheticPartsTarget) => SyntheticContextPart[] | null
   restorePendingSyntheticParts: (parts: SyntheticContextPart[], target?: PendingSyntheticPartsTarget) => void
   addAttachedFile: (file: File) => Promise<boolean>
@@ -191,7 +181,6 @@ export const useInputStore = create<InputState>()((set, get) => ({
   pendingInputText: null,
   pendingInputMode: "replace",
   pendingSyntheticParts: null,
-  pendingSyntheticPartsTarget: null,
   pendingSyntheticPartsByTarget: new Map(),
   pendingPresetSubmit: null,
   attachedFiles: [],
@@ -220,7 +209,6 @@ export const useInputStore = create<InputState>()((set, get) => ({
     if (!target) {
       set({
         pendingSyntheticParts: parts,
-        pendingSyntheticPartsTarget: null,
       })
       return
     }
@@ -237,41 +225,10 @@ export const useInputStore = create<InputState>()((set, get) => ({
     })
   },
 
-  claimPendingSyntheticPartsTarget: (target) => {
-    let claimed = false
-    set((state) => {
-      const key = pendingSyntheticPartsKey(target)
-      const currentTargetParts = state.pendingSyntheticPartsByTarget.get(key)
-      const owner = state.pendingSyntheticPartsTarget
-      if (owner && !samePendingSyntheticPartsTarget(owner, target)) return state
-      if (state.pendingSyntheticParts === null) {
-        if (currentTargetParts === undefined) return state
-        claimed = true
-        return state
-      }
-
-      const pendingSyntheticPartsByTarget = new Map(state.pendingSyntheticPartsByTarget)
-      pendingSyntheticPartsByTarget.set(key, [
-        ...state.pendingSyntheticParts,
-        ...(currentTargetParts ?? []),
-      ])
-      claimed = true
-      return {
-        pendingSyntheticParts: null,
-        pendingSyntheticPartsTarget: null,
-        pendingSyntheticPartsByTarget,
-      }
-    })
-    return claimed
-  },
-
   consumePendingSyntheticParts: (target) => {
     let consumed: SyntheticContextPart[] | null = null
     set((state) => {
-      const pendingSyntheticPartsTarget = state.pendingSyntheticPartsTarget
       const canConsumeUnassigned = state.pendingSyntheticParts !== null
-        && (!pendingSyntheticPartsTarget
-          || (target !== undefined && samePendingSyntheticPartsTarget(pendingSyntheticPartsTarget, target)))
 
       if (target) {
         const key = pendingSyntheticPartsKey(target)
@@ -285,7 +242,6 @@ export const useInputStore = create<InputState>()((set, get) => ({
           return canConsumeUnassigned
             ? {
               pendingSyntheticParts: null,
-              pendingSyntheticPartsTarget: null,
               pendingSyntheticPartsByTarget,
             }
             : { pendingSyntheticPartsByTarget }
@@ -294,7 +250,7 @@ export const useInputStore = create<InputState>()((set, get) => ({
 
       if (!canConsumeUnassigned) return state
       consumed = state.pendingSyntheticParts
-      return { pendingSyntheticParts: null, pendingSyntheticPartsTarget: null }
+      return { pendingSyntheticParts: null }
     })
     return consumed
   },
@@ -307,7 +263,6 @@ export const useInputStore = create<InputState>()((set, get) => ({
           ...parts,
           ...(state.pendingSyntheticParts ?? []),
         ],
-        pendingSyntheticPartsTarget: null,
       }))
       return
     }

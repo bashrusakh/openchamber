@@ -2,8 +2,14 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { useInlineCommentDraftStore } from '@/stores/useInlineCommentDraftStore';
+import { useMessageQueueStore } from '@/stores/messageQueueStore';
 import { useInputStore } from '@/sync/input-store';
-import { captureComposerContextForQueue, consumeComposerContext, withComposerContextRestore } from './contextHandoff';
+import {
+    captureComposerContextForQueue,
+    consumeComposerContext,
+    removeQueuedMessageWithContextRestore,
+    withComposerContextRestore,
+} from './contextHandoff';
 
 const target = (sessionId: string) => ({
     runtimeKey: getRuntimeKey(),
@@ -25,10 +31,15 @@ describe('composer context handoff', () => {
     beforeEach(() => {
         useInputStore.setState({
             pendingSyntheticParts: null,
-            pendingSyntheticPartsTarget: null,
             pendingSyntheticPartsByTarget: new Map(),
         });
         useInlineCommentDraftStore.setState({ drafts: {}, touchedAt: {} });
+        useMessageQueueStore.setState({
+            queuedMessages: {},
+            sendingIds: {},
+            quarantinedLegacyMessages: {},
+            queueDeletionGenerations: {},
+        });
     });
 
     test('restores captured context to its target without taking another target context', () => {
@@ -56,6 +67,20 @@ describe('composer context handoff', () => {
         consumed.restore();
         consumed.restore();
 
+        expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toEqual(ownerParts);
+    });
+
+    test('does not consume context with a stale supplied restoration guard', () => {
+        const owner = target('session-a');
+        const ownerParts = [{ text: 'owner context', synthetic: true }];
+        useInputStore.getState().setPendingSyntheticParts(ownerParts, owner);
+        const staleGuard = useMessageQueueStore.getState().getQueueRestorationGuard(owner);
+
+        useMessageQueueStore.getState().clearQueueForSessionDeletion(owner);
+
+        const consumed = consumeComposerContext(owner, null, staleGuard);
+        expect(consumed.syntheticParts).toEqual([]);
+        consumed.restore();
         expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toEqual(ownerParts);
     });
 
@@ -140,4 +165,46 @@ describe('composer context handoff', () => {
         expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toEqual(ownerParts);
         expect(useInlineCommentDraftStore.getState().getDrafts(ownerDraftTarget)).toHaveLength(1);
     });
+
+    test('restores captured context when an explicit remove discards a queue item', () => {
+        const owner = target('session-a');
+        const ownerDraftTarget = { directory: owner.directory, sessionKey: owner.sessionId };
+        useInputStore.getState().setPendingSyntheticParts([{ text: 'queued synthetic', synthetic: true }]);
+        useInlineCommentDraftStore.getState().addDraft(ownerDraftTarget, draft);
+        const capturedContext = captureComposerContextForQueue(owner, ownerDraftTarget);
+        useMessageQueueStore.getState().addToQueue(owner, {
+            content: 'queued prompt',
+            additionalParts: capturedContext,
+            capturedContext,
+            contextClaimed: true,
+        });
+        const [queued] = useMessageQueueStore.getState().getQueueForTarget(owner);
+        if (!queued) throw new Error('queue item was not created');
+
+        removeQueuedMessageWithContextRestore(owner, queued.id);
+
+        expect(useMessageQueueStore.getState().getQueueForTarget(owner)).toEqual([]);
+        expect(useInlineCommentDraftStore.getState().getDrafts(ownerDraftTarget)).toHaveLength(1);
+        expect(useInlineCommentDraftStore.getState().getDrafts(ownerDraftTarget)[0]?.text).toBe(draft.text);
+        expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toEqual([
+            { text: 'queued synthetic', synthetic: true },
+        ]);
+    });
+
+    test('does not restore command-generated queue instructions as composer context', () => {
+        const owner = target('session-a');
+        const instruction = { text: 'rendered slash instruction', synthetic: true };
+        useMessageQueueStore.getState().addToQueue(owner, {
+            content: 'rendered slash prompt',
+            additionalParts: [instruction],
+            contextClaimed: true,
+        });
+        const [queued] = useMessageQueueStore.getState().getQueueForTarget(owner);
+        if (!queued) throw new Error('queue item was not created');
+
+        removeQueuedMessageWithContextRestore(owner, queued.id);
+
+        expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toBeNull();
+    });
+
 });

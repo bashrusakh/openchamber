@@ -27,3 +27,18 @@ export const normalizePath = (value?: string | null): string | null => {
   const stripped = replaced.length > 1 ? replaced.replace(/\/+$/, "") : replaced;
   return stripped || null;
 };
+
+const WINDOWS_PATH_PATTERN = /^(?:[A-Za-z]:|\/\/)/;
+
+/**
+ * Canonicalize a normalized path for identity keys and comparisons.
+ *
+ * Display and authoritative paths must retain their component casing. Only
+ * identity boundaries apply Windows' case-insensitive matching rules; POSIX
+ * paths remain case-sensitive.
+ */
+export const canonicalizePathIdentity = (value?: string | null): string | null => {
+  const normalized = normalizePath(value);
+  if (!normalized) return null;
+  return WINDOWS_PATH_PATTERN.test(normalized) ? normalized.toLowerCase() : normalized;
+};

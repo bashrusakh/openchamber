@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { normalizePath } from './pathNormalization';
+import { canonicalizePathIdentity, normalizePath } from './pathNormalization';
 
 describe('normalizePath', () => {
   describe('non-string inputs', () => {
@@ -94,6 +94,17 @@ describe('normalizePath', () => {
 
     test('strips trailing slashes from Unix paths', () => {
       expect(normalizePath('/home/user/project/')).toBe('/home/user/project');
+    });
+  });
+
+  describe('path comparison', () => {
+    test('canonicalizes Windows drive paths for identity', () => {
+      expect(canonicalizePathIdentity('C:/Repo/Worktree')).toBe('c:/repo/worktree');
+    });
+
+    test('preserves UNC component casing', () => {
+      expect(normalizePath('\\\\Server\\Share\\Project')).toBe('//Server/Share/Project');
+      expect(normalizePath('//SERVER/share/PROJECT/')).toBe('//SERVER/share/PROJECT');
     });
   });
 });

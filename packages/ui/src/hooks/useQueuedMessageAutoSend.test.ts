@@ -10,6 +10,7 @@ import { useInputStore } from '@/sync/input-store';
 import { useInlineCommentDraftStore, type InlineCommentDraft } from '@/stores/useInlineCommentDraftStore';
 import { CONTEXT_METADATA_KEY } from '@/lib/messages/contextParts';
 import { captureComposerContextForQueue } from '@/components/chat/composer/submit/contextHandoff';
+import { cleanupPersistedSessionState } from '@/sync/session-deletion-cleanup';
 import { createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore, type QueuedMessage } from '../stores/messageQueueStore';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 
@@ -472,10 +473,9 @@ describe('useQueuedMessageAutoSend integration', () => {
   };
 
   const primeContext = (sessionId: string) => {
-    useInputStore.getState().setPendingSyntheticParts([{ text: 'pending synthetic context', synthetic: true }]);
     const target = createMessageQueueTarget(sessionId, DIRECTORY, getRuntimeKey());
     if (!target) throw new Error('queue target derivation failed');
-    expect(useInputStore.getState().claimPendingSyntheticPartsTarget(target)).toBe(true);
+    useInputStore.getState().setPendingSyntheticParts([{ text: 'pending synthetic context', synthetic: true }], target);
     const draft: Omit<InlineCommentDraft, 'id' | 'createdAt' | 'sessionKey'> = {
       source: 'diff',
       fileLabel: 'src/example.ts',
@@ -519,7 +519,6 @@ describe('useQueuedMessageAutoSend integration', () => {
     setDirectorySessionStatus('ses_auto', 'busy');
     useInputStore.setState({
       pendingSyntheticParts: null,
-      pendingSyntheticPartsTarget: null,
       pendingSyntheticPartsByTarget: new Map(),
     });
     useInlineCommentDraftStore.setState({ drafts: {}, touchedAt: {} });
@@ -527,6 +526,7 @@ describe('useQueuedMessageAutoSend integration', () => {
       queuedMessages: {},
       sendingIds: {},
       quarantinedLegacyMessages: {},
+      queueDeletionGenerations: {},
     });
   });
 
@@ -867,6 +867,83 @@ describe('useQueuedMessageAutoSend integration', () => {
     expect(sendMessageCalls).toHaveLength(1);
     expect(queueOf('ses_auto')).toHaveLength(1);
     expect(useMessageQueueStore.getState().sendingIds[getMessageQueueKey(target)]).toBe(undefined);
+  });
+
+  test('discards a deleted queued item when deletion races its claim', async () => {
+    const target = primeQueue('ses_auto');
+    primeContext('ses_auto');
+
+    const originalMarkSending = useMessageQueueStore.getState().markSending;
+    useMessageQueueStore.setState({
+      markSending: (claimedTarget, messageId) => {
+        const claimed = originalMarkSending(claimedTarget, messageId);
+        if (claimed) {
+          useMessageQueueStore.getState().clearQueueForSessionDeletion(claimedTarget);
+          // Restore the real action before the hook's effect can run again.
+          useMessageQueueStore.setState({ markSending: originalMarkSending });
+        }
+        return claimed;
+      },
+    });
+
+    await mountHook();
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf('ses_auto')).toEqual([]);
+    expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+    expect(useInputStore.getState().consumePendingSyntheticParts(target)).toEqual([
+      { text: 'pending synthetic context', synthetic: true },
+    ]);
+    expect(useInlineCommentDraftStore.getState().getDrafts({ directory: DIRECTORY, sessionKey: 'ses_auto' })).toHaveLength(1);
+  });
+
+  test('discards a deleted in-flight item without retrying or restoring its context', async () => {
+    let rejectSend: ((error: Error) => void) | undefined;
+    sendMessageOutcome = new Promise<void>((_resolve, reject) => {
+      rejectSend = reject;
+    });
+    const target = primeQueue('ses_auto');
+    primeContext('ses_auto');
+    await mountHook();
+
+    act(() => {
+      setDirectorySessionStatus('ses_auto', 'idle');
+    });
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf('ses_auto')).toHaveLength(1);
+    expect(useInlineCommentDraftStore.getState().getDrafts({ directory: DIRECTORY, sessionKey: 'ses_auto' })).toEqual([]);
+    expect(useInputStore.getState().consumePendingSyntheticParts(target)).toBeNull();
+
+    cleanupPersistedSessionState({
+      runtimeKey: getRuntimeKey(),
+      directory: target.directory,
+      sessionId: target.sessionId,
+    });
+    expect(queueOf('ses_auto')).toHaveLength(1);
+
+    await act(async () => {
+      rejectSend?.(new Error('deleted session send failed'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf('ses_auto')).toEqual([]);
+    expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+    expect(useInlineCommentDraftStore.getState().getDrafts({ directory: DIRECTORY, sessionKey: 'ses_auto' })).toEqual([]);
+    expect(useInputStore.getState().consumePendingSyntheticParts(target)).toBeNull();
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+      await Promise.resolve();
+    });
+    expect(sendMessageCalls).toHaveLength(1);
   });
 
   test('restores context on failure and sends it once on retry', async () => {

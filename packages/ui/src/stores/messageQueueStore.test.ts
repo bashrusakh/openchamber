@@ -9,9 +9,10 @@ import {
   resolveMainSessionSendDisposition,
   useMessageQueueStore,
 } from "./messageQueueStore"
+import { getRuntimeKey } from "../lib/runtime-switch"
 
 beforeEach(() => {
-  useMessageQueueStore.setState({ queuedMessages: {}, quarantinedLegacyMessages: {}, sendingIds: {} })
+  useMessageQueueStore.setState({ queuedMessages: {}, quarantinedLegacyMessages: {}, queueDeletionGenerations: {}, sendingIds: {} })
 })
 
 describe("message queue runtime ownership", () => {
@@ -156,6 +157,98 @@ describe("in-flight queued sends", () => {
     const remaining = useMessageQueueStore.getState().getQueueForTarget(target)
     expect(remaining).toHaveLength(1)
     expect(remaining[0]?.id).toBe(inFlight.id)
+  })
+
+  test("restores exact entries after a merged composer send fails", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", getRuntimeKey())!
+    const store = useMessageQueueStore.getState()
+    const first = {
+      content: "first",
+      capturedContext: [{ text: "first context", synthetic: true }],
+      additionalParts: [{ text: "first context", synthetic: true }],
+      contextClaimed: true,
+      sendConfig: { providerID: "provider-1", modelID: "model-1", agent: "agent-1", variant: "variant-1" },
+    }
+    const second = {
+      content: "second",
+      capturedContext: [{ text: "second context", synthetic: true }],
+      additionalParts: [{ text: "second context", synthetic: true }],
+      contextClaimed: true,
+      sendConfig: { providerID: "provider-2", modelID: "model-2", agent: "agent-2", variant: "variant-2" },
+    }
+    store.addToQueue(target, first)
+    store.addToQueue(target, second)
+    const beforeSend = store.getQueueForTarget(target)
+
+    const guard = store.getQueueRestorationGuard(target)
+    const removed = store.clearQueue(target)
+    expect(removed).toEqual(beforeSend)
+    expect(store.getQueueForTarget(target)).toEqual([])
+
+    // The normal composer send restores these entries from its rejection path.
+    store.restoreQueue(target, removed, guard)
+    expect(store.getQueueForTarget(target)).toEqual(beforeSend)
+  })
+
+  test("restores merged entries behind an in-flight item and ahead of newer queue additions", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", getRuntimeKey())!
+    const store = useMessageQueueStore.getState()
+    store.addToQueue(target, { content: "in flight", sendConfig: { providerID: "provider-1", modelID: "model-1" } })
+    store.addToQueue(target, { content: "merged", sendConfig: { providerID: "provider-2", modelID: "model-2" } })
+    const [inFlight, merged] = store.getQueueForTarget(target)
+    if (!inFlight || !merged) throw new Error("queue items were not created")
+    store.markSending(target, inFlight.id)
+
+    const guard = store.getQueueRestorationGuard(target)
+    const removed = store.clearQueue(target)
+    store.addToQueue(target, { content: "newer" })
+    store.restoreQueue(target, removed, guard)
+    const newer = store.getQueueForTarget(target).find((message) => message.content === "newer")
+    if (!newer) throw new Error("newer queue item was not created")
+
+    expect(store.getQueueForTarget(target).map((message) => message.id)).toEqual([
+      inFlight.id,
+      merged.id,
+      newer.id,
+    ])
+    expect(store.getQueueForTarget(target).map((message) => message.content)).toEqual([
+      "in flight",
+      "merged",
+      "newer",
+    ])
+    expect(store.getQueueDispatchState(target).sendingIds).toEqual([inFlight.id])
+  })
+
+  test("keeps newer additions when restoring a merged batch over queue capacity", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", getRuntimeKey())!
+    const store = useMessageQueueStore.getState()
+    for (let index = 0; index < 20; index += 1) {
+      store.addToQueue(target, { content: index === 0 ? "in flight" : `merged-${index}` })
+    }
+
+    const [inFlight] = store.getQueueForTarget(target)
+    if (!inFlight) throw new Error("queue head was not created")
+    expect(store.markSending(target, inFlight.id)).toBe(true)
+
+    const guard = store.getQueueRestorationGuard(target)
+    const removed = store.clearQueue(target)
+    for (let index = 0; index < 5; index += 1) {
+      store.addToQueue(target, { content: `newer-${index}` })
+    }
+
+    store.restoreQueue(target, removed, guard)
+
+    expect(store.getQueueForTarget(target).map((message) => message.content)).toEqual([
+      "in flight",
+      ...Array.from({ length: 14 }, (_, index) => `merged-${index + 6}`),
+      "newer-0",
+      "newer-1",
+      "newer-2",
+      "newer-3",
+      "newer-4",
+    ])
+    expect(store.getQueueForTarget(target)).toHaveLength(20)
+    expect(store.getQueueDispatchState(target).sendingIds).toEqual([inFlight.id])
   })
 
   test("clearQueue drops everything once no send is in flight", () => {

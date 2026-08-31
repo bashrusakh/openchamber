@@ -1,8 +1,15 @@
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { useInlineCommentDraftStore, type InlineCommentDraft, type InlineCommentDraftTarget } from '@/stores/useInlineCommentDraftStore';
-import type { MessageQueueTarget, QueuedMessagePart } from '@/stores/messageQueueStore';
+import {
+    useMessageQueueStore,
+    type MessageQueueRestorationGuard,
+    type MessageQueueTarget,
+    type QueuedMessage,
+    type QueuedMessagePart,
+} from '@/stores/messageQueueStore';
 import { useInputStore, type SyntheticContextPart } from '@/sync/input-store';
 import { buildContextParts } from './buildOutgoingMessage';
+import { draftFromContextPayload, readContextPart } from '@/lib/messages/contextParts';
 
 export type ComposerContextSnapshot = {
     inlineComments: InlineCommentDraft[];
@@ -32,9 +39,16 @@ const targetDraft = (target: MessageQueueTarget): InlineCommentDraftTarget => ({
 export const consumeComposerContext = (
     target: MessageQueueTarget | null,
     inlineDraftTarget: InlineCommentDraftTarget | null,
+    suppliedRestorationGuard?: MessageQueueRestorationGuard,
 ): ConsumedComposerContext => {
     const context = emptyContext();
-    const canConsume = target === null || target.runtimeKey === getRuntimeKey();
+    const restorationGuard = target
+        ? suppliedRestorationGuard ?? useMessageQueueStore.getState().getQueueRestorationGuard(target)
+        : null;
+    const canConsume = target === null || (
+        restorationGuard !== null
+        && useMessageQueueStore.getState().isQueueRestorationGuardCurrent(target, restorationGuard)
+    );
     if (!canConsume) {
         return { ...context, restore: () => undefined };
     }
@@ -46,7 +60,14 @@ export const consumeComposerContext = (
 
     let restored = false;
     const restore = () => {
-        if (restored || (target !== null && target.runtimeKey !== getRuntimeKey())) return;
+        if (
+            restored
+            || (target !== null && (
+                target.runtimeKey !== getRuntimeKey()
+                || restorationGuard === null
+                || !useMessageQueueStore.getState().isQueueRestorationGuardCurrent(target, restorationGuard)
+            ))
+        ) return;
         restored = true;
 
         if (context.syntheticParts.length > 0) {
@@ -82,4 +103,47 @@ export const captureComposerContextForQueue = (
 ): QueuedMessagePart[] => {
     const context = consumeComposerContext(target, inlineDraftTarget);
     return buildContextParts(context.inlineComments, context.syntheticParts);
+};
+
+/** Restore context captured by a queue item after an explicit discard. */
+const restoreQueuedMessageContexts = (
+    target: MessageQueueTarget,
+    messages: readonly QueuedMessage[],
+): void => {
+    if (target.runtimeKey !== getRuntimeKey()) return;
+
+    const inlineComments: Array<Omit<InlineCommentDraft, 'id' | 'createdAt' | 'sessionKey'>> = [];
+    const syntheticParts: SyntheticContextPart[] = [];
+    for (const message of messages) {
+        for (const part of message.capturedContext ?? []) {
+            const payload = readContextPart({ type: 'text', metadata: part.metadata });
+            const draft = payload ? draftFromContextPayload(payload) : null;
+            if (draft) inlineComments.push(draft);
+            else syntheticParts.push(part);
+        }
+    }
+
+    if (inlineComments.length === 0 && syntheticParts.length === 0) return;
+
+    const draftTarget = targetDraft(target);
+    const inlineDrafts = useInlineCommentDraftStore.getState();
+    for (const draft of inlineComments) inlineDrafts.addDraft(draftTarget, draft);
+    if (syntheticParts.length > 0) {
+        useInputStore.getState().restorePendingSyntheticParts(syntheticParts, target);
+    }
+};
+
+const restoreQueuedMessageContext = (
+    target: MessageQueueTarget,
+    message: QueuedMessage,
+): void => restoreQueuedMessageContexts(target, [message]);
+
+/** Remove one non-in-flight queue item and return its captured context. */
+export const removeQueuedMessageWithContextRestore = (
+    target: MessageQueueTarget,
+    messageId: string,
+): QueuedMessage | null => {
+    const removed = useMessageQueueStore.getState().removeFromQueue(target, messageId);
+    if (removed) restoreQueuedMessageContext(target, removed);
+    return removed;
 };

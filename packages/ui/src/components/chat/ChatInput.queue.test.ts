@@ -8,6 +8,7 @@ import {
     type QueuedMessage,
 } from '@/stores/messageQueueStore';
 import { isAutoReviewRunActiveForTarget } from '@/stores/useAutoReviewStore';
+import { getRuntimeKey } from '@/lib/runtime-switch';
 
 const target = createMessageQueueTarget('session-3195', '/repo', 'runtime-3195');
 if (!target) {
@@ -88,6 +89,44 @@ describe('ChatInput busy-path queueing', () => {
         expect(payload?.primaryText).toBe('rendered magic prompt');
         expect(payload?.additionalParts).toEqual([{ text: 'rendered magic instructions', synthetic: true }]);
         expect(payload?.sendConfig).toEqual(sendConfig);
+    });
+
+    test('restores a failed magic-prompt merge with its queued captured context', async () => {
+        const restorationTarget = createMessageQueueTarget('session-3195', '/repo', getRuntimeKey());
+        if (!restorationTarget) throw new Error('test queue target derivation failed');
+        const sendConfig = {
+            providerID: 'provider-magic-failure',
+            modelID: 'model-magic-failure',
+            agent: 'agent-magic-failure',
+            variant: 'variant-magic-failure',
+        };
+        const capturedContext = [{ text: 'queued review context', synthetic: true }];
+        useMessageQueueStore.getState().addToQueue(restorationTarget, {
+            content: 'queued follow-up',
+            additionalParts: [
+                { text: 'rendered magic instructions', synthetic: true },
+                ...capturedContext,
+            ],
+            capturedContext,
+            contextClaimed: true,
+            sendConfig,
+        });
+
+        const beforeSend = useMessageQueueStore.getState().getQueueForTarget(restorationTarget);
+        const payload = buildQueuedAutoSendPayload(beforeSend);
+        expect(payload?.additionalParts).toEqual([
+            { text: 'rendered magic instructions', synthetic: true },
+            ...capturedContext,
+        ]);
+
+        const guard = useMessageQueueStore.getState().getQueueRestorationGuard(restorationTarget);
+        const removed = useMessageQueueStore.getState().clearQueue(restorationTarget);
+        await expect(Promise.reject(new Error('magic send failed'))).rejects.toThrow('magic send failed');
+        useMessageQueueStore.getState().restoreQueue(restorationTarget, removed, guard);
+
+        const restored = useMessageQueueStore.getState().getQueueForTarget(restorationTarget);
+        expect(restored).toEqual(beforeSend);
+        expect(restored[0]?.capturedContext).toEqual(capturedContext);
     });
 
     test('only treats auto-review activity for the exact target as busy', () => {

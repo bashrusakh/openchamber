@@ -162,11 +162,15 @@ and the send path reading the same grammar.
    Queueing a magic prompt stores its rendered instruction as a synthetic part,
    so auto-send does not need to interpret the original slash command. Busy
    queueing also captures the current context drafts as synthetic parts on that
-   queue item; editing the item carries those parts back into the composer, and
-   auto-send does not claim context belonging to a different queued item. If a
-   direct send fails, the handoff restores its uncommitted drafts and synthetic
-   parts before showing a failure toast. Synthetic parts remain scoped by
-   runtime, directory, and session.
+   queue item; the captured subset is tracked separately from command-generated
+   instructions. Editing the item carries its parts back into the composer, and
+   auto-send does not claim context belonging to a different queued item. An
+    explicit queue-chip removal restores the captured subset, while a merged composer
+    send restores its removed queue items only if the request fails and session
+    deletion cleanup has not advanced the target's deletion generation. If a direct
+   send fails, the handoff restores its uncommitted drafts and synthetic parts
+   before showing a failure toast. Synthetic parts remain scoped by runtime,
+   directory, and session.
 - `ChatInput.tsx` re-checks live main-session activity before every normal
   composer, preset, and dictation send. Busy sends become visible queue items;
   new-session and btw sends keep their direct path. Queued-chip sends claim

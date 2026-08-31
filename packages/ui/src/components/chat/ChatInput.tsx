@@ -791,6 +791,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const addToQueue = useMessageQueueStore((state) => state.addToQueue);
     const clearQueue = useMessageQueueStore((state) => state.clearQueue);
     const removeFromQueue = useMessageQueueStore((state) => state.removeFromQueue);
+    const restoreQueue = useMessageQueueStore((state) => state.restoreQueue);
     const markSending = useMessageQueueStore((state) => state.markSending);
     const clearSending = useMessageQueueStore((state) => state.clearSending);
     const completeSending = useMessageQueueStore((state) => state.completeSending);
@@ -978,6 +979,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             content: messageToQueue,
             attachments: attachmentsToQueue.length > 0 ? attachmentsToQueue : undefined,
             additionalParts: additionalPartsToQueue.length > 0 ? additionalPartsToQueue : undefined,
+            capturedContext: contextParts.length > 0 ? contextParts : undefined,
             contextClaimed: true,
             sendConfig: currentProviderId && currentModelId ? {
                 providerID: currentProviderId,
@@ -1131,6 +1133,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const queuedOnly = options?.queuedOnly ?? false;
         const queuedMessageId = options?.queuedMessageId;
         const capturedTarget = messageQueueTarget;
+        const queueRestorationGuard = capturedTarget
+            ? useMessageQueueStore.getState().getQueueRestorationGuard(capturedTarget)
+            : null;
         // An expired session cannot deliver anything: keep the prompt in the
         // composer and point at the login banner instead of burning the send
         // on a guaranteed 401.
@@ -1332,7 +1337,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const shouldConsumeComposerContext = !queuedOnly
             || queuedMessagesToSend.some((queued) => !queued.contextClaimed);
         const consumedContext = shouldConsumeComposerContext
-            ? consumeComposerContext(capturedTarget, consumedDraftTarget)
+            ? consumeComposerContext(capturedTarget, consumedDraftTarget, queueRestorationGuard ?? undefined)
             : { inlineComments: [], syntheticParts: [], restore: () => undefined };
         const { syntheticParts, inlineComments: drafts } = consumedContext;
         const restoreConsumedContext = consumedContext.restore;
@@ -1380,11 +1385,16 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         if (outgoing.isEmpty) return;
 
         let editedAdditionalPartsCleared = false;
-        const clearSubmittedInput = (clearEditedAdditionalParts = false) => {
+        let removedQueuedMessages: QueuedMessage[] = [];
+        const clearSubmittedInput = (
+            clearEditedAdditionalParts = false,
+            preserveQueueOnFailure = false,
+        ) => {
             if (capturedTarget && queuedMessageId && !queuedOnly) {
                 removeFromQueue(capturedTarget, queuedMessageId);
             } else if (capturedTarget && hasQueuedMessagesAtSubmit && !queuedOnly) {
-                clearQueue(capturedTarget);
+                const removed = clearQueue(capturedTarget);
+                if (preserveQueueOnFailure) removedQueuedMessages = removed;
             }
             if (!queuedOnly) {
                 setMessage('');
@@ -1408,7 +1418,10 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             }
         };
         const restoreEditedAdditionalParts = () => {
-            if (editedAdditionalPartsCleared && editedAdditionalParts.length > 0) {
+            const canRestoreTargetState = !capturedTarget
+                || (queueRestorationGuard !== null
+                    && useMessageQueueStore.getState().isQueueRestorationGuardCurrent(capturedTarget, queueRestorationGuard));
+            if (editedAdditionalPartsCleared && editedAdditionalParts.length > 0 && canRestoreTargetState) {
                 setPendingEditedAdditionalParts((current) => [...editedAdditionalParts, ...current]);
             }
         };
@@ -1511,11 +1524,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             const magicPrompt = getMagicPromptInvocation(primaryText);
             if (magicPrompt) {
                 if (await guardMainSessionSend(magicPrompt)) return;
-                clearSubmittedInput(true);
-                try {
-                    await withComposerContextRestore(consumedContext, async () => {
-                        await sessionActions.waitForConnectionOrThrow();
-                        const { visibleText, instructionsText } = await renderMagicPromptCommand(magicPrompt.command, magicPrompt.argument);
+                 clearSubmittedInput(true, true);
+                 try {
+                     await withComposerContextRestore(consumedContext, async () => {
+                         await sessionActions.waitForConnectionOrThrow();
+                         const { visibleText, instructionsText } = await renderMagicPromptCommand(magicPrompt.command, magicPrompt.argument);
                         await sendMessage(
                             visibleText,
                             providerIdToSend,
@@ -1531,18 +1544,21 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                             inputMode,
                             sendMessageOptions,
                         );
-                    });
-                    scrollToBottom?.();
-                } catch (error) {
-                    restoreEditedAdditionalParts();
-                    toast.error(getSubmitErrorMessage(error instanceof Error ? error : undefined, t(magicPrompt.command.errorToastKey)));
-                }
-                return;
+                     });
+                     scrollToBottom?.();
+                 } catch (error) {
+                     if (capturedTarget && queueRestorationGuard && removedQueuedMessages.length > 0) {
+                         restoreQueue(capturedTarget, removedQueuedMessages, queueRestorationGuard);
+                     }
+                     restoreEditedAdditionalParts();
+                     toast.error(getSubmitErrorMessage(error instanceof Error ? error : undefined, t(magicPrompt.command.errorToastKey)));
+                 }
+                 return;
             }
         }
 
         if (await guardMainSessionSend()) return;
-        clearSubmittedInput(true);
+        clearSubmittedInput(true, true);
 
         const currentSessionDirectory = capturedTarget?.directory ?? currentDirectory;
         // btw mode: the fork already carries the question plus full history,
@@ -1681,8 +1697,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         : String(error ?? '');
             const normalized = rawMessage.toLowerCase();
 
-            console.error('Message send failed:', rawMessage || error);
-            restoreConsumedContext();
+             console.error('Message send failed:', rawMessage || error);
+              if (capturedTarget && queueRestorationGuard && removedQueuedMessages.length > 0) {
+                  restoreQueue(capturedTarget, removedQueuedMessages, queueRestorationGuard);
+              }
+             restoreConsumedContext();
             restoreEditedAdditionalParts();
 
             // A failed send returns the typed prompt no matter WHY it failed —

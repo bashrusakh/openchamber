@@ -308,19 +308,33 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
       }
 
       inFlightSessionsRef.current.add(targetKey);
+      // Capture the deletion guard before publishing the claim. Deletion can
+      // run synchronously from another queue transition while markSending is
+      // returning.
+      const queueStore = useMessageQueueStore.getState();
+      const sendQueueGuard = queueStore.getQueueRestorationGuard(target);
       // The ref only guards this hook. Publish the dispatch to the store so the
       // composer cannot merge the same item into a parallel send while this one
       // is still awaiting the server.
-      if (!useMessageQueueStore.getState().markSending(target, payload.queuedMessageId)) {
+      if (!queueStore.markSending(target, payload.queuedMessageId)) {
         inFlightSessionsRef.current.delete(targetKey);
         return;
       }
 
-      const claimedMessage = useMessageQueueStore.getState().getQueueForTarget(target)
+      if (!queueStore.isQueueRestorationGuardCurrent(target, sendQueueGuard)) {
+        // Deletion keeps a claimed item visible until its request settles. This
+        // transition drops the item and its claim without restoring context or
+        // scheduling a retry for the deleted target.
+        queueStore.completeSending(target, payload.queuedMessageId);
+        inFlightSessionsRef.current.delete(targetKey);
+        return;
+      }
+
+      const claimedMessage = queueStore.getQueueForTarget(target)
         .find((message) => message.id === payload.queuedMessageId);
       const context = claimedMessage?.contextClaimed
         ? { inlineComments: [], syntheticParts: [], restore: () => undefined }
-        : consumeComposerContext(target, queuedContextTarget(target));
+        : consumeComposerContext(target, queuedContextTarget(target), sendQueueGuard);
       const payloadWithContext = buildQueuedAutoSendPayload(
         claimedMessage ? [claimedMessage] : [],
         context,
@@ -332,6 +346,7 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
         return;
       }
 
+      let queueEntrySettled = false;
       try {
         await sendQueuedAutoSendPayload(target, payloadWithContext, {
           providerID: resolved.providerID,
@@ -340,9 +355,21 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
           variant: resolved.variant,
         });
         useMessageQueueStore.getState().completeSending(target, payload.queuedMessageId);
+        queueEntrySettled = true;
         sendFailuresRef.current.delete(targetKey);
       } catch (error) {
         console.warn('[queue] queued auto-send failed:', error);
+        const queueStore = useMessageQueueStore.getState();
+        const targetWasDeleted = target.runtimeKey === getRuntimeKey()
+          && !queueStore.isQueueRestorationGuardCurrent(target, sendQueueGuard);
+        if (targetWasDeleted) {
+          // Session deletion keeps an in-flight item visible until its request
+          // settles. Drop that item and its claim atomically, but never restore
+          // its context or schedule a retry for the deleted session.
+          queueStore.completeSending(target, payload.queuedMessageId);
+          queueEntrySettled = true;
+          return;
+        }
         context.restore();
         const priorFailures = failure?.messageId === payload.queuedMessageId ? failure.failures : 0;
         const failures = priorFailures + 1;
@@ -355,7 +382,9 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
         retryScheduler.schedule(nextAttemptAt);
       } finally {
         inFlightSessionsRef.current.delete(targetKey);
-        useMessageQueueStore.getState().clearSending(target, payload.queuedMessageId);
+        if (!queueEntrySettled) {
+          useMessageQueueStore.getState().clearSending(target, payload.queuedMessageId);
+        }
       }
     };
 

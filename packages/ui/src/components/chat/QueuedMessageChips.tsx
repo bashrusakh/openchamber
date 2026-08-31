@@ -24,6 +24,7 @@ import { isAutoReviewRunActiveForTarget, useAutoReviewStore } from '@/stores/use
 import { Icon } from "@/components/icon/Icon";
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { removeQueuedMessageWithContextRestore } from './composer/submit/contextHandoff';
 
 interface QueuedMessageChipProps {
     message: QueuedMessage;
@@ -36,7 +37,6 @@ interface QueuedMessageChipProps {
 
 const QueuedMessageChip = memo(({ message, target, onEdit, onSend, canSend, isInFlight }: QueuedMessageChipProps) => {
     const { t } = useI18n();
-    const removeFromQueue = useMessageQueueStore((state) => state.removeFromQueue);
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: message.id, disabled: isInFlight });
 
     // Get first line of message, truncated
@@ -98,7 +98,7 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend, canSend, isIn
             <button
                 type="button"
                 disabled={isInFlight}
-                onClick={() => removeFromQueue(target, message.id)}
+                onClick={() => removeQueuedMessageWithContextRestore(target, message.id)}
                 className="flex items-center justify-center h-6 w-6 flex-shrink-0 hover:bg-[var(--interactive-hover)] rounded-full transition-colors disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label={t('chat.queuedMessage.removeAria')}
             >

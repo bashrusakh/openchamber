@@ -58,7 +58,6 @@ describe("input-store attachments", () => {
       pendingInputText: null,
       pendingInputMode: "replace",
       pendingSyntheticParts: null,
-      pendingSyntheticPartsTarget: null,
       pendingSyntheticPartsByTarget: new Map(),
       activeEditorFile: null,
     })
@@ -381,15 +380,17 @@ describe("pending synthetic parts ownership", () => {
     sessionId,
   })
 
-  test("claims and consumes synthetic context only for its runtime, directory, and session", () => {
+  test("consumes targeted synthetic context only for its runtime, directory, and session", () => {
     const owner = target("session-a")
-    const other = target("session-b")
+    const otherSession = target("session-b")
+    const otherDirectory = { ...owner, directory: "/other-repo" }
+    const otherRuntime = { ...owner, runtimeKey: "runtime-b" }
     const parts = [{ text: "conflict context", synthetic: true }]
 
-    useInputStore.getState().setPendingSyntheticParts(parts)
-    expect(useInputStore.getState().claimPendingSyntheticPartsTarget(owner)).toBe(true)
-    expect(useInputStore.getState().claimPendingSyntheticPartsTarget(other)).toBe(false)
-    expect(useInputStore.getState().consumePendingSyntheticParts(other)).toBeNull()
+    useInputStore.getState().setPendingSyntheticParts(parts, owner)
+    expect(useInputStore.getState().consumePendingSyntheticParts(otherSession)).toBeNull()
+    expect(useInputStore.getState().consumePendingSyntheticParts(otherDirectory)).toBeNull()
+    expect(useInputStore.getState().consumePendingSyntheticParts(otherRuntime)).toBeNull()
     expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toEqual(parts)
     expect(useInputStore.getState().consumePendingSyntheticParts(owner)).toBeNull()
   })
@@ -415,8 +416,7 @@ describe("pending synthetic parts ownership", () => {
     const driveAlias = { ...driveOwner, directory: "c:\\repo" }
     const driveParts = [{ text: "drive context", synthetic: true }]
 
-    useInputStore.getState().setPendingSyntheticParts(driveParts)
-    expect(useInputStore.getState().claimPendingSyntheticPartsTarget(driveOwner)).toBe(true)
+    useInputStore.getState().setPendingSyntheticParts(driveParts, driveOwner)
     expect(useInputStore.getState().consumePendingSyntheticParts(driveAlias)).toEqual(driveParts)
 
     const uncOwner = { ...target("session-unc"), directory: "//Server/Share/Repo" }
