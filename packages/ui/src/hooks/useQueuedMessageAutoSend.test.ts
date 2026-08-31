@@ -3,6 +3,7 @@ import type { Agent, Message, SessionStatus } from '@opencode-ai/sdk/v2';
 import { Window } from 'happy-dom';
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { createJSONStorage } from 'zustand/middleware';
 import { ChildStoreManager } from '@/sync/child-store';
 import type { State } from '@/sync/types';
 import { getDirectoryState, setSyncRefs } from '@/sync/sync-refs';
@@ -11,7 +12,13 @@ import { useInlineCommentDraftStore, type InlineCommentDraft } from '@/stores/us
 import { CONTEXT_METADATA_KEY } from '@/lib/messages/contextParts';
 import { captureComposerContextForQueue } from '@/components/chat/composer/submit/contextHandoff';
 import { cleanupPersistedSessionState } from '@/sync/session-deletion-cleanup';
-import { createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore, type QueuedMessage } from '../stores/messageQueueStore';
+import {
+  createMessageQueueTarget,
+  getMessageQueueKey,
+  useMessageQueueStore,
+  type FollowUpBehavior,
+  type QueuedMessage,
+} from '../stores/messageQueueStore';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 
 let visibleAgents: Agent[] = [];
@@ -107,6 +114,31 @@ const readDirectorySyncState = (): DirectorySyncState => {
   // exactly the DirectorySyncState slice shape this mock hands to selectors.
   const state = getDirectoryState(DIRECTORY) as DirectorySyncState | undefined;
   return state ?? EMPTY_DIRECTORY_STATE;
+};
+
+type PersistedQueueSnapshot = {
+  queuedMessages: Record<string, QueuedMessage[]>;
+  quarantinedLegacyMessages: Record<string, QueuedMessage[]>;
+  followUpBehavior: FollowUpBehavior;
+};
+
+const createControllableQueueStorage = () => {
+  const values = new Map<string, string>();
+  const storage = createJSONStorage<unknown>(() => ({
+    getItem: (name) => values.get(name) ?? null,
+    setItem: (name, value) => values.set(name, value),
+    removeItem: (name) => {
+      values.delete(name);
+    },
+  }));
+  if (!storage) throw new Error('queue test storage unavailable');
+
+  return {
+    storage,
+    seed(snapshot: PersistedQueueSnapshot) {
+      values.set('message-queue-store', JSON.stringify({ state: snapshot, version: 5 }));
+    },
+  };
 };
 
 // The real useDirectorySync passes the selector's own generic through, so the
@@ -548,6 +580,303 @@ describe('useQueuedMessageAutoSend integration', () => {
     expect(sendMessageCalls.length).toBe(1);
     expect(sendMessageCalls[0]?.[0]).toBe('queued prompt');
     expect(queueOf('ses_auto')).toHaveLength(0);
+  });
+
+  test('hydrates a queued item without dispatching until its busy session becomes idle', async () => {
+    const target = createMessageQueueTarget('ses_auto', DIRECTORY, getRuntimeKey());
+    if (!target) throw new Error('queue target derivation failed');
+    const originalStorage = useMessageQueueStore.persist.getOptions().storage;
+    const controlledStorage = createControllableQueueStorage();
+    let resolveSend: (() => void) | undefined;
+    sendMessageOutcome = new Promise<void>((resolve) => {
+      resolveSend = resolve;
+    });
+    const hydratedMessage: QueuedMessage = {
+      id: 'queued-hydrated',
+      content: 'hydrated prompt',
+      createdAt: 1,
+      sendConfig: { providerID: 'provider-hydrated', modelID: 'model-hydrated' },
+    };
+
+    useMessageQueueStore.persist.setOptions({ storage: controlledStorage.storage });
+    try {
+      await mountHook();
+      controlledStorage.seed({
+        queuedMessages: { [getMessageQueueKey(target)]: [hydratedMessage] },
+        quarantinedLegacyMessages: {},
+        followUpBehavior: 'queue',
+      });
+
+      await act(async () => {
+        await useMessageQueueStore.persist.rehydrate();
+      });
+
+      expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([hydratedMessage]);
+      expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+      expect(sendMessageCalls).toHaveLength(0);
+
+      act(() => {
+        setDirectorySessionStatus('ses_auto', 'idle');
+      });
+      await rerenderHook();
+
+      expect(sendMessageCalls).toHaveLength(1);
+      expect(sendMessageCalls[0]?.[0]).toBe('hydrated prompt');
+
+      act(() => {
+        setDirectorySessionStatus('ses_auto', 'idle');
+      });
+      await rerenderHook();
+      await rerenderHook();
+      expect(sendMessageCalls).toHaveLength(1);
+      expect(queueOf('ses_auto')).toEqual([hydratedMessage]);
+      expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([
+        hydratedMessage.id,
+      ]);
+
+      await act(async () => {
+        resolveSend?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(queueOf('ses_auto')).toHaveLength(0);
+      expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+    } finally {
+      useMessageQueueStore.persist.setOptions({ storage: originalStorage });
+    }
+  });
+
+  test('dispatches a ready worktree target even when the global directory is the project root', async () => {
+    const worktreeDirectory = '/Repo-Auto-Worktree';
+    const target = primeQueue('ses_worktree', worktreeDirectory);
+    act(() => {
+      setDirectorySessionStatus(target.sessionId, 'idle', [], worktreeDirectory);
+    });
+
+    await mountHook();
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(sendMessageCalls[0]?.[0]).toBe('queued prompt');
+    expect(sendMessageCalls[0]?.[9]).toEqual({ target });
+    expect(queueOf(target.sessionId, worktreeDirectory)).toHaveLength(0);
+  });
+
+  test('does not dispatch a roots-only fallback after child-session discovery fails', async () => {
+    const worktreeDirectory = '/repo-auto-partial-worktree';
+    const target = primeQueue('ses_partial_worktree', worktreeDirectory);
+    const manager = directoryChildStores;
+    if (!manager) throw new Error('directory child stores not initialized');
+    let bootstrapAttempts = 0;
+    const cleanupBootstrap = manager.configure({
+      onBootstrap: ({ directory }) => {
+        bootstrapAttempts += 1;
+        if (bootstrapAttempts > 1) {
+          setDirectorySessionStatus(target.sessionId, 'idle', [], directory);
+        }
+      },
+    });
+    manager.ensureChild(worktreeDirectory, { bootstrap: false }).setState({
+      status: 'complete',
+      sessionListSource: 'partial',
+    });
+
+    await mountHook();
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf(target.sessionId, worktreeDirectory)).toHaveLength(1);
+    expect(bootstrapAttempts).toBe(1);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(bootstrapAttempts).toBe(2);
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf(target.sessionId, worktreeDirectory)).toHaveLength(0);
+    cleanupBootstrap();
+  });
+
+  test('retries a failed bootstrap and dispatches the FIFO head exactly once after success', async () => {
+    const worktreeDirectory = '/repo-auto-failed-worktree';
+    const target = primeQueue('ses_failed_worktree', worktreeDirectory);
+    const manager = directoryChildStores;
+    if (!manager) throw new Error('directory child stores not initialized');
+    let bootstrapAttempts = 0;
+    const cleanupBootstrap = manager.configure({
+      onBootstrap: ({ directory }) => {
+        bootstrapAttempts += 1;
+        if (bootstrapAttempts === 1) throw new Error('bootstrap failed');
+        setDirectorySessionStatus(target.sessionId, 'idle', [], directory);
+      },
+    });
+
+    await mountHook();
+    expect(bootstrapAttempts).toBe(1);
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf(target.sessionId, worktreeDirectory)).toHaveLength(1);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(bootstrapAttempts).toBe(2);
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf(target.sessionId, worktreeDirectory)).toHaveLength(0);
+    await rerenderHook();
+    expect(sendMessageCalls).toHaveLength(1);
+    cleanupBootstrap();
+  });
+
+  test('coalesces failed bootstrap retry demand for queued sessions sharing a directory', async () => {
+    const sharedDirectory = '/repo-auto-shared-retry';
+    const firstTarget = primeQueue('ses_shared_first', sharedDirectory);
+    const manager = directoryChildStores;
+    if (!manager) throw new Error('directory child stores not initialized');
+    let bootstrapAttempts = 0;
+    const cleanupBootstrap = manager.configure({
+      onBootstrap: ({ directory }) => {
+        bootstrapAttempts += 1;
+        if (bootstrapAttempts === 1) throw new Error('bootstrap failed');
+        const store = manager.ensureChild(directory, { bootstrap: false });
+        store.setState({
+          status: 'complete',
+          sessionListSource: 'authoritative',
+          session_status: {
+            [firstTarget.sessionId]: { type: 'idle' },
+            ses_shared_second: { type: 'idle' },
+          },
+          message: {},
+        });
+      },
+    });
+
+    await mountHook();
+    expect(bootstrapAttempts).toBe(1);
+
+    let secondTarget: ReturnType<typeof primeQueue> | undefined;
+    await act(async () => {
+      secondTarget = primeQueue('ses_shared_second', sharedDirectory);
+      await Promise.resolve();
+    });
+    await rerenderHook();
+    if (!secondTarget) throw new Error('second queue target was not created');
+
+    // The second queue joins the directory's existing backoff window instead
+    // of forcing a second bootstrap before the first retry is due.
+    expect(bootstrapAttempts).toBe(1);
+    expect(queueOf(firstTarget.sessionId, sharedDirectory)).toHaveLength(1);
+    expect(queueOf(secondTarget.sessionId, sharedDirectory)).toHaveLength(1);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(bootstrapAttempts).toBe(2);
+    expect(sendMessageCalls).toHaveLength(2);
+    expect(sendMessageCalls.map((call) => call[9])).toEqual([
+      { target: firstTarget },
+      { target: secondTarget },
+    ]);
+    expect(queueOf(firstTarget.sessionId, sharedDirectory)).toHaveLength(0);
+    expect(queueOf(secondTarget.sessionId, sharedDirectory)).toHaveLength(0);
+    cleanupBootstrap();
+  });
+
+  test('keeps a worktree target queued until its directory session snapshot is authoritative', async () => {
+    const worktreeDirectory = '/repo-auto-pending-worktree';
+    const target = primeQueue('ses_pending_worktree', worktreeDirectory);
+    const manager = directoryChildStores;
+    if (!manager) throw new Error('directory child stores not initialized');
+    manager.ensureChild(worktreeDirectory, { bootstrap: false }).setState({ status: 'complete' });
+
+    await mountHook();
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf(target.sessionId, worktreeDirectory)).toHaveLength(1);
+
+    await act(async () => {
+      setDirectorySessionStatus(target.sessionId, 'idle', [], worktreeDirectory);
+      await Promise.resolve();
+    });
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(queueOf(target.sessionId, worktreeDirectory)).toHaveLength(0);
+  });
+
+  test('demands bootstrap for a queued target that has no child store', async () => {
+    const worktreeDirectory = '/repo-auto-demanded-worktree';
+    const target = primeQueue('ses_demanded_worktree', worktreeDirectory);
+    const manager = directoryChildStores;
+    if (!manager) throw new Error('directory child stores not initialized');
+
+    let resolveBootstrap: (() => void) | undefined;
+    const bootstrapReady = new Promise<void>((resolve) => {
+      resolveBootstrap = resolve;
+    });
+    const cleanupBootstrap = manager.configure({
+      onBootstrap: async ({ directory }) => {
+        await bootstrapReady;
+        setDirectorySessionStatus(target.sessionId, 'idle', [], directory);
+      },
+    });
+
+    expect(manager.getChild(worktreeDirectory)).toBe(undefined);
+    await mountHook();
+    expect(manager.getChild(worktreeDirectory)).toBeDefined();
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf(target.sessionId, worktreeDirectory)).toHaveLength(1);
+
+    await act(async () => {
+      resolveBootstrap?.();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(sendMessageCalls[0]?.[9]).toEqual({ target });
+    expect(queueOf(target.sessionId, worktreeDirectory)).toHaveLength(0);
+    cleanupBootstrap();
+  });
+
+  test('dispatches only the matching directory when session IDs collide', async () => {
+    const firstDirectory = '/repo-auto-collision-a';
+    const secondDirectory = '/repo-auto-collision-b';
+    const firstTarget = primeQueue('ses_collision', firstDirectory);
+    const secondTarget = primeQueue('ses_collision', secondDirectory);
+    act(() => {
+      setDirectorySessionStatus(firstTarget.sessionId, 'idle', [], firstDirectory);
+      setDirectorySessionStatus(secondTarget.sessionId, 'busy', [], secondDirectory);
+    });
+
+    await mountHook();
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(sendMessageCalls[0]?.[9]).toEqual({ target: firstTarget });
+    expect(queueOf(secondTarget.sessionId, secondDirectory)).toHaveLength(1);
+  });
+
+  test('does not dispatch a queued target from a different runtime', async () => {
+    const worktreeDirectory = '/repo-auto-other-runtime';
+    const target = primeQueue('ses_other_runtime', worktreeDirectory, 'other-runtime');
+    act(() => {
+      setDirectorySessionStatus(target.sessionId, 'idle', [], worktreeDirectory);
+    });
+
+    await mountHook();
+    await rerenderHook();
+
+    expect(sendMessageCalls).toHaveLength(0);
+    expect(queueOf(target.sessionId, worktreeDirectory, target.runtimeKey)).toHaveLength(1);
   });
 
   test('dispatches when the server says idle despite an unfinished assistant fallback', async () => {
