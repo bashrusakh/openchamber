@@ -525,18 +525,31 @@ const TerminalViewport = React.forwardRef<TerminalController, Props>(({
       if (container.hasPointerCapture(event.pointerId)) container.releasePointerCapture(event.pointerId);
       pointerId = null;
       gesture = 'idle';
-      if (shouldFinishSelection) finishSelection();
+      if (shouldFinishSelection) {
+        if (terminal.hasSelection()) terminal.deselect();
+        else finishSelection();
+      }
+    };
+    const handleWindowBlur = () => {
+      clearLongPress();
+      if (pointerId !== null && container.hasPointerCapture(pointerId)) container.releasePointerCapture(pointerId);
+      pointerId = null;
+      gesture = 'idle';
+      remainder = 0;
+      selectionFocus = null;
     };
     container.addEventListener('pointerdown', down);
     container.addEventListener('pointermove', move, { passive: false });
     container.addEventListener('pointerup', up);
     container.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', handleWindowBlur);
     return () => {
       clearLongPress();
       container.removeEventListener('pointerdown', down);
       container.removeEventListener('pointermove', move);
       container.removeEventListener('pointerup', up);
       container.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', handleWindowBlur);
     };
   }, [enableTouchScroll, fontSize, ready]);
 

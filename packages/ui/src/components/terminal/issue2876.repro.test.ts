@@ -25,7 +25,11 @@ const DRAG_THRESHOLD = CELL_WIDTH * 0.5;
  * - movement below half a cell leaves the endpoint unchanged
  * - movement past the threshold extends the selection
  * - mouseup clears a click before the copy branch
- * - clearSelection() still has its hasSelection() early return
+ * - pointercancel clears a real selection without copying, and uses mouseup
+ *   only to reset a pending selection
+ * - window blur cancels and resets an in-progress selection
+ * - deselect() clears a real selection and emits the selection-change event
+ *   while clearSelection() still has its hasSelection() early return
  */
 const createGhosttySelectionModel = (screen: string[][]) => {
     let selectionStart: Cell | null = null;
@@ -35,6 +39,7 @@ const createGhosttySelectionModel = (screen: string[][]) => {
     let mouseDownX = 0;
     let mouseDownY = 0;
     const clipboardWrites: string[] = [];
+    let selectionChangeEvents = 0;
 
     const getSelection = (): string => {
         if (!selectionStart || !selectionEnd) return '';
@@ -89,6 +94,12 @@ const createGhosttySelectionModel = (screen: string[][]) => {
         isSelecting = false;
     };
 
+    // Terminal.deselect() clears through the public event-emitting path.
+    const deselect = (): void => {
+        clearSelection();
+        selectionChangeEvents += 1;
+    };
+
     const mousedown = (button: number, col: number, row: number, point: Point): void => {
         if (button !== 0) return;
         if (hasSelection()) clearSelection();
@@ -128,6 +139,23 @@ const createGhosttySelectionModel = (screen: string[][]) => {
         if (text) clipboardWrites.push(text);
     };
 
+    const pointerCancel = (): void => {
+        if (!isSelecting) return;
+        if (hasSelection()) {
+            deselect();
+            return;
+        }
+        mouseup();
+    };
+
+    const windowBlur = (): void => {
+        if (!isSelecting) return;
+        selectionStart = null;
+        selectionEnd = null;
+        isSelecting = false;
+        dragThresholdMet = false;
+    };
+
     const getWordRange = (col: number, row: number): { startCol: number; endCol: number } | null => {
         const line = screen[row] ?? [];
         const isWordCharacter = (character: string | undefined): boolean => Boolean(character && /[\w-]/.test(character));
@@ -154,11 +182,14 @@ const createGhosttySelectionModel = (screen: string[][]) => {
         mousemove: move,
         documentMousemove: move,
         mouseup,
+        pointerCancel,
         outsideClick: mouseup,
+        windowBlur,
         doubleClick,
         hasSelection,
         clearSelection,
         getSelection,
+        get selectionChangeEvents(): number { return selectionChangeEvents; },
         get isSelecting(): boolean { return isSelecting; },
         get dragThresholdMet(): boolean { return dragThresholdMet; },
         clipboardWrites,
@@ -175,6 +206,7 @@ describe('issue 2876: copy-on-click in the integrated terminal clobbers the clip
         model.mouseup();
 
         expect(model.clipboardWrites).toEqual([]);
+        expect(model.selectionChangeEvents).toBe(0);
         expect(model.isSelecting).toBe(false);
         expect(model.getSelection()).toBe('');
     });
@@ -253,6 +285,45 @@ describe('issue 2876: copy-on-click in the integrated terminal clobbers the clip
 
         expect(model.clipboardWrites).toEqual([]);
         expect(model.isSelecting).toBe(false);
+        expect(model.getSelection()).toBe('');
+    });
+
+    test('pointer cancellation clears a real selection without writing to the clipboard', () => {
+        const model = createGhosttySelectionModel(screen);
+
+        model.mousedown(0, 2, 0, { x: 20, y: 0 });
+        model.mousemove(5, 0, { x: 26, y: 0 });
+        model.pointerCancel();
+
+        expect(model.clipboardWrites).toEqual([]);
+        expect(model.selectionChangeEvents).toBe(1);
+        expect(model.isSelecting).toBe(false);
+        expect(model.getSelection()).toBe('');
+    });
+
+    test('pointer cancellation uses mouseup to reset a pending selection without writing', () => {
+        const model = createGhosttySelectionModel(screen);
+
+        model.mousedown(0, 3, 0, { x: 30, y: 0 });
+        model.pointerCancel();
+
+        expect(model.clipboardWrites).toEqual([]);
+        expect(model.selectionChangeEvents).toBe(0);
+        expect(model.isSelecting).toBe(false);
+        expect(model.getSelection()).toBe('');
+    });
+
+    test('window blur cancels selection and prevents later movement or mouseup from copying', () => {
+        const model = createGhosttySelectionModel(screen);
+
+        model.mousedown(0, 2, 0, { x: 20, y: 0 });
+        model.windowBlur();
+        model.documentMousemove(8, 0, { x: 50, y: 0 });
+        model.mouseup();
+
+        expect(model.clipboardWrites).toEqual([]);
+        expect(model.isSelecting).toBe(false);
+        expect(model.dragThresholdMet).toBe(false);
         expect(model.getSelection()).toBe('');
     });
 
