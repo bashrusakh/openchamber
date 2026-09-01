@@ -146,6 +146,38 @@ function assertSdkSuccess<T>(result: SdkResult<T>, operation: string): T | undef
   throw isAmbiguousSendFailure(result.error) ? markAmbiguousTransportFailure(error) : error
 }
 
+/**
+ * The tagged error a non-fallback V2 question outcome surfaces through.
+ *
+ * `rejected` (400/401/other 4xx) keeps the shape the V1 error path already
+ * produces — `Error` with a numeric `status` — so the existing user-visible
+ * error handling (QuestionCard toast; `isQuestionRequestNotFoundError` check)
+ * reads it unchanged and the V1 call's own handling must not run on top.
+ *
+ * `ambiguous`/`server-error` additionally carry the transport's
+ * "dispatched, outcome unknown" tag (same mechanism as the send-failure path,
+ * {@link markAmbiguousTransportFailure}), and the message names the
+ * classification. Local pending state is deliberately left untouched for these
+ * kinds — an admitted-but-unconfirmed reply must not be discarded locally;
+ * SSE/recovery decides the final state.
+ */
+function v2QuestionMutationError(operation: "reply" | "reject", outcome: V2QuestionMutationResult): Error {
+  const kind = outcome.kind
+  // The discriminated union carries the status only for the HTTP-evidence
+  // kinds; admitted/not-admitted never reach this builder, and ambiguous has
+  // no status at all.
+  const status = (kind === "rejected" || kind === "server-error") ? outcome.status : undefined
+  const message = `Question ${operation} v2 ${kind}${status ? ` (${status})` : ""}`
+  // SAFETY: the wrapper is constructed here from validated strings/numbers;
+  // the extra fields mirror the wrapper shape assertSdkSuccess throws.
+  const error = new Error(message) as Error & { status?: number; v2QuestionMutationKind?: V2QuestionMutationResult["kind"] }
+  if (status !== undefined) error.status = status
+  error.v2QuestionMutationKind = kind
+  // Tag the no-evidence/commit-window classes so callers can distinguish a
+  // lost response from a definite rejection, exactly like the send path does.
+  return kind === "ambiguous" || kind === "server-error" ? markAmbiguousTransportFailure(error) : error
+}
+
 function assertSdkData<T>(result: SdkResult<T>, operation: string): T {
   const data = assertSdkSuccess(result, operation)
   if (data === undefined || data === null) {
@@ -853,39 +885,118 @@ function getRequestReplyClient(
 }
 
 /**
+ * V2 question mutation outcome, classified only from in-process evidence.
+ *
+ * The caller may fall back to the V1 endpoint ONLY when the V2 request provably
+ * never arrived at a V2 handler — a V1 resend after an admitted request either
+ * duplicates the mutation or reports misleading not-found semantics.
+ *
+ * Verified against the SDK 1.18.25 hey-api client (`client.gen.js`): a fetch
+ * throw returns `{ error, response: undefined }`; an HTTP error status returns
+ * `{ error: jsonError ?? textError, response }`; a 204 collapses to
+ * `{ data: {}, error: undefined }`.
+ */
+type V2QuestionMutationResult =
+  | { kind: "admitted" } // 204: server resolved the request
+  | { kind: "not-admitted" } // server answered 404: no V2 handler saw this request (not-found question, or pre-V2 route-miss — see classifyV2QuestionMutation)
+  | { kind: "rejected"; status: number } // 400/401 (or other parsed 4xx): server saw and turned the request down — not a compatibility signal
+  | { kind: "ambiguous" } // no response evidence: fetch throw, abort, response === undefined
+  | { kind: "server-error"; status: number } // 5xx: server answered, but admission is unknowable (commit-before-fail window) — treated like ambiguous for safety
+
+type V2QuestionSdkResult = {
+  data?: unknown
+  error?: unknown
+  response?: { status?: number }
+}
+
+/**
+ * Classify one V2 question reply/reject attempt using only evidence available
+ * in-process. Never a network call: the caller decides what each kind means
+ * (only `not-admitted` may trigger the V1 fallback). Shared by reply and reject
+ * so both mutations keep an identical compatibility contract. Pass `result`
+ * when the SDK call returned; pass `null` when the SDK call itself threw.
+ */
+function classifyV2QuestionMutation(result: V2QuestionSdkResult | null): V2QuestionMutationResult {
+  // No result at all: the SDK call threw (old client shape, SDK bug). No HTTP
+  // evidence exists, so the request may still have been dispatched/admitted.
+  if (result === null) return { kind: "ambiguous" }
+  // hey-api fetch-throw path: `{ error: <raw TypeError/DOMException>,
+  // response: undefined }`. Same evidence gap as a direct throw.
+  if (result.response === undefined) return { kind: "ambiguous" }
+  if (result.error === undefined) {
+    // The 204 success branch collapses to { data: {}, error: undefined } with
+    // response present.
+    return { kind: "admitted" }
+  }
+
+  const status = result.response.status
+  if (status === 404) {
+    // The 404 split, documented for the compatibility contract: a structured
+    // `_tag` body (QuestionNotFoundError/SessionNotFoundError) proves a V2
+    // handler answered — the request provably did not mutate the question. An
+    // unparseable/HTML body means the 404 came from something that is not the
+    // V2 handler: an unknown route on a pre-V2 server, where the request could
+    // not have been processed by a handler that does not exist. Both cases are
+    // provably not admitted, so both justify the V1 fallback; the fallback
+    // preserves the OPE-236 stale-recovery semantics where the V1 call
+    // re-answers not-found and clears the stale local entry.
+    return { kind: "not-admitted" }
+  }
+  if (status !== undefined && status >= 400 && status < 500) {
+    // 400/401/other 4xx: the server received, parsed, and rejected the
+    // request — admission was considered and denied. NOT a compatibility
+    // signal; the V1 call would just repeat the rejection (or worse, get V1
+    // semantics on a V2-shaped payload).
+    return { kind: "rejected", status }
+  }
+  if (status !== undefined && status >= 500) {
+    // 5xx: the server answered, but a commit-before-fail window exists —
+    // admission is unknowable. Treated exactly like a transport loss.
+    return { kind: "server-error", status }
+  }
+  // An HTTP-era result without a status (odd transports/proxies): no
+  // trustworthy evidence, so do not fall back.
+  return { kind: "ambiguous" }
+}
+
+/**
  * Try the native V2 question reply endpoint (SDK 1.18.25,
  * `session.question.reply`) against the same directory-resolved client the V1
  * path uses. The V2 route is addressed by `sessionID` + `requestID` — no
  * `directory` parameter exists there — so the caller must pass the
  * directory-resolved client.
  *
- * Resolves `true` only when the server answered through V2 without an error.
- * Anything else — HTTP error, throw, or unexpected result shape — resolves
- * `false` so the caller falls back to the unchanged V1 call. This mirrors the
- * permission V2 adoption (#1982): try V2, fall back cleanly, no version gate;
- * a pre-V2 server simply takes the V1 path. A V2 404 also falls back, so the
- * V1 call re-answers not-found for the stale-request recovery path.
+ * Returns the classified V2 outcome instead of a boolean: see
+ * {@link classifyV2QuestionMutation} for the kind table. Only
+ * `not-admitted` (structured question 404, or an unparseable-body 404 from a
+ * pre-V2 server's missing route) lets the caller fall back to the unchanged
+ * V1 call; `rejected`/`ambiguous`/`server-error` surface as tagged errors
+ * without a V1 resend, so an admitted mutation is never replayed. This mirrors
+ * the permission V2 adoption (#1982) for the try-first direction; the removal
+ * condition for this whole helper is the pre-V2 support decision (#3007
+ * protocol detection follow-up).
  */
 async function tryV2QuestionReply(
   client: OpencodeClient,
   sessionId: string,
   requestId: string,
   answers: string[][],
-): Promise<boolean> {
+): Promise<V2QuestionMutationResult> {
+  let result: V2QuestionSdkResult
   try {
-    const result = await client.v2.session.question.reply({
+    // SAFETY: the generated method returns a RequestResult whose fields match
+    // V2QuestionSdkResult by definition (data/error/response); the assertion
+    // only drops the generated generic parameters.
+    result = await client.v2.session.question.reply({
       sessionID: sessionId,
       requestID: requestId,
       questionV2Reply: { answers },
-    })
-    // Success is a 204 with no body: the discriminated union collapses to
-    // "no error" on the data branch (see fetchPermission in client.ts).
-    return result.error === undefined
+    }) as V2QuestionSdkResult
   } catch {
-    // Old server without the V2 route, network failure, or SDK throw — the
-    // V1 path decides the outcome.
-    return false
+    // The SDK call itself threw: no response evidence (ambiguous).
+    return classifyV2QuestionMutation(null)
   }
+  return classifyV2QuestionMutation(result)
 }
 
 /** See {@link tryV2QuestionReply} — reject has the same shape minus answers. */
@@ -893,16 +1004,18 @@ async function tryV2QuestionReject(
   client: OpencodeClient,
   sessionId: string,
   requestId: string,
-): Promise<boolean> {
+): Promise<V2QuestionMutationResult> {
+  let result: V2QuestionSdkResult
   try {
-    const result = await client.v2.session.question.reject({
+    // SAFETY: same generated RequestResult shape as the reply call above.
+    result = await client.v2.session.question.reject({
       sessionID: sessionId,
       requestID: requestId,
-    })
-    return result.error === undefined
+    }) as V2QuestionSdkResult
   } catch {
-    return false
+    return classifyV2QuestionMutation(null)
   }
+  return classifyV2QuestionMutation(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -1906,9 +2019,12 @@ export async function respondToQuestion(
     const replyClient = getRequestReplyClient("question", sessionId, requestId)
     // V2 first (native `question.v2` surface). The V2 route has no directory
     // parameter — the scoped client itself addresses the owning instance, so
-    // the same directory resolution the V1 call uses is preserved. Any V2
-    // failure falls through to the unchanged V1 call below.
-    if (await tryV2QuestionReply(replyClient, sessionId, requestId, normalizedAnswers)) {
+    // the same directory resolution the V1 call uses is preserved. Only a
+    // provably not-admitted V2 outcome (the 404 classes) falls through to the
+    // unchanged V1 call below; every other outcome throws a tagged error so a
+    // possibly-admitted V2 mutation is never replayed as a V1 resend.
+    const v2Outcome = await tryV2QuestionReply(replyClient, sessionId, requestId, normalizedAnswers)
+    if (v2Outcome.kind === "admitted") {
       // A successful reply is authoritative: the backend resolved the question,
       // so clear it from the local store deterministically instead of waiting
       // for the SSE `question.replied` event. A lost event (SSE gap) would leave
@@ -1918,6 +2034,9 @@ export async function respondToQuestion(
       // removes when present).
       removeQuestionRequestFromChildStores(sessionId, requestId)
       return
+    }
+    if (v2Outcome.kind !== "not-admitted") {
+      throw v2QuestionMutationError("reply", v2Outcome)
     }
     const result = await replyClient.question.reply({
       requestID: requestId,
@@ -1954,14 +2073,19 @@ export async function rejectQuestion(
     || dir()
   try {
     const rejectClient = getRequestReplyClient("question", sessionId, requestId)
-    // V2 first with the same guarded fallback as respondToQuestion above.
-    if (await tryV2QuestionReject(rejectClient, sessionId, requestId)) {
+    // V2 first with the same classified-fallback contract as respondToQuestion
+    // above: only the 404 classes fall back, others throw a tagged error.
+    const v2Outcome = await tryV2QuestionReject(rejectClient, sessionId, requestId)
+    if (v2Outcome.kind === "admitted") {
       // A successful rejection is authoritative: the backend resolved the
       // question, so clear it from the local store deterministically (see
       // respondToQuestion for the lost-SSE-event rationale — issues #2911,
       // #2448). The later SSE `question.rejected` event is a no-op.
       removeQuestionRequestFromChildStores(sessionId, requestId)
       return
+    }
+    if (v2Outcome.kind !== "not-admitted") {
+      throw v2QuestionMutationError("reject", v2Outcome)
     }
     const result = await rejectClient.question.reject({
       requestID: requestId,
