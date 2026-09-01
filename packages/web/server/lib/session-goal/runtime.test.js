@@ -420,6 +420,26 @@ describe('session goal live activity gate', () => {
     runtime.stop();
   });
 
+  it('continues after a truncated agent turn followed by a length-finished summary', async () => {
+    const firstLength = assistantMessage('agent-length', { finish: 'length', time: { created: 10, completed: 11 } });
+    const summary = assistantMessage('summary', {
+      summary: true,
+      finish: 'length',
+      time: { created: 15, completed: 16 },
+    });
+    const { runtime, requests, service } = createRuntimeHarness({
+      messageFactory: (fetchCount) => fetchCount < 2 ? [firstLength] : [firstLength, summary],
+    });
+
+    await runIdleTick(runtime);
+    await runIdleTick(runtime);
+
+    expect(service.generateSmallModelText).not.toHaveBeenCalled();
+    expect(requests.filter((request) => request.pathname === `/session/${SESSION_ID}/prompt_async`)).toHaveLength(2);
+    expect(lastPatchedGoal(requests)).toMatchObject({ status: 'active' });
+    runtime.stop();
+  });
+
   it('does not infer a repeated streak when a completed assistant timestamp is missing', async () => {
     const firstLength = assistantMessage('z', { finish: 'length', time: { completed: 11 } });
     const secondLength = assistantMessage('a', { finish: 'length', time: { created: 20, completed: 21 } });

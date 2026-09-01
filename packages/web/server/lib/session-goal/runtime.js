@@ -259,6 +259,7 @@ const isLengthTruncated = (info, errorName = getErrorName(info?.error)) => {
 // tie-breaker for equal timestamps.
 const hasRepeatedLengthTail = (messages, latestAssistant, goalCreatedAt) => {
   const latestInfo = latestAssistant?.info;
+  if (latestInfo?.summary === true) return false;
   const latestIndex = messages.indexOf(latestAssistant);
   const latestCreated = latestInfo?.time?.created;
   if (
