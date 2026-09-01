@@ -40,8 +40,14 @@ content, since "Implement this plan: X" alone gives the audit nothing to
 judge against. The armed send also attaches a synthetic system-reminder
 part telling the agent goal mode is active and that each turn should end
 with a factual done/verified/remaining statement for the independent audit.
-Freshness/stale-write protection is by `id`: every runtime write re-reads the
-session and drops the write when the stored goal id no longer matches.
+Freshness/stale-write protection is a CAS on the evaluated goal revision:
+every runtime write re-reads the session and drops itself when the stored
+goal no longer matches the expected `id`, `status`, revision key (`id` +
+objective/budget/`createdAt` — the fields the UI can edit in place) AND
+`updatedAt` (the UI stamps it on every user mutation). A stale inflight tick
+can therefore never overwrite a newer Pause/Resume/Complete/Clear,
+replacement, or edit-in-place; runtime writes are serialized per session,
+and unrelated `metadata.openchamber.*` keys are merged from the fresh read.
 
 ## File-backed objectives
 
@@ -62,7 +68,11 @@ before touching the filesystem). Rationale: metadata rides every
   write fails; `clearSessionGoal` deletes the file best-effort.
 - The tick resolves the effective objective fresh on every cycle (the file
   is live-editable mid-goal) and falls back to the inline `objective` when
-  the file is unreadable — a goal never dies because a file went away.
+  the file is unreadable. A missing file with NO inline fallback retries
+  boundedly (backoff), then settles the goal `blocked` ("objective
+  unavailable") — a persistent file failure must never strand an active idle
+  goal. The resolved text is bound to the evaluated goal revision: an
+  inflight tick can never audit goal A with objective B.
 - UI display fetches content via the GET route
   (`useGoalObjectiveContent`); in VS Code the route is unavailable, so the
   strip degrades to the audit note (display-only fallback by design).
@@ -73,12 +83,19 @@ before touching the filesystem). Rationale: metadata rides every
 ## Flow
 
 1. `createSessionGoalRuntime` subscribes to the global SSE hub (same pattern
-   as session-assist — it needs the envelope's `directory`).
+   as session-assist — it needs the envelope's `directory`), and `start()`
+   runs a bounded one-shot restart scan: after an OpenChamber restart, every
+   known directory's session list is checked once and persisted `active`
+   goals on already-idle sessions are re-armed with the kickoff delay. No
+   permanent global polling — everything after the scan is event-driven.
 2. `session.status: idle` arms a 15s per-session timer; `busy`/`retry` clears
    it. A `session.updated` carrying a fresh active goal (`turnsUsed === 0` or
    `statusReason === 'resumed'`) arms a kickoff timer — 3s for fresh goals,
    ~250ms for an explicit Resume so the nudge feels immediate — since setting
-   a goal on an idle session emits no status transition.
+   a goal on an idle session emits no status transition. An idle/Resume event
+   that arrives while a tick is already inflight is remembered and becomes
+   exactly ONE bounded follow-up tick when the current tick finishes (one
+   effective tick per session — never concurrent, never lost).
 3. On fire (`tick`), gated by the `sessionGoalEnabled` setting:
    - fetch session (skip sub-agent sessions), require an `active` goal;
    - authoritative live-activity check after the quiet window: re-read the
@@ -90,8 +107,14 @@ before touching the filesystem). Rationale: metadata rides every
      the audit and retries after another quiet window;
    - quiescence check via the message tail (trailing user message or
      unfinished assistant reply → bail; the next idle transition re-arms);
+   - bounded read recovery: session/status/children/message/objective read
+     failures retry with backoff (bounded), then settle the goal `blocked`
+     ("<path> unavailable") instead of staying eternally `active`;
    - token accounting as a SNAPSHOT of the latest completed assistant turn:
-     `input + cache.read + output`. Earlier turns' inputs and outputs fold
+     `input + output + reasoning + cache.read + cache.write` (the SDK's
+     authoritative token contract — reasoning tokens are never omitted, and
+     cache writes are paid input; the same sum the shared UI applies).
+     Earlier turns' inputs and outputs fold
      into the next turn's cache, so the latest snapshot already carries the
      whole run's paid tokens — no summing across messages. Goal-relative via
      `tokensBaseline` (the same snapshot of the newest pre-goal turn,
@@ -138,10 +161,24 @@ before touching the filesystem). Rationale: metadata rides every
      audit unavailable") — resumable, and settling resets the streak so
      Resume gets fresh tolerance. A dead small model can never drive the
      loop blind to the turn cap;
-   - continue: persist accounting + `turnsUsed` first (a crash after the
-     write just waits for the next idle tick; the reverse could double-send),
-     re-check the tail, then `POST /session/:id/prompt_async` with the
-     continuation prompt using the last assistant message's
+   - continue: persist accounting + the RESERVED turn first (a crash after
+     the write just waits for the next idle tick; the reverse could
+     double-send). `turnsUsed` counts ADMITTED continuations exactly once:
+     a tail-moved drop or a proven pre-admission failure CAS-rolls the
+     reserved turn back, an ambiguous outcome never double-counts, and a
+     reservation is never charged before admission is certain;
+   - continuation admission: `POST /session/:id/prompt_async` outcomes are
+     classified — 2xx = admitted (exactly one provider execution, turn
+     counts); 4xx (non-timeout) = proven non-admission (turn rolled back,
+     bounded safe retry); timeout/network/5xx = AMBIGUOUS — never resent
+     blindly. Authoritative session/status/messages are reconciled first:
+     an idle session with an unchanged tail proves non-admission (bounded
+     retry); a busy session or a NEW assistant turn means the continuation
+     landed (admitted, counted once, no second POST); a moved tail means the
+     user took over (dropped, turn rolled back). If admission can never be
+     established within the bounded budget, the goal settles `blocked`
+     ("continuation dispatch failed") instead of risking duplicate
+     execution. The continuation prompt uses the last assistant message's
      provider/model/agent — the goal spends the session's own subscription.
 4. Settling (`complete`/`blocked`/`budgetLimited`) fires the injected
    `emitGoalNotification` so the user hears about it even with the UI closed:
@@ -221,3 +258,7 @@ ordering used by create and scheduled goals.
 - `tokensUsed` only counts completed assistant messages seen within the
   40-message fetch window per tick; extremely long busy stretches between
   idles undercount (acceptable: budget is a guardrail, not billing).
+- Message chronology is authoritative `time.created`, never lexical message
+  IDs (OpenCode's sortable ids roll over); equal timestamps keep the
+  authoritative array order, so accounting and audits are stable across an
+  ID rollover.
