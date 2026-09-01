@@ -56,8 +56,36 @@ const makeV1ListResult = (items: QuestionFixture[]) => ({
   response: new Response(null, { status: 200 }),
 });
 
+/**
+ * A closed set of non-array payload shapes the contract-drift test feeds.
+ * The reader under test only checks `Array.isArray(response.data?.data)`,
+ * so any non-array value triggers the warn-and-fall-back path. The closed
+ * union is intentional: this test is the parser-of-last-resort for the
+ * wire drift, not a generic value passthrough.
+ */
+type NonArrayPayload =
+  | { readonly tag: 'object' }
+  | null
+  | string
+  | number
+  | boolean;
+
+/**
+ * Build a 200 success result whose `data.data` is NOT an item array. This is
+ * the same-version contract-drift case where the typed SDK path no longer
+ * matches the wire envelope — the reader under test must reject it
+ * conservatively (warn once, fall back to V1).
+ */
+const makeV2NonArrayPayloadResult = (payload: NonArrayPayload) => ({
+  data: { data: payload },
+  error: undefined,
+  request: new Request('http://test/'),
+  response: new Response(null, { status: 200 }),
+});
+
 type V2Response =
   | { kind: 'ok'; items: QuestionFixture[] | unknown[] }
+  | { kind: 'non-array-payload'; payload: unknown }
   | { kind: 'v2-404' }
   | { kind: 'server-error' }
   | { kind: 'throw' };
@@ -81,6 +109,14 @@ const questionV2ListMock = mock((args?: { location?: { directory?: string } }) =
         // violates the QuestionFixture contract; the parser under test must
         // reject it.
         resolve(makeV2SuccessResult(r.items as QuestionFixture[]));
+      } else if (r.kind === 'non-array-payload') {
+        // SAFETY: the contract-drift test intentionally feeds a 200 status
+        // whose `data.data` is not an item array; the reader under test
+        // must reject it (warn once, fall back to V1). `r.payload` is
+        // intentionally typed `unknown` in the discriminator (any non-array
+        // value is valid here), so we narrow it to the closed
+        // `NonArrayPayload` union at the helper boundary by construction.
+        resolve(makeV2NonArrayPayloadResult(r.payload as NonArrayPayload));
       } else if (r.kind === 'v2-404') {
         resolve(makeV2ErrorResult(404));
       } else {
@@ -324,6 +360,31 @@ describe('opencodeClient.listPendingQuestions (V2 read adoption)', () => {
       // itself is not — `questions` carries a string instead of the option
       // array. Typed as `unknown` at the mock boundary on purpose.
       { kind: 'ok', items: [{ ...makeQuestion('q-drift'), questions: 'missing' }] },
+      { kind: 'ok', items: [] },
+    ]);
+    const result = await promise;
+
+    expect(result).toEqual([v1Question]);
+    expect(v1ListArgs).toEqual([undefined]);
+    expect(consoleWarnCalls.length).toBe(1);
+    expect(consoleWarnCalls[0]).toContain('[questions-v2]');
+    expect(consoleWarnCalls[0]).toContain('malformed-payload');
+  });
+
+  test('falls back to V1 with a warn when a 200 V2 payload is not an item array (contract drift)', async () => {
+    // SAFETY: the contract-drift test intentionally feeds a 200 status whose
+    // `data.data` is NOT an array (here: a bare object). The reader under
+    // test must reject it conservatively (warn once, fall back to V1) and
+    // must NOT treat it as an empty success.
+    const v1Question = makeQuestion('v1driftna');
+    v1ListResult = makeV1ListResult([v1Question]);
+
+    const promise = opencodeClient.listPendingQuestions({ directories: ['/repo'] });
+    resolveV2Calls([
+      // Same-version contract drift: the 200 envelope is valid, but the
+      // payload the reader expects (an item array) is replaced by a plain
+      // object literal, satisfying the closed `NonArrayPayload` union.
+      { kind: 'non-array-payload', payload: { tag: 'object' } },
       { kind: 'ok', items: [] },
     ]);
     const result = await promise;
