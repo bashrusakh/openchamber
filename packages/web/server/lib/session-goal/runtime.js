@@ -11,10 +11,9 @@
 // has no channel to settle its own goal. When the small model is unavailable
 // the loop still terminates via the budget and the continuation cap.
 //
-// Event-driven with bounded recovery: no permanent global polling. Wakeups
-// come from session.status idle transitions, goal kickoff/Resume events, and
-// one deterministic restart scan for persisted active goals on already-idle
-// sessions (see recover()).
+// Event-driven like session-assist during normal operation: no permanent
+// polling or backfill. A bounded startup scan handles active goals whose idle
+// state produced no event while the server was down.
 
 import fs from 'fs';
 import os from 'os';
@@ -61,19 +60,19 @@ const BLOCKED_STREAK_LIMIT = 3;
 // hiccup allows a single unaudited continuation; a dead small model must not
 // drive the loop blind all the way to the turn cap.
 const AUDIT_FAIL_LIMIT = 2;
-// Bounded recovery for read failures (session/status/children/messages and
-// the objective file): the initial tick runs immediately, then a failing path
-// retries a bounded number of times with backoff. Persistent failure becomes
-// an explicit recoverable state (blocked) instead of infinite `active`.
+// Fetch/quiet failures are retried at most four times after the initial tick.
+// The delay is derived from the idle delay so tests and embedded runtimes can
+// use the same policy without a second clock configuration.
 const MAX_RETRY_ATTEMPTS = 4;
-// Bounded continuation dispatch: after an ambiguous prompt_async outcome the
-// runtime reconciles authoritative state and may re-dispatch at most this
-// many times, then settles explicitly instead of risking duplicate execution.
-const MAX_DISPATCH_ATTEMPTS = 3;
-// Restart recovery scan bounds (bounded, one-shot, never permanent polling).
-const RESTART_SCAN_DIRECTORY_LIMIT = 50;
+const MAX_DISPATCH_ATTEMPTS = 4;
+const MAX_LENGTH_RECOVERY_ATTEMPTS = 2;
+// Keep restart recovery aligned with lifecycle.js warmup: the last-used
+// directory plus the three most recently opened projects. Recovery is a
+// one-shot safety net, not an unlimited sequential project scan.
+const RESTART_SCAN_DIRECTORY_LIMIT = 4;
 
 const GOAL_STATUSES = ['active', 'paused', 'blocked', 'budgetLimited', 'complete'];
+const SESSION_STATUS_TYPES = new Set(['busy', 'idle', 'retry', 'error']);
 
 const clampText = (value, limit) => String(value ?? '').trim().slice(0, limit);
 
@@ -176,10 +175,15 @@ const extractSessionStatus = (payload) => {
   return { sessionId, type, directory };
 };
 
+const sessionStatusType = (status) => status?.type?.trim?.() || '';
+
+const isValidSessionStatus = (status) => Boolean(
+  status
+  && !Array.isArray(status)
+  && SESSION_STATUS_TYPES.has(sessionStatusType(status)),
+);
+
 // A user abort lands as an assistant message carrying MessageAbortedError.
-// The same-message mutation case: the event re-fires with the abort error on
-// a message id that may not have changed — handle the event itself, never the
-// id movement.
 const extractAbortedAssistant = (payload) => {
   if (!payload || payload.type !== 'message.updated') return null;
   const info = payload.properties?.info;
@@ -189,30 +193,44 @@ const extractAbortedAssistant = (payload) => {
   return { sessionId: info.sessionID };
 };
 
-// Newer user activity invalidates stale continuation work: a freshly created
-// user message means the user owns the session again. Old user messages are
-// re-emitted after settlement, so only messages created after the timer was
-// armed count (same guard session-assist uses).
-const extractUserMessage = (payload) => {
-  if (!payload || payload.type !== 'message.updated') return null;
-  const info = payload.properties?.info;
-  if (!info || typeof info !== 'object' || info.role !== 'user') return null;
-  if (typeof info.sessionID !== 'string' || !info.sessionID) return null;
-  return {
-    sessionId: info.sessionID,
-    createdAt: typeof info.time?.created === 'number' ? info.time.created : 0,
-  };
-};
-
 const extractSessionUpdate = (payload) => {
   if (!payload || payload.type !== 'session.updated') return null;
   const info = payload.properties?.info;
   if (!info || typeof info !== 'object' || typeof info.id !== 'string' || !info.id) return null;
+  const sessionUpdatedAt = Number.isFinite(info.time?.updated) ? info.time.updated : null;
   return {
     sessionId: info.id,
     directory: typeof info.directory === 'string' ? info.directory : '',
     goal: parseGoalMetadata(info),
+    hasGoalNamespace: Boolean(
+      info.metadata
+      && typeof info.metadata === 'object'
+      && info.metadata.openchamber
+      && typeof info.metadata.openchamber === 'object'
+      && !Array.isArray(info.metadata.openchamber),
+    ),
+    hasGoalKey: Boolean(
+      info.metadata
+      && typeof info.metadata === 'object'
+      && info.metadata.openchamber
+      && typeof info.metadata.openchamber === 'object'
+      && !Array.isArray(info.metadata.openchamber)
+      && Object.hasOwn(info.metadata.openchamber, 'goal'),
+    ),
     parentID: typeof info.parentID === 'string' ? info.parentID : '',
+    sessionUpdatedAt,
+  };
+};
+
+const extractUserMessage = (payload) => {
+  if (!payload || payload.type !== 'message.updated') return null;
+  const info = payload.properties?.info;
+  if (!info || typeof info !== 'object' || info.role !== 'user') return null;
+  if (typeof info.sessionID !== 'string' || !info.sessionID || typeof info.id !== 'string' || !info.id) return null;
+  return {
+    sessionId: info.sessionID,
+    messageId: info.id,
+    createdAt: Number.isFinite(info.time?.created) ? info.time.created : null,
   };
 };
 
@@ -261,10 +279,12 @@ const messagePartsToText = (message) => {
     .slice(0, TRANSCRIPT_PART_CHAR_LIMIT);
 };
 
-// Authoritative token contract (SDK `Message.tokens`): input + output +
-// reasoning + cache.read + cache.write. Reasoning must never be silently
-// omitted; cache.write is paid input per the SDK's getUsage accounting (the
-// same sum the UI's tokenUtils/session-ui-store apply).
+// OpenCode reports tokens per message, and each turn's cache.read carries
+// everything that was already paid for in earlier turns (past inputs and
+// outputs fold into the cache of the next turn). So the accumulated cost of
+// a whole run is simply the LATEST message's input + reasoning + cache.read
+// + cache.write + output —
+// a snapshot, not a sum across messages.
 const messageTokenTotal = (info) => {
   const tokens = info?.tokens;
   if (!tokens || typeof tokens !== 'object') return 0;
@@ -273,146 +293,200 @@ const messageTokenTotal = (info) => {
   const reasoning = Number.isFinite(tokens.reasoning) ? Math.max(0, tokens.reasoning) : 0;
   const cachedRead = Number.isFinite(tokens.cache?.read) ? Math.max(0, tokens.cache.read) : 0;
   const cachedWrite = Number.isFinite(tokens.cache?.write) ? Math.max(0, tokens.cache.write) : 0;
-  return input + output + reasoning + cachedRead + cachedWrite;
+  return input + cachedRead + cachedWrite + output + reasoning;
 };
 
-// Chronology is authoritative `time.created`, never lexical message IDs
-// (OpenCode's sortable id rolls over — `msg_000…` can be NEWER than
-// `msg_fff…`). Equal timestamps keep the authoritative array order (the API
-// returns messages chronologically, so array position is the deterministic
-// equal-time tie-breaker — same contract #3278 uses); an unknown timestamp
-// cannot safely participate in chronology and leaves the message at its array
-// position rather than pretending to know where it belongs.
 const messageChronology = (message) => {
   const created = message?.info?.time?.created;
-  return Number.isFinite(created) ? created : null;
+  return Number.isFinite(created) ? created : Number.POSITIVE_INFINITY;
 };
 
 const compareMessages = (left, right) => {
   const leftCreated = messageChronology(left);
   const rightCreated = messageChronology(right);
-  if (leftCreated === null || rightCreated === null || leftCreated === rightCreated) return 0;
-  return leftCreated - rightCreated;
+  const leftHasCreated = Number.isFinite(leftCreated);
+  const rightHasCreated = Number.isFinite(rightCreated);
+  if (leftHasCreated && rightHasCreated && leftCreated !== rightCreated) return leftCreated - rightCreated;
+  // Missing timestamps form a stable unknown bucket after messages with an
+  // authoritative creation time. Array#sort is stable in the supported
+  // runtimes, so equal timestamps and equal-unknown messages retain the API's
+  // order. Opaque IDs are identity keys, never chronology keys.
+  if (leftHasCreated !== rightHasCreated) return leftHasCreated ? -1 : 1;
+  return 0;
 };
 
-const sortMessagesChronologically = (messages) => [...messages].sort(compareMessages);
+// A restart loses the in-memory breaker, but the transcript is authoritative
+// enough to bound consecutive truncations. User messages do not break the
+// sequence because each continuation has one; summaries are deliberately
+// neutral and do not increment the breaker.
+const consecutiveLengthLimitedAssistants = (messages, goalCreatedAt) => {
+  let attempts = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const info = messages[index]?.info;
+    if (info?.role !== 'assistant') continue;
+    if (info.summary === true) break;
+    const createdAt = info.time?.created;
+    // An unknown timestamp cannot establish whether this message belongs to
+    // the current goal or where it falls in the consecutive sequence.
+    if (!Number.isFinite(createdAt)) break;
+    if (Number.isFinite(createdAt) && Number.isFinite(goalCreatedAt) && createdAt <= goalCreatedAt) continue;
+    if (!isResumableLengthMessage(info)) break;
+    attempts += 1;
+  }
+  return attempts;
+};
 
-// Revision of the evaluated goal: id + the fields the UI can edit in place
-// (objective content and budget) + createdAt. Binds objective content (both
-// inline and file-backed) to the exact goal revision a tick evaluated, so an
-// inflight tick can never audit goal A with objective B or a replaced goal's
-// file. No persisted schema change: derived from the payload itself.
-const goalRevisionKey = (goal) => JSON.stringify([
+// Metadata identity must not depend on the resolved objective text. File-backed
+// goals persist an empty inline objective and resolve their effective text from
+// a separate file for prompts and audits.
+const goalMetadataIdentityKey = (goal) => JSON.stringify([
   goal.id,
-  goal.objective,
+  goal.objectiveFile === true ? '' : goal.objective,
+  goal.objectiveFile,
+  goal.status,
+  goal.tokenBudget,
+  goal.createdAt,
+]);
+
+// Status and statusReason are lifecycle signals, not a new logical goal. A
+// reservation must survive pause/resume, while a changed id/objective/budget
+// still identifies a genuinely new goal and must clean up the old one.
+const goalLogicalIdentityKey = (goal) => JSON.stringify([
+  goal.id,
+  goal.objectiveFile === true ? '' : goal.objective,
   goal.objectiveFile,
   goal.tokenBudget,
   goal.createdAt,
 ]);
 
-const getErrorName = (error) => error?.name?.trim?.() ?? '';
+// UI edits intentionally keep the goal id and creation time while changing
+// objective/budget metadata. Those edits preserve accounting and must be able
+// to rebind an undispatched reservation instead of looking like a replacement.
+const goalReservationIdentityKey = (goal) => JSON.stringify([goal.id, goal.createdAt]);
 
-const isLengthTruncated = (info, errorName = getErrorName(info?.error)) => {
-  const error = info?.error;
-  const hasError = error !== null && error !== undefined;
-  return errorName === 'MessageOutputLengthError' || (!hasError && info?.finish === 'length');
+const reservationAccountingState = (goal) => ({
+  tokensUsed: goal.tokensUsed,
+  tokensBaseline: goal.tokensBaseline,
+  tokensCommitted: goal.tokensCommitted,
+  turnsUsed: goal.turnsUsed,
+  lastAccountedMessageID: goal.lastAccountedMessageID,
+});
+
+const reservationGoalState = (goal) => ({
+  status: goal.status,
+  statusReason: goal.statusReason,
+  note: goal.note,
+  blockedStreak: goal.blockedStreak,
+  auditFailStreak: goal.auditFailStreak,
+  ...reservationAccountingState(goal),
+  evaluationProviderID: goal.evaluationProviderID,
+  evaluationModelID: goal.evaluationModelID,
+});
+
+const reservationStateMatches = (goal, state) => Object.entries(state)
+  .every(([key, value]) => goal[key] === value);
+
+const isLengthLimitedMessage = (info) => info?.finish === 'length'
+  || info?.error?.name === 'MessageOutputLengthError';
+
+const isResumableLengthMessage = (info) => {
+  if (!isLengthLimitedMessage(info)) return false;
+  return !info.error || info.error.name === 'MessageOutputLengthError';
 };
 
-// Summary messages are assistant-shaped, but they are compaction turns rather
-// than agent turns. They must not break or satisfy the consecutive truncation
-// check; only completed, non-summary assistant turns participate. Chronology
-// comes from `time.created`, never from message IDs; array position is only a
-// tie-breaker for equal timestamps.
-const hasRepeatedLengthTail = (messages, latestAssistant, goalCreatedAt) => {
-  const latestInfo = latestAssistant?.info;
-  if (latestInfo?.summary === true) return false;
-  const latestIndex = messages.indexOf(latestAssistant);
-  const latestCreated = latestInfo?.time?.created;
-  if (
-    latestIndex < 0
-    || !(latestInfo?.time?.completed > 0)
-    || !(Number.isFinite(latestCreated) && latestCreated > 0)
-    || !isLengthTruncated(latestInfo)
-  ) return false;
-
-  let previous = null;
-  for (let i = 0; i < messages.length; i += 1) {
-    const info = messages[i]?.info;
-    if (info?.role !== 'assistant' || info.summary === true || !(info.time?.completed > 0)) continue;
-    const created = info.time?.created;
-    // An unknown timestamp cannot safely participate in chronology. Ignore it
-    // rather than letting an unrelated older message hide known chronology.
-    if (!(Number.isFinite(created) && created > 0)) continue;
-    if (i === latestIndex) continue;
-    if (created > latestCreated || (created === latestCreated && i > latestIndex)) continue;
-    if (
-      !previous
-      || created > previous.created
-      || (created === previous.created && i > previous.index)
-    ) {
-      previous = { info, created, index: i };
-    }
-  }
-
-  return Boolean(
-    previous
-    && previous.created > goalCreatedAt
-    && isLengthTruncated(previous.info),
-  );
-};
+const continuationAdmission = (error) => error?.admission === 'rejected' ? 'rejected' : 'ambiguous';
 
 export const createSessionGoalRuntime = ({
   buildOpenCodeUrl,
   getOpenCodeAuthHeaders,
   getSmallModelService,
   emitGoalNotification,
-  // Injected for tests; production callers use the real module implementation.
-  readObjectiveImpl = readObjective,
+  readGoalObjective = readObjective,
   isEnabled = isSessionGoalEnabled,
   idleQuietMs = IDLE_QUIET_MS,
   kickoffQuietMs = KICKOFF_QUIET_MS,
-  resumeKickoffMs = RESUME_KICKOFF_MS,
   maxAutoTurns = MAX_AUTO_TURNS,
   retryDelaysMs = [idleQuietMs, idleQuietMs * 2, idleQuietMs * 4, idleQuietMs * 8],
   maxRetryAttempts = MAX_RETRY_ATTEMPTS,
   maxDispatchAttempts = MAX_DISPATCH_ATTEMPTS,
 }) => {
-  const timers = new Map(); // sessionId -> { timer, dueAt }
-  const inflightCounts = new Map(); // sessionId -> active ticks (one effective tick enforced)
-  const pendingArms = new Map(); // sessionId -> { directory, quietMs } (lost-wakeup follow-up)
-  const generations = new Map(); // sessionId -> monotonically increasing invalidation token
-  const writeQueues = new Map(); // sessionId -> serialized write chain
-  const writeVersions = new Map(); // sessionId -> latest queued write id (newer write supersedes queued writes)
-  const retryStates = new Map(); // sessionId -> { kind, attempts, exhausted }
-  const dispatchStates = new Map(); // sessionId -> reservation for an admitted-continuation dispatch
-  const goalSnapshots = new Map(); // sessionId -> last seen goalRevisionKey (event-path change detection)
-  const resumeSnapshots = new Map(); // sessionId -> last resume revision key (dedupe)
-  let started = false;
+  const timers = new Map();
+  const inflight = new Map();
+  const inflightArmPoints = new Map();
+  const pendingArms = new Map();
+  const generations = new Map();
+  const writeQueues = new Map();
+  const writeVersions = new Map();
+  const reservations = new Map();
+  const lengthRecoveryStates = new Map();
+  const pendingAborts = new Map();
+  const retryStates = new Map();
+  const goalSnapshots = new Map();
+  const goalMetadataSnapshots = new Map();
+  // A session response may legitimately omit optional goal metadata. Keep the
+  // last known lifecycle status so an active goal is not mistaken for a clear.
+  const knownGoalStatuses = new Map();
+  // Explicit clears temporarily authorize an omitted goal response while any
+  // undispatched reservation is being reconciled.
+  const clearedGoalSessions = new Set();
+  const resumeSnapshots = new Map();
+  // A persisted accounting cursor with no in-memory reservation is ambiguous
+  // after a process crash: the prompt may have been accepted before the crash.
+  // Hold only sessions found by the one-shot restart scan until a new tail or
+  // explicit Resume provides authoritative intent.
+  const recoveryHolds = new Set();
+  const recoveryHoldDirectories = new Map();
+  // Keep authoritative active-goal sessions independently of restart recovery.
+  // A timer can fire while the feature is disabled; retaining this record lets
+  // the settings lifecycle re-arm the goal without relying on another event.
+  const activeGoalSessions = new Map();
+  // A disabled restart scan cannot keep an ambiguity hold: the hold would be
+  // consumed by the skipped tick and no transcript event may follow. Retry
+  // only these scanned sessions a bounded number of times so a later setting
+  // enable can recover an unchanged idle goal without global polling.
+  const disabledRecoverySessions = new Set();
+  const disabledRecoveryDirectories = new Map();
+  // session.updated delivery is ordered by the session's authoritative
+  // freshness fields, not by arrival time. Keep the last accepted pair local
+  // to this runtime so a delayed clear/pause/replacement cannot invalidate a
+  // newer generation or reservation.
+  const sessionUpdateFreshness = new Map();
   let stopped = false;
+
+  const rememberActiveGoalSession = (sessionId, directory, goal) => {
+    if (goal?.status !== 'active') {
+      activeGoalSessions.delete(sessionId);
+      return;
+    }
+    const previous = activeGoalSessions.get(sessionId);
+    activeGoalSessions.set(sessionId, directory || previous || '');
+  };
 
   const getGeneration = (sessionId) => generations.get(sessionId) ?? 0;
   const advanceGeneration = (sessionId) => {
     const generation = getGeneration(sessionId) + 1;
     generations.set(sessionId, generation);
+    const pendingAbort = pendingAborts.get(sessionId);
+    if (pendingAbort) {
+      pendingAborts.set(sessionId, { ...pendingAbort, generation });
+    }
     return generation;
   };
-  const isGenerationCurrent = (sessionId, generation) =>
-    !stopped && getGeneration(sessionId) === generation;
-
-  const isInflight = (sessionId) => (inflightCounts.get(sessionId) ?? 0) > 0;
+  const isGenerationCurrent = (sessionId, generation) => !stopped && getGeneration(sessionId) === generation;
+  const isInflight = (sessionId) => (inflight.get(sessionId) ?? 0) > 0;
   const beginInflight = (sessionId) => {
-    inflightCounts.set(sessionId, (inflightCounts.get(sessionId) ?? 0) + 1);
+    inflight.set(sessionId, (inflight.get(sessionId) ?? 0) + 1);
+    if (!inflightArmPoints.has(sessionId)) inflightArmPoints.set(sessionId, Date.now());
   };
-  // One effective tick per session: when a tick finishes and a newer arm was
-  // requested while it ran, exactly one follow-up tick runs (bounded — a
-  // follow-up is armed once, not re-queued).
+
   const finishInflight = (sessionId) => {
-    const count = (inflightCounts.get(sessionId) ?? 1) - 1;
+    const count = (inflight.get(sessionId) ?? 1) - 1;
     if (count > 0) {
-      inflightCounts.set(sessionId, count);
+      inflight.set(sessionId, count);
       return;
     }
-    inflightCounts.delete(sessionId);
+    inflight.delete(sessionId);
+    inflightArmPoints.delete(sessionId);
     const pending = pendingArms.get(sessionId);
     if (!pending || stopped) return;
     pendingArms.delete(sessionId);
@@ -425,18 +499,18 @@ export const createSessionGoalRuntime = ({
     retryStates.delete(sessionId);
   };
 
-  const isRetryExhausted = (sessionId) => retryStates.get(sessionId)?.exhausted === true;
-
-  // Bounded retry: a failing read path re-arms a bounded number of times
-  // (backoff), then reports exhaustion so the tick can settle explicitly
-  // instead of stranding an active idle goal.
-  const scheduleRetry = (sessionId, directory, generation, kind = 'fetch') => {
+  const scheduleRetry = (sessionId, directory, generation, kind = 'fetch', { settleOnExhaustion = true } = {}) => {
     if (!isGenerationCurrent(sessionId, generation)) return false;
     const previous = retryStates.get(sessionId);
     const attempts = previous?.kind === kind ? previous.attempts + 1 : 1;
     if (attempts > maxRetryAttempts) {
       retryStates.set(sessionId, { kind, attempts, exhausted: true });
       console.warn(`[session-goal] ${sessionId} ${kind} retry limit reached (${maxRetryAttempts})`);
+      if (settleOnExhaustion) {
+        void settleReservationAfterRetryExhaustion(sessionId, directory, generation, kind).catch((error) => {
+          console.warn(`[session-goal] ${sessionId} retry exhaustion settlement failed: ${error?.message || error}`);
+        });
+      }
       return false;
     }
     retryStates.set(sessionId, { kind, attempts, exhausted: false });
@@ -465,18 +539,48 @@ export const createSessionGoalRuntime = ({
     if (directory) params.set('directory', directory);
     const search = params.toString();
     const url = search ? `${base}?${search}` : base;
-    const response = await fetch(url, {
-      method,
-      headers: {
-        Accept: 'application/json',
-        ...(body ? { 'Content-Type': 'application/json' } : {}),
-        ...getOpenCodeAuthHeaders(),
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers: {
+          Accept: 'application/json',
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+          ...getOpenCodeAuthHeaders(),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    } catch (error) {
+      // A transport rejection does not tell us whether OpenCode accepted a
+      // prompt before the connection died. Callers of prompt_async must
+      // reconcile authoritative state rather than retrying this blindly.
+      if (error && typeof error === 'object') error.admission = 'ambiguous';
+      throw error;
+    }
+    if (!response || typeof response.ok !== 'boolean' || !Number.isFinite(response.status)) {
+      const error = new Error(`OpenCode ${method} ${fetchPath} returned an unknown response`);
+      error.admission = 'ambiguous';
+      throw error;
+    }
     if (!response.ok) {
-      throw new Error(`OpenCode ${method} ${fetchPath} failed with ${response.status}`);
+      const status = Number.isFinite(response.status) ? response.status : null;
+      const error = new Error(`OpenCode ${method} ${fetchPath} failed with ${status ?? 'unknown status'}`);
+      error.status = status;
+      error.admission = status !== null && ![408, 429, 500, 502, 503, 504].includes(status)
+        ? 'rejected'
+        : 'ambiguous';
+      throw error;
+    }
+    // prompt_async is a 204 endpoint in OpenCode. Its HTTP status is the
+    // admission result; there is no JSON body to validate (and attempting to
+    // parse one would turn a successful 204 into a false unknown). All other
+    // operations retain their JSON response contract.
+    if (method === 'POST') return null;
+    if (typeof response.json !== 'function') {
+      const error = new Error(`OpenCode ${method} ${fetchPath} returned an unknown response`);
+      error.admission = 'ambiguous';
+      throw error;
     }
     return response.json().catch(() => null);
   };
@@ -486,60 +590,116 @@ export const createSessionGoalRuntime = ({
       directory,
       query: { limit: String(MESSAGE_FETCH_LIMIT) },
     }).catch(() => null);
-    return Array.isArray(messages) ? messages : null;
+    if (!Array.isArray(messages)) return null;
+    if (messages.some((message) => {
+      const info = message?.info;
+      if (!info || typeof info !== 'object' || typeof info.id !== 'string' || !info.id) return true;
+      if (info.role !== 'user' && info.role !== 'assistant') return true;
+      if (message.parts !== undefined && (!Array.isArray(message.parts)
+        || message.parts.some((part) => !part || typeof part !== 'object' || typeof part.type !== 'string'))) return true;
+      return false;
+    })) return null;
+    return messages;
   };
 
-  const fetchSessionStatuses = async (directory) => {
+  const fetchSession = async (sessionId, directory) => {
+    const session = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}`, { directory });
+    if (
+      !session
+      || Array.isArray(session)
+      || session.id !== sessionId
+      || (session.parentID !== undefined && typeof session.parentID !== 'string')
+    ) {
+      const error = new Error(`OpenCode session ${sessionId} response was malformed`);
+      error.retryKind = 'fetch';
+      throw error;
+    }
+    const parsedGoal = parseGoalMetadata(session);
+    const hasKnownActiveGoal = !clearedGoalSessions.has(sessionId)
+      && (knownGoalStatuses.get(sessionId) === 'active'
+        || reservations.get(sessionId)?.goal?.status === 'active');
+    if (hasKnownActiveGoal && parsedGoal === null) {
+      const error = new Error(`OpenCode session ${sessionId} response omitted its known active goal`);
+      error.retryKind = 'fetch';
+      throw error;
+    }
+    if (parsedGoal) {
+      // A response already in flight when Clear was accepted must not
+      // resurrect the local active-goal marker. A newer session.updated event
+      // clears the marker when it authoritatively installs a goal again.
+      if (!clearedGoalSessions.has(sessionId)) {
+        knownGoalStatuses.set(sessionId, parsedGoal.status);
+        rememberActiveGoalSession(sessionId, session.directory || directory, parsedGoal);
+      }
+    } else if (clearedGoalSessions.has(sessionId)) {
+      activeGoalSessions.delete(sessionId);
+    }
+    return session;
+  };
+
+  const fetchSessionStatuses = async (sessionId, directory) => {
     const statuses = await openCodeFetch('/session/status', { directory }).catch(() => null);
-    return statuses && typeof statuses === 'object' && !Array.isArray(statuses) ? statuses : null;
+    if (!statuses || typeof statuses !== 'object' || Array.isArray(statuses)) return null;
+    // OpenCode's authoritative status map contains only non-idle sessions.
+    // A missing target is therefore idle; a present malformed/unknown value is
+    // still unknown and must remain retryable.
+    if (Object.hasOwn(statuses, sessionId) && !isValidSessionStatus(statuses[sessionId])) return null;
+    return statuses;
   };
 
   const fetchSessionChildren = async (sessionId, directory) => {
     const children = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/children`, { directory })
       .catch(() => null);
-    return Array.isArray(children) ? children : null;
+    if (!Array.isArray(children)) return null;
+    const childIds = new Set();
+    if (children.some((child) => {
+      const childId = child?.id;
+      if (typeof childId !== 'string' || !childId || childId === sessionId || childIds.has(childId)) return true;
+      if (child.parentID !== undefined && child.parentID !== sessionId) return true;
+      childIds.add(childId);
+      return false;
+    })) return null;
+    return children;
   };
 
-  const isWorkingStatus = (status) => status?.type === 'busy' || status?.type === 'retry';
+  const isWorkingStatus = (status) => sessionStatusType(status) === 'busy' || sessionStatusType(status) === 'retry';
 
-  // --- Goal metadata writes ---
-  //
-  // Serialized per session, and each write carries the exact goal state the
-  // caller evaluated: expected id, expected status, expected revision key,
-  // expected updatedAt, and the generation token. The write re-reads the
-  // session and drops itself when ANY of those moved — a stale tick can never
-  // overwrite a newer Pause/Resume/Complete/Clear/replacement/terminal write,
-  // nor an in-place edit (which bumps updatedAt and may change the revision).
-  // Unrelated metadata.openchamber.* keys are spread from the fresh read.
-  // `updatedAt` is the stale-write lock (UI always bumps it); when a goal
-  // lacks one (legacy payload) `undefined` matches only `undefined`, so a
-  // goal that gains an updatedAt while we worked is also rejected.
-  const writeGoal = (sessionId, directory, expected, mutate, options = {}) => {
-    const { generation } = options;
+  // Runtime writes are serialized per session. This protects read/modify/PATCH
+  // operations issued by this runtime and drops a queued operation when a
+  // newer runtime write supersedes it. External UI PATCH callers cannot join
+  // this queue or CAS protocol; their writes can still race us.
+  const writeGoal = (sessionId, directory, expectedGoal, mutate, {
+    expectedStatus = 'active',
+    generation,
+    generationCheck = () => true,
+    finalCheck = async () => true,
+    allowStopped = false,
+  } = {}) => {
     const version = (writeVersions.get(sessionId) ?? 0) + 1;
     writeVersions.set(sessionId, version);
     const previous = writeQueues.get(sessionId) ?? Promise.resolve(null);
     const operation = previous.catch(() => null).then(async () => {
       const isCurrentWrite = () => writeVersions.get(sessionId) === version;
-      if (stopped || !isCurrentWrite() || !isGenerationCurrent(sessionId, generation)) return null;
-      const session = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}`, { directory });
-      if (stopped || !isCurrentWrite() || !isGenerationCurrent(sessionId, generation)) return null;
+      if ((!allowStopped && stopped) || !isCurrentWrite() || (generation !== undefined && !isGenerationCurrent(sessionId, generation)) || !generationCheck()) return null;
+      const session = await fetchSession(sessionId, directory);
+      if ((!allowStopped && stopped) || !isCurrentWrite() || (generation !== undefined && !isGenerationCurrent(sessionId, generation)) || !generationCheck()) return null;
       const currentGoal = parseGoalMetadata(session);
-      if (!currentGoal) return null;
-      if (currentGoal.id !== expected.id) return null;
-      if (expected.status && currentGoal.status !== expected.status) return null;
-      if (expected.updatedAt !== undefined && currentGoal.updatedAt !== expected.updatedAt) return null;
-      if (expected.status === 'active' && expected.revisionKey && goalRevisionKey(currentGoal) !== expected.revisionKey) return null;
+      if (
+        !currentGoal
+        || goalMetadataIdentityKey(currentGoal) !== goalMetadataIdentityKey(expectedGoal)
+        || (expectedStatus && currentGoal.status !== expectedStatus)
+      ) return null;
       const mutation = mutate(currentGoal);
       if (mutation === null) return null;
-      const changed = Object.keys(mutation).some((key) => currentGoal[key] !== mutation[key]);
-      if (!changed) return currentGoal;
+      if (mutation === currentGoal) return currentGoal;
       const nextGoal = { ...currentGoal, ...mutation, updatedAt: Date.now() };
       const currentMetadata = session?.metadata && typeof session.metadata === 'object' ? session.metadata : {};
       const currentNamespace = currentMetadata.openchamber && typeof currentMetadata.openchamber === 'object'
         ? currentMetadata.openchamber
         : {};
-      if (stopped || !isCurrentWrite() || !isGenerationCurrent(sessionId, generation)) return null;
+      if ((!allowStopped && stopped) || !isCurrentWrite() || (generation !== undefined && !isGenerationCurrent(sessionId, generation)) || !generationCheck()) return null;
+      if (!(await finalCheck({ session, currentGoal, nextGoal }))) return null;
+      if ((!allowStopped && stopped) || !isCurrentWrite() || (generation !== undefined && !isGenerationCurrent(sessionId, generation)) || !generationCheck()) return null;
       await openCodeFetch(`/session/${encodeURIComponent(sessionId)}`, {
         directory,
         method: 'PATCH',
@@ -550,6 +710,7 @@ export const createSessionGoalRuntime = ({
           },
         },
       });
+      knownGoalStatuses.set(sessionId, nextGoal.status);
       return nextGoal;
     });
     const settled = operation.finally(() => {
@@ -559,13 +720,33 @@ export const createSessionGoalRuntime = ({
     return settled;
   };
 
-  const settleGoal = async ({ sessionId, directory, goal, status, statusReason, note, tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, evaluationProviderID, evaluationModelID, generation }) => {
-    const written = await writeGoal(sessionId, directory, {
-      id: goal.id,
-      status: 'active',
-      updatedAt: goal.updatedAt,
-      revisionKey: goalRevisionKey(goal),
-    }, (current) => ({
+  const forgetReservationIfSettled = (sessionId, goal) => {
+    const reservation = reservations.get(sessionId);
+    if (
+      reservation
+      && reservation.goalId === goal.id
+      && reservation.turnsUsed === goal.turnsUsed
+      && reservation.lastAccountedMessageID === goal.lastAccountedMessageID
+    ) {
+      reservations.delete(sessionId);
+    }
+  };
+
+  const resolveObjective = async (sessionId, goal) => {
+    if (!goal.objectiveFile) return { objective: goal.objective, available: Boolean(goal.objective) };
+    let fileObjective = null;
+    try {
+      fileObjective = await readGoalObjective(sessionId);
+    } catch (error) {
+      console.warn(`[session-goal] objective file read failed: ${error?.message || error}`);
+    }
+    if (typeof fileObjective === 'string' && fileObjective) return { objective: fileObjective, available: true };
+    if (goal.objective) return { objective: goal.objective, available: true };
+    return { objective: '', available: false };
+  };
+
+  const settleGoal = async ({ sessionId, directory, goal, status, statusReason, note, tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, evaluationProviderID, evaluationModelID, generation, effectiveObjective }) => {
+    const written = await writeGoal(sessionId, directory, goal, (current) => ({
       status,
       statusReason: clampText(statusReason, REASON_CHAR_LIMIT),
       note: note !== undefined ? clampText(note, NOTE_CHAR_LIMIT) : current.note,
@@ -577,8 +758,23 @@ export const createSessionGoalRuntime = ({
       ...(lastAccountedMessageID ? { lastAccountedMessageID } : {}),
       ...(evaluationProviderID ? { evaluationProviderID } : {}),
       ...(evaluationModelID ? { evaluationModelID } : {}),
-    }), { generation });
-    if (!written) return null;
+    }), {
+      generation,
+      finalCheck: () => objectiveSnapshotIsCurrent({ sessionId, goal, effectiveObjective }),
+    });
+    if (!written) {
+      if (effectiveObjective !== undefined && isGenerationCurrent(sessionId, generation)) {
+        scheduleRetry(sessionId, directory, generation, 'objective');
+      }
+      return;
+    }
+    activeGoalSessions.delete(sessionId);
+    finalizeSettlement({ sessionId, directory, written, status, statusReason });
+  };
+
+  const finalizeSettlement = ({ sessionId, directory, written, status, statusReason }) => {
+    forgetReservationIfSettled(sessionId, written);
+    lengthRecoveryStates.delete(sessionId);
     resetRetry(sessionId);
     console.log(`[session-goal] ${sessionId} settled as ${status}${statusReason ? ` (${statusReason})` : ''}`);
     if (typeof emitGoalNotification === 'function') {
@@ -588,7 +784,259 @@ export const createSessionGoalRuntime = ({
         console.warn('[session-goal] notification failed:', error?.message || error);
       }
     }
-    return written;
+  };
+
+  const rebindPendingReservation = (reservation, goal, directory, { resetAccounting = false } = {}) => {
+    if (
+      !reservation
+      || reservation.postAttempts > 0
+      || goalReservationIdentityKey(reservation.goal) !== goalReservationIdentityKey(goal)
+      || !GOAL_STATUSES.includes(goal.status)
+    ) return false;
+    const lifecycle = { status: goal.status, statusReason: goal.statusReason };
+    reservation.directory = directory || reservation.directory;
+    reservation.goal = goal;
+    const accountingReset = resetAccounting
+      && !reservationStateMatches(
+        reservationAccountingState(goal),
+        reservationAccountingState(reservation.after),
+      );
+    if (accountingReset) {
+      const resumedState = reservationGoalState(goal);
+      reservation.before = resumedState;
+      reservation.after = resumedState;
+      reservation.previousTurnsUsed = goal.turnsUsed;
+      reservation.previousLastAccountedMessageID = goal.lastAccountedMessageID;
+      reservation.turnsUsed = goal.turnsUsed;
+      reservation.lastAccountedMessageID = goal.lastAccountedMessageID;
+      reservation.tokensUsed = goal.tokensUsed;
+      reservation.tokensBaseline = goal.tokensBaseline;
+      reservation.tokensCommitted = goal.tokensCommitted;
+    } else {
+      reservation.before = { ...reservation.before, ...lifecycle };
+      reservation.after = { ...reservation.after, ...lifecycle };
+    }
+    return true;
+  };
+
+  const rollbackReservation = async ({ sessionId, directory, reservation, generation, rebindGeneration = false, allowStopped = false, blockedReason = 'continuation reservation rollback unavailable' }) => {
+    if (reservations.get(sessionId) !== reservation) return false;
+    const resolutionReason = reservation.resolutionReason || blockedReason;
+    reservation.resolutionReason = resolutionReason;
+    const expectedGoal = { ...reservation.goal, ...reservation.after };
+    const generationCheck = rebindGeneration
+      ? () => pendingAborts.get(sessionId)?.generation === getGeneration(sessionId)
+      : undefined;
+    let restored = null;
+    try {
+      restored = await writeGoal(sessionId, directory, expectedGoal, (current) => {
+        if (!reservationStateMatches(current, reservation.after)) return null;
+        return reservation.before;
+      }, {
+        expectedStatus: expectedGoal.status,
+        generation: rebindGeneration ? undefined : generation,
+        generationCheck,
+        allowStopped,
+      });
+    } catch {
+      // A lost/failed response is followed by the same guarded operation;
+      // neither attempt may overwrite a newer goal mutation.
+    }
+    if (restored) {
+      if (reservations.get(sessionId) === reservation) reservations.delete(sessionId);
+      resetRetry(sessionId, 'reservation-rollback');
+      return true;
+    }
+
+    // Do not leave an active goal carrying an undispatched charge when a
+    // guarded restore is no longer possible. This write is guarded by the
+    // complete after-state and cannot clobber a newer write.
+    let blocked = null;
+    try {
+      blocked = await writeGoal(sessionId, directory, expectedGoal, (current) => {
+        if (!reservationStateMatches(current, reservation.after)) return null;
+        return { status: 'blocked', statusReason: resolutionReason };
+      }, {
+        expectedStatus: expectedGoal.status,
+        generation: rebindGeneration ? getGeneration(sessionId) : generation,
+        generationCheck,
+        allowStopped,
+      });
+    } catch {
+      // Stopped or superseded work is intentionally not written.
+    }
+    if (blocked) {
+      if (reservations.get(sessionId) === reservation) reservations.delete(sessionId);
+      finalizeSettlement({ sessionId, directory, written: blocked, status: 'blocked', statusReason: resolutionReason });
+      return false;
+    }
+
+    // Keep the reservation as an explicit local pending state. A later bounded
+    // retry must either restore the before-state or confirm the blocked state;
+    // dropping it here would strand the active goal with an undispatched charge.
+    reservation.resolutionState = 'pending';
+    if (!scheduleRetry(sessionId, directory, generation, 'reservation-rollback', { settleOnExhaustion: false })) {
+      reservation.resolutionState = 'escalated';
+      console.warn(`[session-goal] ${sessionId} reservation rollback unresolved after bounded retries`);
+    }
+    return false;
+  };
+
+  const discardReservation = async ({ sessionId, directory, reservation, generation, rebindGeneration = false, rollback = true, blockedReason }) => {
+    if (reservations.get(sessionId) !== reservation) return;
+    // After prompt_async was attempted, the server may have accepted it even
+    // when the response was lost. Preserve that accounting and drop only the
+    // retry marker in that case.
+    if (!rollback || (reservation.postAttempts > 0 && reservation.dispatchOutcome !== 'rejected')) {
+      reservations.delete(sessionId);
+      return;
+    }
+    await rollbackReservation({ sessionId, directory, reservation, generation, rebindGeneration, blockedReason });
+  };
+
+  const reconcileDroppedReservation = async ({ sessionId, directory, reservation, generation, preserveAccounting = false }) => {
+    if (reservations.get(sessionId) !== reservation) return;
+    reservation.resolutionState = 'pending';
+    if (reservation.postAttempts > 0 && reservation.dispatchOutcome !== 'rejected') {
+      // A prompt may have crossed the wire. Its accounting is intentionally
+      // retained; only a genuinely new logical goal makes the old state
+      // irrelevant.
+      reservations.delete(sessionId);
+      return;
+    }
+
+    let session;
+    try {
+      session = await fetchSession(sessionId, directory || reservation.directory);
+    } catch {
+      reservation.resolutionState = 'pending';
+      scheduleRetry(sessionId, directory || reservation.directory, getGeneration(sessionId), 'reservation-rollback', { settleOnExhaustion: false });
+      return;
+    }
+    // The invalidating event may advance the generation while this read is in
+    // flight. Re-read once so an older lifecycle snapshot cannot overwrite a
+    // newer pause/resume or edit before applying the guarded cleanup.
+    let reconciliationGeneration = getGeneration(sessionId);
+    if (reconciliationGeneration !== generation) {
+      try {
+        session = await fetchSession(sessionId, directory || reservation.directory);
+      } catch {
+        scheduleRetry(sessionId, directory || reservation.directory, reconciliationGeneration, 'reservation-rollback', { settleOnExhaustion: false });
+        return;
+      }
+      reconciliationGeneration = getGeneration(sessionId);
+    }
+    const currentGoal = parseGoalMetadata(session);
+    if (!currentGoal) {
+      const rawGoal = session?.metadata?.openchamber?.goal;
+      if (rawGoal !== undefined) {
+        // A present-but-malformed goal is unknown, not an authoritative clear.
+        // Keep the reservation for a bounded retry rather than dropping a
+        // charge based on a partial payload.
+        reservation.resolutionState = 'pending';
+        scheduleRetry(sessionId, directory || reservation.directory, reconciliationGeneration, 'reservation-rollback', { settleOnExhaustion: false });
+      } else {
+        // Clear/replacement removed the old metadata, so its charge is no
+        // longer present in the authoritative goal and cannot be replayed.
+        reservations.delete(sessionId);
+      }
+      return;
+    }
+
+    if (goalReservationIdentityKey(currentGoal) === goalReservationIdentityKey(reservation.goal)) {
+      rebindPendingReservation(reservation, currentGoal, directory || reservation.directory);
+      if (reservationStateMatches(currentGoal, reservation.before)) {
+        reservations.delete(sessionId);
+        resetRetry(sessionId, 'reservation-rollback');
+        return;
+      }
+      if (preserveAccounting && currentGoal.status === 'active' && reservationStateMatches(currentGoal, reservation.after)) {
+        // Keep the local marker while persisted accounting is still
+        // undispatched. An edit-in-place may change the objective, status
+        // reason, or freshness, but deleting this marker would make the next
+        // idle tick account the same tail as a new continuation. Rebinding
+        // above is enough; the next guarded dispatch consumes this exact
+        // reservation.
+        reservation.resolutionState = 'rebound';
+        resetRetry(sessionId, 'reservation-rebound');
+        return;
+      }
+      await rollbackReservation({ sessionId, directory: directory || reservation.directory, reservation, generation: reconciliationGeneration });
+      return;
+    }
+
+    if (!reservationStateMatches(currentGoal, reservation.after)) {
+      reservations.delete(sessionId);
+      return;
+    }
+
+    // The current logical goal still contains the old charge, but its
+    // identity no longer permits a rollback to be applied safely. Make the
+    // ambiguity explicit instead of silently leaving a charged active goal.
+    try {
+      const blocked = await writeGoal(sessionId, directory || reservation.directory, currentGoal, () => ({
+        status: 'blocked',
+        statusReason: 'continuation reservation could not be reconciled',
+      }), { expectedStatus: currentGoal.status, generation: reconciliationGeneration });
+      if (blocked) {
+        reservations.delete(sessionId);
+        finalizeSettlement({
+          sessionId,
+          directory: directory || reservation.directory,
+          written: blocked,
+          status: 'blocked',
+          statusReason: 'continuation reservation could not be reconciled',
+        });
+        return;
+      }
+    } catch {
+      // Keep the explicit reservation for a bounded retry if the guarded
+      // terminal write itself is unavailable.
+    }
+    reservation.resolutionState = 'pending';
+    scheduleRetry(sessionId, directory || reservation.directory, generation, 'reservation-rollback', { settleOnExhaustion: false });
+  };
+
+  const ensureObjectiveCurrent = async ({ sessionId, directory, goal, effectiveObjective, generation }) => {
+    if (!goal.objectiveFile) return true;
+    const resolved = await resolveObjective(sessionId, goal);
+    if (!isGenerationCurrent(sessionId, generation)) return false;
+    if (resolved.available && resolved.objective === effectiveObjective) return true;
+    const reason = resolved.available ? 'objective changed during tick' : 'objective file unavailable';
+    console.warn(`[session-goal] ${sessionId} ${reason}; discarding stale work`);
+    if (!scheduleRetry(sessionId, directory, generation, 'objective')) {
+      await settleGoal({ sessionId, directory, goal, status: 'blocked', statusReason: reason, generation });
+    }
+    return false;
+  };
+
+  const objectiveSnapshotIsCurrent = async ({ sessionId, goal, effectiveObjective }) => {
+    if (!goal.objectiveFile || effectiveObjective === undefined) return true;
+    const resolved = await resolveObjective(sessionId, goal);
+    return resolved.available && resolved.objective === effectiveObjective;
+  };
+
+  const settleReservationAfterRetryExhaustion = async (sessionId, directory, generation, kind) => {
+    const reservation = reservations.get(sessionId);
+    if (!reservation) return;
+    if (reservation.postAttempts > 0 && reservation.dispatchOutcome !== 'rejected') {
+      await settleGoal({
+        sessionId,
+        directory,
+        goal: { ...reservation.goal, ...reservation.after },
+        status: 'blocked',
+        statusReason: `${kind} retry limit reached`,
+        generation,
+      });
+      return;
+    }
+    await discardReservation({
+      sessionId,
+      directory,
+      reservation,
+      generation,
+      blockedReason: `${kind} retry limit reached before continuation dispatch`,
+    });
   };
 
   const runAudit = async ({ goal, assistantText, directory, lastAssistantInfo }) => {
@@ -653,471 +1101,226 @@ export const createSessionGoalRuntime = ({
     }
   };
 
-  // --- Continuation admission ---
-  //
-  // prompt_async outcomes are classified, never blindly retried:
-  //   sent       — 2xx: the continuation was admitted; exactly one provider
-  //                execution will happen. turnsUsed (already persisted in the
-  //                reservation write) counts this continuation.
-  //   rejected   — proven non-admission (4xx that is not a timeout/rate
-  //                limit): the request never ran. The reserved turn is rolled
-  //                back (CAS) so it does NOT consume the allowance, then
-  //                re-dispatched within the bounded attempts budget.
-  //   ambiguous  — network error / timeout / 5xx: the request MAY have been
-  //                admitted. Never resent blindly: authoritative state is
-  //                reconciled first (fresh session/status/messages). Only a
-  //                proven non-admission (idle + unchanged tail + no new
-  //                assistant message) may re-dispatch, boundedly; anything
-  //                else (busy, user message, new assistant turn, unreadable
-  //                state) keeps the reservation or settles explicitly —
-  //                never a second POST.
-  //   invalidated — user intent (abort/pause/clear/edit/replacement/new
-  //                message) invalidated the dispatch mid-flight; drop, try a
-  //                bounded CAS rollback, never POST.
-  const sendContinuation = async ({ sessionId, directory, goal, lastAssistantInfo, generation }) => {
-    if (stopped || !isGenerationCurrent(sessionId, generation)) return 'invalidated';
+  const sendContinuation = async ({ sessionId, directory, goal, effectiveObjective, expectedTailID, lastAssistantInfo, generation, onDispatchAttempt }) => {
+    if (stopped || (generation !== undefined && !isGenerationCurrent(sessionId, generation))) return { sent: false, stale: true };
+    let authoritativeSession;
+    try {
+      authoritativeSession = await fetchSession(sessionId, directory);
+    } catch (error) {
+      const retryableError = error instanceof Error ? error : new Error(String(error));
+      retryableError.retryKind = 'fetch';
+      throw retryableError;
+    }
+    if (stopped || (generation !== undefined && !isGenerationCurrent(sessionId, generation))) return { sent: false, stale: true };
+    const authoritativeGoal = parseGoalMetadata(authoritativeSession);
+    if (
+      !authoritativeGoal
+      || authoritativeGoal.status !== 'active'
+      || authoritativeGoal.id !== goal.id
+      || goalMetadataIdentityKey(authoritativeGoal) !== goalMetadataIdentityKey(goal)
+    ) return { sent: false, stale: true };
+    const statuses = await fetchSessionStatuses(sessionId, directory);
+    if (stopped || (generation !== undefined && !isGenerationCurrent(sessionId, generation))) return { sent: false, stale: true };
+    if (!statuses) {
+      const error = new Error('continuation status unavailable');
+      error.retryKind = 'fetch';
+      throw error;
+    }
+    if (isWorkingStatus(statuses[sessionId])) return { sent: false, busy: true };
+
+    // The first session/status pair admits the operation; this second pair is
+    // the final local admission barrier. It closes the common window where a
+    // pause/clear/complete or a new user turn lands after accounting but just
+    // before prompt_async. An external PATCH can still race the final POST;
+    // that unavoidable cross-process case remains explicitly ambiguous.
+    const finalSession = await fetchSession(sessionId, directory);
+    if (stopped || (generation !== undefined && !isGenerationCurrent(sessionId, generation))) return { sent: false, stale: true };
+    const finalGoal = parseGoalMetadata(finalSession);
+    if (
+      !finalGoal
+      || finalGoal.status !== 'active'
+      || goalMetadataIdentityKey(finalGoal) !== goalMetadataIdentityKey(goal)
+    ) return { sent: false, stale: true };
+    const finalMessages = await fetchRecentMessages(sessionId, directory);
+    if (stopped || (generation !== undefined && !isGenerationCurrent(sessionId, generation))) return { sent: false, stale: true };
+    if (!finalMessages) {
+      const error = new Error('continuation final message state unavailable');
+      error.retryKind = 'fetch';
+      throw error;
+    }
+    const finalOrderedMessages = [...finalMessages].sort(compareMessages);
+    const finalLastInfo = finalOrderedMessages.length > 0
+      ? finalOrderedMessages[finalOrderedMessages.length - 1]?.info
+      : null;
+    if (!finalLastInfo || finalLastInfo.id !== expectedTailID) return { sent: false, stale: true };
+    if (!(await objectiveSnapshotIsCurrent({ sessionId, goal: finalGoal, effectiveObjective }))) {
+      return { sent: false, stale: true };
+    }
+    const finalStatuses = await fetchSessionStatuses(sessionId, directory);
+    if (stopped || (generation !== undefined && !isGenerationCurrent(sessionId, generation))) return { sent: false, stale: true };
+    if (!finalStatuses) {
+      const error = new Error('continuation final status unavailable');
+      error.retryKind = 'fetch';
+      throw error;
+    }
+    if (isWorkingStatus(finalStatuses[sessionId])) return { sent: false, busy: true };
     const providerID = typeof lastAssistantInfo?.providerID === 'string' ? lastAssistantInfo.providerID : '';
     const modelID = typeof lastAssistantInfo?.modelID === 'string' ? lastAssistantInfo.modelID : '';
+    // Configuration failure is not a POST, but it is still a bounded dispatch
+    // attempt: otherwise a malformed assistant record can retry forever.
     if (!providerID || !modelID) {
-      throw new Error('cannot continue goal: last assistant message has no provider/model');
+      const error = new Error('cannot continue goal: last assistant message has no provider/model');
+      error.retryKind = 'dispatch-config';
+      error.admission = 'rejected';
+      if (typeof onDispatchAttempt === 'function') onDispatchAttempt({ postAttempted: false });
+      throw error;
     }
+    if (stopped || (generation !== undefined && !isGenerationCurrent(sessionId, generation))) return { sent: false, stale: true };
     const agent = typeof lastAssistantInfo?.agent === 'string' && lastAssistantInfo.agent
       ? lastAssistantInfo.agent
       : (typeof lastAssistantInfo?.mode === 'string' ? lastAssistantInfo.mode : '');
     const variant = typeof lastAssistantInfo?.variant === 'string' ? lastAssistantInfo.variant : '';
-    const base = buildOpenCodeUrl(`/session/${encodeURIComponent(sessionId)}/prompt_async`, '');
-    const params = new URLSearchParams();
-    if (directory) params.set('directory', directory);
-    const search = params.toString();
-    const url = search ? `${base}?${search}` : base;
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          ...getOpenCodeAuthHeaders(),
-        },
-        body: JSON.stringify({
-          model: { providerID, modelID },
-          ...(agent ? { agent } : {}),
-          ...(variant ? { variant } : {}),
-          parts: [{ type: 'text', text: buildContinuationPrompt(goal) }],
-        }),
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
-      if (response.ok) return 'sent';
-      // 408/429 are transient; 4xx otherwise proves non-admission. 5xx and
-      // network-level failures are ambiguous (the request may already be in
-      // the queue on the server side).
-      if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) {
-        return 'rejected';
-      }
-      return 'ambiguous';
-    } catch (error) {
-      console.warn(`[session-goal] ${sessionId} prompt_async transport failure: ${error?.message || error}`);
-      return 'ambiguous';
-    }
-  };
-
-  // Reconcile the reservation against authoritative state and dispatch while
-  // admission remains provably safe. Bounded by maxDispatchAttempts; the
-  // reservation's turnsUsed is only ever committed once (or rolled back on
-  // proven pre-admission failure).
-  const dispatchWithReconciliation = async ({ sessionId, directory, goal, generation, reservation, effectiveObjective, executionInfo, auditNote }) => {
-    let attempts = reservation.dispatchAttempts;
-    let currentReservation = reservation;
-    const persistAttempts = () => {
-      if (currentReservation) {
-        currentReservation.dispatchAttempts = attempts;
-        dispatchStates.set(sessionId, currentReservation);
-      }
-    };
-    const settleFailed = async (reason) => {
-      // A reserved turn that was never dispatched must not consume the
-      // allowance even when the bounded budget runs out: roll the reservation
-      // back (CAS against the stored state) BEFORE settling.
-      let baseGoal = goal;
-      if (currentReservation && !currentReservation.dispatched) {
-        const rolledBack = await currentReservation.rollback?.(generation);
-        if (rolledBack) {
-          baseGoal = rolledBack;
-        } else {
-          // State moved while the budget was spent: settle against whatever
-          // the session stores now, or give up silently when the user already
-          // took ownership.
-          const fresh = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}`, { directory })
-            .catch(() => null);
-          const freshGoal = fresh ? parseGoalMetadata(fresh) : null;
-          baseGoal = freshGoal ?? goal;
-        }
-      }
-      const settled = await settleGoal({
-        sessionId, directory, goal: baseGoal, status: 'blocked', statusReason: reason,
-        tokensUsed: baseGoal.tokensUsed, tokensBaseline: baseGoal.tokensBaseline,
-        tokensCommitted: baseGoal.tokensCommitted, lastAccountedMessageID: baseGoal.lastAccountedMessageID,
-        generation,
-      }).catch((error) => {
-        console.warn(`[session-goal] dispatch settle failed: ${error?.message || error}`);
-        return null;
-      });
-      if (!settled) {
-        console.warn(`[session-goal] ${sessionId} dispatch-failure settle rejected (state moved)`);
-      }
-    };
-
-    const rollbackReservedTurn = async () => {
-      if (!currentReservation.persisted) return; // restart recovery: previous values unknown, keep the count
-      await currentReservation.rollback?.(generation);
-    };
-
-    // A prior pass could not establish admission (status/messages unreadable):
-    // reconcile FIRST; only a proven non-admission may lead to another POST.
-    let reconcileFirst = currentReservation.reconcilePending === true;
-
-    for (;;) {
-      if (stopped || !isGenerationCurrent(sessionId, generation)) return 'dropped';
-      if (!reconcileFirst) {
-        attempts += 1;
-        persistAttempts();
-        if (attempts > maxDispatchAttempts) {
-          dispatchStates.delete(sessionId);
-          await settleFailed('continuation dispatch failed');
-          return;
-        }
-        const outcome = await sendContinuation({
-          sessionId, directory,
-          goal: { ...goal, objective: effectiveObjective },
-          lastAssistantInfo: executionInfo,
-          generation,
-        });
-        if (stopped || !isGenerationCurrent(sessionId, generation)) return 'dropped';
-        if (outcome === 'sent') {
-          currentReservation.dispatched = true;
-          dispatchStates.delete(sessionId);
-          resetRetry(sessionId);
-          console.log(`[session-goal] continuing ${sessionId} (turn ${currentReservation.turnsUsed}/${maxAutoTurns}, tokens ${currentReservation.tokensUsed}${goal.tokenBudget ? `/${goal.tokenBudget}` : ''})`);
-          return 'sent';
-        }
-        if (outcome === 'invalidated') {
-          dispatchStates.delete(sessionId);
-          await rollbackReservedTurn();
-          return 'dropped';
-        }
-        if (outcome === 'rejected') {
-          // Proven non-admission: undo the reserved turn, then retry boundedly.
-          // Capture the values BEFORE any re-reservation replaces the object.
-          const previous = { ...currentReservation };
-          const rolledBack = await currentReservation.rollback?.(generation);
-          const session = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}`, { directory })
-            .catch(() => null);
-          if (!isGenerationCurrent(sessionId, generation)) return 'dropped';
-          if (!session) {
-            console.warn(`[session-goal] ${sessionId} session unavailable while re-reserving dispatch`);
-            dispatchStates.delete(sessionId);
-            return 'dropped';
-          }
-          const currentGoal = parseGoalMetadata(session);
-          if (!currentGoal || currentGoal.id !== goal.id || currentGoal.status !== 'active'
-            || goalRevisionKey(currentGoal) !== goalRevisionKey(goal)
-            || (currentGoal.updatedAt !== undefined
-              && rolledBack
-              && currentGoal.updatedAt !== rolledBack.updatedAt)) {
-            dispatchStates.delete(sessionId);
-            return 'dropped';
-          }
-          const reserved = await reserveTurn({
-            sessionId, directory, goal: currentGoal, generation,
-            tokensUsed: previous.tokensUsed, tokensBaseline: previous.tokensBaseline,
-            tokensCommitted: previous.tokensCommitted, lastAccountedMessageID: previous.lastAccountedMessageID,
-            lastMessageID: previous.lastMessageID, blockedStreak: previous.blockedStreak,
-            auditFailStreak: previous.auditFailStreak, auditNote: previous.auditNote,
-            evaluationProviderID: previous.evaluationProviderID,
-            evaluationModelID: previous.evaluationModelID,
-            previousTurnsUsed: currentGoal.turnsUsed, previousLastAccountedMessageID: currentGoal.lastAccountedMessageID,
-          });
-          if (!reserved) {
-            dispatchStates.delete(sessionId);
-            return 'dropped';
-          }
-          currentReservation = reserved;
-          continue;
-        }
-        // ambiguous: reconcile authoritative state before any next move.
-      }
-
-      // --- Reconciliation pass (after an ambiguous outcome, or from the eager
-      // path when the previous pass could not establish admission) ---
-      reconcileFirst = false;
-      currentReservation.reconcilePending = false;
-      const statuses = await fetchSessionStatuses(directory);
-      if (!isGenerationCurrent(sessionId, generation)) return 'dropped';
-      if (!statuses) {
-        // Admission cannot be established — do NOT POST again. Keep the
-        // reservation (counted once), retry reconciliation boundedly.
-        currentReservation.reconcilePending = true;
-        dispatchStates.set(sessionId, currentReservation);
-        if (!scheduleRetry(sessionId, directory, generation, 'dispatch')) {
-          currentReservation.exhausted = true;
-        }
-        return 'unresolved';
-      }
-      if (isWorkingStatus(statuses[sessionId])) {
-        // Something is running: the continuation (or the user's own turn)
-        // owns the session. Never re-dispatch. The reservation counts once.
-        dispatchStates.delete(sessionId);
-        resetRetry(sessionId, 'dispatch');
-        return 'admitted';
-      }
-      const latest = await fetchRecentMessages(sessionId, directory);
-      if (!isGenerationCurrent(sessionId, generation)) return 'dropped';
-      if (!latest) {
-        currentReservation.reconcilePending = true;
-        dispatchStates.set(sessionId, currentReservation);
-        if (!scheduleRetry(sessionId, directory, generation, 'dispatch')) {
-          currentReservation.exhausted = true;
-        }
-        return 'unresolved';
-      }
-      const latestOrdered = sortMessagesChronologically(latest);
-      const latestLastInfo = latestOrdered.length > 0 ? latestOrdered[latestOrdered.length - 1]?.info : null;
-      if (!latestLastInfo) {
-        // Empty transcript cannot exist on a live session; treat as unresolved.
-        currentReservation.reconcilePending = true;
-        dispatchStates.set(sessionId, currentReservation);
-        if (!scheduleRetry(sessionId, directory, generation, 'dispatch')) {
-          currentReservation.exhausted = true;
-        }
-        return 'unresolved';
-      }
-      let newestAssistantInfo = null;
-      for (let i = latestOrdered.length - 1; i >= 0; i -= 1) {
-        const info = latestOrdered[i]?.info;
-        if (info?.role === 'assistant') { newestAssistantInfo = info; break; }
-      }
-      const tailMoved = latestLastInfo.id !== currentReservation.lastMessageID;
-      // A NEW assistant turn at/after the reserved tail means the continuation
-      // landed and produced a reply: admitted exactly once — drop the
-      // reservation WITHOUT rolling the counted turn back. Clock-independent:
-      // id comparison decides, never wall clocks.
-      if (tailMoved && newestAssistantInfo && newestAssistantInfo.id !== currentReservation.lastMessageID) {
-        dispatchStates.delete(sessionId);
-        resetRetry(sessionId, 'dispatch');
-        return 'admitted';
-      }
-      // User took over (tail moved with a user message): drop the
-      // continuation. Proven not admitted — its reserved turn must not
-      // consume the allowance.
-      if (tailMoved) {
-        dispatchStates.delete(sessionId);
-        await rollbackReservedTurn();
-        console.log('[session-goal] tail moved on, dropping continuation');
-        return 'dropped';
-      }
-      // Idle + unchanged tail + no new assistant turn: provably not admitted.
-      // Bounded re-dispatch is safe (nothing is executing) — loop back to POST.
-    }
-  };
-
-  // Persist accounting + the reserved auto-turn (CAS-guarded), and register
-  // the dispatch state that ties this reservation to the exact tail.
-  const reserveTurn = async ({ sessionId, directory, goal, generation, tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, lastMessageID, blockedStreak, auditFailStreak, auditNote, evaluationProviderID, evaluationModelID, previousTurnsUsed, previousLastAccountedMessageID }) => {
-    const written = await writeGoal(sessionId, directory, {
-      id: goal.id,
-      status: 'active',
-      updatedAt: goal.updatedAt,
-      revisionKey: goalRevisionKey(goal),
-    }, (current) => ({
-      tokensUsed,
-      tokensBaseline,
-      tokensCommitted,
-      lastAccountedMessageID,
-      turnsUsed: current.turnsUsed + 1,
-      blockedStreak,
-      auditFailStreak,
-      statusReason: '',
-      ...(auditNote ? { note: auditNote } : {}),
-      ...(evaluationProviderID ? { evaluationProviderID } : {}),
-      ...(evaluationModelID ? { evaluationModelID } : {}),
-    }), { generation });
-    if (!written) return null;
-    const rollback = async (activeGeneration) => {
-      // The generation token may have advanced (user abort/stop invalidated
-      // the tick) — the caller passes the CURRENT generation so the CAS can
-      // still land; the id/status/updatedAt/turnsUsed checks keep it safe.
-      const rolledBack = await writeGoal(sessionId, directory, {
-        id: goal.id,
-        status: 'active',
-        updatedAt: written.updatedAt,
-        revisionKey: goalRevisionKey(goal),
-      }, (current) => {
-        if (current.turnsUsed !== written.turnsUsed) return null;
-        if (current.lastAccountedMessageID !== written.lastAccountedMessageID) return null;
-        return {
-          turnsUsed: previousTurnsUsed,
-          lastAccountedMessageID: previousLastAccountedMessageID,
-        };
-      }, { generation: activeGeneration ?? generation }).catch(() => null);
-      return rolledBack;
-    };
-    const reservation = {
-      goalId: goal.id,
-      revisionKey: goalRevisionKey(goal),
-      metadata: written,
-      rollback,
-      turnsUsed: written.turnsUsed,
-      previousTurnsUsed,
-      lastAccountedMessageID: written.lastAccountedMessageID,
-      previousLastAccountedMessageID,
-      lastMessageID,
-      tokensUsed: written.tokensUsed,
-      tokensBaseline: written.tokensBaseline,
-      tokensCommitted: written.tokensCommitted,
-      blockedStreak: written.blockedStreak,
-      auditFailStreak: written.auditFailStreak,
-      auditNote: written.note,
-      evaluationProviderID: written.evaluationProviderID,
-      evaluationModelID: written.evaluationModelID,
-      dispatchAttempts: 0,
-      createdAt: Date.now(),
-      persisted: true,
-    };
-    dispatchStates.set(sessionId, reservation);
-    return reservation;
-  };
-
-  // The eager reservation path inside the tick: when a reservation exists for
-  // the exact tail the tick is evaluating and the persisted goal still shows
-  // the reserved turn (nothing else consumed it), reconcile and dispatch —
-  // without auditing or reserving the same turn twice.
-  const handleExistingReservation = async ({ sessionId, directory, goal, generation, reservation, lastMessageInfo, executionInfo }) => {
-    if (reservation.goalId !== goal.id
-      || reservation.revisionKey !== goalRevisionKey(goal)
-      || reservation.turnsUsed !== goal.turnsUsed
-      || (goal.updatedAt !== undefined && reservation.metadata.updatedAt !== goal.updatedAt)
-      || reservation.lastMessageID !== lastMessageInfo?.id) {
-      // A newer intent consumed or replaced the reservation — superseded. When
-      // the reserved tail is gone (user message, stop, clear, replacement),
-      // the continuation was never admitted; roll the counted turn back so it
-      // does not consume the allowance.
-      if (reservation.persisted && !reservation.dispatched) {
-        void reservation.rollback?.(generation);
-      }
-      dispatchStates.delete(sessionId);
-      return true;
-    }
-    // Re-resolve the objective for the evaluated goal revision: file edits are
-    // live and the metadata revision may not have changed, so re-read fresh
-    // and fail boundedly rather than dispatching against a stale objective.
-    let effectiveObjective = goal.objective;
-    if (goal.objectiveFile) {
-      const fileObjective = await readObjectiveImpl(sessionId).catch(() => null);
-      if (!isGenerationCurrent(sessionId, generation)) return true;
-      if (fileObjective) {
-        effectiveObjective = fileObjective;
-      } else if (!effectiveObjective) {
-        if (scheduleRetry(sessionId, directory, generation, 'objective')) return true;
-        console.warn(`[session-goal] ${sessionId} objective read exhausted while dispatching reservation`);
-        dispatchStates.delete(sessionId);
-        return true;
-      }
-    }
-    if (reservation.exhausted) {
-      // The reserved turn was never dispatched — it must not consume the
-      // allowance even though the bounded reconciliation budget ran out.
-      if (reservation.persisted && !reservation.dispatched) {
-        const rolledBack = await reservation.rollback?.(generation);
-        if (rolledBack) {
-          await settleGoal({
-            sessionId, directory, goal: rolledBack,
-            status: 'blocked', statusReason: 'continuation dispatch failed',
-            tokensUsed: rolledBack.tokensUsed, tokensBaseline: rolledBack.tokensBaseline,
-            tokensCommitted: rolledBack.tokensCommitted, lastAccountedMessageID: rolledBack.lastAccountedMessageID,
-            generation,
-          }).catch((error) => {
-            console.warn(`[session-goal] dispatch settle failed: ${error?.message || error}`);
-          });
-          dispatchStates.delete(sessionId);
-          return true;
-        }
-      }
-      await settleGoal({
-        sessionId, directory, goal,
-        status: 'blocked', statusReason: 'continuation dispatch failed',
-        tokensUsed: goal.tokensUsed, tokensBaseline: goal.tokensBaseline,
-        tokensCommitted: goal.tokensCommitted, lastAccountedMessageID: goal.lastAccountedMessageID,
-        generation,
-      }).catch((error) => {
-        console.warn(`[session-goal] dispatch settle failed: ${error?.message || error}`);
-      });
-      dispatchStates.delete(sessionId);
-      return true;
-    }
-    await dispatchWithReconciliation({
-      sessionId, directory, goal,
-      generation, reservation,
-      effectiveObjective,
-      executionInfo,
-      auditNote: reservation.auditNote,
+    if (typeof onDispatchAttempt === 'function') onDispatchAttempt({ postAttempted: true });
+    await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
+      directory,
+      method: 'POST',
+      body: {
+        model: { providerID, modelID },
+        ...(agent ? { agent } : {}),
+        ...(variant ? { variant } : {}),
+        parts: [{ type: 'text', text: buildContinuationPrompt({ ...goal, objective: effectiveObjective }) }],
+      },
     });
-    return true;
+    return (generation === undefined || isGenerationCurrent(sessionId, generation))
+      ? { sent: true }
+      : { sent: false, ambiguous: true };
+  };
+
+  const reconcileAmbiguousDispatch = async ({ sessionId, directory, reservation, generation }) => {
+    if (reservations.get(sessionId) !== reservation) return 'stale';
+    let currentSession;
+    try {
+      currentSession = await fetchSession(sessionId, directory);
+    } catch {
+      return 'unknown';
+    }
+    if (!isGenerationCurrent(sessionId, generation)) return 'stale';
+    const currentGoal = parseGoalMetadata(currentSession);
+    if (!currentGoal || currentGoal.status !== 'active'
+      || goalLogicalIdentityKey(currentGoal) !== goalLogicalIdentityKey(reservation.goal)) {
+      // The prompt cannot be resent into a cleared/paused/replaced goal. Its
+      // accounting remains because a POST crossed the transport boundary.
+      reservations.delete(sessionId);
+      return 'settled';
+    }
+    const statuses = await fetchSessionStatuses(sessionId, directory);
+    if (!isGenerationCurrent(sessionId, generation)) return 'stale';
+    if (!statuses) return 'unknown';
+    const messages = await fetchRecentMessages(sessionId, directory);
+    if (!isGenerationCurrent(sessionId, generation)) return 'stale';
+    if (!messages) return 'unknown';
+    const ordered = [...messages].sort(compareMessages);
+    const lastInfo = ordered.length > 0 ? ordered[ordered.length - 1]?.info : null;
+    if (isWorkingStatus(statuses[sessionId]) || lastInfo?.id !== reservation.lastMessageID) {
+      // A busy status or a moved transcript tail is authoritative evidence that
+      // the attempted continuation was consumed (or that the user moved on).
+      // Do not send another provider request for the same reservation.
+      reservations.delete(sessionId);
+      return 'settled';
+    }
+
+    // Idle + unchanged tail cannot prove that the request was rejected: an
+    // accepted prompt may not have published its first message yet. Settle
+    // safely instead of converting this ambiguity into a duplicate execution.
+    await settleGoal({
+      sessionId,
+      directory,
+      goal: { ...reservation.goal, ...reservation.after },
+      status: 'blocked',
+      statusReason: 'continuation admission unresolved',
+      generation,
+    });
+    return reservations.get(sessionId) === reservation ? 'unknown' : 'settled';
   };
 
   const tick = async (sessionId, directory, expectedGeneration = getGeneration(sessionId)) => {
-    if (stopped || !isEnabled()) return;
-    const generation = expectedGeneration;
-    // Persistent read failure on a KNOWN active goal must become an explicit
-    // recoverable state instead of an eternally active idle goal. When the
-    // session itself cannot be read there is no safe write target (we cannot
-    // prove a goal exists without clobbering unrelated metadata), so boundedly
-    // stop and wait for the next event to re-arm.
-    const retryOrExit = async (path, goal) => {
-      if (scheduleRetry(sessionId, directory, generation)) return true;
-      console.warn(`[session-goal] ${sessionId} read recovery exhausted (${path})`);
-      if (!goal) return false;
-      console.warn(`[session-goal] ${sessionId} settling blocked (${path} unavailable)`);
-      await settleGoal({
-        sessionId, directory, goal,
-        status: 'blocked', statusReason: `${path} unavailable`,
-        generation,
-      }).catch((error) => {
-        console.warn(`[session-goal] settle after read failure failed: ${error?.message || error}`);
-      });
-      return false;
-    };
-
-    const session = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}`, { directory })
-      .catch((error) => {
-        console.warn(`[session-goal] session fetch failed: ${error?.message || error}`);
-        return null;
-      });
-    if (!isGenerationCurrent(sessionId, generation)) return;
-    if (!session || typeof session !== 'object') {
-      await retryOrExit('session', null);
+    if (stopped) return;
+    if (!isEnabled()) {
+      if (disabledRecoverySessions.has(sessionId)) {
+        scheduleRetry(sessionId, directory, expectedGeneration, 'enabled', { settleOnExhaustion: false });
+      }
       return;
     }
+    if (disabledRecoverySessions.delete(sessionId)) resetRetry(sessionId, 'enabled');
+    disabledRecoveryDirectories.delete(sessionId);
+    const generation = expectedGeneration;
+
+    let session;
+    try {
+      session = await fetchSession(sessionId, directory);
+    } catch (error) {
+      console.warn(`[session-goal] session fetch failed: ${error?.message || error}`);
+      if (isGenerationCurrent(sessionId, generation)) {
+        scheduleRetry(sessionId, directory, generation, error?.retryKind || 'fetch');
+      }
+      return;
+    }
+    if (!isGenerationCurrent(sessionId, generation)) return;
     // Sub-agent/task sessions never carry user goals — skip them.
     if (typeof session.parentID === 'string' && session.parentID) return;
 
     const goal = parseGoalMetadata(session);
+    if (goal) knownGoalStatuses.set(sessionId, goal.status);
     if (!goal || goal.status !== 'active') return;
-    goalSnapshots.set(sessionId, goalRevisionKey(goal));
+    const goalSnapshot = goalLogicalIdentityKey(goal);
+    const previousGoalSnapshot = goalSnapshots.get(sessionId);
+    if (previousGoalSnapshot !== undefined && previousGoalSnapshot !== goalSnapshot) {
+      lengthRecoveryStates.delete(sessionId);
+    }
+    goalSnapshots.set(sessionId, goalSnapshot);
+    goalMetadataSnapshots.set(sessionId, goalMetadataIdentityKey(goal));
+
+    const pendingAbort = pendingAborts.get(sessionId);
+    if (pendingAbort?.generation === generation) {
+      const written = await writeGoal(sessionId, directory, goal, () => ({
+        status: 'paused',
+        statusReason: 'paused after abort',
+      }), { generation });
+      if (written) {
+        pendingAborts.delete(sessionId);
+        activeGoalSessions.delete(sessionId);
+      }
+      return;
+    }
 
     // File-backed objectives: the metadata carries only a flag; the objective
     // TEXT lives under the OpenChamber data dir keyed by session id and is
-    // read fresh on every tick. The read FAILS into a bounded retry, and the
-    // resolved text is bound to the evaluated goal revision below — an
-    // inflight tick can never audit goal A with objective B.
-    let effectiveObjective = goal.objective;
+    // read fresh on every tick (live-editable). A missing file is not an empty
+    // objective: retry it with the normal bounded policy, then settle the goal
+    // explicitly if no inline fallback exists.
+    const resolvedObjective = await resolveObjective(sessionId, goal);
+    let effectiveObjective = resolvedObjective.objective;
+    const settleCurrentGoal = async (settlement) => {
+      if (!(await ensureObjectiveCurrent({ sessionId, directory, goal, effectiveObjective, generation }))) return false;
+      await settleGoal({ ...settlement, effectiveObjective });
+      return true;
+    };
     if (goal.objectiveFile) {
-      const fileObjective = await readObjectiveImpl(sessionId).catch(() => null);
       if (!isGenerationCurrent(sessionId, generation)) return;
-      if (fileObjective) {
-        effectiveObjective = fileObjective;
+      if (resolvedObjective.available) {
+        resetRetry(sessionId, 'objective');
       } else if (!effectiveObjective) {
-        // Missing file is a temporary condition on a live-edited goal: retry
-        // boundedly, then settle explicitly — never strand active+idle.
-        await retryOrExit('objective', goal);
+        console.warn(`[session-goal] ${sessionId} objective file unreadable and no inline fallback`);
+        if (!scheduleRetry(sessionId, directory, generation, 'objective')) {
+          await settleGoal({
+            sessionId,
+            directory,
+            goal,
+            status: 'blocked',
+            statusReason: 'objective file unavailable',
+            generation,
+          });
+        }
         return;
       } else {
         console.warn(`[session-goal] ${sessionId} objective file unreadable, using inline fallback`);
@@ -1130,10 +1333,10 @@ export const createSessionGoalRuntime = ({
     // its next idle event will arm a fresh tick. If a child is still working,
     // OpenCode will inject its result into the parent and produce the same
     // busy→idle cycle, so do not poll or audit the interim parent reply.
-    const statuses = await fetchSessionStatuses(directory);
+    const statuses = await fetchSessionStatuses(sessionId, directory);
     if (!isGenerationCurrent(sessionId, generation)) return;
     if (!statuses) {
-      await retryOrExit('status', goal);
+      scheduleRetry(sessionId, directory, generation);
       return;
     }
     if (isWorkingStatus(statuses[sessionId])) {
@@ -1144,21 +1347,32 @@ export const createSessionGoalRuntime = ({
     const children = await fetchSessionChildren(sessionId, directory);
     if (!isGenerationCurrent(sessionId, generation)) return;
     if (!children) {
-      await retryOrExit('children', goal);
+      scheduleRetry(sessionId, directory, generation);
       return;
     }
-    if (children.some((child) => typeof child?.id === 'string' && isWorkingStatus(statuses[child.id]))) {
-      resetRetry(sessionId, 'fetch');
-      return;
+    for (const child of children) {
+      const childStatus = statuses[child.id];
+      // The status endpoint omits idle sessions. Only an explicitly present
+      // malformed/unknown child status is retryable unknown.
+      if (Object.hasOwn(statuses, child.id) && !isValidSessionStatus(childStatus)) {
+        scheduleRetry(sessionId, directory, generation);
+        return;
+      }
+      if (isWorkingStatus(childStatus)) {
+        resetRetry(sessionId, 'fetch');
+        return;
+      }
     }
 
     const messages = await fetchRecentMessages(sessionId, directory);
     if (!isGenerationCurrent(sessionId, generation)) return;
     if (!messages) {
-      await retryOrExit('messages', goal);
+      scheduleRetry(sessionId, directory, generation);
       return;
     }
-    const orderedMessages = sortMessagesChronologically(messages);
+    resetRetry(sessionId, 'fetch');
+
+    const orderedMessages = [...messages].sort(compareMessages);
 
     let lastAssistant = null;
     for (let i = orderedMessages.length - 1; i >= 0; i -= 1) {
@@ -1169,6 +1383,37 @@ export const createSessionGoalRuntime = ({
     }
     const lastAssistantInfo = lastAssistant?.info;
     const lastMessageInfo = orderedMessages.length > 0 ? orderedMessages[orderedMessages.length - 1]?.info : null;
+
+    if (recoveryHolds.has(sessionId)) {
+      if (goal.lastAccountedMessageID !== lastMessageInfo?.id) {
+        // A newer transcript tail is proof that the old prompt reservation
+        // was consumed (or that new user work arrived), so normal processing
+        // can resume. An unchanged accounted tail remains ambiguous.
+        recoveryHolds.delete(sessionId);
+        recoveryHoldDirectories.delete(sessionId);
+      } else {
+        console.warn(`[session-goal] ${sessionId} holding ambiguous post-restart continuation`);
+        return;
+      }
+    }
+
+    const pendingReservation = reservations.get(sessionId);
+    if ((pendingReservation?.resolutionState === 'pending' || pendingReservation?.resolutionState === 'escalated')
+      && pendingReservation.postAttempts === 0) {
+      if (reservationStateMatches(goal, pendingReservation.before)) {
+        reservations.delete(sessionId);
+        resetRetry(sessionId, 'reservation-rollback');
+      } else {
+        await discardReservation({
+          sessionId,
+          directory,
+          reservation: pendingReservation,
+          generation,
+          blockedReason: pendingReservation.resolutionReason,
+        });
+        return;
+      }
+    }
 
     // Execution source for audits and continuations: the newest NON-summary
     // assistant turn. The compaction summary message carries agent/mode
@@ -1188,50 +1433,224 @@ export const createSessionGoalRuntime = ({
     // user message or an unfinished assistant reply means the session is (or
     // is about to be) busy — the next idle transition re-arms us.
     if (lastMessageInfo?.role === 'user') return;
-    if (lastAssistantInfo && !(lastAssistantInfo.time?.completed > 0) && !lastAssistantInfo.error) return;
+    const lengthLimited = isLengthLimitedMessage(lastAssistantInfo);
+    if (lastAssistantInfo && !(lastAssistantInfo.time?.completed > 0) && !lastAssistantInfo.error
+      && !lengthLimited && lastAssistantInfo.summary !== true) return;
 
     // A goal on a session with no assistant reply yet: there is no message to
     // take provider/model from, so the loop starts after the user's first
     // exchange completes (the idle transition re-arms us).
     if (!lastAssistantInfo?.id) return;
 
-    // --- Eager dispatch reservation ---
-    const existingReservation = dispatchStates.get(sessionId);
-    if (existingReservation) {
-      await handleExistingReservation({
-        sessionId, directory, goal, generation, reservation: existingReservation,
-        lastMessageInfo, executionInfo: executionInfo ?? lastAssistantInfo,
-      });
+    // A reservation means accounting and turnsUsed were already persisted for
+    // this exact tail, but prompt_async failed (or its tail confirmation did).
+    // Retry the dispatch without auditing or reserving the same turn again.
+    const reservation = reservations.get(sessionId);
+    if (reservation && (
+      reservation.goalId !== goal.id
+      || reservation.turnsUsed !== goal.turnsUsed
+      || reservation.lastAccountedMessageID !== goal.lastAccountedMessageID
+      || reservation.lastMessageID !== lastMessageInfo?.id
+    )) {
+      // A failed accounting PATCH may not have changed the authoritative
+      // goal at all. Drop that uncommitted marker and let this tick retry the
+      // accounting write; only a visible after-state needs guarded cleanup.
+      if (reservationStateMatches(goal, reservation.before)) {
+        reservations.delete(sessionId);
+      } else {
+        await reconcileDroppedReservation({
+          sessionId,
+          directory,
+          reservation,
+          generation,
+        });
+        return;
+      }
+    }
+    if (
+      reservation
+      && reservation.goalId === goal.id
+      && reservation.turnsUsed === goal.turnsUsed
+      && reservation.lastAccountedMessageID === goal.lastAccountedMessageID
+      && reservation.lastMessageID === lastMessageInfo?.id
+    ) {
+      if (reservation.dispatchOutcome === 'ambiguous') {
+        const reconciled = await reconcileAmbiguousDispatch({ sessionId, directory, reservation, generation });
+        if (reconciled === 'unknown' && isGenerationCurrent(sessionId, generation)) {
+          await settleGoal({
+            sessionId,
+            directory,
+            goal: { ...reservation.goal, ...reservation.after },
+            status: 'blocked',
+            statusReason: 'continuation admission unresolved',
+            generation,
+          });
+        }
+        return;
+      }
+      const latest = await fetchRecentMessages(sessionId, directory);
+      if (!isGenerationCurrent(sessionId, generation)) return;
+      if (!latest) {
+        scheduleRetry(sessionId, directory, generation);
+        return;
+      }
+      const latestOrdered = [...latest].sort(compareMessages);
+       const latestLastInfo = latestOrdered.length > 0 ? latestOrdered[latestOrdered.length - 1]?.info : null;
+      if (latestLastInfo?.id !== reservation.lastMessageID) {
+        await discardReservation({
+          sessionId,
+          directory,
+          reservation,
+          generation,
+          blockedReason: 'continuation tail changed before dispatch',
+        });
+        return;
+      }
+      try {
+         if (!(await ensureObjectiveCurrent({ sessionId, directory, goal, effectiveObjective, generation }))) {
+           await discardReservation({ sessionId, directory, reservation, generation });
+           return;
+        }
+         if (reservation.dispatchAttempts >= maxDispatchAttempts) {
+           if (reservation.postAttempts === 0) {
+             await discardReservation({
+               sessionId,
+               directory,
+               reservation,
+               generation,
+               blockedReason: 'continuation dispatch rejected before continuation dispatch',
+             });
+             return;
+           }
+           await settleCurrentGoal({
+            sessionId, directory, goal, status: 'blocked', statusReason: 'continuation dispatch retry limit reached', generation,
+          });
+          return;
+        }
+        const sent = await sendContinuation({
+          sessionId,
+          directory,
+          goal,
+           effectiveObjective,
+           expectedTailID: reservation.lastMessageID,
+           lastAssistantInfo: executionInfo ?? lastAssistantInfo,
+          generation,
+           onDispatchAttempt: ({ postAttempted }) => {
+             reservation.dispatchAttempts += 1;
+             if (postAttempted) {
+               reservation.postAttempts += 1;
+               reservation.dispatchOutcome = 'pending';
+             }
+           },
+        });
+         if (sent.sent) {
+           reservations.delete(sessionId);
+           resetRetry(sessionId);
+         } else if (sent.ambiguous && isGenerationCurrent(sessionId, generation)) {
+           reservation.dispatchOutcome = 'ambiguous';
+           const reconciled = await reconcileAmbiguousDispatch({ sessionId, directory, reservation, generation });
+           if (reconciled === 'unknown' && isGenerationCurrent(sessionId, generation)) {
+             await settleGoal({
+               sessionId,
+               directory,
+               goal: { ...reservation.goal, ...reservation.after },
+               status: 'blocked',
+               statusReason: 'continuation admission unresolved',
+               generation,
+             });
+           }
+         } else if (sent.stale && isGenerationCurrent(sessionId, generation)) {
+          await reconcileDroppedReservation({ sessionId, directory, reservation, generation });
+        }
+      } catch (error) {
+        console.warn(`[session-goal] continuation dispatch failed: ${error?.message || error}`);
+        const dispatchOutcome = continuationAdmission(error);
+        const currentReservation = reservations.get(sessionId);
+        if (currentReservation?.postAttempts > 0) currentReservation.dispatchOutcome = dispatchOutcome;
+        if (dispatchOutcome === 'ambiguous' && currentReservation?.postAttempts > 0) {
+          currentReservation.dispatchOutcome = 'ambiguous';
+          const reconciled = await reconcileAmbiguousDispatch({
+            sessionId,
+            directory,
+            reservation: currentReservation,
+            generation,
+          });
+          if (reconciled === 'unknown' && isGenerationCurrent(sessionId, generation)) {
+            await settleGoal({
+              sessionId,
+              directory,
+              goal: { ...currentReservation.goal, ...currentReservation.after },
+              status: 'blocked',
+              statusReason: 'continuation admission unresolved',
+              generation,
+            });
+          }
+        } else if (error?.retryKind === 'fetch') {
+          scheduleRetry(sessionId, directory, generation, 'fetch');
+        } else if (currentReservation?.dispatchAttempts >= maxDispatchAttempts) {
+          if (currentReservation.postAttempts === 0) {
+            await discardReservation({
+              sessionId,
+              directory,
+              reservation: currentReservation,
+              generation,
+              blockedReason: 'continuation dispatch rejected before continuation dispatch',
+            });
+            return;
+          }
+          await settleCurrentGoal({
+            sessionId, directory, goal, status: 'blocked', statusReason: 'continuation dispatch retry limit reached', generation,
+          });
+        } else {
+          scheduleRetry(sessionId, directory, generation, 'dispatch');
+        }
+      }
       return;
     }
 
-    // --- Token accounting: snapshot of the latest completed assistant turn,
-    // goal-relative via a baseline captured on the first tick, segmented by
-    // compaction summaries, kept monotonic. Chronology is authoritative
-    // `time.created`, never lexical message IDs.
+    // --- Token accounting: snapshot of the latest completed assistant turn
+    // (input + cache.read + output), goal-relative via a baseline captured on
+    // the first tick. For a mid-session goal the baseline is the same
+    // snapshot of the newest turn that completed BEFORE the goal was created,
+    // so pre-goal history is not charged to the goal.
+    //
+    // Compaction breaks the snapshot chain: it inserts an assistant message
+    // with `summary: true` and rebuilds the context, so the next snapshots
+    // start small again. Accounting is therefore segmented — a summary
+    // message closes the current segment (its value moves into
+    // tokensCommitted; the summary turn itself read the whole context, so
+    // its own snapshot prices the compaction), and the next segment starts
+    // with a zero baseline.
     let tokensBaseline = goal.tokensBaseline;
+    let baselineUnknown = false;
     if (!goal.lastAccountedMessageID && !(tokensBaseline > 0)) {
       tokensBaseline = 0;
       for (const message of orderedMessages) {
         const info = message?.info;
         if (info?.role !== 'assistant') continue;
-        if (!(info.time?.completed > 0) || info.time.completed > goal.createdAt) continue;
+        if (!(info.time?.completed > 0)) continue;
+        const createdAt = info.time?.created;
+        // Completion time is not a chronology fallback. A missing creation
+        // timestamp stays in the unknown/API-order bucket and cannot be
+        // classified as pre-goal history.
+        if (!Number.isFinite(createdAt) || createdAt > goal.createdAt) continue;
         tokensBaseline = Math.max(tokensBaseline, messageTokenTotal(info));
       }
+      baselineUnknown = tokensBaseline === 0 && orderedMessages.length >= MESSAGE_FETCH_LIMIT;
     }
     let tokensCommitted = goal.tokensCommitted;
     let tokensUsed = goal.tokensUsed;
     let lastAccountedMessageID = goal.lastAccountedMessageID;
     let segmentSnapshot = null;
     let sawNewMessages = false;
-    const messagesToAccount = (() => {
-      if (!lastAccountedMessageID) return orderedMessages;
+    let messagesToAccount = baselineUnknown ? [] : orderedMessages;
+    if (lastAccountedMessageID) {
       const cursorIndex = orderedMessages.findIndex((message) => message?.info?.id === lastAccountedMessageID);
-      // The cursor is an opaque compatibility marker. If it is outside this
-      // bounded page, never infer chronology from IDs: keep the monotonic
-      // totals until a safe cursor is visible rather than double-charging.
-      return cursorIndex >= 0 ? orderedMessages.slice(cursorIndex + 1) : [];
-    })();
+      // The cursor is intentionally an opaque compatibility marker. If it is
+      // outside this bounded page, do not replay the page or infer chronology
+      // from IDs; retain the monotonic totals until a safe cursor is visible.
+      messagesToAccount = cursorIndex >= 0 ? orderedMessages.slice(cursorIndex + 1) : [];
+    }
     for (const message of messagesToAccount) {
       const info = message?.info;
       if (info?.role !== 'assistant' || typeof info.id !== 'string') continue;
@@ -1242,9 +1661,10 @@ export const createSessionGoalRuntime = ({
         // The summary message's own tokens are ZEROED by opencode — never
         // feed them into the closing value. Close the segment from what is
         // already known, with the previously displayed total as a continuity
-        // floor; otherwise the counter freezes at the pre-compaction value
-        // until the new context outgrows it. Known undercount: the
-        // summarization call itself is reported as 0 tokens.
+        // floor (the latest pre-summary snapshot was already folded into
+        // tokensUsed on earlier ticks); otherwise the counter freezes at the
+        // pre-compaction value until the new context outgrows it. Known
+        // undercount: the summarization call itself is reported as 0 tokens.
         tokensCommitted = Math.max(
           goal.tokensUsed,
           tokensCommitted + Math.max(0, (segmentSnapshot ?? 0) - tokensBaseline),
@@ -1263,7 +1683,19 @@ export const createSessionGoalRuntime = ({
       tokensUsed = Math.max(goal.tokensUsed, tokensCommitted + segmentCurrent);
     }
 
+    if (baselineUnknown) {
+      // A full page with no visible pre-goal assistant cannot prove that the
+      // segment starts at zero. Keep the cursor and total unchanged rather
+      // than charging pre-goal context; this is conservative undercounting.
+      tokensBaseline = goal.tokensBaseline;
+      tokensCommitted = goal.tokensCommitted;
+      tokensUsed = goal.tokensUsed;
+      lastAccountedMessageID = goal.lastAccountedMessageID;
+    }
+
     const assistantText = messagePartsToText(lastAssistant);
+
+    if (!isGenerationCurrent(sessionId, generation)) return;
 
     // --- Terminal conditions, cheapest first ---
 
@@ -1273,18 +1705,15 @@ export const createSessionGoalRuntime = ({
     // resumed over an aborted tail: that is an explicit "keep going", so it
     // falls through to the continuation below (skipping the audit — an
     // aborted reply is not evidence of anything).
-    const error = lastAssistantInfo.error;
-    const errorName = getErrorName(error);
-    const hasError = error !== null && error !== undefined;
-    const abortedTail = errorName === 'MessageAbortedError';
-    const lengthTail = isLengthTruncated(lastAssistantInfo, errorName);
+    const abortedTail = lastAssistantInfo.error?.name === 'MessageAbortedError';
+    const resumableLengthTail = !abortedTail && lastAssistantInfo.summary !== true
+      && isResumableLengthMessage(lastAssistantInfo);
+    if (!abortedTail && lastAssistantInfo.summary === true) {
+      lengthRecoveryStates.delete(sessionId);
+    }
     if (abortedTail && goal.statusReason !== 'resumed') {
-      const written = await writeGoal(sessionId, directory, {
-        id: goal.id,
-        status: 'active',
-        updatedAt: goal.updatedAt,
-        revisionKey: goalRevisionKey(goal),
-      }, () => ({
+      if (!(await ensureObjectiveCurrent({ sessionId, directory, goal, effectiveObjective, generation }))) return;
+      await writeGoal(sessionId, directory, goal, () => ({
         status: 'paused',
         statusReason: 'paused after abort',
         tokensUsed,
@@ -1292,70 +1721,93 @@ export const createSessionGoalRuntime = ({
         tokensCommitted,
         lastAccountedMessageID,
       }), { generation });
-      if (written) console.log(`[session-goal] ${sessionId} paused after user abort`);
+      console.log(`[session-goal] ${sessionId} paused after user abort`);
       return;
     }
 
-    // Non-length turn error → blocked (prevents runaway auto-continuation into
-    // failures). Recognized length cutoffs are in-progress continuations, not
-    // hard failures.
-    if (!abortedTail && !lengthTail && hasError) {
-      await settleGoal({
-        sessionId, directory, goal, status: 'blocked', statusReason: errorName || 'assistant turn failed',
-        tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
+    // Turn error → blocked (prevents runaway auto-continuation into failures).
+    if (!abortedTail && !resumableLengthTail && lastAssistantInfo.error && typeof lastAssistantInfo.error === 'object') {
+      const reason = typeof lastAssistantInfo.error.name === 'string' && lastAssistantInfo.error.name
+        ? lastAssistantInfo.error.name
+        : 'assistant turn failed';
+      await settleCurrentGoal({
+        sessionId, directory, goal, status: 'blocked', statusReason: reason, tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
       });
       return;
     }
 
     // Token budget crossed → budgetLimited.
     if (typeof goal.tokenBudget === 'number' && tokensUsed >= goal.tokenBudget) {
-      await settleGoal({
-        sessionId, directory, goal, status: 'budgetLimited', statusReason: 'token budget reached',
-        tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
+      await settleCurrentGoal({
+        sessionId, directory, goal, status: 'budgetLimited', statusReason: 'token budget reached', tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
       });
       return;
     }
 
     // Auto-continuation safety cap → blocked.
     if (goal.turnsUsed >= maxAutoTurns) {
-      await settleGoal({
-        sessionId, directory, goal, status: 'blocked', statusReason: 'auto-continuation limit reached',
-        tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
+      await settleCurrentGoal({
+        sessionId, directory, goal, status: 'blocked', statusReason: 'auto-continuation limit reached', tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
       });
       return;
     }
 
-    // A second consecutive completed, non-summary length-truncated turn is a
-    // bounded recovery failure. Derive this from the loaded transcript rather
-    // than persisting another goal counter.
-    if (lengthTail && hasRepeatedLengthTail(orderedMessages, lastAssistant, goal.createdAt)) {
-      await settleGoal({
-        sessionId, directory, goal, status: 'blocked', statusReason: 'repeated output truncation',
-        tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
-      });
-      return;
+    // A repeated eligible truncation is a breaker, but it must not outrank
+    // authoritative error, budget, cap, or abort outcomes above.
+    if (resumableLengthTail) {
+      const hasKnownCreationTime = Number.isFinite(lastAssistantInfo.time?.created);
+      const previous = hasKnownCreationTime ? lengthRecoveryStates.get(sessionId) : null;
+      const transcriptAttempts = hasKnownCreationTime
+        ? consecutiveLengthLimitedAssistants(orderedMessages, goal.createdAt)
+        : 0;
+      const priorAttempts = hasKnownCreationTime && previous
+        ? (previous.messageID === lastAssistantInfo.id ? previous.attempts : previous.attempts + 1)
+        : 0;
+      const attempts = Math.max(
+        transcriptAttempts,
+        priorAttempts,
+        1,
+      );
+      if (hasKnownCreationTime) {
+        lengthRecoveryStates.set(sessionId, { attempts, messageID: lastAssistantInfo.id });
+      } else {
+        // Unknown chronology is recoverable, but it must never seed or advance
+        // a persisted/in-memory consecutive truncation streak.
+        lengthRecoveryStates.delete(sessionId);
+      }
+      if (attempts >= MAX_LENGTH_RECOVERY_ATTEMPTS) {
+        await settleCurrentGoal({
+          sessionId,
+          directory,
+          goal,
+          status: 'blocked',
+           statusReason: 'repeated output truncation',
+          tokensUsed,
+          tokensBaseline,
+          tokensCommitted,
+          lastAccountedMessageID,
+          generation,
+        });
+        return;
+      }
+    } else if (!abortedTail && lastAssistantInfo.summary !== true) {
+      lengthRecoveryStates.delete(sessionId);
     }
 
     // --- Small-model audit: the sole termination authority besides the hard
     // stops above (turn error, budget, continuation cap). The working agent
     // has no channel to settle its own goal.
     //
-    // Exception: when the latest message is a compaction summary or was cut off
-    // by the output token limit (length stop), the agent by definition ran into
-    // the context/output limit mid-work — that IS "in progress, not finished".
-    // No audit call; continue unconditionally.
+    // Exception: when the latest message is a compaction summary, the agent
+    // by definition ran into the context window mid-work — that IS
+    // "in progress, not finished". No audit call; continue unconditionally.
     let audit = null;
     let blockedStreak = 0;
     let auditFailStreak = goal.auditFailStreak;
-    if (lastAssistantInfo.summary === true || abortedTail || lengthTail) {
+    if (lastAssistantInfo.summary === true || abortedTail || resumableLengthTail) {
       blockedStreak = goal.blockedStreak;
     } else {
-      audit = await runAudit({
-        goal: { ...goal, objective: effectiveObjective },
-        assistantText,
-        directory,
-        lastAssistantInfo: executionInfo ?? lastAssistantInfo,
-      });
+      audit = await runAudit({ goal: { ...goal, objective: effectiveObjective }, assistantText, directory, lastAssistantInfo: executionInfo ?? lastAssistantInfo });
       if (!isGenerationCurrent(sessionId, generation)) return;
 
       // Audit unavailable: tolerate one consecutive failure (transient
@@ -1364,9 +1816,8 @@ export const createSessionGoalRuntime = ({
       if (!audit) {
         auditFailStreak += 1;
         if (auditFailStreak >= AUDIT_FAIL_LIMIT) {
-          await settleGoal({
-            sessionId, directory, goal, status: 'blocked', statusReason: 'progress audit unavailable',
-            tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
+            await settleCurrentGoal({
+              sessionId, directory, goal, status: 'blocked', statusReason: 'progress audit unavailable', tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
           });
           return;
         }
@@ -1376,9 +1827,8 @@ export const createSessionGoalRuntime = ({
       }
 
       if (audit?.verdict === 'complete') {
-        await settleGoal({
-          sessionId, directory, goal, status: 'complete', statusReason: 'verified by audit',
-          note: audit.note, tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
+        await settleCurrentGoal({
+          sessionId, directory, goal, status: 'complete', statusReason: 'verified by audit', note: audit.note, tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
           evaluationProviderID: audit.evaluationProviderID, evaluationModelID: audit.evaluationModelID,
         });
         return;
@@ -1392,10 +1842,8 @@ export const createSessionGoalRuntime = ({
           blockedStreakLimit: BLOCKED_STREAK_LIMIT,
         });
         if (blockedStreak >= BLOCKED_STREAK_LIMIT) {
-          await settleGoal({
-            sessionId, directory, goal, status: 'blocked',
-            statusReason: audit.note || 'blocked per audit', note: audit.note,
-            tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
+          await settleCurrentGoal({
+            sessionId, directory, goal, status: 'blocked', statusReason: audit.note || 'blocked per audit', note: audit.note, tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, generation,
             evaluationProviderID: audit.evaluationProviderID, evaluationModelID: audit.evaluationModelID,
           });
           return;
@@ -1403,83 +1851,211 @@ export const createSessionGoalRuntime = ({
       }
     }
 
-    // --- Continue: persist the reserved turn first, then dispatch. ---
-    // Order matters: if the write lands and the prompt fails, the goal keeps
-    // the reservation and reconciliation picks it up; the reverse could
-    // double-execute. turnsUsed is incremented EXACTLY ONCE per admitted
-    // continuation: a tail-moved drop or a proven pre-admission failure
-    // CAS-rolls the reserved turn back, and an ambiguous outcome never
-    // double-counts.
-    const reservation = await reserveTurn({
-      sessionId, directory, goal, generation,
-      tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID,
-      lastMessageID: lastMessageInfo.id,
-      blockedStreak, auditFailStreak,
-      auditNote: audit?.note,
-      evaluationProviderID: audit?.evaluationProviderID,
-      evaluationModelID: audit?.evaluationModelID,
+    // --- Continue: persist accounting first, then re-prompt ---
+    // Order matters: if the write lands and the prompt fails, the goal just
+    // waits for the next idle tick; the reverse could double-charge a turn.
+    if (!(await ensureObjectiveCurrent({ sessionId, directory, goal, effectiveObjective, generation }))) return;
+    const existingReservation = reservations.get(sessionId);
+    const nextReservation = {
+      directory,
+      goal,
+      before: reservationGoalState(goal),
+      after: {
+        ...reservationGoalState(goal),
+        tokensUsed,
+        tokensBaseline,
+        tokensCommitted,
+        lastAccountedMessageID,
+        turnsUsed: goal.turnsUsed + 1,
+        blockedStreak,
+        auditFailStreak,
+        statusReason: '',
+        ...(audit?.note ? { note: audit.note } : {}),
+        ...(audit?.evaluationProviderID ? { evaluationProviderID: audit.evaluationProviderID } : {}),
+        ...(audit?.evaluationModelID ? { evaluationModelID: audit.evaluationModelID } : {}),
+      },
+      goalId: goal.id,
       previousTurnsUsed: goal.turnsUsed,
       previousLastAccountedMessageID: goal.lastAccountedMessageID,
+      turnsUsed: goal.turnsUsed + 1,
+      lastAccountedMessageID,
+      lastMessageID: lastMessageInfo.id,
+      tokensUsed,
+      tokensBaseline,
+      tokensCommitted,
+      dispatchAttempts: existingReservation?.goalId === goal.id
+        && existingReservation.lastMessageID === lastMessageInfo.id
+        ? existingReservation.dispatchAttempts
+        : 0,
+      postAttempts: existingReservation?.goalId === goal.id
+        && existingReservation.lastMessageID === lastMessageInfo.id
+        ? existingReservation.postAttempts
+        : 0,
+      dispatchOutcome: existingReservation?.goalId === goal.id
+        && existingReservation.lastMessageID === lastMessageInfo.id
+        ? existingReservation.dispatchOutcome
+        : 'unattempted',
+    };
+    reservations.set(sessionId, nextReservation);
+    const written = await writeGoal(sessionId, directory, goal, (current) => {
+      if (goalMetadataIdentityKey(current) !== goalMetadataIdentityKey(goal)) return null;
+      if (
+        current.turnsUsed === nextReservation.turnsUsed
+        && current.lastAccountedMessageID === nextReservation.lastAccountedMessageID
+        && current.tokensUsed === nextReservation.tokensUsed
+        && current.tokensBaseline === nextReservation.tokensBaseline
+        && current.tokensCommitted === nextReservation.tokensCommitted
+      ) return current;
+      if (
+        current.turnsUsed !== nextReservation.previousTurnsUsed
+        || current.lastAccountedMessageID !== nextReservation.previousLastAccountedMessageID
+      ) return null;
+      return {
+        tokensUsed,
+        tokensBaseline,
+        tokensCommitted,
+        lastAccountedMessageID,
+        turnsUsed: nextReservation.turnsUsed,
+        blockedStreak,
+        auditFailStreak,
+        statusReason: '',
+        ...(audit?.note ? { note: audit.note } : {}),
+        ...(audit?.evaluationProviderID ? { evaluationProviderID: audit.evaluationProviderID } : {}),
+        ...(audit?.evaluationModelID ? { evaluationModelID: audit.evaluationModelID } : {}),
+      };
+    }, {
+      generation,
+      finalCheck: () => objectiveSnapshotIsCurrent({ sessionId, goal, effectiveObjective }),
     });
-    if (!reservation) {
+    if (!written) {
+      await reconcileDroppedReservation({ sessionId, directory, reservation: nextReservation, generation });
       console.log('[session-goal] goal changed during tick, dropping continuation');
+      return;
+    }
+    if (!isGenerationCurrent(sessionId, generation)) return;
+
+    nextReservation.turnsUsed = written.turnsUsed;
+    nextReservation.lastAccountedMessageID = written.lastAccountedMessageID;
+    nextReservation.after = reservationGoalState(written);
+    nextReservation.goal = written;
+    reservations.set(sessionId, nextReservation);
+
+    if (!(await ensureObjectiveCurrent({ sessionId, directory, goal: written, effectiveObjective, generation }))) {
+      await discardReservation({ sessionId, directory, reservation: nextReservation, generation });
       return;
     }
 
     // The tail may have moved while auditing (user sent a message) — a
-    // continuation now would collide with the user's own turn. Re-read and
-    // reconcile; anything but a proven-clean match drops the continuation
-    // and rolls the reserved turn back (never consumes the allowance).
+    // continuation now would collide with the user's own turn.
     const latest = await fetchRecentMessages(sessionId, directory);
     if (!isGenerationCurrent(sessionId, generation)) return;
     if (!latest) {
-      // The write already reserved the turn but admission is unknown: keep
-      // the reservation (counted once) and let reconciliation resolve it.
-      console.log('[session-goal] tail re-read failed after reservation, deferring to reconciliation');
+      scheduleRetry(sessionId, directory, generation);
       return;
     }
-    const latestOrdered = sortMessagesChronologically(latest);
+    const latestOrdered = [...latest].sort(compareMessages);
     const latestLastInfo = latestOrdered.length > 0 ? latestOrdered[latestOrdered.length - 1]?.info : null;
-    if (!latestLastInfo || latestLastInfo.id !== lastMessageInfo.id) {
-      dispatchStates.delete(sessionId);
-      const rolledBack = await writeGoal(sessionId, directory, {
-        id: goal.id,
-        status: 'active',
-        updatedAt: reservation.metadata.updatedAt,
-        revisionKey: goalRevisionKey(goal),
-      }, (current) => {
-        if (current.turnsUsed !== reservation.turnsUsed) return null;
-        if (current.lastAccountedMessageID !== reservation.lastAccountedMessageID) return null;
-        return {
-          turnsUsed: reservation.previousTurnsUsed,
-          lastAccountedMessageID: reservation.previousLastAccountedMessageID,
-        };
-      }, { generation }).catch(() => null);
-      if (rolledBack) {
-        console.log('[session-goal] tail moved on, dropping continuation (reserved turn rolled back)');
-      } else {
-        console.log('[session-goal] tail moved on, dropping continuation');
-      }
+    if (!latestLastInfo || latestLastInfo.id !== lastMessageInfo?.id) {
+      await discardReservation({
+        sessionId,
+        directory,
+        reservation: nextReservation,
+        generation,
+        blockedReason: 'continuation tail changed before dispatch',
+      });
+      console.log('[session-goal] tail moved on, dropping continuation');
       return;
     }
 
-    await dispatchWithReconciliation({
-      sessionId, directory, goal,
-      generation, reservation,
-      effectiveObjective,
-      executionInfo: executionInfo ?? lastAssistantInfo,
-      auditNote: audit?.note,
-    });
+    console.log(`[session-goal] continuing ${sessionId} (turn ${written.turnsUsed}/${maxAutoTurns}, tokens ${written.tokensUsed}${written.tokenBudget ? `/${written.tokenBudget}` : ''})`);
+    try {
+      const reservation = reservations.get(sessionId);
+      if (!reservation) return;
+      if (!(await ensureObjectiveCurrent({ sessionId, directory, goal: written, effectiveObjective, generation }))) {
+        await discardReservation({ sessionId, directory, reservation, generation });
+        return;
+      }
+      const sent = await sendContinuation({
+        sessionId,
+        directory,
+        goal: written,
+         effectiveObjective,
+         expectedTailID: lastMessageInfo.id,
+         lastAssistantInfo: executionInfo ?? lastAssistantInfo,
+        generation,
+        onDispatchAttempt: ({ postAttempted }) => {
+          reservation.dispatchAttempts += 1;
+          if (postAttempted) {
+            reservation.postAttempts += 1;
+            reservation.dispatchOutcome = 'pending';
+          }
+        },
+      });
+      if (sent.sent) {
+        reservations.delete(sessionId);
+        resetRetry(sessionId);
+      } else if (sent.ambiguous && isGenerationCurrent(sessionId, generation)) {
+        reservation.dispatchOutcome = 'ambiguous';
+        const reconciled = await reconcileAmbiguousDispatch({ sessionId, directory, reservation, generation });
+        if (reconciled === 'unknown' && isGenerationCurrent(sessionId, generation)) {
+          await settleGoal({
+            sessionId,
+            directory,
+            goal: { ...reservation.goal, ...reservation.after },
+            status: 'blocked',
+            statusReason: 'continuation admission unresolved',
+            generation,
+          });
+        }
+      } else if (sent.stale && isGenerationCurrent(sessionId, generation)) {
+         await reconcileDroppedReservation({ sessionId, directory, reservation, generation });
+       }
+    } catch (error) {
+      console.warn(`[session-goal] continuation dispatch failed: ${error?.message || error}`);
+      const reservation = reservations.get(sessionId);
+      const dispatchOutcome = continuationAdmission(error);
+      if (reservation?.postAttempts > 0) reservation.dispatchOutcome = dispatchOutcome;
+      if (dispatchOutcome === 'ambiguous' && reservation?.postAttempts > 0) {
+        reservation.dispatchOutcome = 'ambiguous';
+        const reconciled = await reconcileAmbiguousDispatch({ sessionId, directory, reservation, generation });
+        if (reconciled === 'unknown' && isGenerationCurrent(sessionId, generation)) {
+          await settleGoal({
+            sessionId,
+            directory,
+            goal: { ...reservation.goal, ...reservation.after },
+            status: 'blocked',
+            statusReason: 'continuation admission unresolved',
+            generation,
+          });
+        }
+      } else if (error?.retryKind === 'fetch') {
+        scheduleRetry(sessionId, directory, generation, 'fetch');
+      } else if ((reservation?.dispatchAttempts ?? maxDispatchAttempts) >= maxDispatchAttempts) {
+        if ((reservation?.postAttempts ?? 0) === 0) {
+          await discardReservation({
+            sessionId,
+            directory,
+            reservation,
+            generation,
+            blockedReason: 'continuation dispatch rejected before continuation dispatch',
+          });
+          return;
+        }
+        await settleCurrentGoal({
+          sessionId, directory, goal: written, status: 'blocked', statusReason: 'continuation dispatch retry limit reached', generation,
+        });
+      } else {
+        scheduleRetry(sessionId, directory, generation, 'dispatch');
+      }
+    }
   };
 
-  // One timer per session; arming replaces a pending timer with the SHORTER
-  // deadline so an explicit Resume (250ms) always replaces a pending normal
-  // idle timer (15s) instead of hiding behind it. While a tick is inflight the
-  // arm is remembered as a bounded follow-up (see finishInflight) — an
-  // idle/Resume that arrives during a tick can never disappear.
   const armTimer = (sessionId, directory, quietMs) => {
-    if (stopped) return;
-    if (isRetryExhausted(sessionId) && quietMs !== RESUME_KICKOFF_MS) return;
+    if (
+      retryStates.get(sessionId)?.exhausted
+      && quietMs !== RESUME_KICKOFF_MS
+      && !reservations.get(sessionId)?.resolutionState
+    ) return;
     if (isInflight(sessionId)) {
       const pending = pendingArms.get(sessionId);
       if (!pending || quietMs < pending.quietMs) {
@@ -1488,27 +2064,23 @@ export const createSessionGoalRuntime = ({
       return;
     }
     const now = Date.now();
-    const requestedDueAt = now + quietMs;
     const existing = timers.get(sessionId);
+    const requestedDueAt = now + quietMs;
     if (existing && existing.dueAt <= requestedDueAt) return;
     clearTimer(sessionId);
     const timer = setTimeout(() => {
       timers.delete(sessionId);
       if (stopped) return;
       if (isInflight(sessionId)) {
-        // Lost-wakeup guard: the event arrived while a tick ran; this becomes
-        // the guaranteed follow-up tick.
         pendingArms.set(sessionId, { directory, quietMs });
         return;
       }
-      beginInflight(sessionId);
+       beginInflight(sessionId);
       const generation = getGeneration(sessionId);
       tick(sessionId, directory, generation)
         .catch((error) => {
           console.warn('[session-goal] tick failed:', error?.message || error);
-          if (isGenerationCurrent(sessionId, generation)) {
-            scheduleRetry(sessionId, directory, generation, error?.retryKind || 'fetch');
-          }
+          scheduleRetry(sessionId, directory, generation, error?.retryKind || 'fetch');
         })
         .finally(() => {
           finishInflight(sessionId);
@@ -1520,53 +2092,132 @@ export const createSessionGoalRuntime = ({
 
   // Immediate event path for a user abort: pause the active goal right away,
   // BEFORE any idle tick could send a continuation over the user's explicit
-  // "stop". Same-message mutation is covered: the event itself (not message-id
-  // movement) triggers the pause. Messages the user sends afterwards leave the
-  // paused goal alone; Resume re-arms the loop.
+  // "stop". Messages the user sends afterwards leave the paused goal alone;
+  // Resume re-arms the loop (and kicks off immediately on an idle session).
   const pauseAfterAbort = async (sessionId, directory, generation) => {
-    if (!isGenerationCurrent(sessionId, generation)) return null;
-    const session = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}`, { directory })
-      .catch(() => null);
-    if (!isGenerationCurrent(sessionId, generation)) return null;
-    if (!session) throw new Error('session fetch unavailable while pausing after abort');
+    if (!isGenerationCurrent(sessionId, generation)) return;
+    const session = await fetchSession(sessionId, directory);
+    if (!isGenerationCurrent(sessionId, generation)) return;
     const goal = parseGoalMetadata(session);
-    if (!goal || goal.status !== 'active') return null;
-    const written = await writeGoal(sessionId, directory, {
-      id: goal.id,
-      status: 'active',
-      updatedAt: goal.updatedAt,
-      revisionKey: goalRevisionKey(goal),
-    }, () => ({
+    if (!goal || goal.status !== 'active') {
+      if (isGenerationCurrent(sessionId, generation)) pendingAborts.delete(sessionId);
+      return;
+    }
+    const written = await writeGoal(sessionId, directory, goal, () => ({
       status: 'paused',
       statusReason: 'paused after abort',
     }), { generation });
-    if (!written) return null;
+    if (!written) return;
+    pendingAborts.delete(sessionId);
+    activeGoalSessions.delete(sessionId);
     console.log(`[session-goal] ${sessionId} paused after user abort`);
-    return written;
+  };
+
+  const invalidateForAuthoritativeUserChange = (sessionId, directory) => {
+    const generation = advanceGeneration(sessionId);
+    clearTimer(sessionId);
+    clearPendingArm(sessionId);
+    resetRetry(sessionId);
+    disabledRecoverySessions.delete(sessionId);
+    const reservation = reservations.get(sessionId);
+    if (!reservation) return generation;
+    if (reservation.postAttempts > 0 && reservation.dispatchOutcome !== 'rejected') {
+      // A POST crossed the boundary. Preserve its persisted accounting, but
+      // never let this old reservation trigger another provider execution.
+      reservations.delete(sessionId);
+    } else {
+      void reconcileDroppedReservation({ sessionId, directory, reservation, generation });
+    }
+    return generation;
+  };
+
+  const clearGoalTracking = (sessionId) => {
+    clearedGoalSessions.add(sessionId);
+    pendingAborts.delete(sessionId);
+    knownGoalStatuses.delete(sessionId);
+    goalSnapshots.delete(sessionId);
+    goalMetadataSnapshots.delete(sessionId);
+    resumeSnapshots.delete(sessionId);
+    lengthRecoveryStates.delete(sessionId);
+    recoveryHolds.delete(sessionId);
+    recoveryHoldDirectories.delete(sessionId);
+    disabledRecoverySessions.delete(sessionId);
+    disabledRecoveryDirectories.delete(sessionId);
+    activeGoalSessions.delete(sessionId);
+  };
+
+  const acceptSessionUpdate = (update) => {
+    if (update.parentID) return true;
+    const sessionUpdatedAt = update.sessionUpdatedAt;
+    const goalUpdatedAt = update.goal && Number.isFinite(update.goal.updatedAt)
+      ? update.goal.updatedAt
+      : null;
+    const previous = sessionUpdateFreshness.get(update.sessionId);
+    // A timestamp-less event is usable as the first observation, but once a
+    // session has a freshness baseline it cannot prove that a delayed clear or
+    // replacement is newer than the accepted state.
+    if (!Number.isFinite(sessionUpdatedAt) && !Number.isFinite(goalUpdatedAt)) {
+      return !previous;
+    }
+    if (!previous) {
+      sessionUpdateFreshness.set(update.sessionId, { sessionUpdatedAt, goalUpdatedAt });
+      return true;
+    }
+
+    if (Number.isFinite(sessionUpdatedAt) && Number.isFinite(previous.sessionUpdatedAt)) {
+      if (sessionUpdatedAt < previous.sessionUpdatedAt) return false;
+      if (sessionUpdatedAt > previous.sessionUpdatedAt) {
+        sessionUpdateFreshness.set(update.sessionId, { sessionUpdatedAt, goalUpdatedAt });
+        return true;
+      }
+    } else if (Number.isFinite(sessionUpdatedAt) && !Number.isFinite(previous.sessionUpdatedAt)) {
+      sessionUpdateFreshness.set(update.sessionId, { sessionUpdatedAt, goalUpdatedAt });
+      return true;
+    }
+
+    // Some producers update goal metadata more precisely than the enclosing
+    // session timestamp. Use that field only as an equal-session-time
+    // secondary freshness signal. A missing value cannot outrank a known one.
+    if (Number.isFinite(goalUpdatedAt) && Number.isFinite(previous.goalUpdatedAt)) {
+      if (goalUpdatedAt < previous.goalUpdatedAt) return false;
+      if (goalUpdatedAt > previous.goalUpdatedAt) {
+        sessionUpdateFreshness.set(update.sessionId, { sessionUpdatedAt, goalUpdatedAt });
+        return true;
+      }
+    } else if (!Number.isFinite(goalUpdatedAt) && Number.isFinite(previous.goalUpdatedAt)) {
+      return false;
+    } else if (Number.isFinite(goalUpdatedAt) && !Number.isFinite(previous.goalUpdatedAt)) {
+      sessionUpdateFreshness.set(update.sessionId, { sessionUpdatedAt, goalUpdatedAt });
+      return true;
+    }
+
+    // Equal freshness is deterministic: keep the first accepted event. This
+    // makes duplicate delivery a no-op and avoids inventing chronology from an
+    // opaque goal/session ID.
+    return false;
   };
 
   const processPayload = (payload, directoryHint = '') => {
     if (stopped) return;
 
-    // User abort — authoritative stop. The generation advance invalidates any
-    // inflight tick's continuation work and the reserved turn is dropped.
     const aborted = extractAbortedAssistant(payload);
     if (aborted) {
       const generation = advanceGeneration(aborted.sessionId);
       clearTimer(aborted.sessionId);
       clearPendingArm(aborted.sessionId);
-      // Roll back a reserved (counted) turn that never dispatched: the abort
-      // proves the continuation did not produce work, so it must not consume
-      // the auto-continuation allowance. Unilateral CAS — no-op if the goal
-      // moved on first.
-      const reservation = dispatchStates.get(aborted.sessionId);
-      if (reservation && !reservation.dispatched) {
-        void reservation.rollback?.(generation);
-      }
-      dispatchStates.delete(aborted.sessionId);
-      resetRetry(aborted.sessionId);
+      const reservation = reservations.get(aborted.sessionId);
+      pendingAborts.set(aborted.sessionId, { directory: directoryHint, generation });
       beginInflight(aborted.sessionId);
-      pauseAfterAbort(aborted.sessionId, directoryHint, generation)
+      const cleanup = reservation
+        ? discardReservation({
+          sessionId: aborted.sessionId,
+          directory: directoryHint || reservation.directory,
+          reservation,
+          generation,
+          rebindGeneration: true,
+        })
+        : Promise.resolve();
+      cleanup.then(() => pauseAfterAbort(aborted.sessionId, directoryHint || reservation?.directory, generation))
         .catch((error) => {
           console.warn('[session-goal] pause after abort failed:', error?.message || error);
           if (isGenerationCurrent(aborted.sessionId, generation)) {
@@ -1582,29 +2233,60 @@ export const createSessionGoalRuntime = ({
     const status = extractSessionStatus(payload);
     if (status) {
       if (status.type === 'idle') {
+        if (reservations.get(status.sessionId)?.resolutionState && retryStates.get(status.sessionId)?.exhausted) {
+          // A later authoritative idle starts a fresh bounded resolution
+          // window after an earlier escalation, without a self-sustaining loop.
+          resetRetry(status.sessionId, 'reservation-rollback');
+        }
+        resetRetry(status.sessionId, 'status-event');
         armTimer(status.sessionId, status.directory || directoryHint, idleQuietMs);
-      } else {
-        // busy/retry: user or agent work owns the session — invalidate stale
-        // pending work and stop the timers; the next idle re-arms.
+      } else if (SESSION_STATUS_TYPES.has(status.type)) {
         advanceGeneration(status.sessionId);
         resetRetry(status.sessionId);
         clearTimer(status.sessionId);
         clearPendingArm(status.sessionId);
+        disabledRecoverySessions.delete(status.sessionId);
+        disabledRecoveryDirectories.delete(status.sessionId);
+        const reservation = reservations.get(status.sessionId);
+        if (reservation && reservation.postAttempts === 0) {
+          void reconcileDroppedReservation({
+            sessionId: status.sessionId,
+            directory: status.directory || directoryHint || reservation.directory,
+            reservation,
+            generation: getGeneration(status.sessionId),
+          });
+        } else if (reservation) {
+          // Busy/retry is authoritative evidence that an ambiguous prompt was
+          // admitted. Retain persisted accounting, but remove the local marker
+          // so the next idle cannot send it a second time.
+          reservations.delete(status.sessionId);
+        }
+      } else {
+        // An event with a status type introduced by a newer OpenCode must not
+        // be treated as definitive activity. Keep the current generation and
+        // use the normal bounded retry policy until a known status arrives.
+        scheduleRetry(
+          status.sessionId,
+          status.directory || directoryHint,
+          getGeneration(status.sessionId),
+          'status-event',
+          { settleOnExhaustion: false },
+        );
       }
       return;
     }
 
-    // Newer user activity invalidates stale pending continuation work (stop,
-    // pause, clear, replacement or any new user prompt that lands as a user
-    // message after the timer was armed). Old user messages are re-emitted
-    // after settlement — only a message newer than the arm counts.
     const userMessage = extractUserMessage(payload);
     if (userMessage) {
-      const armed = timers.get(userMessage.sessionId);
-      if (armed && userMessage.createdAt >= armed.armedAt) {
-        advanceGeneration(userMessage.sessionId);
-        clearTimer(userMessage.sessionId);
-        clearPendingArm(userMessage.sessionId);
+      const timer = timers.get(userMessage.sessionId);
+      const armedAt = timer?.armedAt ?? inflightArmPoints.get(userMessage.sessionId);
+      // Message IDs are opaque. Only a message with an authoritative creation
+      // timestamp at or after the current timer/tick arm point is new activity;
+      // an old or timestamp-less replay must not cancel active work.
+      if (Number.isFinite(armedAt)
+        && Number.isFinite(userMessage.createdAt)
+        && userMessage.createdAt >= armedAt) {
+        invalidateForAuthoritativeUserChange(userMessage.sessionId, directoryHint);
       }
       return;
     }
@@ -1614,25 +2296,90 @@ export const createSessionGoalRuntime = ({
     // transition, only session.updated. Arm a short timer; the tick's
     // quiescence check keeps this safe if the session is actually busy.
     const update = extractSessionUpdate(payload);
+    if (update && !acceptSessionUpdate(update)) return;
     let freshGoal = false;
     let newGoalDuringWork = false;
+    if (
+      update
+      && !update.parentID
+      && !update.goal
+      && !update.hasGoalKey
+      && (
+        update.hasGoalNamespace
+        || knownGoalStatuses.get(update.sessionId) === 'active'
+        || reservations.has(update.sessionId)
+        || goalSnapshots.has(update.sessionId)
+      )
+    ) {
+      // Clear removes the goal key from the OpenChamber namespace. The event is
+      // authoritative even though it has no parseable goal or namespace. Only
+      // sessions already tracked as goal-bearing are invalidated, so an
+      // unrelated session.updated without goal metadata remains a no-op.
+      invalidateForAuthoritativeUserChange(update.sessionId, update.directory || directoryHint);
+      clearGoalTracking(update.sessionId);
+      return;
+    }
     if (update && !update.parentID && update.goal) {
-      const nextSnapshot = goalRevisionKey(update.goal);
-      const previousSnapshot = goalSnapshots.get(update.sessionId);
-      freshGoal = previousSnapshot !== undefined && previousSnapshot !== nextSnapshot;
-      newGoalDuringWork = previousSnapshot === undefined && isInflight(update.sessionId) && update.goal.status === 'active';
-      goalSnapshots.set(update.sessionId, nextSnapshot);
-      if (update.goal.status !== 'active') {
-        resumeSnapshots.delete(update.sessionId);
+      const nextGoalSnapshot = goalLogicalIdentityKey(update.goal);
+      const previousGoalSnapshot = goalSnapshots.get(update.sessionId);
+      freshGoal = previousGoalSnapshot !== undefined && previousGoalSnapshot !== nextGoalSnapshot;
+      newGoalDuringWork = previousGoalSnapshot === undefined
+        && isInflight(update.sessionId)
+        && update.goal.status === 'active';
+      goalSnapshots.set(update.sessionId, nextGoalSnapshot);
+      knownGoalStatuses.set(update.sessionId, update.goal.status);
+      rememberActiveGoalSession(update.sessionId, update.directory || directoryHint, update.goal);
+      clearedGoalSessions.delete(update.sessionId);
+      const nextGoalMetadataSnapshot = goalMetadataIdentityKey(update.goal);
+      const previousGoalMetadataSnapshot = goalMetadataSnapshots.get(update.sessionId);
+      const changedGoalMetadata = previousGoalMetadataSnapshot !== undefined
+        && previousGoalMetadataSnapshot !== nextGoalMetadataSnapshot;
+      goalMetadataSnapshots.set(update.sessionId, nextGoalMetadataSnapshot);
+      const lifecycleUpdate = update.goal.status !== 'active'
+        && (previousGoalMetadataSnapshot === undefined || changedGoalMetadata);
+      const resumeUpdate = update.goal.status === 'active'
+        && update.goal.statusReason === 'resumed';
+      const reservation = reservations.get(update.sessionId);
+      if (resumeUpdate && reservation) {
+        const explicitAccountingReset = update.goal.turnsUsed === 0
+          && update.goal.lastAccountedMessageID === '';
+        if (explicitAccountingReset) {
+          // Resume intentionally establishes a new accounting segment. An old
+          // reservation belongs to the previous segment and must not make the
+          // new tick dispatch without recreating its reservation.
+          reservations.delete(update.sessionId);
+        } else {
+          // Edit-in-place may change identity/freshness while preserving the
+          // accounting counters. Rebind the reservation to that authoritative
+          // goal; do not discard it merely because metadata changed.
+          rebindPendingReservation(
+            reservation,
+            update.goal,
+            update.directory || directoryHint || reservation.directory,
+            { resetAccounting: true },
+          );
+        }
       }
-      if (freshGoal || newGoalDuringWork) {
-        // Replacement/edit/clear/complete: newer intent wins over the inflight
-        // tick; its write and dispatch attempts are invalidated.
+      if (update.goal.status !== 'active') resumeSnapshots.delete(update.sessionId);
+      if (freshGoal || newGoalDuringWork || lifecycleUpdate) {
+        pendingAborts.delete(update.sessionId);
         advanceGeneration(update.sessionId);
         resetRetry(update.sessionId);
-        dispatchStates.delete(update.sessionId);
+        lengthRecoveryStates.delete(update.sessionId);
+        if (reservation) {
+          const directory = update.directory || directoryHint || reservation.directory;
+          void reconcileDroppedReservation({
+            sessionId: update.sessionId,
+            directory,
+            reservation,
+            generation: getGeneration(update.sessionId),
+            preserveAccounting: update.goal.status === 'active' && reservation.resolutionState !== 'pending',
+          });
+        }
         clearTimer(update.sessionId);
         clearPendingArm(update.sessionId);
+        disabledRecoverySessions.delete(update.sessionId);
+        disabledRecoveryDirectories.delete(update.sessionId);
       }
     }
     if (
@@ -1643,72 +2390,147 @@ export const createSessionGoalRuntime = ({
       && (update.goal.turnsUsed === 0 || update.goal.statusReason === 'resumed' || freshGoal || newGoalDuringWork)
     ) {
       const isResume = update.goal.statusReason === 'resumed';
-      const resumeKey = goalRevisionKey(update.goal);
+      // CAS identity intentionally excludes updatedAt and effective file text.
+      // Resume dedup needs a separate lifecycle signal so a real file edit that
+      // reuses the same goal identity is not mistaken for duplicate delivery.
+      const resumeKey = JSON.stringify([
+        goalMetadataIdentityKey(update.goal),
+        update.goal.updatedAt,
+        update.sessionUpdatedAt,
+      ]);
       const duplicateResume = resumeSnapshots.get(update.sessionId) === resumeKey;
-      if (isResume && !duplicateResume) {
-        // Explicit Resume: advance the generation (stale tick work is dead),
-        // clear the pending normal idle timer, and arm the SHORT kickoff
-        // delay so Resume is never stuck behind a 15s idle timer.
-        resumeSnapshots.set(update.sessionId, resumeKey);
-        advanceGeneration(update.sessionId);
-        resetRetry(update.sessionId);
-        dispatchStates.delete(update.sessionId);
-        clearTimer(update.sessionId);
-        clearPendingArm(update.sessionId);
-      } else if (!freshGoal && !newGoalDuringWork
-        && (timers.has(update.sessionId) || isInflight(update.sessionId))
-        && !(isResume && !duplicateResume)) {
+      if (isResume && duplicateResume) {
         return;
       }
-      const quiet = isResume ? resumeKickoffMs : kickoffQuietMs;
+      if (isResume) {
+        resumeSnapshots.set(update.sessionId, resumeKey);
+        recoveryHolds.delete(update.sessionId);
+        recoveryHoldDirectories.delete(update.sessionId);
+        disabledRecoverySessions.delete(update.sessionId);
+        disabledRecoveryDirectories.delete(update.sessionId);
+        advanceGeneration(update.sessionId);
+        pendingAborts.delete(update.sessionId);
+        resetRetry(update.sessionId);
+        clearTimer(update.sessionId);
+        clearPendingArm(update.sessionId);
+      } else if (!freshGoal && !newGoalDuringWork && (timers.has(update.sessionId) || isInflight(update.sessionId))) {
+        return;
+      }
+      const quiet = isResume ? RESUME_KICKOFF_MS : kickoffQuietMs;
       armTimer(update.sessionId, update.directory || directoryHint, quiet);
     }
   };
 
-  // --- Restart recovery ---
-  //
-  // Deterministic, bounded, one-shot scan: on start (after OpenCode is ready),
-  // list sessions per known directory and arm the normal idle path for every
-  // persisted goal that is still active. An already-idle session usually emits
-  // no event after a restart, so without this an active goal could only ever
-  // recover from unrelated SSE activity. No permanent polling: the scan runs
-  // once; everything after it is event-driven.
-  const recover = async ({ listDirectories, directoryLimit = RESTART_SCAN_DIRECTORY_LIMIT } = {}) => {
-    if (stopped || !isEnabled() || typeof listDirectories !== 'function') return;
-    const directories = Array.from(new Set((await listDirectories().catch(() => [])) || []))
-      .filter((directory) => typeof directory === 'string' && directory)
-      .slice(0, directoryLimit);
-    for (const directory of directories) {
-      let sessions = null;
+  const start = async ({ listDirectories } = {}) => {
+    if (stopped || typeof listDirectories !== 'function') return;
+    let directories;
+    try {
+      directories = await listDirectories();
+    } catch (error) {
+      console.warn(`[session-goal] restart directory scan failed: ${error?.message || error}`);
+      return;
+    }
+    if (!Array.isArray(directories)) return;
+    for (const directory of [...new Set(directories.filter((value) => typeof value === 'string' && value))]
+      .slice(0, RESTART_SCAN_DIRECTORY_LIMIT)) {
+      if (stopped) return;
+      let sessions;
       try {
-        sessions = await openCodeFetch('/session', { directory });
+        sessions = await openCodeFetch('/session', {
+          directory,
+          query: { archived: 'false', roots: 'true', limit: String(MESSAGE_FETCH_LIMIT * 10) },
+        });
       } catch (error) {
-        console.warn(`[session-goal] restart recovery session list failed for ${directory}: ${error?.message || error}`);
+        // One unavailable project must not prevent recovery in unrelated ones.
+        console.warn(`[session-goal] restart scan failed for ${directory}: ${error?.message || error}`);
         continue;
       }
       if (!Array.isArray(sessions)) continue;
-      for (const session of sessions) {
-        if (stopped || !isEnabled()) return;
-        if (typeof session?.id !== 'string' || !session.id) continue;
-        if (typeof session.parentID === 'string' && session.parentID) continue;
-        const goal = parseGoalMetadata(session);
-        if (!goal || goal.status !== 'active') continue;
-        if (timers.has(session.id) || isInflight(session.id)) continue;
-        goalSnapshots.set(session.id, goalRevisionKey(goal));
-        console.log(`[session-goal] restart recovery: re-arming active goal on ${session.id}`);
-        armTimer(session.id, directory, kickoffQuietMs);
+      if (stopped) return;
+      for (const candidate of sessions) {
+        if (
+          !candidate
+          || typeof candidate !== 'object'
+          || typeof candidate.id !== 'string'
+          || !candidate.id
+          || (candidate.parentID !== undefined
+            && (typeof candidate.parentID !== 'string' || candidate.parentID))
+        ) continue;
+        if (stopped) return;
+        const candidateGoal = parseGoalMetadata(candidate);
+        if (!candidateGoal || candidateGoal.status !== 'active') continue;
+        const sessionId = candidate.id;
+        const sessionDirectory = typeof candidate.directory === 'string' && candidate.directory
+          ? candidate.directory
+          : directory;
+        if (!acceptSessionUpdate({
+          sessionId,
+          parentID: '',
+          goal: candidateGoal,
+          sessionUpdatedAt: Number.isFinite(candidate.time?.updated) ? candidate.time.updated : null,
+        })) continue;
+        goalSnapshots.set(sessionId, goalLogicalIdentityKey(candidateGoal));
+         goalMetadataSnapshots.set(sessionId, goalMetadataIdentityKey(candidateGoal));
+         knownGoalStatuses.set(sessionId, candidateGoal.status);
+         rememberActiveGoalSession(sessionId, sessionDirectory, candidateGoal);
+         if (!isEnabled()) {
+          recoveryHolds.delete(sessionId);
+          recoveryHoldDirectories.delete(sessionId);
+          disabledRecoverySessions.add(sessionId);
+          disabledRecoveryDirectories.set(sessionId, sessionDirectory);
+          resetRetry(sessionId);
+          armTimer(sessionId, sessionDirectory, 0);
+          continue;
+        }
+        disabledRecoverySessions.delete(sessionId);
+        disabledRecoveryDirectories.delete(sessionId);
+        recoveryHolds.add(sessionId);
+        recoveryHoldDirectories.set(sessionId, sessionDirectory);
+        armTimer(sessionId, sessionDirectory, 0);
       }
     }
   };
 
+  const onSettingsChanged = () => {
+    if (stopped) return;
+    if (!isEnabled()) {
+      for (const [sessionId, directory] of recoveryHoldDirectories.entries()) {
+        recoveryHolds.delete(sessionId);
+        recoveryHoldDirectories.delete(sessionId);
+        disabledRecoverySessions.add(sessionId);
+        disabledRecoveryDirectories.set(sessionId, directory);
+        resetRetry(sessionId);
+        armTimer(sessionId, directory, 0);
+      }
+      return;
+    }
+    for (const [sessionId, directory] of disabledRecoveryDirectories.entries()) {
+      disabledRecoverySessions.delete(sessionId);
+      disabledRecoveryDirectories.delete(sessionId);
+      recoveryHolds.delete(sessionId);
+      resetRetry(sessionId);
+      armTimer(sessionId, directory, 0);
+    }
+    for (const [sessionId, directory] of activeGoalSessions.entries()) {
+      // Re-enable is an explicit recovery edge: clear any exhausted bounded
+      // retry window, then arm every authoritative active goal exactly once.
+      resetRetry(sessionId);
+      armTimer(sessionId, directory, 0);
+    }
+  };
+
   const stop = () => {
+    if (stopped) return;
+    const reservationsToRollback = [...reservations.entries()]
+      .filter(([, reservation]) => reservation.postAttempts === 0 || reservation.dispatchOutcome === 'rejected');
     stopped = true;
     for (const sessionId of new Set([
       ...generations.keys(),
       ...timers.keys(),
-      ...inflightCounts.keys(),
+      ...inflight.keys(),
       ...writeQueues.keys(),
-      ...dispatchStates.keys(),
+      ...reservations.keys(),
+      ...pendingAborts.keys(),
     ])) {
       advanceGeneration(sessionId);
     }
@@ -1716,24 +2538,42 @@ export const createSessionGoalRuntime = ({
       clearTimeout(timer);
     }
     timers.clear();
+    inflightArmPoints.clear();
     pendingArms.clear();
-    dispatchStates.clear();
+    for (const [sessionId, reservation] of reservations.entries()) {
+      if (reservation.postAttempts > 0 && reservation.dispatchOutcome !== 'rejected') reservations.delete(sessionId);
+    }
+    pendingAborts.clear();
     retryStates.clear();
     goalSnapshots.clear();
     resumeSnapshots.clear();
-    writeVersions.clear();
-    writeQueues.clear();
-    started = false;
+    goalMetadataSnapshots.clear();
+    knownGoalStatuses.clear();
+    clearedGoalSessions.clear();
+    recoveryHolds.clear();
+    recoveryHoldDirectories.clear();
+    disabledRecoverySessions.clear();
+    disabledRecoveryDirectories.clear();
+    activeGoalSessions.clear();
+    sessionUpdateFreshness.clear();
+    for (const [sessionId, reservation] of reservationsToRollback) {
+      void rollbackReservation({
+        sessionId,
+        directory: reservation.directory,
+        reservation,
+        allowStopped: true,
+        blockedReason: 'runtime stopped before continuation dispatch',
+      }).catch((error) => {
+        console.warn(`[session-goal] ${sessionId} shutdown reservation cleanup failed: ${error?.message || error}`);
+      });
+    }
+    for (const sessionId of writeQueues.keys()) {
+      if (!reservations.has(sessionId)) {
+        writeVersions.delete(sessionId);
+        writeQueues.delete(sessionId);
+      }
+    }
   };
 
-  return {
-    processPayload,
-    start: async (options) => {
-      if (started || stopped) return;
-      started = true;
-      await recover(options);
-    },
-    stop,
-  };
-
+  return { processPayload, start, onSettingsChanged, stop };
 };

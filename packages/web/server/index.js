@@ -386,7 +386,15 @@ const readSettingsFromDiskMigrated = (...args) => settingsRuntime.readSettingsFr
 const readSettingsFromDisk = (...args) => settingsRuntime.readSettingsFromDisk(...args);
 const readSettingsFromDiskStrict = (...args) => settingsRuntime.readSettingsFromDiskStrict(...args);
 const writeSettingsToDisk = (...args) => settingsRuntime.writeSettingsToDisk(...args);
-const persistSettings = (...args) => settingsRuntime.persistSettings(...args);
+let sessionGoalRuntime;
+const persistSettings = async (...args) => {
+  const changes = args[0];
+  const updated = await settingsRuntime.persistSettings(...args);
+  if (changes?.sessionGoalEnabled === true || changes?.sessionGoalEnabled === false) {
+    sessionGoalRuntime?.onSettingsChanged?.();
+  }
+  return updated;
+};
 
 // Known project directories, MRU first (lastDirectory, then projects by
 // lastOpenedAt). Shared by the lifecycle warmup pass and the session-goal
@@ -801,7 +809,7 @@ const sessionAssistRuntime = createSessionAssistRuntime({
   getSmallModelService: async () => import('./lib/small-model/index.js'),
 });
 
-const sessionGoalRuntime = createSessionGoalRuntime({
+sessionGoalRuntime = createSessionGoalRuntime({
   buildOpenCodeUrl,
   getOpenCodeAuthHeaders,
   getSmallModelService: async () => import('./lib/small-model/index.js'),
