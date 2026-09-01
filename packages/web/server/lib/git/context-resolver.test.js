@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { createGitContextResolver } from './context-resolver.js';
 
@@ -233,6 +236,7 @@ describe('GitContextResolver', () => {
     const resolver = createGitContextResolver({
       realpath: async (value) => value.replace('/link', ''),
       pathExists: async () => true,
+      getPathFingerprint: async () => 'stable',
       runGit: async (cwd) => {
         calls.push(cwd);
         return { success: true, stdout: '/repo/src\n/repo/.git\n/repo/.git\n' };
@@ -243,6 +247,56 @@ describe('GitContextResolver', () => {
     await resolver.resolve('/repo/src');
 
     expect(calls).toEqual(['/repo/src']);
+  });
+
+  it('rediscovers a repository when its identity fingerprint changes at the same path', async () => {
+    let fingerprint = 'first';
+    let calls = 0;
+    const resolver = createGitContextResolver({
+      realpath: async (value) => value,
+      pathExists: async () => true,
+      getPathFingerprint: async () => fingerprint,
+      runGit: async () => {
+        calls += 1;
+        const commonDir = fingerprint === 'first' ? '/repo/.git-one' : '/repo/.git-two';
+        return { success: true, stdout: `/repo\n${commonDir}\n${commonDir}\n` };
+      },
+    });
+
+    await resolver.resolve('/repo');
+    fingerprint = 'second';
+    const replacement = await resolver.resolve('/repo');
+
+    expect(calls).toBe(2);
+    expect(replacement).toMatchObject({
+      topLevel: '/repo',
+      commonDir: '/repo/.git-two',
+      commonId: '/repo/.git-two',
+    });
+  });
+
+  it('invalidates the default fingerprint when repository metadata is replaced in place', async () => {
+    const repository = await fsp.mkdtemp(path.join(os.tmpdir(), 'openchamber-context-replacement-'));
+    const gitDir = path.join(repository, '.git');
+    await fsp.mkdir(gitDir);
+    let calls = 0;
+    const resolver = createGitContextResolver({
+      runGit: async () => {
+        calls += 1;
+        return { success: true, stdout: `${repository}\n${gitDir}\n${gitDir}\n` };
+      },
+    });
+
+    try {
+      await resolver.resolve(repository);
+      await fsp.rm(gitDir, { recursive: true });
+      await fsp.mkdir(gitDir);
+
+      await resolver.resolve(repository);
+      expect(calls).toBe(2);
+    } finally {
+      await fsp.rm(repository, { recursive: true, force: true });
+    }
   });
 
   it('keeps shared discovery alive when one waiter is cancelled', async () => {
@@ -307,8 +361,66 @@ describe('GitContextResolver', () => {
       success: true,
       stdout: '/repo\n/repo/.git\n/repo/.git\n',
     });
-    await tick();
+    await waitFor(() => resolver.getStats().inFlightAliases === 0
+      && resolver.getStats().inFlightContexts === 0);
 
+    expect(resolver.getStats()).toMatchObject({
+      inFlightAliases: 0,
+      inFlightContexts: 0,
+      discovery: { active: 0, pending: 0 },
+    });
+  });
+
+  it('aborts the underlying discovery process when its last waiter cancels', async () => {
+    const controller = new AbortController();
+    let discoverySignal;
+    let processAborted = false;
+    const resolver = createGitContextResolver({
+      realpath: async (value) => value,
+      pathExists: async () => true,
+      getPathFingerprint: async () => 'stable',
+      runGit: async (_cwd, _args, options = {}) => new Promise((_resolve, reject) => {
+        discoverySignal = options.signal;
+        options.signal?.addEventListener('abort', () => {
+          processAborted = true;
+          reject(options.signal.reason);
+        }, { once: true });
+      }),
+    });
+
+    const request = resolver.resolve('/repo', { signal: controller.signal });
+    await waitFor(() => discoverySignal instanceof AbortSignal);
+    controller.abort('request no longer needed');
+
+    await expect(request).rejects.toMatchObject({ code: 'GIT_EXECUTION_CANCELLED' });
+    await waitFor(() => processAborted
+      && resolver.getStats().inFlightAliases === 0
+      && resolver.getStats().inFlightContexts === 0
+      && resolver.getStats().discovery.active === 0);
+
+    expect(processAborted).toBe(true);
+    expect(resolver.getStats()).toMatchObject({
+      inFlightAliases: 0,
+      inFlightContexts: 0,
+      discovery: { active: 0, pending: 0 },
+    });
+  });
+
+  it('bounds a hung discovery and releases its resolver and queue slots', async () => {
+    let discoverySignal;
+    const resolver = createGitContextResolver({
+      realpath: async (value) => value,
+      pathExists: async () => true,
+      getPathFingerprint: async () => 'stable',
+      discoveryTimeoutMs: 5,
+      runGit: async (_cwd, _args, options = {}) => new Promise((_resolve, reject) => {
+        discoverySignal = options.signal;
+        options.signal?.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      }),
+    });
+
+    await expect(resolver.resolve('/repo')).rejects.toMatchObject({ code: 'GIT_EXECUTION_CANCELLED' });
+    expect(discoverySignal?.aborted).toBe(true);
     expect(resolver.getStats()).toMatchObject({
       inFlightAliases: 0,
       inFlightContexts: 0,

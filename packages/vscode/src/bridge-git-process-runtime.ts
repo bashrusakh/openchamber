@@ -13,6 +13,10 @@ export type GitProcessRuntimeOptions = {
   resolveGitExecutable?: () => Promise<string | undefined>;
 };
 
+export type GitProcessExecutionOptions = {
+  signal?: AbortSignal;
+};
+
 const isSocketPath = async (candidate: string): Promise<boolean> => {
   if (!candidate) {
     return false;
@@ -97,7 +101,11 @@ const processFailure = (error: unknown): { stdout: string; stderr: string; exitC
 export const createGitProcessRuntime = ({
   resolveGitExecutable = getGitExecutablePath,
 }: GitProcessRuntimeOptions = {}) => {
-  const execGit = async (args: string[], cwd: string): Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }> => {
+  const execGit = async (
+    args: string[],
+    cwd: string,
+    options: GitProcessExecutionOptions = {},
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }> => {
     let env: NodeJS.ProcessEnv;
     let configuredPath: string | undefined;
     try {
@@ -110,16 +118,47 @@ export const createGitProcessRuntime = ({
     }
     const gitExecutable = configuredPath?.trim() || 'git';
 
-    return new Promise((resolve) => {
-      const proc = spawn(gitExecutable, args, {
-        cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...env, ...getGitExecutionEnv() },
-        windowsHide: true,
-      });
+    if (options.signal?.aborted) {
+      return processFailure(options.signal.reason || new Error('Git process was cancelled'));
+    }
 
+    return new Promise((resolve) => {
       let stdout = '';
       let stderr = '';
+      let settled = false;
+      let terminationRequested = false;
+
+      let proc: ReturnType<typeof spawn>;
+      try {
+        proc = spawn(gitExecutable, args, {
+          cwd,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...env, ...getGitExecutionEnv() },
+          windowsHide: true,
+        });
+      } catch (error) {
+        resolve(processFailure(error));
+        return;
+      }
+
+      const cleanup = () => {
+        options.signal?.removeEventListener('abort', onAbort);
+      };
+      const finish = (result: { stdout: string; stderr: string; exitCode: number; code?: string }) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      };
+      const onAbort = () => {
+        if (settled || terminationRequested) return;
+        terminationRequested = true;
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          // The process may already have exited.
+        }
+      };
 
       proc.stdout?.on('data', (data) => {
         stdout += data.toString();
@@ -130,12 +169,23 @@ export const createGitProcessRuntime = ({
       });
 
       proc.on('close', (code) => {
-        resolve({ stdout, stderr, exitCode: code ?? 0 });
+        finish({ stdout, stderr, exitCode: code ?? (terminationRequested ? 1 : 0) });
       });
 
       proc.on('error', (error) => {
-        resolve(processFailure(error));
+        finish(terminationRequested ? {
+          stdout,
+          stderr: `${stderr}\n${error instanceof Error ? error.message : String(error)}`.trim(),
+          exitCode: 1,
+          code: getErrorCode(error),
+        } : processFailure(error));
       });
+
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal?.addEventListener('abort', onAbort, { once: true });
     });
   };
 

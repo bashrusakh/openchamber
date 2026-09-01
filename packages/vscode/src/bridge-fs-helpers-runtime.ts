@@ -175,9 +175,8 @@ export const parseGitCheckIgnoreResult = (
   if (result.exitCode === 0) {
     return new Set(
       result.stdout
-        .split('\n')
-        .map((name: string) => name.trim())
-        .filter(Boolean),
+        .split('\0')
+        .filter((name: string) => name.length > 0),
     );
   }
 
@@ -204,8 +203,8 @@ const execGitCheckIgnore = async (
     ? { signal: controller.signal, queueTimeoutMs: GIT_CHECK_IGNORE_TIMEOUT_MS }
     : undefined;
   const read = () => runGitRead
-    ? runGitRead(cwd, () => execGit(args, cwd), readOptions)
-    : runWithGitExecutionScope(true, () => execGit(args, cwd));
+    ? runGitRead(cwd, () => execGit(args, cwd, { signal: readOptions?.signal }), readOptions)
+    : runWithGitExecutionScope(true, () => execGit(args, cwd, { signal: readOptions?.signal }));
   if (GIT_CHECK_IGNORE_TIMEOUT_MS <= 0) {
     return read();
   }
@@ -234,7 +233,7 @@ const gitCheckIgnoreNames = async (cwd: string, names: string[], runGitRead?: Gi
   }
 
   return parseGitCheckIgnoreResult(
-    await execGitCheckIgnore(['check-ignore', '--', ...names], cwd, runGitRead),
+    await execGitCheckIgnore(['check-ignore', '-z', '--', ...names], cwd, runGitRead),
     cwd,
   );
 };
@@ -245,7 +244,7 @@ const gitCheckIgnorePaths = async (cwd: string, paths: string[], runGitRead?: Gi
   }
 
   return parseGitCheckIgnoreResult(
-    await execGitCheckIgnore(['check-ignore', '--', ...paths], cwd, runGitRead),
+    await execGitCheckIgnore(['check-ignore', '-z', '--', ...paths], cwd, runGitRead),
     cwd,
   );
 };

@@ -67,7 +67,7 @@ export type GitExecutionRunOptions = {
   label?: string;
   signal?: AbortSignal;
   queueTimeoutMs?: number;
-  lease?: GitExecutionLease;
+  lease?: GitExecutionLease | GitCloneLease;
 };
 
 export type GitStatusRunOptions<T, R> = {
@@ -112,7 +112,7 @@ export class GitExecutionCoordinator {
   invalidateWorktrees(commonId: string, worktreeIds: string[]): number;
   run<T>(options: GitExecutionRunOptions, task: (lease: GitExecutionLease) => Promise<T> | T): Promise<T>;
   runClone<T>(options: GitCloneRunOptions, task: (lease: GitCloneLease) => Promise<T> | T): Promise<T>;
-  runStatus<T, R = T>(options: GitStatusRunOptions<T, R>, task: (shape: GitStatusShape) => Promise<T> | T): Promise<R>;
+  runStatus<T, R = T>(options: GitStatusRunOptions<T, R>, task: (shape: GitStatusShape, signal: AbortSignal) => Promise<T> | T): Promise<R>;
   getStats(): GitExecutionCoordinatorStats;
 }
 

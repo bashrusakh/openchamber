@@ -311,22 +311,73 @@ function cleanBranchName(branch: string): string {
   return branch;
 }
 
+type GitProcessExecutionOptions = {
+  signal?: AbortSignal;
+};
+
+export type GitRangeExecutionOptions = {
+  signal?: AbortSignal;
+  queueTimeoutMs?: number;
+};
+
 /**
  * Execute a raw git command and return the output
  */
-async function execGit(args: string[], cwd: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+async function execGit(
+  args: string[],
+  cwd: string,
+  options: GitProcessExecutionOptions = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const normalizedCwd = normalizePath(cwd);
   return new Promise((resolve) => {
     Promise.all([buildGitEnv(), getGitExecutablePath()]).then(([env, configuredPath]) => {
       const gitPath = configuredPath?.trim() || 'git';
-      const proc = spawn(gitPath, args, {
-        cwd: normalizedCwd,
-        env: { ...env, ...getGitExecutionEnv() },
-        windowsHide: true,
-      });
-
       let stdout = '';
       let stderr = '';
+      let settled = false;
+      let terminationRequested = false;
+
+      if (options.signal?.aborted) {
+        resolve({
+          stdout,
+          stderr: options.signal.reason instanceof Error
+            ? options.signal.reason.message
+            : String(options.signal.reason || 'Git process was cancelled'),
+          exitCode: 1,
+        });
+        return;
+      }
+
+      let proc: ReturnType<typeof spawn>;
+      try {
+        proc = spawn(gitPath, args, {
+          cwd: normalizedCwd,
+          env: { ...env, ...getGitExecutionEnv() },
+          windowsHide: true,
+        });
+      } catch (error) {
+        resolve({ stdout: '', stderr: error instanceof Error ? error.message : String(error), exitCode: 1 });
+        return;
+      }
+
+      const cleanup = () => {
+        options.signal?.removeEventListener('abort', onAbort);
+      };
+      const finish = (result: { stdout: string; stderr: string; exitCode: number }) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      };
+      const onAbort = () => {
+        if (settled || terminationRequested) return;
+        terminationRequested = true;
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          // The process may already have exited.
+        }
+      };
 
       proc.stdout?.on('data', (data) => {
         stdout += data.toString();
@@ -337,12 +388,22 @@ async function execGit(args: string[], cwd: string): Promise<{ stdout: string; s
       });
 
       proc.on('close', (exitCode) => {
-        resolve({ stdout, stderr, exitCode: exitCode ?? 0 });
+        finish({ stdout, stderr, exitCode: exitCode ?? (terminationRequested ? 1 : 0) });
       });
 
       proc.on('error', (error) => {
-        resolve({ stdout: '', stderr: error.message, exitCode: 1 });
+        finish({
+          stdout,
+          stderr: `${stderr}\n${error.message}`.trim(),
+          exitCode: 1,
+        });
       });
+
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal?.addEventListener('abort', onAbort, { once: true });
     }).catch((error) => {
       resolve({ stdout: '', stderr: error instanceof Error ? error.message : String(error), exitCode: 1 });
     });
@@ -444,6 +505,8 @@ export interface GitStatusResult {
 
 type GitStatusOptions = {
   mode?: 'light';
+  signal?: AbortSignal;
+  queueTimeoutMs?: number;
 };
 
 /**
@@ -485,12 +548,11 @@ function getRepositoryRelativePath(repo: Repository, uri: vscode.Uri): string {
 export async function getGitStatus(directory: string, options?: GitStatusOptions): Promise<GitStatusResult> {
   // The VS Code Git API path does not compute heavyweight diff stats today,
   // but accepts the shared options contract so callers can rely on parity.
-  void options;
   const repo = await getRepository(directory);
-  
+
   if (!repo) {
     // Fallback to raw git
-    return getGitStatusRaw(directory);
+    return getGitStatusRaw(directory, options);
   }
 
   const state = repo.state;
@@ -603,8 +665,10 @@ async function checkInProgressOperations(directory: string): Promise<{
 /**
  * Fallback: Get git status using raw git commands
  */
-async function getGitStatusRaw(directory: string): Promise<GitStatusResult> {
-  const statusResult = await execGit(['status', '--porcelain=v1', '-b', '-uall'], directory);
+async function getGitStatusRaw(directory: string, options: GitStatusOptions = {}): Promise<GitStatusResult> {
+  const statusResult = await execGit(['status', '--porcelain=v1', '-b', '-uall'], directory, {
+    signal: options.signal,
+  });
   
   if (statusResult.exitCode !== 0) {
     return {
@@ -2244,7 +2308,8 @@ export async function getGitRangeDiff(
   base: string,
   head: string,
   filePath: string,
-  contextLines = 3
+  contextLines = 3,
+  options: GitRangeExecutionOptions = {},
 ): Promise<{ diff: string }> {
   const baseRef = (base || '').trim();
   const headRef = (head || '').trim();
@@ -2254,7 +2319,9 @@ export async function getGitRangeDiff(
 
   let resolvedBase = baseRef;
   try {
-    const verify = await execGit(['rev-parse', '--verify', `refs/remotes/origin/${baseRef}`], directory);
+    const verify = await execGit(['rev-parse', '--verify', `refs/remotes/origin/${baseRef}`], directory, {
+      signal: options.signal,
+    });
     if (verify.exitCode === 0) {
       resolvedBase = `origin/${baseRef}`;
     }
@@ -2263,7 +2330,7 @@ export async function getGitRangeDiff(
   }
 
   const args = ['diff', '--no-color', `-U${Math.max(0, contextLines)}`, `${resolvedBase}...${headRef}`, '--', filePath];
-  const result = await execGit(args, directory);
+  const result = await execGit(args, directory, { signal: options.signal });
   if (result.exitCode !== 0) {
     throw createGitCommandFailure('Git range diff', directory, args, result);
   }
@@ -2276,7 +2343,8 @@ export async function getGitRangeDiff(
 export async function getGitRangeFiles(
   directory: string,
   base: string,
-  head: string
+  head: string,
+  options: GitRangeExecutionOptions = {},
 ): Promise<string[]> {
   const baseRef = (base || '').trim();
   const headRef = (head || '').trim();
@@ -2286,7 +2354,9 @@ export async function getGitRangeFiles(
 
   let resolvedBase = baseRef;
   try {
-    const verify = await execGit(['rev-parse', '--verify', `refs/remotes/origin/${baseRef}`], directory);
+    const verify = await execGit(['rev-parse', '--verify', `refs/remotes/origin/${baseRef}`], directory, {
+      signal: options.signal,
+    });
     if (verify.exitCode === 0) {
       resolvedBase = `origin/${baseRef}`;
     }
@@ -2295,7 +2365,7 @@ export async function getGitRangeFiles(
   }
 
   const args = ['diff', '--name-only', `${resolvedBase}...${headRef}`];
-  const result = await execGit(args, directory);
+  const result = await execGit(args, directory, { signal: options.signal });
   if (result.exitCode !== 0) {
     throw createGitCommandFailure('Git range file discovery', directory, args, result);
   }

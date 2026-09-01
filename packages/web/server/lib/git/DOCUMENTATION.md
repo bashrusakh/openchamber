@@ -114,8 +114,24 @@ the Git repository/worktree identity before admission and uses
 worktree/common/topology mutations, coalesce compatible status requests, and
 reserve clone destinations. `context-resolver.js` is the only source of the
 common repository and worktree keys; callers must not derive those keys from
-directory names. `execution-errors.js` contains the structured overload,
-cancellation, timeout, and re-entrancy errors returned by the coordinator.
+directory names. Concurrent discovery requests share one `rev-parse` process.
+Each waiter can cancel independently. The resolver aborts that process only
+after the last waiter leaves, and it keeps the queue and in-flight entries
+until the process closes. A discovery timeout follows the same cleanup path.
+Status requests use the same source lifecycle. The source aborts only after
+the last waiter leaves, and `statusInFlight` remains occupied until the source
+task closes. A source queued after a mutation is not reused before that
+mutation runs.
+`execution-errors.js` contains the structured overload, cancellation, timeout,
+and re-entrancy errors returned by the coordinator.
+Raw Git reads owned by adjacent web features use `gitExecutionService.withRawRead()`
+so they receive the same repository/worktree admission and read-only environment.
+`checkoutBranch` admits its remote-name probe as a read. A configured remote
+name keeps the potentially remote checkout in common-write and network
+admission, rather than relying on a local-branch probe that could become stale
+before checkout and allow fetches or shared-ref updates to bypass coordination.
+Slash-named branches whose first component is not a configured remote remain
+worktree writes.
 
 The VS Code extension bundles the same source primitives and keeps its built-in
 Git API and raw Git process adapters runtime-specific.

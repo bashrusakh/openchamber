@@ -36,14 +36,14 @@ const operationKinds = Object.freeze({
   countStashFiles: operation.read,
   getBranches: operation.read,
   getWorktrees: operation.read,
-  previewWorktreeCreate: operation.read,
+  previewWorktreeCreate: operation.commonWrite,
   getLog: operation.read,
   getCommitFiles: operation.read,
   getCommitFileDiff: operation.read,
   getRemotes: operation.read,
   isLinkedWorktree: operation.read,
   validateWorktreeDirectory: operation.read,
-  canonicalizeWorktreeState: operation.read,
+  canonicalizeWorktreeState: operation.commonWrite,
   getConflictDetails: operation.read,
   getIntegrateConflictDetails: operation.read,
   getRepositoryRoot: operation.read,
@@ -94,7 +94,7 @@ const operationKinds = Object.freeze({
   populateWorktreeWithLockRecovery: operation.worktreeWrite,
 });
 
-const networkOperations = new Set(['push', 'pull', 'fetch', 'deleteRemoteBranch']);
+const networkOperations = new Set(['push', 'pull', 'fetch', 'deleteRemoteBranch', 'getBranches']);
 const repositoryInputOperations = new Set([
   'computeIntegratePlan',
   'integrateWorktreeCommits',
@@ -113,15 +113,24 @@ const errorText = (error) => [
   error,
 ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
 
-const createDiscoveryRunner = (gitModule = rawGit) => async (cwd, args) => {
+const normalizeDiscoveryCode = (value) => {
+  if (value === undefined || value === null) return {};
+  if (Number.isFinite(value)) return { exitCode: value };
+  return { code: String(value) };
+};
+
+const createDiscoveryRunner = (gitModule = rawGit) => async (cwd, args, options = {}) => {
   try {
-    const git = await gitModule.createGit(cwd, { envOverrides: GIT_READ_ONLY_ENV });
+    const git = await gitModule.createGit(cwd, {
+      envOverrides: GIT_READ_ONLY_ENV,
+      signal: options.signal,
+    });
     return { success: true, stdout: await git.raw(args), stderr: '' };
   } catch (error) {
+    const code = normalizeDiscoveryCode(error?.code);
     return {
       success: false,
-      code: typeof error?.code === 'string' ? error.code : undefined,
-      exitCode: typeof error?.code === 'number' ? error.code : undefined,
+      ...code,
       stdout: String(error?.stdout || ''),
       stderr: String(error?.stderr || ''),
       message: errorText(error),
@@ -132,8 +141,91 @@ const createDiscoveryRunner = (gitModule = rawGit) => async (cwd, args) => {
 const worktreeMayUseNetwork = (input) => Boolean(
   input?.setUpstream
   || (input?.ensureRemoteName && input?.ensureRemoteUrl)
-  || String(input?.existingBranch || input?.startRef || '').includes('/'),
+  || String(input?.existingBranch || '').includes('/')
+  || String(input?.startRef || '').includes('/'),
 );
+
+const checkoutBranchMayUseNetwork = async (raw, directory, branchName) => {
+  const requested = String(branchName || '').trim();
+  if (!requested || !requested.includes('/')) {
+    return false;
+  }
+
+  const remoteRef = requested.replace(/^refs\/remotes\//, '').replace(/^remotes\//, '');
+  const remoteName = remoteRef.split('/', 1)[0];
+  const localBranch = remoteRef.slice(remoteName.length + 1);
+  if (!remoteName || !localBranch || localBranch === 'HEAD') {
+    return false;
+  }
+
+  const explicitRemoteRef = remoteRef !== requested;
+  if (!raw.getRemotes) {
+    return true;
+  }
+
+  let configuredRemote = explicitRemoteRef;
+  try {
+    const remotes = await raw.getRemotes(directory);
+    configuredRemote = Array.isArray(remotes) && remotes.some((remote) => remote?.name === remoteName);
+  } catch {
+    // Let the checkout operation report the underlying Git error, but do not
+    // allow a failed remote lookup to bypass network admission.
+    return true;
+  }
+
+  if (!configuredRemote) {
+    return false;
+  }
+
+  // checkoutBranch prefers a local branch, including one whose name contains
+  // slashes, before it considers a remote-tracking ref. Do not probe that
+  // local ref here: it can disappear before the checkout is admitted, after
+  // which the service may fetch or update shared refs. A configured remote
+  // therefore keeps this potentially remote checkout network-coordinated.
+  return true;
+};
+
+const checkoutBranchClassification = async (
+  raw,
+  coordinator,
+  context,
+  directory,
+  branchName,
+  options,
+) => {
+  const requested = String(branchName || '').trim();
+  const explicitRemoteRef = requested.startsWith('remotes/')
+    || requested.startsWith('refs/remotes/');
+  if (explicitRemoteRef || !requested.includes('/')) {
+    const network = explicitRemoteRef;
+    return {
+      kind: network ? GIT_OPERATION_KIND.COMMON_WRITE : GIT_OPERATION_KIND.WORKTREE_WRITE,
+      network,
+    };
+  }
+
+  // The remote-name probe is part of checkout's decision, so it must use
+  // coordinator admission too. It is a local read; the checkout is upgraded
+  // to a common/network mutation when the lookup shows that Git may fetch or
+  // update shared refs.
+  const network = await coordinator.run({
+    context,
+    kind: GIT_OPERATION_KIND.READ,
+    targetWorktree: true,
+    network: false,
+    label: 'checkout-branch-preflight',
+    signal: options.signal,
+    queueTimeoutMs: options.queueTimeoutMs,
+  }, () => runWithGitExecutionScope(true, () => checkoutBranchMayUseNetwork(
+    raw,
+    directory,
+    branchName,
+  )));
+  return {
+    kind: network ? GIT_OPERATION_KIND.COMMON_WRITE : GIT_OPERATION_KIND.WORKTREE_WRITE,
+    network,
+  };
+};
 
 export const createGitExecutionService = (dependencies = {}) => {
   const raw = dependencies.raw || rawGit;
@@ -142,7 +234,7 @@ export const createGitExecutionService = (dependencies = {}) => {
     runGit: dependencies.runGit || createDiscoveryRunner(raw),
   });
 
-  const createBackgroundScheduler = (lease, outerContext) => async (request, task) => {
+  const createBackgroundScheduler = (outerContext, outerNetwork) => async (request, task) => {
     const context = request.operation === 'worktreeAttachment'
       ? outerContext
       : await resolver.resolve(request.contextDirectory);
@@ -150,14 +242,16 @@ export const createGitExecutionService = (dependencies = {}) => {
       context,
       kind: GIT_OPERATION_KIND.TOPOLOGY_WRITE,
       targetWorktree: true,
-      network: request.network,
+      network: request.network === true
+        || (request.operation === 'worktreeAttachment' && outerNetwork === true),
       label: request.operation,
-      lease: request.operation === 'worktreeAttachment' ? lease : undefined,
+      signal: request.signal,
+      queueTimeoutMs: request.queueTimeoutMs,
     }, () => runWithGitExecutionScope(false, task));
   };
 
   const runOperation = async (name, directory, args, options = {}) => {
-    const kind = operationKinds[name];
+    let kind = operationKinds[name];
     if (!kind) {
       throw new TypeError(`Unclassified Git service operation: ${name}`);
     }
@@ -165,20 +259,34 @@ export const createGitExecutionService = (dependencies = {}) => {
     if (!context.isRepository) {
       return runWithGitExecutionScope(kind === GIT_OPERATION_KIND.READ, () => raw[name](...args));
     }
+    let network = options.network ?? networkOperations.has(name);
+    if (name === 'checkoutBranch') {
+      const classification = await checkoutBranchClassification(
+        raw,
+        coordinator,
+        context,
+        directory,
+        args[1],
+        options,
+      );
+      kind = classification.kind;
+      network = classification.network;
+    }
     return coordinator.run({
       context,
       kind,
       targetWorktree: options.targetWorktree ?? kind !== GIT_OPERATION_KIND.COMMON_WRITE,
-      network: options.network ?? networkOperations.has(name),
+      network,
       label: name,
+      lease: options.lease,
       signal: options.signal,
       queueTimeoutMs: options.queueTimeoutMs,
-    }, (lease) => runWithGitExecutionScope(
+    }, () => runWithGitExecutionScope(
       kind === GIT_OPERATION_KIND.READ,
       () => raw[name](
         ...args,
         ...(name === 'createWorktree'
-          ? [{ scheduleBackground: createBackgroundScheduler(lease, context) }]
+           ? [{ scheduleBackground: createBackgroundScheduler(context, options.network) }]
           : []),
       ),
     ));
@@ -189,17 +297,37 @@ export const createGitExecutionService = (dependencies = {}) => {
     if (!context.isRepository) {
       return runWithGitExecutionScope(true, () => raw.getStatus(directory, options));
     }
-    const shape = options?.mode === 'light' ? 'light' : 'full';
+    const statusMode = options?.mode === 'light' ? 'light' : 'full';
     return coordinator.runStatus({
       context,
-      shape,
+      'shape': statusMode,
       signal: options?.signal,
-      label: `status:${shape}`,
-    }, (sourceShape) => runWithGitExecutionScope(true, () => raw.getStatus(
-      directory,
-      sourceShape === 'light' ? { mode: 'light' } : undefined,
-    )));
+      queueTimeoutMs: options?.queueTimeoutMs,
+      label: `status:${statusMode}`,
+    }, (sourceMode, sourceSignal) => runWithGitExecutionScope(true, () => {
+      const sourceOptions = sourceSignal ? { signal: sourceSignal } : {};
+      const statusOptions = sourceMode === 'light'
+        ? { mode: 'light', ...sourceOptions }
+        : sourceSignal ? sourceOptions : undefined;
+      return raw.getStatus(directory, statusOptions);
+    }));
   };
+
+  const withRawRead = (directory, task, options = {}) => (
+    resolver.resolve(directory, { signal: options.signal }).then((context) => {
+      if (!context.isRepository) {
+        return runWithGitExecutionScope(true, task);
+      }
+      return coordinator.run({
+        context,
+        kind: GIT_OPERATION_KIND.READ,
+        targetWorktree: true,
+        label: 'raw-read',
+        signal: options.signal,
+        queueTimeoutMs: options.queueTimeoutMs,
+      }, () => runWithGitExecutionScope(true, task));
+    })
+  );
 
   const checkIsGitRepository = async (directory) => (
     (await resolver.resolve(directory)).isRepository
@@ -216,6 +344,13 @@ export const createGitExecutionService = (dependencies = {}) => {
         : undefined,
     });
   }
+
+  wrapped.setLocalIdentity = (directory, profile, options) => runOperation(
+    'setLocalIdentity',
+    directory,
+    [directory, profile],
+    options,
+  );
 
   wrapped.isGitRepository = checkIsGitRepository;
   wrapped.getStatus = runStatus;
@@ -240,7 +375,7 @@ export const createGitExecutionService = (dependencies = {}) => {
   wrapped.getCurrentIdentity = (...args) => runOperation('getCurrentIdentity', args[0], args);
   wrapped.hasLocalIdentity = (...args) => runOperation('hasLocalIdentity', args[0], args);
 
-  return Object.freeze({ ...raw, ...wrapped, coordinator, resolver });
+  return Object.freeze({ ...raw, ...wrapped, coordinator, resolver, withRawRead });
 };
 
 const defaultService = createGitExecutionService();
@@ -322,6 +457,7 @@ export const {
   populateWorktreeWithLockRecovery,
   coordinator,
   resolver,
+  withRawRead,
 } = defaultService;
 
 export { defaultService as gitExecutionService };

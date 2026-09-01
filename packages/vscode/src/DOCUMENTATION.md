@@ -35,7 +35,12 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
 - `git-execution-runtime.ts`
   - VS Code adapter for shared repository/worktree identity resolution,
     bounded admission, status coalescing, cancellation, and read-only Git
-    environment scoping.
+    environment scoping. Shared status sources receive a cancellation signal,
+    remain tracked until their Git task closes, and never cross a queued
+    mutation when status requests coalesce.
+  - Clone reservations remain held through sparse checkout, skill file
+    processing, and temporary-directory cleanup; network capacity is released
+    after that materialization work completes.
 
 - `git-context-resolver.ts`, `git-execution-coordinator.ts`,
   `git-execution-errors.ts`

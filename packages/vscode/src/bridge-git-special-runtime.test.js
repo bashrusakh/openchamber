@@ -28,6 +28,7 @@ const gitExecutionRuntime = {
   discover: mock(),
   withRawRead: mock(),
 };
+const rawReadOptions = [];
 
 mock.module('./gitService', () => gitService);
 mock.module('@opencode-ai/sdk/v2', () => ({ createOpencodeClient }));
@@ -47,6 +48,7 @@ describe('bridge git special runtime', () => {
     createOpencodeClient.mockReset();
     gitExecutionRuntime.discover.mockReset();
     gitExecutionRuntime.withRawRead.mockReset();
+    rawReadOptions.length = 0;
     rawFetch.mockClear();
 
     globalThis.fetch = rawFetch;
@@ -60,7 +62,10 @@ describe('bridge git special runtime', () => {
       commonId: '/repo/.git',
       worktreeId: '/repo',
     });
-    gitExecutionRuntime.withRawRead.mockImplementation((_directory, task) => task());
+    gitExecutionRuntime.withRawRead.mockImplementation((_directory, task, options) => {
+      rawReadOptions.push(options);
+      return task();
+    });
     gitService.getGitRangeFiles.mockImplementation(async () => ['src/a.ts']);
     gitService.getGitRangeDiff.mockImplementation(async () => ({ diff: 'diff --git a/src/a.ts b/src/a.ts\n+new line' }));
     sdkClient.v2.model.list.mockImplementation(async () => ({
@@ -110,6 +115,23 @@ describe('bridge git special runtime', () => {
       data: { title: 'PR title', body: 'PR body' },
     });
     expect(rawFetch).not.toHaveBeenCalled();
+    expect(rawReadOptions).toHaveLength(2);
+    expect(rawReadOptions.every((options) => options?.signal instanceof AbortSignal
+      && options.queueTimeoutMs === 3_000)).toBe(true);
+    expect(gitService.getGitRangeFiles).toHaveBeenCalledWith(
+      '/repo',
+      'main',
+      'feature',
+      { signal: rawReadOptions[0].signal },
+    );
+    expect(gitService.getGitRangeDiff).toHaveBeenCalledWith(
+      '/repo',
+      'main',
+      'feature',
+      'src/a.ts',
+      3,
+      { signal: rawReadOptions[1].signal },
+    );
     expect(createOpencodeClient).toHaveBeenCalledWith({
       baseUrl: 'http://opencode.test',
       headers: { Authorization: 'Bearer test' },
@@ -185,5 +207,40 @@ describe('bridge git special runtime', () => {
       execGit: mock(),
     })).rejects.toThrow('bad revision');
     expect(sdkClient.session.create).not.toHaveBeenCalled();
+  });
+
+  it('passes the bounded status signal to every raw conflict-details command', async () => {
+    const execOptions = [];
+    const response = await handleSpecialGitBridgeMessage({
+      id: 'conflict-details',
+      type: 'api:git/conflict-details',
+      payload: { directory: '/repo' },
+    }, undefined, {
+      readSettings: () => ({}),
+      execGit: async (args, _directory, options) => {
+        execOptions.push({ args, options });
+        if (args[0] === 'status') {
+          return { stdout: ' M src/a.ts\n', stderr: '', exitCode: 0 };
+        }
+        if (args[1] === '--name-only') {
+          return { stdout: 'src/a.ts\n', stderr: '', exitCode: 0 };
+        }
+        if (args[0] === 'diff') {
+          return { stdout: 'diff --git a/src/a.ts b/src/a.ts\n', stderr: '', exitCode: 0 };
+        }
+        return { stdout: '', stderr: '', exitCode: 1 };
+      },
+    });
+
+    expect(response).toMatchObject({
+      id: 'conflict-details',
+      type: 'api:git/conflict-details',
+      success: true,
+    });
+    expect(execOptions).toHaveLength(5);
+    expect(execOptions.every(({ options }) => options?.signal instanceof AbortSignal)).toBe(true);
+    expect(rawReadOptions).toHaveLength(5);
+    expect(rawReadOptions.every((options) => options?.signal instanceof AbortSignal
+      && options.queueTimeoutMs === 3_000)).toBe(true);
   });
 });

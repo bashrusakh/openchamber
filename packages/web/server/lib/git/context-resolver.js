@@ -11,6 +11,7 @@ const DEFAULTS = Object.freeze({
   maxPendingDiscoveries: 256,
   maxInFlightAliases: 2048,
   maxInFlightContexts: 1024,
+  discoveryTimeoutMs: 30_000,
 });
 
 const normalizeDirectory = (directory) => {
@@ -30,6 +31,50 @@ const defaultPathExists = async (value) => {
     }
     throw error;
   }
+};
+
+const statFingerprint = (stat) => [
+  stat.dev,
+  stat.ino,
+  stat.mode,
+  stat.size,
+  stat.mtimeNs?.toString() || stat.mtimeMs,
+  stat.ctimeNs?.toString() || stat.ctimeMs,
+].join(':');
+
+const defaultPathFingerprint = async (context) => {
+  const paths = Array.from(new Set([
+    context.topLevel,
+    context.gitDir,
+    context.commonDir,
+    path.join(context.topLevel, '.git'),
+    path.join(context.gitDir, 'config'),
+    path.join(context.gitDir, 'HEAD'),
+    path.join(context.gitDir, 'gitdir'),
+    path.join(context.gitDir, 'commondir'),
+    path.join(context.commonDir, 'config'),
+  ]));
+  let fingerprints;
+  try {
+    fingerprints = await Promise.all(paths.map(async (value) => {
+      try {
+        return `${value}\0${statFingerprint(await fsp.lstat(value))}`;
+      } catch (error) {
+        if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') {
+          return `${value}\0missing`;
+        }
+        throw error;
+      }
+    }));
+  } catch {
+    return null;
+  }
+
+  const requiredPaths = [context.topLevel, context.gitDir, context.commonDir, path.join(context.topLevel, '.git')];
+  if (requiredPaths.some((value) => fingerprints.find((entry) => entry.startsWith(`${value}\0missing`)))) {
+    return null;
+  }
+  return fingerprints.join('|');
 };
 
 const normalizeCommandResult = (result) => {
@@ -177,29 +222,6 @@ const abortError = (signal) => new GitExecutionCancelledError(
   { reason: signal?.reason },
 );
 
-const raceAbort = (promise, signal) => {
-  if (!signal) {
-    return promise;
-  }
-  if (signal.aborted) {
-    return Promise.reject(abortError(signal));
-  }
-  return new Promise((resolve, reject) => {
-    const onAbort = () => reject(abortError(signal));
-    signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener('abort', onAbort);
-        reject(error);
-      },
-    );
-  });
-};
-
 const createQueue = (concurrency, maxPending) => {
   const pending = [];
   let active = 0;
@@ -210,12 +232,22 @@ const createQueue = (concurrency, maxPending) => {
       if (entry.cancelled) {
         continue;
       }
+      entry.started = true;
       active += 1;
       Promise.resolve()
         .then(entry.task)
-        .then(entry.resolve, entry.reject)
+        .then(
+          (value) => { entry.result = { success: true, value }; },
+          (error) => { entry.result = { success: false, error }; },
+        )
         .finally(() => {
           active -= 1;
+          const result = entry.result;
+          if (result?.success) {
+            entry.resolve(result.value);
+          } else {
+            entry.reject(result?.error);
+          }
           drain();
         });
     }
@@ -238,6 +270,11 @@ const createQueue = (concurrency, maxPending) => {
       if (signal) {
         onAbort = () => {
           if (entry.cancelled) {
+            return;
+          }
+          if (entry.started) {
+            // The task owns termination of an active process. Keep the queue
+            // slot and promise until its close lifecycle completes.
             return;
           }
           entry.cancelled = true;
@@ -279,10 +316,14 @@ export class GitContextResolver {
     this.runGit = options.runGit;
     this.realpath = options.realpath || ((value) => fsp.realpath(value));
     this.pathExists = options.pathExists || defaultPathExists;
+    this.getPathFingerprint = options.getPathFingerprint || defaultPathFingerprint;
     this.discoveryConcurrency = Math.max(1, Math.floor(options.discoveryConcurrency ?? DEFAULTS.discoveryConcurrency));
     this.maxPendingDiscoveries = Math.max(0, Math.floor(options.maxPendingDiscoveries ?? DEFAULTS.maxPendingDiscoveries));
     this.maxInFlightAliases = Math.max(1, Math.floor(options.maxInFlightAliases ?? DEFAULTS.maxInFlightAliases));
     this.maxInFlightContexts = Math.max(1, Math.floor(options.maxInFlightContexts ?? DEFAULTS.maxInFlightContexts));
+    this.discoveryTimeoutMs = Math.max(1, Math.floor(options.discoveryTimeoutMs ?? DEFAULTS.discoveryTimeoutMs));
+    this.setTimer = options.setTimer || ((callback, delay) => setTimeout(callback, delay));
+    this.clearTimer = options.clearTimer || ((handle) => clearTimeout(handle));
     this.aliases = new Map();
     this.inFlightAliases = new Map();
     this.contexts = new Map();
@@ -313,9 +354,12 @@ export class GitContextResolver {
     }
   }
 
-  rememberAlias(alias, context) {
+  rememberAlias(alias, context, fingerprint) {
+    if (!fingerprint) {
+      return;
+    }
     this.aliases.delete(alias);
-    this.aliases.set(alias, context);
+    this.aliases.set(alias, { context, fingerprint });
     while (this.aliases.size > this.maxInFlightAliases) {
       const oldest = this.aliases.keys().next().value;
       if (oldest === undefined) {
@@ -325,13 +369,29 @@ export class GitContextResolver {
     }
   }
 
-  async discover(directory, requestedDirectory) {
+  forgetContext(context) {
+    for (const [alias, entry] of this.aliases) {
+      if (entry.context === context) {
+        this.aliases.delete(alias);
+      }
+    }
+  }
+
+  async discover(directory, requestedDirectory, signal) {
     let result;
     try {
       result = normalizeCommandResult(await this.queue.enqueue(
-        () => this.runGit(directory, ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir']),
+        () => this.runGit(
+          directory,
+          ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'],
+          { signal },
+        ),
+        signal,
       ));
     } catch (error) {
+      if (signal?.aborted) {
+        throw abortError(signal);
+      }
       if (error instanceof GitExecutionCancelledError || error instanceof GitExecutionOverloadedError) {
         throw error;
       }
@@ -339,6 +399,9 @@ export class GitContextResolver {
         return { isRepository: false, requestedDirectory, reason: 'not-a-repository' };
       }
       throw createDiscoveryError(error, directory);
+    }
+    if (signal?.aborted) {
+      throw abortError(signal);
     }
     if (!result.success) {
       if (isConfirmedNonRepository(result)) {
@@ -360,10 +423,17 @@ export class GitContextResolver {
 
     const canonicalizeDiscoveredPath = async (value) => {
       try {
-        return await this.canonicalize(path.isAbsolute(value)
+        const result = await this.canonicalize(path.isAbsolute(value)
           ? value
           : path.resolve(directory, value));
+        if (signal?.aborted) {
+          throw abortError(signal);
+        }
+        return result;
       } catch (error) {
+        if (error instanceof GitExecutionCancelledError) {
+          throw error;
+        }
         throw createDiscoveryError(error, directory);
       }
     };
@@ -389,11 +459,130 @@ export class GitContextResolver {
         exitCode: result.exitCode,
       }, directory);
     }
+    if (signal?.aborted) {
+      throw abortError(signal);
+    }
+    const fingerprint = await this.getPathFingerprint(context);
+    if (signal?.aborted) {
+      throw abortError(signal);
+    }
     this.contexts.set(`${context.commonId}\0${context.worktreeId}`, context);
     this.evictContexts();
-    this.rememberAlias(directory, context);
-    this.rememberAlias(topLevel, context);
+    this.rememberAlias(directory, context, fingerprint);
+    this.rememberAlias(topLevel, context, fingerprint);
     return context;
+  }
+
+  createDiscoveryEntry(canonicalDirectory, requestedDirectory) {
+    const controller = new AbortController();
+    const entry = {
+      promise: null,
+      controller,
+      consumers: 0,
+      settled: false,
+      abortScheduled: false,
+      abortTimer: undefined,
+      timer: undefined,
+    };
+
+    this.inFlightContexts.add(canonicalDirectory);
+    entry.promise = this.discover(canonicalDirectory, requestedDirectory, controller.signal)
+      .finally(() => {
+        entry.settled = true;
+        if (entry.timer !== undefined) {
+          this.clearTimer(entry.timer);
+          entry.timer = undefined;
+        }
+        if (entry.abortTimer !== undefined) {
+          this.clearTimer(entry.abortTimer);
+          entry.abortTimer = undefined;
+        }
+        this.inFlightContexts.delete(canonicalDirectory);
+        if (this.inFlightAliases.get(canonicalDirectory) === entry) {
+          this.inFlightAliases.delete(canonicalDirectory);
+        }
+      });
+    this.inFlightAliases.set(canonicalDirectory, entry);
+    entry.timer = this.setTimer(() => {
+      if (!entry.settled && !controller.signal.aborted) {
+        controller.abort(new GitExecutionCancelledError(
+          'Git context discovery timed out',
+          { reason: 'timeout', timeoutMs: this.discoveryTimeoutMs },
+        ));
+      }
+    }, this.discoveryTimeoutMs);
+    entry.timer?.unref?.();
+    return entry;
+  }
+
+  releaseDiscoveryConsumer(entry) {
+    entry.consumers = Math.max(0, entry.consumers - 1);
+    if (entry.consumers !== 0 || entry.settled || entry.abortScheduled) {
+      return;
+    }
+
+    // Let resolve() calls already in their asynchronous path acquire the
+    // shared entry before canceling its process. This preserves the shared
+    // waiter contract without leaving an uncancelable race window.
+    entry.abortScheduled = true;
+    entry.abortTimer = this.setTimer(() => {
+      entry.abortTimer = undefined;
+      entry.abortScheduled = false;
+      if (entry.consumers === 0 && !entry.settled && !entry.controller.signal.aborted) {
+        entry.controller.abort(new GitExecutionCancelledError(
+          'Git context discovery no longer has consumers',
+          { reason: 'no-consumers' },
+        ));
+      }
+    }, 0);
+    entry.abortTimer?.unref?.();
+  }
+
+  waitForDiscovery(entry, signal) {
+    if (signal?.aborted) {
+      return Promise.reject(abortError(signal));
+    }
+
+    entry.consumers += 1;
+    if (entry.abortTimer !== undefined) {
+      this.clearTimer(entry.abortTimer);
+      entry.abortTimer = undefined;
+      entry.abortScheduled = false;
+    }
+    if (!signal) {
+      return entry.promise.finally(() => this.releaseDiscoveryConsumer(entry));
+    }
+
+    return new Promise((resolve, reject) => {
+      let released = false;
+      const release = () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        signal.removeEventListener('abort', onAbort);
+        this.releaseDiscoveryConsumer(entry);
+      };
+      const onAbort = () => {
+        release();
+        reject(abortError(signal));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      entry.promise.then(
+        (value) => {
+          release();
+          resolve(value);
+        },
+        (error) => {
+          release();
+          reject(error);
+        },
+      );
+    });
   }
 
   resolve(directory, options = {}) {
@@ -402,22 +591,26 @@ export class GitContextResolver {
       return Promise.reject(abortError(options.signal));
     }
 
-    const resolveExistingDirectory = () => this.canonicalize(requestedDirectory).catch((error) => {
+    const resolveExistingDirectory = async () => this.canonicalize(requestedDirectory).catch((error) => {
       throw createDiscoveryError(error, requestedDirectory);
-    }).then((canonicalDirectory) => {
+    }).then(async (canonicalDirectory) => {
       if (options.signal?.aborted) {
         throw abortError(options.signal);
       }
-      const cached = this.aliases.get(canonicalDirectory);
-      if (cached) {
-        this.aliases.delete(canonicalDirectory);
-        this.aliases.set(canonicalDirectory, cached);
-        return cached;
+      const cachedEntry = this.aliases.get(canonicalDirectory);
+      if (cachedEntry) {
+        const fingerprint = await this.getPathFingerprint(cachedEntry.context).catch(() => null);
+        if (fingerprint !== null && fingerprint === cachedEntry.fingerprint) {
+          this.aliases.delete(canonicalDirectory);
+          this.aliases.set(canonicalDirectory, cachedEntry);
+          return cachedEntry.context;
+        }
+        this.forgetContext(cachedEntry.context);
       }
 
       const inFlight = this.inFlightAliases.get(canonicalDirectory);
       if (inFlight) {
-        return raceAbort(inFlight, options.signal);
+        return this.waitForDiscovery(inFlight, options.signal);
       }
       if (this.inFlightAliases.size >= this.maxInFlightAliases) {
         throw new GitExecutionOverloadedError(
@@ -432,18 +625,8 @@ export class GitContextResolver {
         );
       }
 
-      this.inFlightContexts.add(canonicalDirectory);
-      // Discovery is shared across waiters; cancellation is applied by each
-      // caller's race below instead of cancelling the shared queue task.
-      const discovery = this.discover(canonicalDirectory, requestedDirectory)
-        .finally(() => {
-          this.inFlightContexts.delete(canonicalDirectory);
-          if (this.inFlightAliases.get(canonicalDirectory) === discovery) {
-            this.inFlightAliases.delete(canonicalDirectory);
-          }
-        });
-      this.inFlightAliases.set(canonicalDirectory, discovery);
-      return raceAbort(discovery, options.signal);
+      const discovery = this.createDiscoveryEntry(canonicalDirectory, requestedDirectory);
+      return this.waitForDiscovery(discovery, options.signal);
     });
 
     return this.pathExists(requestedDirectory).then((exists) => {
@@ -468,6 +651,7 @@ export class GitContextResolver {
         ...discovery,
         concurrency: this.discoveryConcurrency,
         maxPending: this.maxPendingDiscoveries,
+        timeoutMs: this.discoveryTimeoutMs,
       },
     };
   }

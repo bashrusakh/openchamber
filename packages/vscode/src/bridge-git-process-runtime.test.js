@@ -75,4 +75,32 @@ describe('VS Code Git process runtime executable selection', () => {
       options: { cwd: '/repo' },
     });
   });
+
+  it('kills an active process on abort and settles only after child exit', async () => {
+    const childProcess = new EventEmitter();
+    childProcess.stdout = new EventEmitter();
+    childProcess.stderr = new EventEmitter();
+    childProcess.kill = mock();
+    spawn.mockImplementationOnce(() => childProcess);
+
+    const controller = new AbortController();
+    const runtime = createGitProcessRuntime();
+    const pending = runtime.execGit(['status'], '/repo', { signal: controller.signal });
+    for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+
+    controller.abort('cancelled by test');
+    expect(childProcess.kill).toHaveBeenCalledWith('SIGKILL');
+
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    childProcess.emit('close', null);
+    await expect(pending).resolves.toMatchObject({ exitCode: 1 });
+    childProcess.emit('error', new Error('late child error'));
+    expect(childProcess.kill).toHaveBeenCalledTimes(1);
+  });
 });
