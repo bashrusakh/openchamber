@@ -84,8 +84,10 @@ const fallbackContext = (directory: string): GitExecutionContext => ({
 export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = {}) => {
   const coordinator = options.coordinator || createGitExecutionCoordinator();
   const resolver = options.resolver || createGitContextResolver({
-    runGit: async (cwd, args) => {
-      const result = await runWithGitExecutionScope(true, () => execGit(args, cwd));
+    runGit: async (cwd, args, options = {}) => {
+      const result = await runWithGitExecutionScope(true, () => execGit(args, cwd, {
+        signal: options.signal,
+      }));
       return {
         success: result.exitCode === 0,
         stdout: result.stdout,
@@ -142,7 +144,7 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
 
   const runStatus = async <T, R = T>(
     directory: string,
-    task: (shape: GitStatusShape) => Promise<T> | T,
+    task: (shape: GitStatusShape, signal?: AbortSignal) => Promise<T> | T,
     options: {
       shape?: GitStatusShape;
       signal?: AbortSignal;
@@ -158,13 +160,13 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
       if (!isGitDiscoveryExecutableUnavailable(error)) {
         throw error;
       }
-      const value = await runWithGitExecutionScope(true, () => task(requestedShape));
+      const value = await runWithGitExecutionScope(true, () => task(requestedShape, options.signal));
       return typeof options.projectResult === 'function'
         ? options.projectResult(value, requestedShape, requestedShape)
         : value as R;
     }
     if (!context.isRepository) {
-      const value = await runWithGitExecutionScope(true, () => task(requestedShape));
+      const value = await runWithGitExecutionScope(true, () => task(requestedShape, options.signal));
       return typeof options.projectResult === 'function'
         ? options.projectResult(value, requestedShape, requestedShape)
         : value as R;
@@ -176,7 +178,7 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
       queueTimeoutMs: options.queueTimeoutMs,
       projectResult: options.projectResult,
       label: `status:${requestedShape}`,
-    }, (sourceShape) => runWithGitExecutionScope(true, () => task(sourceShape)));
+    }, (sourceShape, sourceSignal) => runWithGitExecutionScope(true, () => task(sourceShape, sourceSignal)));
   };
 
   const runDirectoryFallbackRead = <T>(directory: string, task: () => Promise<T> | T): Promise<T> => (

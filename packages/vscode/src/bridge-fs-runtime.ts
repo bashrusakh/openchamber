@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { BridgeResponse } from './bridge';
+import type { GitProcessExecutionOptions } from './bridge-git-process-runtime';
 import { runWithGitExecutionScope } from './git-execution-scope';
 import { parseGitCheckIgnoreResult } from './bridge-fs-helpers-runtime';
 
@@ -119,7 +120,11 @@ type FsDeps = {
   resolveUserPath: (value: string, baseDirectory: string) => string;
   listDirectoryEntries: (directoryPath: string) => Promise<DirectoryEntry[]>;
   normalizeFsPath: (value: string) => string;
-  execGit: (args: string[], cwd: string) => Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }>;
+  execGit: (
+    args: string[],
+    cwd: string,
+    options?: GitProcessExecutionOptions,
+  ) => Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }>;
   searchDirectory: (
     directory: string,
     query: string,
@@ -148,8 +153,8 @@ const runGitCheckIgnore = async (
     ? { signal: controller.signal, queueTimeoutMs: GIT_CHECK_IGNORE_TIMEOUT_MS }
     : undefined;
   const read = () => runGitRead
-    ? runGitRead(cwd, () => execGit(args, cwd), readOptions)
-    : runWithGitExecutionScope(true, () => execGit(args, cwd));
+    ? runGitRead(cwd, () => execGit(args, cwd, { signal: readOptions?.signal }), readOptions)
+    : runWithGitExecutionScope(true, () => execGit(args, cwd, { signal: readOptions?.signal }));
   if (GIT_CHECK_IGNORE_TIMEOUT_MS <= 0) {
     return read();
   }
@@ -243,7 +248,7 @@ export async function handleFsBridgeMessage(
         ignoredNames = parseGitCheckIgnoreResult(
           await runGitCheckIgnore(
             deps.execGit,
-            ['check-ignore', '--', ...pathsToCheck],
+            ['check-ignore', '-z', '--', ...pathsToCheck],
             normalized,
             deps.runGitRead,
           ),

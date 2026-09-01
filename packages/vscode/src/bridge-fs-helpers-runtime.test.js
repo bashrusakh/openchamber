@@ -40,6 +40,16 @@ describe('filesystem Gitignore handling', () => {
     }, '/not-a-repo')).toEqual(new Set());
   });
 
+  it('preserves spaces and embedded newlines in NUL-delimited output', () => {
+    const ignoredNames = [' leading space', 'trailing space ', 'line\nbreak'];
+
+    expect(parseGitCheckIgnoreResult({
+      stdout: `${ignoredNames.join('\0')}\0`,
+      stderr: '',
+      exitCode: 0,
+    }, '/repo')).toEqual(new Set(ignoredNames));
+  });
+
   it('keeps authoritative parser failures observable', () => {
     expect(() => parseGitCheckIgnoreResult({
       stdout: '',
@@ -70,7 +80,7 @@ describe('filesystem Gitignore handling', () => {
       { fsPath: '/repo/visible.ts' },
     ]);
     const runGitRead = mock(async () => ({
-      stdout: 'ignored.ts\n',
+      stdout: 'ignored.ts\0',
       stderr: '',
       exitCode: 0,
     }));

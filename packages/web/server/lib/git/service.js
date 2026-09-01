@@ -239,7 +239,7 @@ const resolveGitBinary = () => {
   return resolvedGitBinary;
 };
 
-const getGitBinary = () => resolveGitBinary();
+export const getGitBinary = () => resolveGitBinary();
 
 /**
  * Escape an SSH key path for use in core.sshCommand.
@@ -257,7 +257,7 @@ function escapeSshKeyPath(sshKeyPath) {
   // Validate: reject paths with characters that could enable injection
   // Allow only alphanumeric, path separators, dots, dashes, underscores, spaces, and colons (for Windows drives)
   // Note: backslash is not in this list since we've already normalized Windows paths
-  const dangerousChars = /[`$!"';&|<>(){}[\]*?#~]/;
+  const dangerousChars = /[\u0000\r\n`$!"';&|<>(){}[\]*?#~%^]/;
   if (dangerousChars.test(normalizedPath)) {
     throw new Error(`SSH key path contains invalid characters: ${sshKeyPath}`);
   }
@@ -284,7 +284,7 @@ function escapeSshKeyPath(sshKeyPath) {
 /**
  * Build the SSH command string for git config
  */
-function buildSshCommand(sshKeyPath) {
+export function buildSshCommand(sshKeyPath) {
   const escapedPath = escapeSshKeyPath(sshKeyPath);
   return `ssh -i ${escapedPath} -o IdentitiesOnly=yes`;
 }
@@ -372,6 +372,7 @@ export const createGit = async (
     allowUnsafeCredentialHelper = false,
     stallTimeoutMs = 0,
     envOverrides = undefined,
+    signal = undefined,
   } = {},
 ) => {
   const env = await buildGitEnv(envOverrides);
@@ -398,14 +399,18 @@ export const createGit = async (
   if (typeof baseDir !== 'string' || !baseDir.trim()) {
     throw new Error('Git directory is required');
   }
-  return createSimpleGit({
+  const gitOptions = {
     baseDir,
     env,
     spawnOptions,
     binary,
     unsafe,
     ...(timeout ? { timeout } : {}),
-  });
+  };
+  if (signal) {
+    gitOptions.abort = signal;
+  }
+  return createSimpleGit(gitOptions);
 };
 
 // Global config reads do not need a repository; use the home directory as a
@@ -1057,7 +1062,7 @@ const isMissingDirectoryError = (error) => {
   return /directory that does not exist|does not exist|no such file or directory/i.test(text);
 };
 
-const runGitCommand = async (cwd, args, { timeoutMs = 0, envOverrides = undefined } = {}) => {
+const runGitCommand = async (cwd, args, { timeoutMs = 0, envOverrides = undefined, signal = undefined } = {}) => {
   try {
     const { stdout, stderr } = await execFileAsync(getGitBinary(), args, {
       cwd,
@@ -1067,6 +1072,7 @@ const runGitCommand = async (cwd, args, { timeoutMs = 0, envOverrides = undefine
       // Only short probes pass a timeout; commands that legitimately run long
       // (a fetch into a temporary clone) keep the default of none.
       ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: 'SIGKILL' } : {}),
+      ...(signal ? { signal } : {}),
     });
     return {
       success: true,
@@ -2219,18 +2225,18 @@ export const unsupportedRepositoryRootReason = (repoRoot, home = os.homedir()) =
 
 const warnedUnsupportedRoots = new Set();
 
-export async function isGitRepository(directory) {
+export async function isGitRepository(directory, { signal = undefined } = {}) {
   const directoryPath = normalizeDirectoryPath(directory);
   if (!directoryPath || !fs.existsSync(directoryPath)) {
     return false;
   }
 
-  const result = await runGitCommand(directoryPath, ['rev-parse', '--git-dir'], { timeoutMs: GIT_PROBE_TIMEOUT_MS });
+  const result = await runGitCommand(directoryPath, ['rev-parse', '--git-dir'], { timeoutMs: GIT_PROBE_TIMEOUT_MS, signal });
   if (!result.success) return false;
 
   // `--show-toplevel` has no answer inside a bare repository or a .git
   // directory; those keep the previous answer rather than being rejected.
-  const topLevel = await runGitCommand(directoryPath, ['rev-parse', '--show-toplevel'], { timeoutMs: GIT_PROBE_TIMEOUT_MS });
+  const topLevel = await runGitCommand(directoryPath, ['rev-parse', '--show-toplevel'], { timeoutMs: GIT_PROBE_TIMEOUT_MS, signal });
   if (!topLevel.success) return true;
   const repoRoot = topLevel.stdout.trim();
   const reason = unsupportedRepositoryRootReason(repoRoot);
@@ -2521,8 +2527,12 @@ export async function getStatus(directory, options = {}) {
   // callers it answers, at the widest mode any of them asked for.
   return statusRefresh.run(
     normalizedDirectory,
-    { lightMode },
-    (requests) => readStatus(normalizedDirectory, requests.every((request) => request.lightMode)),
+    { lightMode, signal: options.signal },
+    (requests) => readStatus(
+      normalizedDirectory,
+      requests.every((request) => request.lightMode),
+      requests.find((request) => request.signal)?.signal,
+    ),
   );
 }
 
@@ -2559,16 +2569,17 @@ export async function isAncestorOfHead(directory, sha) {
   return result.success;
 }
 
-async function readStatus(normalizedDirectory, lightMode) {
+async function readStatus(normalizedDirectory, lightMode, signal) {
   try {
     // Prefer an explicit non-repo check before simple-git status so a missing
     // repository never depends on process.cwd() or an opaque GitError shape.
-    if (!(await isGitRepository(normalizedDirectory))) {
+    if (!(await isGitRepository(normalizedDirectory, { signal }))) {
       throw new Error('fatal: not a git repository (or any of the parent directories): .git');
     }
 
     const { directoryPath, repoRoot, git } = await createRepositoryGitContext(normalizedDirectory, {
       stallTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS,
+      signal,
     });
 
     // `-unormal` lists a directory with no tracked files as one `dir/` entry
@@ -4210,19 +4221,15 @@ async function getRemoteDefaultBranches(git) {
     const missing = remotes.filter((remote) => remote?.name && !defaults[remote.name]);
     if (missing.length === 0) return defaults;
 
-    const resolved = await Promise.all(missing.map(async (remote) => {
+    for (const remote of missing) {
       try {
         const output = await git.raw(['ls-remote', '--symref', remote.name, 'HEAD']);
         const match = String(output || '').match(/^ref:\s+refs\/heads\/(.+?)\s+HEAD$/m);
-        return match ? [remote.name, match[1]] : null;
+        if (match) defaults[remote.name] = match[1];
       } catch {
         // Unreachable or refusing: no answer is better than a guessed one.
-        return null;
+        continue;
       }
-    }));
-
-    for (const entry of resolved) {
-      if (entry) defaults[entry[0]] = entry[1];
     }
   } catch {
     // Remote list unavailable; the local symrefs are still valid.
@@ -4243,7 +4250,7 @@ async function filterActiveRemoteBranches(git, remoteBranches) {
     // against the local remote-tracking refs.
     const unreachableRemotes = new Set();
 
-    await Promise.all(remotes.map(async (remote) => {
+    for (const remote of remotes) {
       try {
         const lsRemoteResult = await git.raw(['ls-remote', '--heads', remote.name]);
         const actualRemoteBranches = new Set();
@@ -4258,7 +4265,7 @@ async function filterActiveRemoteBranches(git, remoteBranches) {
       } catch {
         unreachableRemotes.add(remote.name);
       }
-    }));
+    }
 
     const activeBranches = remoteBranches.filter(remoteBranch => {
       const match = remoteBranch.match(/^remotes\/[^\/]+\/(.+)$/);
