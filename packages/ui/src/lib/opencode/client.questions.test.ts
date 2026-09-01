@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 
 type QuestionFixture = {
   id: string;
@@ -58,6 +58,7 @@ const makeV1ListResult = (items: QuestionFixture[]) => ({
 
 type V2Response =
   | { kind: 'ok'; items: QuestionFixture[] | unknown[] }
+  | { kind: 'v2-404' }
   | { kind: 'server-error' }
   | { kind: 'throw' };
 
@@ -80,6 +81,8 @@ const questionV2ListMock = mock((args?: { location?: { directory?: string } }) =
         // violates the QuestionFixture contract; the parser under test must
         // reject it.
         resolve(makeV2SuccessResult(r.items as QuestionFixture[]));
+      } else if (r.kind === 'v2-404') {
+        resolve(makeV2ErrorResult(404));
       } else {
         resolve(makeV2ErrorResult(500));
       }
@@ -137,7 +140,13 @@ mock.module('@/lib/startupTrace', () => ({
   markStartupTrace: mock(() => undefined),
 }));
 
-const { opencodeClient } = await import(`./client?cache-test-questions=${Date.now()}`);
+const { opencodeClient, resetQuestionsV2FallbackWarningsForTests } = await import(`./client?cache-test-questions=${Date.now()}`);
+
+const consoleWarnCalls: string[] = [];
+const consoleWarnSpy = mock((message: string) => {
+  consoleWarnCalls.push(message);
+});
+const originalConsoleWarn = console.warn;
 
 const resolveV2Calls = (responses: V2Response[]) => {
   queueMicrotask(() => {
@@ -153,6 +162,13 @@ beforeEach(() => {
   v2ListArgs.length = 0;
   v1ListArgs.length = 0;
   v1ListResult = makeV1ListResult([]);
+  resetQuestionsV2FallbackWarningsForTests();
+  consoleWarnCalls.length = 0;
+  console.warn = consoleWarnSpy;
+});
+
+afterEach(() => {
+  console.warn = originalConsoleWarn;
 });
 
 describe('opencodeClient.listPendingQuestions (V2 read adoption)', () => {
@@ -192,6 +208,40 @@ describe('opencodeClient.listPendingQuestions (V2 read adoption)', () => {
 
     expect(result).toEqual([v1Question]);
     expect(v1ListArgs).toEqual([undefined, { directory: '/repo' }]);
+  });
+
+  test('falls back to V1 on V2 404 route-miss without console.warn (pre-V2 compat path)', async () => {
+    const v1Question = makeQuestion('v1notfound');
+    v1ListResult = makeV1ListResult([v1Question]);
+
+    const promise = opencodeClient.listPendingQuestions({ directories: ['/repo'] });
+    resolveV2Calls([
+      { kind: 'v2-404' },
+      { kind: 'v2-404' },
+    ]);
+    const result = await promise;
+
+    expect(result).toEqual([v1Question]);
+    expect(v1ListArgs).toEqual([undefined, { directory: '/repo' }]);
+    expect(consoleWarnCalls).toEqual([]);
+  });
+
+  test('falls back to V1 on V2 network throw with a single stable-marker warn', async () => {
+    const v1Question = makeQuestion('v1net2');
+    v1ListResult = makeV1ListResult([v1Question]);
+
+    const promise = opencodeClient.listPendingQuestions({ directories: ['/repo'] });
+    resolveV2Calls([
+      { kind: 'throw' },
+      { kind: 'throw' },
+    ]);
+    const result = await promise;
+
+    expect(result).toEqual([v1Question]);
+    expect(consoleWarnCalls.length).toBe(1);
+    expect(consoleWarnCalls[0]).toContain('[questions-v2]');
+    expect(consoleWarnCalls[0]).toContain('network-error');
+    expect(consoleWarnCalls[0]).toContain('falling back to V1');
   });
 
   test('falls back to V1 when the V2 SDK call throws (network failure)', async () => {
@@ -260,6 +310,29 @@ describe('opencodeClient.listPendingQuestions (V2 read adoption)', () => {
     expect(result).toEqual([v1Question, scopedQuestion]);
     expect(v1ListArgs).toEqual([undefined]);
     expect(v2ListArgs).toEqual([undefined, { location: { directory: '/repo' } }]);
+  });
+
+  test('falls back to V1 with a warn when a 200 V2 payload is malformed (contract drift)', async () => {
+    // SAFETY: the malformed-payload test intentionally feeds a payload that
+    // violates the V2 contract; the reader under test must reject it.
+    const v1Question = makeQuestion('v1drift');
+    v1ListResult = makeV1ListResult([v1Question]);
+
+    const promise = opencodeClient.listPendingQuestions({ directories: ['/repo'] });
+    resolveV2Calls([
+      // Same-version contract drift: the 200 envelope is valid, but the item
+      // itself is not — `questions` carries a string instead of the option
+      // array. Typed as `unknown` at the mock boundary on purpose.
+      { kind: 'ok', items: [{ ...makeQuestion('q-drift'), questions: 'missing' }] },
+      { kind: 'ok', items: [] },
+    ]);
+    const result = await promise;
+
+    expect(result).toEqual([v1Question]);
+    expect(v1ListArgs).toEqual([undefined]);
+    expect(consoleWarnCalls.length).toBe(1);
+    expect(consoleWarnCalls[0]).toContain('[questions-v2]');
+    expect(consoleWarnCalls[0]).toContain('malformed-payload');
   });
 
   test('keeps the V2 unscoped + per-directory call pattern when V2 succeeds empty', async () => {
