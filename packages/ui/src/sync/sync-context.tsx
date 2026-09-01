@@ -1883,11 +1883,11 @@ export function handleEvent(
     case "permission.replied":
       cloneField("permission", (value) => ({ ...value }))
       break
+    // V2 question events mutate the same `question` slice as their V1
+    // counterparts; reuse the single targeted clone.
     case "question.asked":
     case "question.replied":
     case "question.rejected":
-    // V2 question events mutate the same `question` slice as their V1
-    // counterparts; reuse the single targeted clone.
     case "question.v2.asked":
     case "question.v2.replied":
     case "question.v2.rejected":
