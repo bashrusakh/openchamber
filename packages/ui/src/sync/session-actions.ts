@@ -742,8 +742,32 @@ function resolveDirectoryForBlockingRequest(
 
 export function isQuestionRequestNotFoundError(error: unknown): boolean {
   if (error && typeof error === "object") {
+    // A classified V2 mutation error (v2QuestionMutationError) is never a
+    // not-found signal: the classifier already decided the kind, and only the
+    // non-not-admitted kinds (rejected/ambiguous/server-error) reach the throw
+    // path. Excluding it keeps the stale-recovery cleanup from running on a
+    // server rejection the classifier proved is not a missing question.
+    // SAFETY: the predicate accepts any thrown value by design; reading the
+    // optional kind/status/tag fields off the object is safe.
+    if ((error as { v2QuestionMutationKind?: unknown }).v2QuestionMutationKind !== undefined) {
+      return false
+    }
+    // SAFETY: same optional-field read as above.
     const status = (error as { status?: unknown }).status
-    if (status === 404) return true
+    if (status === 404) {
+      // A structured 404 with an unrelated `_tag` is a parsed rejection, not
+      // a not-found signal (see classifyV2QuestionMutation for the 404 split).
+      // Errors reaching this predicate are either classified V2 errors (already
+      // excluded above) or plain V1-path `Error` wrappers that never carry a
+      // `_tag` — so `tag === undefined` means "no structured discriminant on
+      // the thrown error" (the V1 wrapper case), not "unparseable response
+      // body".
+      // SAFETY: same optional-field read as above.
+      const tag = (error as { _tag?: unknown })._tag
+      if (tag === "QuestionNotFoundError" || tag === "SessionNotFoundError") return true
+      if (tag === undefined) return true
+      return false
+    }
   }
 
   let message = ""
@@ -898,8 +922,8 @@ function getRequestReplyClient(
  */
 type V2QuestionMutationResult =
   | { kind: "admitted" } // 204: server resolved the request
-  | { kind: "not-admitted" } // server answered 404: no V2 handler saw this request (not-found question, or pre-V2 route-miss — see classifyV2QuestionMutation)
-  | { kind: "rejected"; status: number } // 400/401 (or other parsed 4xx): server saw and turned the request down — not a compatibility signal
+  | { kind: "not-admitted" } // server answered 404 with provable non-admission evidence: a structured QuestionNotFoundError/SessionNotFoundError body, or an unparseable (pre-V2 route-miss) body — see classifyV2QuestionMutation
+  | { kind: "rejected"; status: number } // 400/401 (or other parsed 4xx, including a structured 404 with an unrelated body): server saw and turned the request down — not a compatibility signal
   | { kind: "ambiguous" } // no response evidence: fetch throw, abort, response === undefined
   | { kind: "server-error"; status: number } // 5xx: server answered, but admission is unknowable (commit-before-fail window) — treated like ambiguous for safety
 
@@ -931,15 +955,44 @@ function classifyV2QuestionMutation(result: V2QuestionSdkResult | null): V2Quest
 
   const status = result.response.status
   if (status === 404) {
-    // The 404 split, documented for the compatibility contract: a structured
-    // `_tag` body (QuestionNotFoundError/SessionNotFoundError) proves a V2
-    // handler answered — the request provably did not mutate the question. An
-    // unparseable/HTML body means the 404 came from something that is not the
-    // V2 handler: an unknown route on a pre-V2 server, where the request could
-    // not have been processed by a handler that does not exist. Both cases are
-    // provably not admitted, so both justify the V1 fallback; the fallback
-    // preserves the OPE-236 stale-recovery semantics where the V1 call
-    // re-answers not-found and clears the stale local entry.
+    // The 404 split, documented for the compatibility contract: a 404 is
+    // `not-admitted` (and may trigger the V1 fallback) ONLY when the body
+    // provably shows the request never reached a V2 handler that could have
+    // mutated the question:
+    //   - a structured body carrying the `_tag` discriminant
+    //     "QuestionNotFoundError" or "SessionNotFoundError" — a V2 handler
+    //     answered and provably did not mutate the request; or
+    //   - an unparseable body (the SDK's `error` is the raw text string when
+    //     JSON.parse fails — e.g. an HTML route-miss page from a pre-V2 server
+    //     that has no V2 route at all, so no handler could have processed the
+    //     request).
+    // Any OTHER structured 404 (a JSON object body with a different `_tag`,
+    // or with no not-found shape) is a parsed 4xx the server answered: a V2
+    // handler may have rejected the request for an unrelated reason, so it is
+    // NOT provably not-admitted and must not fall back — classify it as
+    // `rejected` and surface the tagged error instead. The fallback preserves
+    // the OPE-236 stale-recovery semantics where the V1 call re-answers
+    // not-found and clears the stale local entry.
+    const body = result.error
+    if (body instanceof Object) {
+      // SAFETY: the SDK returns `jsonError ?? textError` — a JSON-parsed body
+      // is an object, an unparseable body is the raw text string; reading the
+      // optional `_tag` discriminant off the parsed object is safe.
+      const tag = (body as { _tag?: unknown })._tag
+      if (tag === "QuestionNotFoundError" || tag === "SessionNotFoundError") {
+        return { kind: "not-admitted" }
+      }
+      // Structured 404 with an unrelated/absent not-found tag: the server
+      // parsed and answered the request — admission was considered and denied
+      // for an unrelated reason. Not a compatibility signal.
+      return { kind: "rejected", status }
+    }
+    // Not a JSON-parsed object: the SDK's `error` is the raw text string when
+    // JSON.parse fails (e.g. an HTML route-miss page from a pre-V2 server that
+    // has no V2 route at all, so no handler could have processed the request).
+    // An empty body cannot reach this branch — the SDK's error interceptors
+    // coerce falsy values to `{}`, so it classifies as `rejected` above
+    // (conservative: no fallback, but a 404 never admits a mutation).
     return { kind: "not-admitted" }
   }
   if (status !== undefined && status >= 400 && status < 500) {
@@ -968,10 +1021,11 @@ function classifyV2QuestionMutation(result: V2QuestionSdkResult | null): V2Quest
  *
  * Returns the classified V2 outcome instead of a boolean: see
  * {@link classifyV2QuestionMutation} for the kind table. Only
- * `not-admitted` (structured question 404, or an unparseable-body 404 from a
- * pre-V2 server's missing route) lets the caller fall back to the unchanged
- * V1 call; `rejected`/`ambiguous`/`server-error` surface as tagged errors
- * without a V1 resend, so an admitted mutation is never replayed. This mirrors
+ * `not-admitted` (a structured QuestionNotFoundError/SessionNotFoundError 404,
+ * or an unparseable-body 404 from a pre-V2 server's missing route) lets the
+ * caller fall back to the unchanged V1 call; `rejected`/`ambiguous`/
+ * `server-error` surface as tagged errors without a V1 resend, so an admitted
+ * mutation is never replayed. This mirrors
  * the permission V2 adoption (#1982) for the try-first direction; the removal
  * condition for this whole helper is the pre-V2 support decision (#3007
  * protocol detection follow-up).
