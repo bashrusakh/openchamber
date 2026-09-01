@@ -128,6 +128,24 @@ const parseQuestionV2Item = (item: QuestionV2Request): QuestionRequest | null =>
   return request;
 };
 
+/**
+ * Warn once per process per failure kind for V2 question-read fallbacks
+ * that are NOT the expected pre-V2 404 compat path, so a same-version
+ * upstream contract break cannot silently degrade question reads to V1
+ * forever (see {@link fetchPendingQuestionsV2} for the transition plan).
+ */
+const questionsV2WarnedKinds = new Set<'network-error' | 'server-error' | 'malformed-payload'>();
+const warnQuestionsV2FallbackOnce = (kind: 'network-error' | 'server-error' | 'malformed-payload', detail: string): void => {
+  if (questionsV2WarnedKinds.has(kind)) return;
+  questionsV2WarnedKinds.add(kind);
+  console.warn(`[questions-v2] ${kind}: ${detail}`);
+};
+
+/** Clear the once-per-process V2 fallback warnings between tests. */
+export const resetQuestionsV2FallbackWarningsForTests = (): void => {
+  questionsV2WarnedKinds.clear();
+};
+
 const isMissingDirectoryError = (error: unknown): boolean => {
   if (error instanceof FilesystemError) {
     return error.reason === "not-found" || error.reason === "not-directory";
@@ -1548,12 +1566,21 @@ class OpencodeService {
    * `question.request.list` (unscoped for global pending items, or scoped
    * via `location.directory`).
    *
-   * Returns the pending questions on success, or `null` on any failure
-   * (network error, 4xx/5xx response, missing/unexpected payload, or a
-   * pre-1.18 server without the V2 endpoint) so the caller can use the
-   * V1 `question.list` path unchanged. Each item is schema-validated
-   * before being accepted (see {@link parseQuestionV2Item}) — any
-   * malformed item fails the whole V2 attempt conservatively.
+   * Returns the pending questions on success, or `null` on failure so the
+   * caller can use the V1 `question.list` path unchanged. Each item is
+   * schema-validated before being accepted (see {@link parseQuestionV2Item})
+   * — any malformed item fails the whole V2 attempt conservatively.
+   *
+   * Failures other than a server-confirmed pre-V2 404 (network error, 5xx,
+   * malformed payload with a 200 status) are warned once per process per
+   * failure kind before the silent `null` fallback — read-only fallback is
+   * transitional, not a standing behavior.
+   *
+   * Removal condition: this V1 fallback is transitional. End-state is
+   * capability selection via runtime protocol detection (`openCodeProtocol`
+   * from `/health`, infra tracked in #3007, separate follow-up), or
+   * removal of the V1 path once the supported-runtime policy sets a
+   * minimum OpenCode version. Reference: #3259.
    */
   private async fetchPendingQuestionsV2(directory?: string): Promise<QuestionRequest[] | null> {
     try {
@@ -1562,20 +1589,51 @@ class OpencodeService {
       );
       // HeyApi `RequestResult` discriminates on `error`/`data`; the 200
       // payload nests the array under its own `data` field.
-      if (response.error !== undefined) return null;
+      if (response.error !== undefined) {
+        const status = response.response?.status;
+        // A server-confirmed 404 is the expected pre-V2 route-miss compat
+        // path — silent fallback. Any other failure (5xx, auth/contract
+        // drift) must not degrade to V1 invisibly, so warn (once per kind).
+        if (status === 404) return null;
+        warnQuestionsV2FallbackOnce(
+          status === undefined ? 'network-error' : 'server-error',
+          `question.request.list failed${status === undefined ? '' : ` (HTTP ${status})`}; falling back to V1 question.list`,
+        );
+        return null;
+      }
       const items = response.data?.data;
-      if (!Array.isArray(items)) return null;
+      if (!Array.isArray(items)) {
+        // Same-version contract drift: 200 status but a payload the typed
+        // SDK path no longer matches. Warn, then fall back to V1.
+        warnQuestionsV2FallbackOnce(
+          'malformed-payload',
+          'question.request.list returned a 200 payload that is not an item array; falling back to V1 question.list',
+        );
+        return null;
+      }
       const validated: QuestionRequest[] = [];
       for (const item of items) {
         const parsed = parseQuestionV2Item(item);
         // Malformed item: reject the whole V2 attempt conservatively — the
         // caller falls back to V1 instead of returning partial data.
-        if (!parsed) return null;
+        if (!parsed) {
+          warnQuestionsV2FallbackOnce(
+            'malformed-payload',
+            'question.request.list returned an item failing the V2 question schema; falling back to V1 question.list',
+          );
+          return null;
+        }
         validated.push(parsed);
       }
       return validated;
-    } catch {
-      // Network failure, pre-V2 server, or runtimeFetch throwing → fall back.
+    } catch (error) {
+      // Network failure or runtimeFetch throwing → fall back. Never the
+      // provably-pre-V2 404 path (that responds with an error result, not a
+      // throw), so surface it once per kind.
+      warnQuestionsV2FallbackOnce(
+        'network-error',
+        `question.request.list threw (${error instanceof Error ? error.message : 'unknown error'}); falling back to V1 question.list`,
+      );
       return null;
     }
   }
