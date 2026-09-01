@@ -388,6 +388,26 @@ const readSettingsFromDiskStrict = (...args) => settingsRuntime.readSettingsFrom
 const writeSettingsToDisk = (...args) => settingsRuntime.writeSettingsToDisk(...args);
 const persistSettings = (...args) => settingsRuntime.persistSettings(...args);
 
+// Known project directories, MRU first (lastDirectory, then projects by
+// lastOpenedAt). Shared by the lifecycle warmup pass and the session-goal
+// restart scan so both derive the same directory set.
+const collectKnownDirectories = async () => {
+  const settings = await readSettingsFromDiskMigrated().catch(() => null);
+  if (!settings) return [];
+  const directories = [];
+  if (typeof settings.lastDirectory === 'string' && settings.lastDirectory) {
+    directories.push(settings.lastDirectory);
+  }
+  const projects = Array.isArray(settings.projects) ? [...settings.projects] : [];
+  projects.sort((a, b) => (b?.lastOpenedAt ?? 0) - (a?.lastOpenedAt ?? 0));
+  for (const project of projects) {
+    if (typeof project?.path === 'string' && project.path) {
+      directories.push(project.path);
+    }
+  }
+  return [...new Set(directories)];
+};
+
 const requestSecurityRuntime = createRequestSecurityRuntime({
   readSettingsFromDiskMigrated,
 });
@@ -1149,22 +1169,7 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
   // lazily on first request (seconds on large session stores), so the
   // lifecycle warms these right after readiness — before the UI's first
   // interactive request would otherwise pay that cost.
-  getWarmupDirectories: async () => {
-    const settings = await readSettingsFromDiskMigrated().catch(() => null);
-    if (!settings) return [];
-    const directories = [];
-    if (typeof settings.lastDirectory === 'string' && settings.lastDirectory) {
-      directories.push(settings.lastDirectory);
-    }
-    const projects = Array.isArray(settings.projects) ? [...settings.projects] : [];
-    projects.sort((a, b) => (b?.lastOpenedAt ?? 0) - (a?.lastOpenedAt ?? 0));
-    for (const project of projects) {
-      if (typeof project?.path === 'string' && project.path) {
-        directories.push(project.path);
-      }
-    }
-    return [...new Set(directories)];
-  },
+  getWarmupDirectories: collectKnownDirectories,
   // A managed restart can move OpenCode to a NEW port (the old one may stay
   // occupied if killProcessOnPort/waitForPortRelease didn't free it in time,
   // on any platform). Rebind the message-stream upstream readers to the current port
@@ -1974,6 +1979,19 @@ async function main(options = {}) {
     await scheduledTasksRuntime.start();
   } catch (error) {
     console.warn('[ScheduledTasks] Failed to start runtime:', error?.message || error);
+  }
+
+  // Deterministic restart recovery for persisted active goals: an already-idle
+  // session usually emits no SSE event after a restart, so a bounded one-shot
+  // scan over the known directories re-arms the loop (see runtime.recover).
+  // The scan mirrors the lifecycle warmup directories (MRU last, then
+  // projects) and is bounded per runtime; there is no permanent polling.
+  try {
+    await sessionGoalRuntime.start({
+      listDirectories: collectKnownDirectories,
+    });
+  } catch (error) {
+    console.warn('[session-goal] restart recovery failed:', error?.message || error);
   }
 
   // Only opens a relay control socket when the user opted in (config enabled).
