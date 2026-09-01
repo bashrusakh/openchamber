@@ -18,6 +18,7 @@ export const GIT_OPERATION_KIND = Object.freeze({
 export const GIT_READ_ONLY_ENV = Object.freeze({ GIT_OPTIONAL_LOCKS: '0' });
 
 const kinds = new Set(Object.values(GIT_OPERATION_KIND));
+const cloneLeaseEntries = new WeakMap();
 
 const DEFAULT_LIMITS = Object.freeze({
   globalConcurrency: 32,
@@ -205,6 +206,7 @@ export class GitExecutionCoordinator {
       activeReads: 0,
       activeNetwork: 0,
       generation: 0,
+      lastCommonMutationId: 0,
       lastUsed: nowValue(this.now),
     };
     this.contexts.set(commonId, state);
@@ -231,6 +233,7 @@ export class GitExecutionCoordinator {
       active: new Set(),
       pending: 0,
       generation: 0,
+      lastMutationId: 0,
       lastUsed: nowValue(this.now),
     };
     contextState.worktrees.set(worktreeId, state);
@@ -293,7 +296,7 @@ export class GitExecutionCoordinator {
   }
 
   entryCanStart(entry) {
-    if (this.activeEntries.size >= this.limits.globalConcurrency) {
+    if (this.activeEntries.size + this.cloneActive.size >= this.limits.globalConcurrency) {
       return false;
     }
     if (entry.network && this.activeNetwork >= this.limits.globalNetworkConcurrency) {
@@ -373,6 +376,17 @@ export class GitExecutionCoordinator {
     entry.worktreeState.generation += 1;
   }
 
+  recordMutationOrder(entry) {
+    if (isRead(entry.kind)) {
+      return;
+    }
+    if (isCommonBarrier(entry.kind)) {
+      entry.contextState.lastCommonMutationId = entry.id;
+      return;
+    }
+    entry.worktreeState.lastMutationId = entry.id;
+  }
+
   releaseMutationGeneration(entry) {
     if (isRead(entry.kind)) {
       return;
@@ -394,6 +408,7 @@ export class GitExecutionCoordinator {
     entry.worktreeState.active.add(entry);
     this.activeNetwork += entry.network ? 1 : 0;
     this.addMutationGeneration(entry);
+    this.recordMutationOrder(entry);
     const lease = {
       commonId: entry.context.commonId,
       worktreeId: entry.context.worktreeId,
@@ -530,6 +545,16 @@ export class GitExecutionCoordinator {
 
     if (options.lease) {
       const lease = options.lease;
+      if (lease.kind === 'clone-reservation') {
+        const entry = cloneLeaseEntries.get(lease);
+        if (!entry || !lease.active || !this.cloneActive.has(entry)) {
+          return Promise.reject(new GitExecutionReentrancyError(
+            'Git execution attempted an inactive clone lease re-entry',
+            { kind: options.kind, worktreeId: options.context.worktreeId },
+          ));
+        }
+        return Promise.resolve().then(() => task(lease));
+      }
       if (!lease.active || !compatibleLease(lease, options)) {
         return Promise.reject(new GitExecutionReentrancyError(
           'Git execution attempted incompatible lease re-entry',
@@ -552,6 +577,89 @@ export class GitExecutionCoordinator {
     return `${context.commonId}\0${context.worktreeId}\0${generation.common}\0${generation.worktree}`;
   }
 
+  latestMutationId(context) {
+    const contextState = this.contexts.get(context.commonId);
+    const worktreeState = contextState?.worktrees.get(context.worktreeId);
+    return Math.max(contextState?.lastCommonMutationId || 0, worktreeState?.lastMutationId || 0);
+  }
+
+  hasLaterPendingMutation(operationId, context) {
+    const statusOperation = {
+      context,
+      kind: GIT_OPERATION_KIND.READ,
+      targetWorktree: true,
+    };
+    return this.pending.some((entry) => entry.id > operationId
+      && !entry.cancelled
+      && !isRead(entry.kind)
+      && potentiallyConflicts(entry, statusOperation));
+  }
+
+  canReuseStatusSource(entry, baseKey, context) {
+    if (entry.context.commonId !== context.commonId || entry.context.worktreeId !== context.worktreeId) {
+      return false;
+    }
+    if (entry.sourceAbortRequested || entry.controller.signal.aborted) {
+      return false;
+    }
+    if (this.hasLaterPendingMutation(entry.operationId, context)) {
+      return false;
+    }
+    return entry.baseKey === baseKey || entry.operationId > this.latestMutationId(context);
+  }
+
+  finishStatusSource(key, entry) {
+    if (entry.sourceCompleted) {
+      return;
+    }
+    entry.sourceCompleted = true;
+    if (this.statusInFlight.get(key) === entry) {
+      this.statusInFlight.delete(key);
+    }
+  }
+
+  releaseStatusWaiter(entry, reason) {
+    entry.waiters = Math.max(0, entry.waiters - 1);
+    if (entry.waiters !== 0 || entry.sourceCompleted || entry.sourceAbortRequested) {
+      return;
+    }
+    entry.sourceAbortRequested = true;
+    entry.controller.abort(reason || 'Git status source is no longer needed');
+  }
+
+  waitForStatus(entry, projected, signal) {
+    entry.waiters += 1;
+    if (!signal) {
+      return projected.finally(() => this.releaseStatusWaiter(entry));
+    }
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (method, value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        this.releaseStatusWaiter(entry, signal.reason);
+        method(value);
+      };
+      const onAbort = () => finish(
+        reject,
+        cancellationError(signal, 'Git status waiter was cancelled'),
+      );
+
+      signal.addEventListener('abort', onAbort, { once: true });
+      projected.then(
+        (value) => finish(resolve, value),
+        (error) => finish(reject, error),
+      );
+      if (signal.aborted) {
+        onAbort();
+      }
+    });
+  }
+
   projectStatus(value, requestedShape, sourceShape, projectResult) {
     return typeof projectResult === 'function'
       ? projectResult(value, requestedShape, sourceShape)
@@ -569,10 +677,14 @@ export class GitExecutionCoordinator {
     } catch (error) {
       return Promise.reject(error);
     }
+    if (options.signal?.aborted) {
+      return Promise.reject(cancellationError(options.signal, 'Git status was cancelled before admission'));
+    }
     const requestedShape = options.shape === 'light' ? 'light' : 'full';
     const baseKey = this.statusBaseKey(options.context, generation);
     const sourceEntry = Array.from(this.statusInFlight.values()).find((entry) => (
-      entry.baseKey === baseKey && (entry.shape === 'full' || entry.shape === requestedShape)
+      (entry.shape === 'full' || entry.shape === requestedShape)
+      && this.canReuseStatusSource(entry, baseKey, options.context)
     ));
 
     const waitFor = sourceEntry || (() => {
@@ -580,11 +692,27 @@ export class GitExecutionCoordinator {
         return null;
       }
       const shape = requestedShape;
-      const key = `${baseKey}\0${shape}`;
+      const operationId = this.nextEntryId;
+      const key = `${baseKey}\0${shape}\0${operationId}`;
+      const controller = new AbortController();
       const entry = {
+        context: options.context,
         baseKey,
         shape,
+        operationId,
+        controller,
+        waiters: 0,
+        sourceAbortRequested: false,
+        sourceStarted: false,
+        sourceCompleted: false,
         promise: null,
+      };
+      const sourceTask = () => {
+        entry.sourceStarted = true;
+        entry.baseKey = this.statusBaseKey(options.context, this.getGeneration(options.context));
+        return Promise.resolve()
+          .then(() => task(shape, controller.signal))
+          .finally(() => this.finishStatusSource(key, entry));
       };
       entry.promise = this.run({
         context: options.context,
@@ -592,12 +720,21 @@ export class GitExecutionCoordinator {
         targetWorktree: true,
         label: options.label || `status:${shape}`,
         queueTimeoutMs: options.queueTimeoutMs,
-      }, () => task(shape)).finally(() => {
-        if (this.statusInFlight.get(key) === entry) {
-          this.statusInFlight.delete(key);
-        }
-      });
+        signal: controller.signal,
+      }, sourceTask);
       this.statusInFlight.set(key, entry);
+      entry.promise.then(
+        () => {
+          if (!entry.sourceStarted) {
+            this.finishStatusSource(key, entry);
+          }
+        },
+        () => {
+          if (!entry.sourceStarted) {
+            this.finishStatusSource(key, entry);
+          }
+        },
+      );
       return entry;
     })();
 
@@ -613,26 +750,7 @@ export class GitExecutionCoordinator {
       waitFor.shape,
       options.projectResult,
     ));
-    if (options.signal?.aborted) {
-      return Promise.reject(cancellationError(options.signal, 'Git status was cancelled before admission'));
-    }
-    if (!options.signal) {
-      return projected;
-    }
-    return new Promise((resolve, reject) => {
-      const onAbort = () => reject(cancellationError(options.signal, 'Git status waiter was cancelled'));
-      options.signal.addEventListener('abort', onAbort, { once: true });
-      projected.then(
-        (value) => {
-          options.signal.removeEventListener('abort', onAbort);
-          resolve(value);
-        },
-        (error) => {
-          options.signal.removeEventListener('abort', onAbort);
-          reject(error);
-        },
-      );
-    });
+    return this.waitForStatus(waitFor, projected, options.signal);
   }
 
   canonicalCloneKey(destination) {
@@ -669,6 +787,7 @@ export class GitExecutionCoordinator {
       },
     };
     entry.lease = lease;
+    cloneLeaseEntries.set(lease, entry);
     Promise.resolve()
       .then(() => entry.task(lease))
       .then(
@@ -678,6 +797,7 @@ export class GitExecutionCoordinator {
       .finally(() => {
         lease.releaseNetwork();
         lease.active = false;
+        cloneLeaseEntries.delete(lease);
         this.cloneActive.delete(entry);
         entry.destinationState.active = false;
         entry.destinationState.pending = Math.max(0, entry.destinationState.pending - 1);
@@ -750,7 +870,9 @@ export class GitExecutionCoordinator {
       entry.reject = reject;
       const onAbort = () => {
         if (entry.started) {
-          this.settleEntry(entry, reject, cancellationError(entry.signal, 'Git clone was cancelled'));
+          // The started task owns process termination and cleanup. Let its
+          // close lifecycle settle the clone so the reservation is not
+          // released before the destination cleanup completes.
           return;
         }
         this.removePendingClone(entry);

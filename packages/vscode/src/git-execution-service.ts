@@ -80,7 +80,7 @@ const worktreeMayUseNetwork = (input: core.CreateGitWorktreePayload | undefined)
 const createBackgroundScheduler = (
   runtime: typeof gitExecutionRuntime,
   outerContext: GitExecutionContext,
-  outerLease: GitExecutionLease,
+  outerNetwork: boolean,
 ): NonNullable<core.GitWorktreeExecutionOptions['scheduleBackground']> => (
   request,
   task,
@@ -92,7 +92,7 @@ const createBackgroundScheduler = (
       request.operation,
       outerContext,
       runTask,
-      { network: request.network, lease: outerLease },
+      { network: request.network || outerNetwork },
     );
   }
   return runtime.runInternalOperationWithCommonFallback(
@@ -147,11 +147,18 @@ export const createGitExecutionService = ({
     const shape = options?.mode === 'light' ? 'light' : 'full';
     return runtime.runStatus(
       directory,
-      (sourceShape) => coreImpl.getGitStatus(
+      (sourceShape, sourceSignal) => coreImpl.getGitStatus(
         directory,
-        sourceShape === 'light' ? { mode: 'light' } : undefined,
+        {
+          mode: sourceShape === 'light' ? 'light' : undefined,
+          signal: sourceSignal,
+        },
       ),
-      { shape },
+      {
+        shape,
+        signal: options?.signal,
+        queueTimeoutMs: options?.queueTimeoutMs,
+      },
     );
   };
 
@@ -181,17 +188,18 @@ export const createGitExecutionService = ({
   const previewWorktreeCreate: typeof core.previewWorktreeCreate = (directory, input) => (
     runCore('previewWorktreeCreate', directory, () => coreImpl.previewWorktreeCreate(directory, input))
   );
-  const createWorktree: typeof core.createWorktree = (directory, input) => (
-    runCore('createWorktree', directory, (lease) => coreImpl.createWorktree(directory, input, {
+  const createWorktree: typeof core.createWorktree = (directory, input) => {
+    const network = worktreeMayUseNetwork(input);
+    return runCore('createWorktree', directory, (lease) => coreImpl.createWorktree(directory, input, {
       scheduleBackground: createBackgroundScheduler(runtime, {
         isRepository: true,
         commonId: lease.commonId,
         worktreeId: lease.worktreeId,
-      }, lease),
+      }, network),
     }), {
-      network: worktreeMayUseNetwork(input),
-    })
-  );
+      network,
+    });
+  };
   const getWorktreeBootstrapStatus: typeof core.getWorktreeBootstrapStatus = (directory) => (
     coreImpl.getWorktreeBootstrapStatus(directory)
   );
@@ -201,11 +209,32 @@ export const createGitExecutionService = ({
   const getGitDiff: typeof core.getGitDiff = (directory, filePath, staged, contextLines) => (
     runCore('getGitDiff', directory, () => coreImpl.getGitDiff(directory, filePath, staged, contextLines))
   );
-  const getGitRangeDiff: typeof core.getGitRangeDiff = (directory, base, head, filePath, contextLines) => (
-    runCore('getGitRangeDiff', directory, () => coreImpl.getGitRangeDiff(directory, base, head, filePath, contextLines))
+  const getGitRangeDiff: typeof core.getGitRangeDiff = (
+    directory,
+    base,
+    head,
+    filePath,
+    contextLines,
+    options,
+  ) => (
+    runCore(
+      'getGitRangeDiff',
+      directory,
+      () => options === undefined
+        ? coreImpl.getGitRangeDiff(directory, base, head, filePath, contextLines)
+        : coreImpl.getGitRangeDiff(directory, base, head, filePath, contextLines, options),
+      options,
+    )
   );
-  const getGitRangeFiles: typeof core.getGitRangeFiles = (directory, base, head) => (
-    runCore('getGitRangeFiles', directory, () => coreImpl.getGitRangeFiles(directory, base, head))
+  const getGitRangeFiles: typeof core.getGitRangeFiles = (directory, base, head, options) => (
+    runCore(
+      'getGitRangeFiles',
+      directory,
+      () => options === undefined
+        ? coreImpl.getGitRangeFiles(directory, base, head)
+        : coreImpl.getGitRangeFiles(directory, base, head, options),
+      options,
+    )
   );
   const getGitFileDiff: typeof core.getGitFileDiff = (directory, filePath, staged) => (
     runCore('getGitFileDiff', directory, () => coreImpl.getGitFileDiff(directory, filePath, staged))

@@ -38,7 +38,16 @@ export function spawnOwnedProcess(binary: string, args: string[], options: Pick<
   const terminate = () => {
     if (termination) return termination;
     termination = (async () => {
-      if (!child.pid) { await closed; return; }
+      if (!child.pid) {
+        // Test doubles and a child that failed before receiving a pid may still
+        // expose a kill method; ask them to close so cancellation settles only
+        // after the same close event as a real child.
+        if (typeof child.kill === 'function') {
+          try { child.kill('SIGKILL'); } catch { /* already closed */ }
+        }
+        await closed;
+        return;
+      }
       if (process.platform === 'win32') {
         if (child.exitCode === null && child.signalCode === null) {
           // Keep the parent alive until Windows has enumerated its descendants.

@@ -3,8 +3,8 @@ import { describe, expect, it, mock } from 'bun:test';
 import { getGitExecutionEnv } from './git-execution-scope';
 
 const calls = [];
-const execGit = mock(async (args, cwd) => {
-  calls.push({ args, cwd, env: getGitExecutionEnv() });
+const execGit = mock(async (args, cwd, options = {}) => {
+  calls.push({ args, cwd, env: getGitExecutionEnv(), signal: options.signal });
   return {
     stdout: '',
     stderr: 'fatal: permission denied while reading repository metadata',
@@ -35,6 +35,7 @@ describe('VS Code Git execution runtime discovery', () => {
       args: ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'],
       cwd: directory,
       env: { GIT_OPTIONAL_LOCKS: '0' },
+      signal: expect.any(AbortSignal),
     }]);
   });
 

@@ -7,6 +7,10 @@ export type GitDiscoveryCommandResult = {
   message?: string;
 };
 
+export type GitDiscoveryRunOptions = {
+  signal?: AbortSignal;
+};
+
 export type GitRepositoryContext = {
   isRepository: true;
   requestedDirectory: string;
@@ -29,13 +33,16 @@ export type GitContextResolverOptions = {
   runGit: (
     cwd: string,
     args: string[],
+    options?: GitDiscoveryRunOptions,
   ) => Promise<GitDiscoveryCommandResult | string | Buffer>;
   realpath?: (value: string) => Promise<string>;
   pathExists?: (value: string) => Promise<boolean>;
+  getPathFingerprint?: (context: GitRepositoryContext) => Promise<string | null>;
   discoveryConcurrency?: number;
   maxPendingDiscoveries?: number;
   maxInFlightAliases?: number;
   maxInFlightContexts?: number;
+  discoveryTimeoutMs?: number;
 };
 
 export type GitContextResolveOptions = {
@@ -52,6 +59,7 @@ export type GitContextResolverStats = {
     pending: number;
     concurrency: number;
     maxPending: number;
+    timeoutMs: number;
   };
 };
 

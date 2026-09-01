@@ -8,6 +8,7 @@ export type {
   GitContextResolverOptions,
   GitContextResolverStats,
   GitDiscoveryCommandResult,
+  GitDiscoveryRunOptions,
   GitNonRepositoryContext,
   GitRepositoryContext,
   GitResolvedContext,

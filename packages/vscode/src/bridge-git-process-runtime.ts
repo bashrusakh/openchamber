@@ -14,6 +14,12 @@ export type GitProcessRuntimeOptions = {
   resolveGitExecutable?: () => Promise<string | undefined>;
 };
 
+export type GitProcessExecutionOptions = {
+  signal?: AbortSignal;
+  binary?: string;
+  timeoutMs?: number;
+};
+
 const isSocketPath = async (candidate: string): Promise<boolean> => {
   if (!candidate) {
     return false;
@@ -114,7 +120,7 @@ export const createGitProcessRuntime = ({
   const execGit = async (
     args: string[],
     cwd: string,
-    options: { binary?: string; timeoutMs?: number } = {},
+    options: GitProcessExecutionOptions = {},
   ): Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }> => {
     let env: NodeJS.ProcessEnv;
     let configuredPath: string | undefined;
@@ -127,6 +133,9 @@ export const createGitProcessRuntime = ({
       return processFailure(error);
     }
     if (shutdown) return { stdout: '', stderr: 'Git runtime is shutting down', exitCode: 1 };
+    if (options.signal?.aborted) {
+      return processFailure(options.signal.reason || new Error('Git process was cancelled'));
+    }
 
     const process = spawnOwnedProcess(options.binary?.trim() || configuredPath?.trim() || 'git', args, {
       cwd,
@@ -136,8 +145,16 @@ export const createGitProcessRuntime = ({
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let cancelled = false;
     let termination: Promise<void> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      if (termination) return;
+      cancelled = true;
+      termination = process.terminate();
+      void termination.catch(() => undefined);
+    };
+    options.signal?.addEventListener('abort', onAbort, { once: true });
     process.child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
     process.child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
     try {
@@ -159,6 +176,13 @@ export const createGitProcessRuntime = ({
           exitCode: 1,
         };
       }
+      if (cancelled) {
+        return {
+          stdout,
+          stderr: stderr || 'Git process was cancelled',
+          exitCode: 1,
+        };
+      }
       if (exit.error) return processFailure(exit.error);
       return {
         stdout,
@@ -169,6 +193,7 @@ export const createGitProcessRuntime = ({
       return processFailure(error);
     } finally {
       clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
       void process.closed.then(() => activeProcesses.delete(process));
     }
   };

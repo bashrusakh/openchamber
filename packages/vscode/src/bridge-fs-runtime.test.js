@@ -93,6 +93,8 @@ describe('bridge fs exec git read cache', () => {
   it('uses the execution adapter for gitignore checks', async () => {
     const readCalls = [];
     const readOptions = [];
+    const execOptions = [];
+    const execArgs = [];
     const result = await handleFsBridgeMessage(
       { id: '1', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
       {
@@ -101,7 +103,11 @@ describe('bridge fs exec git read cache', () => {
           { name: 'ignored.ts', path: '/repo/ignored.ts', isDirectory: false },
           { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
         ],
-        execGit: async () => ({ stdout: 'ignored.ts\n', stderr: '', exitCode: 0 }),
+        execGit: async (args, _cwd, options) => {
+          execArgs.push(args);
+          execOptions.push(options);
+          return { stdout: 'ignored.ts\0', stderr: '', exitCode: 0 };
+        },
         runGitRead: async (cwd, task, options) => {
           readCalls.push(cwd);
           readOptions.push(options);
@@ -115,6 +121,10 @@ describe('bridge fs exec git read cache', () => {
       signal: expect.any(AbortSignal),
       queueTimeoutMs: 10,
     });
+    expect(execOptions[0]).toEqual({
+      signal: readOptions[0].signal,
+    });
+    expect(execArgs[0]).toEqual(['check-ignore', '-z', '--', 'ignored.ts', 'visible.ts']);
     expect(result?.data?.entries).toEqual([
       { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
     ]);

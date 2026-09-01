@@ -116,6 +116,110 @@ describe('GitExecutionCoordinator', () => {
     await expect(light).resolves.toEqual({ files: [], full: true });
   });
 
+  it('cancels a shared status source once its last waiter leaves and retains state until cleanup', async () => {
+    const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    let sourceSignal;
+    let releaseSource;
+    let sourceAbortCount = 0;
+    const source = coordinator.runStatus({
+      context: context(),
+      'shape': 'full',
+      signal: firstController.signal,
+    }, (_statusMode, signal) => {
+      sourceSignal = signal;
+      signal?.addEventListener('abort', () => { sourceAbortCount += 1; }, { once: true });
+      return new Promise((resolve) => { releaseSource = resolve; });
+    });
+    const shared = coordinator.runStatus({
+      context: context(),
+      'shape': 'light',
+      signal: secondController.signal,
+    }, () => 'never');
+
+    try {
+      await waitFor(() => coordinator.getStats().active === 1);
+      firstController.abort('first waiter left');
+      await expect(source).rejects.toMatchObject({ code: GIT_EXECUTION_ERROR_CODES.CANCELLED });
+      expect(sourceSignal).toBeInstanceOf(AbortSignal);
+      expect(sourceSignal.aborted).toBe(false);
+      expect(coordinator.getStats()).toMatchObject({ active: 1, statusInFlight: 1 });
+
+      secondController.abort('last waiter left');
+      await expect(shared).rejects.toMatchObject({ code: GIT_EXECUTION_ERROR_CODES.CANCELLED });
+      expect(sourceSignal.aborted).toBe(true);
+      expect(sourceAbortCount).toBe(1);
+      expect(coordinator.getStats()).toMatchObject({ active: 1, statusInFlight: 1 });
+    } finally {
+      releaseSource?.({ files: [] });
+      await Promise.allSettled([source, shared]);
+    }
+
+    await waitFor(() => coordinator.getStats().active === 0
+      && coordinator.getStats().statusInFlight === 0);
+    expect(coordinator.getStats()).toMatchObject({ active: 0, statusInFlight: 0 });
+  });
+
+  it('does not reuse a status source that is before a queued mutation', async () => {
+    const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
+    const calls = [];
+    let releaseStatus;
+    const first = coordinator.runStatus({ context: context(), 'shape': 'full' }, () => {
+      calls.push('status-before');
+      return new Promise((resolve) => { releaseStatus = resolve; });
+    });
+    await waitFor(() => coordinator.getStats().active === 1);
+
+    const mutation = coordinator.run(
+      { context: context(), kind: GIT_OPERATION_KIND.WORKTREE_WRITE },
+      () => {
+        calls.push('mutation');
+        return 'mutated';
+      },
+    );
+    const later = coordinator.runStatus({ context: context(), 'shape': 'light' }, () => {
+      calls.push('status-after');
+      return { version: 'after' };
+    });
+    let laterSettled = false;
+    void later.then(
+      () => { laterSettled = true; },
+      () => { laterSettled = true; },
+    );
+
+    await tick();
+    expect(laterSettled).toBe(false);
+    expect(calls).toEqual(['status-before']);
+
+    releaseStatus({ version: 'before' });
+    await expect(first).resolves.toEqual({ version: 'before' });
+    await expect(mutation).resolves.toBe('mutated');
+    await expect(later).resolves.toEqual({ version: 'after' });
+    expect(calls).toEqual(['status-before', 'mutation', 'status-after']);
+  });
+
+  it('does not coalesce status sources across worktrees in one repository', async () => {
+    const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
+    const calls = [];
+    let releaseFirst;
+    const first = coordinator.runStatus({ context: context('first'), 'shape': 'full' }, () => {
+      calls.push('first');
+      return new Promise((resolve) => { releaseFirst = resolve; });
+    });
+    await waitFor(() => coordinator.getStats().active === 1);
+
+    const second = coordinator.runStatus({ context: context('second'), 'shape': 'full' }, () => {
+      calls.push('second');
+      return 'second';
+    });
+
+    await expect(second).resolves.toBe('second');
+    expect(calls).toEqual(['first', 'second']);
+    releaseFirst('first');
+    await expect(first).resolves.toBe('first');
+  });
+
   it('keeps a clone destination reserved after releasing network capacity', async () => {
     const coordinator = createGitExecutionCoordinator({
       globalConcurrency: 2,
@@ -133,6 +237,65 @@ describe('GitExecutionCoordinator', () => {
     release('first');
     await expect(first).resolves.toBe('first');
     await expect(second).resolves.toBe('second');
+  });
+
+  it('counts active clones against the global concurrency limit', async () => {
+    const coordinator = createGitExecutionCoordinator({
+      globalConcurrency: 1,
+      canonicalizeCloneDestination: async (destination) => path.resolve(destination),
+    });
+    let releaseClone;
+    let cloneStarted = false;
+    const clone = coordinator.runClone({ destination: '/tmp/clone' }, (lease) => {
+      cloneStarted = true;
+      lease.releaseNetwork();
+      return new Promise((resolve) => { releaseClone = resolve; });
+    });
+    await waitFor(() => cloneStarted);
+    const operation = coordinator.run(
+      { context: context(), kind: GIT_OPERATION_KIND.READ },
+      () => 'operation',
+    );
+
+    await waitFor(() => coordinator.getStats().pending === 1);
+    expect(coordinator.getStats()).toMatchObject({ active: 1, pending: 1, activeNetwork: 0 });
+
+    releaseClone('clone');
+    await expect(clone).resolves.toBe('clone');
+    await expect(operation).resolves.toBe('operation');
+  });
+
+  it('rejects a queued clone cancellation without settling the active clone', async () => {
+    const coordinator = createGitExecutionCoordinator({
+      globalConcurrency: 1,
+      globalNetworkConcurrency: 1,
+      canonicalizeCloneDestination: async (destination) => path.resolve(destination),
+    });
+    let releaseActive;
+    const active = coordinator.runClone({ destination: '/tmp/active-clone' }, () => (
+      new Promise((resolve) => { releaseActive = resolve; })
+    ));
+    await waitFor(() => coordinator.getStats().active === 1);
+
+    const controller = new AbortController();
+    const queued = coordinator.runClone({
+      destination: '/tmp/queued-clone',
+      signal: controller.signal,
+    }, () => 'never');
+    await waitFor(() => coordinator.getStats().clonePending === 1);
+
+    controller.abort();
+    await expect(queued).rejects.toMatchObject({ code: GIT_EXECUTION_ERROR_CODES.CANCELLED });
+    expect(coordinator.getStats()).toMatchObject({
+      active: 1,
+      activeNetwork: 1,
+      clonePending: 0,
+      cloneDestinations: 1,
+    });
+
+    releaseActive('active');
+    await expect(active).resolves.toBe('active');
+    expect(coordinator.getStats()).toMatchObject({ active: 0, activeNetwork: 0, cloneDestinations: 0 });
   });
 
   it('coalesces symlinked clone destination aliases without merging distinct destinations', async () => {

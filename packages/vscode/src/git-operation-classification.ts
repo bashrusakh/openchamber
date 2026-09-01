@@ -77,7 +77,7 @@ export const GIT_SERVICE_OPERATION_CLASSIFICATION = Object.freeze({
   revertCommit: operation(GIT_OPERATION_PROFILE.WORKTREE_WRITE),
   resetToCommit: operation(GIT_OPERATION_PROFILE.COMMON_WORKTREE_WRITE),
   validateWorktreeDirectory: operation(GIT_OPERATION_PROFILE.BOOTSTRAP),
-  canonicalizeWorktreeState: operation(GIT_OPERATION_PROFILE.READ),
+  canonicalizeWorktreeState: operation(GIT_OPERATION_PROFILE.COMMON_WRITE),
 } as const);
 
 export type GitServiceOperationName = keyof typeof GIT_SERVICE_OPERATION_CLASSIFICATION;
