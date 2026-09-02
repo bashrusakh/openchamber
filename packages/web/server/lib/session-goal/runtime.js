@@ -74,6 +74,23 @@ const RESTART_SCAN_DIRECTORY_LIMIT = 4;
 const GOAL_STATUSES = ['active', 'paused', 'blocked', 'budgetLimited', 'complete'];
 const SESSION_STATUS_TYPES = new Set(['busy', 'idle', 'retry', 'error']);
 
+const isString = (value) => Object(value) !== value && value === String(value);
+
+const isCallable = (value) => {
+  try {
+    Function.prototype.toString.call(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const isNonCallableObject = (value) => value !== null
+  && Object(value) === value
+  && !isCallable(value);
+
+const isPlainObject = (value) => isNonCallableObject(value) && !Array.isArray(value);
+
 const clampText = (value, limit) => String(value ?? '').trim().slice(0, limit);
 
 const escapeXmlText = (value) => String(value ?? '')
@@ -204,17 +221,15 @@ const extractSessionUpdate = (payload) => {
     goal: parseGoalMetadata(info),
     hasGoalNamespace: Boolean(
       info.metadata
-      && typeof info.metadata === 'object'
+      && isPlainObject(info.metadata)
       && info.metadata.openchamber
-      && typeof info.metadata.openchamber === 'object'
-      && !Array.isArray(info.metadata.openchamber),
+      && isPlainObject(info.metadata.openchamber),
     ),
     hasGoalKey: Boolean(
       info.metadata
-      && typeof info.metadata === 'object'
+      && isPlainObject(info.metadata)
       && info.metadata.openchamber
-      && typeof info.metadata.openchamber === 'object'
-      && !Array.isArray(info.metadata.openchamber)
+      && isPlainObject(info.metadata.openchamber)
       && Object.hasOwn(info.metadata.openchamber, 'goal'),
     ),
     parentID: typeof info.parentID === 'string' ? info.parentID : '',
@@ -225,8 +240,8 @@ const extractSessionUpdate = (payload) => {
 const extractUserMessage = (payload) => {
   if (!payload || payload.type !== 'message.updated') return null;
   const info = payload.properties?.info;
-  if (!info || typeof info !== 'object' || info.role !== 'user') return null;
-  if (typeof info.sessionID !== 'string' || !info.sessionID || typeof info.id !== 'string' || !info.id) return null;
+  if (!isPlainObject(info) || info.role !== 'user') return null;
+  if (!isString(info.sessionID) || !info.sessionID || !isString(info.id) || !info.id) return null;
   return {
     sessionId: info.sessionID,
     messageId: info.id,
@@ -555,10 +570,10 @@ export const createSessionGoalRuntime = ({
       // A transport rejection does not tell us whether OpenCode accepted a
       // prompt before the connection died. Callers of prompt_async must
       // reconcile authoritative state rather than retrying this blindly.
-      if (error && typeof error === 'object') error.admission = 'ambiguous';
+      if (isNonCallableObject(error)) error.admission = 'ambiguous';
       throw error;
     }
-    if (!response || typeof response.ok !== 'boolean' || !Number.isFinite(response.status)) {
+    if (!response || (response.ok !== true && response.ok !== false) || !Number.isFinite(response.status)) {
       const error = new Error(`OpenCode ${method} ${fetchPath} returned an unknown response`);
       error.admission = 'ambiguous';
       throw error;
@@ -577,7 +592,7 @@ export const createSessionGoalRuntime = ({
     // parse one would turn a successful 204 into a false unknown). All other
     // operations retain their JSON response contract.
     if (method === 'POST') return null;
-    if (typeof response.json !== 'function') {
+    if (!isCallable(response.json)) {
       const error = new Error(`OpenCode ${method} ${fetchPath} returned an unknown response`);
       error.admission = 'ambiguous';
       throw error;
@@ -593,10 +608,10 @@ export const createSessionGoalRuntime = ({
     if (!Array.isArray(messages)) return null;
     if (messages.some((message) => {
       const info = message?.info;
-      if (!info || typeof info !== 'object' || typeof info.id !== 'string' || !info.id) return true;
+      if (!isPlainObject(info) || !isString(info.id) || !info.id) return true;
       if (info.role !== 'user' && info.role !== 'assistant') return true;
       if (message.parts !== undefined && (!Array.isArray(message.parts)
-        || message.parts.some((part) => !part || typeof part !== 'object' || typeof part.type !== 'string'))) return true;
+        || message.parts.some((part) => !isPlainObject(part) || !isString(part.type)))) return true;
       return false;
     })) return null;
     return messages;
@@ -608,7 +623,7 @@ export const createSessionGoalRuntime = ({
       !session
       || Array.isArray(session)
       || session.id !== sessionId
-      || (session.parentID !== undefined && typeof session.parentID !== 'string')
+      || (session.parentID !== undefined && !isString(session.parentID))
     ) {
       const error = new Error(`OpenCode session ${sessionId} response was malformed`);
       error.retryKind = 'fetch';
@@ -639,7 +654,7 @@ export const createSessionGoalRuntime = ({
 
   const fetchSessionStatuses = async (sessionId, directory) => {
     const statuses = await openCodeFetch('/session/status', { directory }).catch(() => null);
-    if (!statuses || typeof statuses !== 'object' || Array.isArray(statuses)) return null;
+    if (!isPlainObject(statuses)) return null;
     // OpenCode's authoritative status map contains only non-idle sessions.
     // A missing target is therefore idle; a present malformed/unknown value is
     // still unknown and must remain retryable.
@@ -654,7 +669,7 @@ export const createSessionGoalRuntime = ({
     const childIds = new Set();
     if (children.some((child) => {
       const childId = child?.id;
-      if (typeof childId !== 'string' || !childId || childId === sessionId || childIds.has(childId)) return true;
+      if (!isString(childId) || !childId || childId === sessionId || childIds.has(childId)) return true;
       if (child.parentID !== undefined && child.parentID !== sessionId) return true;
       childIds.add(childId);
       return false;
@@ -740,7 +755,7 @@ export const createSessionGoalRuntime = ({
     } catch (error) {
       console.warn(`[session-goal] objective file read failed: ${error?.message || error}`);
     }
-    if (typeof fileObjective === 'string' && fileObjective) return { objective: fileObjective, available: true };
+    if (isString(fileObjective) && fileObjective) return { objective: fileObjective, available: true };
     if (goal.objective) return { objective: goal.objective, available: true };
     return { objective: '', available: false };
   };
@@ -1172,24 +1187,25 @@ export const createSessionGoalRuntime = ({
       const error = new Error('cannot continue goal: last assistant message has no provider/model');
       error.retryKind = 'dispatch-config';
       error.admission = 'rejected';
-      if (typeof onDispatchAttempt === 'function') onDispatchAttempt({ postAttempted: false });
+      if (isCallable(onDispatchAttempt)) onDispatchAttempt({ postAttempted: false });
       throw error;
     }
     if (stopped || (generation !== undefined && !isGenerationCurrent(sessionId, generation))) return { sent: false, stale: true };
-    const agent = typeof lastAssistantInfo?.agent === 'string' && lastAssistantInfo.agent
+    const agent = isString(lastAssistantInfo?.agent) && lastAssistantInfo.agent
       ? lastAssistantInfo.agent
-      : (typeof lastAssistantInfo?.mode === 'string' ? lastAssistantInfo.mode : '');
-    const variant = typeof lastAssistantInfo?.variant === 'string' ? lastAssistantInfo.variant : '';
-    if (typeof onDispatchAttempt === 'function') onDispatchAttempt({ postAttempted: true });
+      : (isString(lastAssistantInfo?.mode) ? lastAssistantInfo.mode : '');
+    const variant = isString(lastAssistantInfo?.variant) ? lastAssistantInfo.variant : '';
+    if (isCallable(onDispatchAttempt)) onDispatchAttempt({ postAttempted: true });
+    const continuationBody = {
+      model: { providerID, modelID },
+    };
+    if (agent) continuationBody.agent = agent;
+    if (variant) continuationBody.variant = variant;
+    continuationBody.parts = [{ type: 'text', text: buildContinuationPrompt({ ...goal, objective: effectiveObjective }) }];
     await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/prompt_async`, {
       directory,
       method: 'POST',
-      body: {
-        model: { providerID, modelID },
-        ...(agent ? { agent } : {}),
-        ...(variant ? { variant } : {}),
-        parts: [{ type: 'text', text: buildContinuationPrompt({ ...goal, objective: effectiveObjective }) }],
-      },
+      body: continuationBody,
     });
     return (generation === undefined || isGenerationCurrent(sessionId, generation))
       ? { sent: true }
@@ -1726,8 +1742,8 @@ export const createSessionGoalRuntime = ({
     }
 
     // Turn error → blocked (prevents runaway auto-continuation into failures).
-    if (!abortedTail && !resumableLengthTail && lastAssistantInfo.error && typeof lastAssistantInfo.error === 'object') {
-      const reason = typeof lastAssistantInfo.error.name === 'string' && lastAssistantInfo.error.name
+    if (!abortedTail && !resumableLengthTail && isNonCallableObject(lastAssistantInfo.error)) {
+      const reason = isString(lastAssistantInfo.error.name) && lastAssistantInfo.error.name
         ? lastAssistantInfo.error.name
         : 'assistant turn failed';
       await settleCurrentGoal({
@@ -1856,24 +1872,25 @@ export const createSessionGoalRuntime = ({
     // waits for the next idle tick; the reverse could double-charge a turn.
     if (!(await ensureObjectiveCurrent({ sessionId, directory, goal, effectiveObjective, generation }))) return;
     const existingReservation = reservations.get(sessionId);
+    const reservationAfter = {
+      ...reservationGoalState(goal),
+      tokensUsed,
+      tokensBaseline,
+      tokensCommitted,
+      lastAccountedMessageID,
+      turnsUsed: goal.turnsUsed + 1,
+      blockedStreak,
+      auditFailStreak,
+      statusReason: '',
+    };
+    if (audit?.note) reservationAfter.note = audit.note;
+    if (audit?.evaluationProviderID) reservationAfter.evaluationProviderID = audit.evaluationProviderID;
+    if (audit?.evaluationModelID) reservationAfter.evaluationModelID = audit.evaluationModelID;
     const nextReservation = {
       directory,
       goal,
       before: reservationGoalState(goal),
-      after: {
-        ...reservationGoalState(goal),
-        tokensUsed,
-        tokensBaseline,
-        tokensCommitted,
-        lastAccountedMessageID,
-        turnsUsed: goal.turnsUsed + 1,
-        blockedStreak,
-        auditFailStreak,
-        statusReason: '',
-        ...(audit?.note ? { note: audit.note } : {}),
-        ...(audit?.evaluationProviderID ? { evaluationProviderID: audit.evaluationProviderID } : {}),
-        ...(audit?.evaluationModelID ? { evaluationModelID: audit.evaluationModelID } : {}),
-      },
+      after: reservationAfter,
       goalId: goal.id,
       previousTurnsUsed: goal.turnsUsed,
       previousLastAccountedMessageID: goal.lastAccountedMessageID,
@@ -1910,7 +1927,7 @@ export const createSessionGoalRuntime = ({
         current.turnsUsed !== nextReservation.previousTurnsUsed
         || current.lastAccountedMessageID !== nextReservation.previousLastAccountedMessageID
       ) return null;
-      return {
+      const nextState = {
         tokensUsed,
         tokensBaseline,
         tokensCommitted,
@@ -1919,10 +1936,11 @@ export const createSessionGoalRuntime = ({
         blockedStreak,
         auditFailStreak,
         statusReason: '',
-        ...(audit?.note ? { note: audit.note } : {}),
-        ...(audit?.evaluationProviderID ? { evaluationProviderID: audit.evaluationProviderID } : {}),
-        ...(audit?.evaluationModelID ? { evaluationModelID: audit.evaluationModelID } : {}),
       };
+      if (audit?.note) nextState.note = audit.note;
+      if (audit?.evaluationProviderID) nextState.evaluationProviderID = audit.evaluationProviderID;
+      if (audit?.evaluationModelID) nextState.evaluationModelID = audit.evaluationModelID;
+      return nextState;
     }, {
       generation,
       finalCheck: () => objectiveSnapshotIsCurrent({ sessionId, goal, effectiveObjective }),
@@ -2422,7 +2440,7 @@ export const createSessionGoalRuntime = ({
   };
 
   const start = async ({ listDirectories } = {}) => {
-    if (stopped || typeof listDirectories !== 'function') return;
+    if (stopped || !isCallable(listDirectories)) return;
     let directories;
     try {
       directories = await listDirectories();
@@ -2431,7 +2449,7 @@ export const createSessionGoalRuntime = ({
       return;
     }
     if (!Array.isArray(directories)) return;
-    for (const directory of [...new Set(directories.filter((value) => typeof value === 'string' && value))]
+    for (const directory of [...new Set(directories.filter((value) => isString(value) && value))]
       .slice(0, RESTART_SCAN_DIRECTORY_LIMIT)) {
       if (stopped) return;
       let sessions;
@@ -2450,17 +2468,17 @@ export const createSessionGoalRuntime = ({
       for (const candidate of sessions) {
         if (
           !candidate
-          || typeof candidate !== 'object'
-          || typeof candidate.id !== 'string'
+          || !isPlainObject(candidate)
+          || !isString(candidate.id)
           || !candidate.id
           || (candidate.parentID !== undefined
-            && (typeof candidate.parentID !== 'string' || candidate.parentID))
+            && (!isString(candidate.parentID) || candidate.parentID))
         ) continue;
         if (stopped) return;
         const candidateGoal = parseGoalMetadata(candidate);
         if (!candidateGoal || candidateGoal.status !== 'active') continue;
         const sessionId = candidate.id;
-        const sessionDirectory = typeof candidate.directory === 'string' && candidate.directory
+        const sessionDirectory = isString(candidate.directory) && candidate.directory
           ? candidate.directory
           : directory;
         if (!acceptSessionUpdate({

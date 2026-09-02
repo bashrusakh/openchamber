@@ -27,7 +27,7 @@ const jsonResponse = (body, status = 200) => new Response(JSON.stringify(body), 
   headers: { 'Content-Type': 'application/json' },
 });
 
-const requestPath = (input) => new URL(typeof input === 'string' ? input : input.url).pathname;
+const requestPath = (input) => new URL(input?.url ?? input).pathname;
 
 const flushMicrotasks = async () => {
   await Promise.resolve();
