@@ -125,8 +125,13 @@ before touching the filesystem). Rationale: metadata rides every
    idle event cannot replace an already-earlier Resume timer. Fetch/quiet
    failures use bounded exponential delays derived from the idle delay (15s,
    30s, 60s, 120s by default), at most four retries after the initial tick.
-    Exhaustion stops automatic re-arming until authoritative activity, a fresh
-    goal, or Resume resets the retry state.
+     On fetch retry exhaustion, the runtime re-reads the authoritative goal and
+     settles an active goal as `blocked` even when no dispatch reservation exists.
+     The guarded write uses the current goal revision and generation, with a
+     `statusReason` that identifies the exhausted fetch retry. If the read or
+     blocked PATCH is unavailable, terminalization retries with bounded backoff
+     and then stops until a later authoritative idle event or Resume starts a
+     fresh bounded window. This path never calls `prompt_async`.
     Authoritative activity and successful audit/continuation progress reset the
     corresponding retry state; a failed fetch never becomes an empty success.
     A `message.updated` user event invalidates an armed timer or in-flight tick

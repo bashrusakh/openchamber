@@ -819,11 +819,9 @@ describe('session goal live activity gate', () => {
     ['message', `/session/${SESSION_ID}/message`],
   ])('bounds %s fetch retries with exponential delays', async (_label, failingPath) => {
     let failures = 0;
-    let attempts = 0;
     const fetchImpl = vi.fn(async (input) => {
       const pathname = requestPath(input);
       if (pathname === failingPath) {
-        attempts += 1;
         if (failures < 3) {
           failures += 1;
           return jsonResponse({ error: 'unavailable' }, 503);
@@ -852,9 +850,301 @@ describe('session goal live activity gate', () => {
     await vi.runOnlyPendingTimersAsync();
     await vi.advanceTimersByTimeAsync(10);
     await vi.advanceTimersByTimeAsync(20);
-    expect(attempts).toBe(3);
+    expect(failures).toBe(3);
+    const requestsAfterExhaustion = fetchImpl.mock.calls.length;
     await vi.advanceTimersByTimeAsync(100);
-    expect(attempts).toBe(3);
+    expect(fetchImpl.mock.calls).toHaveLength(requestsAfterExhaustion);
+    runtime.stop();
+  });
+
+  it.each([
+    ['fetchSession', `/session/${SESSION_ID}`],
+    ['fetchSessionStatuses', '/session/status'],
+    ['children', `/session/${SESSION_ID}/children`],
+    ['fetchRecentMessages', `/session/${SESSION_ID}/message`],
+  ])('terminalizes an active goal after %s retry exhaustion without a reservation', async (_label, failingPath) => {
+    let currentGoal = { ...goal, updatedAt: 1 };
+    let failures = 0;
+    let blockedWrites = 0;
+    let promptAttempts = 0;
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === failingPath && (init.method ?? 'GET') === 'GET' && failures < 3) {
+        failures += 1;
+        return jsonResponse({ error: 'unavailable' }, 503);
+      }
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        currentGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (currentGoal.status === 'blocked') blockedWrites += 1;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        return new Response(null, { status: 204 });
+      }
+      if (pathname === `/session/${SESSION_ID}/message`) {
+        return jsonResponse([]);
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: vi.fn(),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      retryDelaysMs: [10],
+      maxRetryAttempts: 2,
+    });
+
+    runtime.processPayload({
+      type: 'session.updated',
+      properties: { info: { ...session, time: { updated: 1 }, metadata: { openchamber: { goal: currentGoal } } } },
+    });
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+
+    expect(failures).toBe(3);
+    expect(currentGoal).toMatchObject({
+      status: 'blocked',
+      statusReason: 'fetch retry limit reached',
+    });
+    expect(blockedWrites).toBe(1);
+    expect(promptAttempts).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    const requestsAfterSettlement = fetchImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchImpl.mock.calls).toHaveLength(requestsAfterSettlement);
+    expect(currentGoal.status).toBe('blocked');
+    runtime.stop();
+  });
+
+  it('does not overwrite a newer goal revision during fetch-exhaustion terminalization', async () => {
+    const originalGoal = { ...goal, updatedAt: 1 };
+    const newerGoal = { ...originalGoal, statusReason: 'resumed', updatedAt: 2 };
+    let currentGoal = originalGoal;
+    let sessionReads = 0;
+    let statusFailures = 0;
+    let blockedWrites = 0;
+    let promptAttempts = 0;
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        blockedWrites += 1;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        sessionReads += 1;
+        if (sessionReads === 5) currentGoal = newerGoal;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') {
+        if (statusFailures < 3) {
+          statusFailures += 1;
+          return jsonResponse({ error: 'unavailable' }, 503);
+        }
+        return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      }
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: vi.fn(),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      retryDelaysMs: [10],
+      maxRetryAttempts: 2,
+    });
+
+    runtime.processPayload({
+      type: 'session.updated',
+      properties: { info: { ...session, time: { updated: 1 }, metadata: { openchamber: { goal: originalGoal } } } },
+    });
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+
+    expect(currentGoal).toEqual(newerGoal);
+    expect(blockedWrites).toBe(0);
+    expect(promptAttempts).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    runtime.stop();
+  });
+
+  it('reconciles a reservation-free blocked terminalization after its PATCH response is lost', async () => {
+    let currentGoal = { ...goal, updatedAt: 1 };
+    let statusFailures = 0;
+    let blockedWrites = 0;
+    let promptAttempts = 0;
+    const emitGoalNotification = vi.fn();
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        const nextGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (nextGoal.status === 'blocked') {
+          blockedWrites += 1;
+          currentGoal = nextGoal;
+          throw new Error('blocked terminal response lost');
+        }
+        currentGoal = nextGoal;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') {
+        if (statusFailures < 3) {
+          statusFailures += 1;
+          return jsonResponse({ error: 'unavailable' }, 503);
+        }
+        return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      }
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: vi.fn(),
+      emitGoalNotification,
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      retryDelaysMs: [10],
+      maxRetryAttempts: 2,
+    });
+
+    runtime.processPayload({
+      type: 'session.updated',
+      properties: { info: { ...session, time: { updated: 1 }, metadata: { openchamber: { goal: currentGoal } } } },
+    });
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+
+    await vi.waitFor(() => expect(emitGoalNotification).toHaveBeenCalledOnce());
+    expect(currentGoal).toMatchObject({
+      status: 'blocked',
+      statusReason: 'fetch retry limit reached',
+    });
+    expect(blockedWrites).toBe(1);
+    expect(promptAttempts).toBe(0);
+
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(blockedWrites).toBe(1);
+    expect(promptAttempts).toBe(0);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
+    runtime.stop();
+  });
+
+  it('bounds reservation-free terminalization when the blocked PATCH stays unavailable', async () => {
+    let currentGoal = { ...goal, updatedAt: 1 };
+    let statusFailures = 0;
+    let blockedWrites = 0;
+    let promptAttempts = 0;
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        blockedWrites += 1;
+        throw new Error('blocked write unavailable');
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') {
+        if (statusFailures < 3) {
+          statusFailures += 1;
+          return jsonResponse({ error: 'unavailable' }, 503);
+        }
+        return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      }
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: vi.fn(),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      retryDelaysMs: [10],
+      maxRetryAttempts: 1,
+    });
+
+    runtime.processPayload({
+      type: 'session.updated',
+      properties: { info: { ...session, time: { updated: 1 }, metadata: { openchamber: { goal: currentGoal } } } },
+    });
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushMicrotasks();
+
+    expect(currentGoal.status).toBe('active');
+    expect(blockedWrites).toBe(2);
+    expect(promptAttempts).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    const requestsAfterExhaustion = fetchImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchImpl.mock.calls).toHaveLength(requestsAfterExhaustion);
     runtime.stop();
   });
 
