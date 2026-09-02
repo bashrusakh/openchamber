@@ -397,11 +397,13 @@ const persistSettings = async (...args) => {
 };
 
 // Known project directories, MRU first (lastDirectory, then projects by
-// lastOpenedAt). Shared by the lifecycle warmup pass and the session-goal
-// restart scan so both derive the same directory set.
-const collectKnownDirectories = async () => {
-  const settings = await readSettingsFromDiskMigrated().catch(() => null);
-  if (!settings) return [];
+// lastOpenedAt). The session-goal restart scan uses the strict settings reader
+// so a read failure remains a retryable failure instead of an empty scan.
+const collectKnownDirectories = async (readSettings = readSettingsFromDiskStrict) => {
+  const settings = await readSettings();
+  if (Array.isArray(settings)) {
+    throw new Error('Settings file is malformed (expected object payload)');
+  }
   const directories = [];
   if (typeof settings.lastDirectory === 'string' && settings.lastDirectory) {
     directories.push(settings.lastDirectory);
@@ -413,7 +415,18 @@ const collectKnownDirectories = async () => {
       directories.push(project.path);
     }
   }
-  return [...new Set(directories)];
+  return [...new Set(directories)].slice(0, 4);
+};
+
+// Lifecycle warmup is deliberately best-effort. Keep its existing behavior
+// even when settings are unavailable, while the session-goal scan receives the
+// strict collector above and can schedule bounded recovery.
+const collectWarmupDirectories = async () => {
+  try {
+    return await collectKnownDirectories(readSettingsFromDiskMigrated);
+  } catch {
+    return [];
+  }
 };
 
 const requestSecurityRuntime = createRequestSecurityRuntime({
@@ -1177,7 +1190,7 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
   // lazily on first request (seconds on large session stores), so the
   // lifecycle warms these right after readiness — before the UI's first
   // interactive request would otherwise pay that cost.
-  getWarmupDirectories: collectKnownDirectories,
+  getWarmupDirectories: collectWarmupDirectories,
   // A managed restart can move OpenCode to a NEW port (the old one may stay
   // occupied if killProcessOnPort/waitForPortRelease didn't free it in time,
   // on any platform). Rebind the message-stream upstream readers to the current port
@@ -1211,6 +1224,12 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
       console.warn('Failed to reconcile sessions after OpenCode restart:', error?.message ?? error);
     }
   },
+  onOpenCodeReady: () => sessionGoalRuntime.start({
+    listDirectories: collectKnownDirectories,
+    resetRetryWindow: true,
+  }).catch((error) => {
+    console.warn('[session-goal] readiness recovery failed:', error?.message || error);
+  }),
   getManagedOpenCodeEnv: async () => {
     const settings = await readSettingsFromDiskMigrated().catch(() => null);
     // Each capability is its own tool and its own switch; the plugin is only

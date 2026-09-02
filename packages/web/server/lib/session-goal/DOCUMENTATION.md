@@ -104,6 +104,17 @@ before touching the filesystem). Rationale: metadata rides every
    directory record for every authoritative active goal it observes. On server
    startup, `start({ listDirectories })` also performs one bounded scan of known
    directories and arms active root goals that emitted no post-restart event.
+   The strict settings read distinguishes a missing settings file (successful
+   empty result) from malformed data, including an array payload, and from a
+   read or migration failure. If the directory list or a
+   session-list fetch is unavailable, the scan schedules at most four delayed
+   recovery attempts and never treats the failure as an empty result. The
+   OpenCode lifecycle keeps its separate best-effort warmup fallback, while
+   `start` retains the strict signal for goal recovery. The lifecycle calls
+   `start` again after confirmed readiness with a fresh bounded window, covering
+   the startup race where the initial scan ran before OpenCode was usable.
+   Recovery remains capped at the same four MRU directories and has no
+   permanent polling loop.
 2. `session.status: idle` arms a 15s per-session timer; `busy`/`retry` advances
    the session generation before clearing it. A `session.updated` carrying a fresh active goal (`turnsUsed === 0` or
    `statusReason === 'resumed'`) arms a kickoff timer — 3s for fresh goals,
@@ -218,8 +229,20 @@ before touching the filesystem). Rationale: metadata rides every
         the ambiguous accounting PATCH and is idempotently recognized on the
         next read, so an accepted PATCH with a lost response cannot double-count.
         Proven rejection dispatch is attempted at most four times, including the
-        initial attempt. On exhaustion an authoritative active goal is settled
-        as blocked and its reservation is released. An ambiguous `prompt_async`
+         initial attempt. On exhaustion the runtime enters an in-memory
+         `terminalization-pending` state before disabling ordinary retries. An
+         authoritative active goal is settled as blocked and its reservation is
+         released only after the terminal write succeeds. If the final fetch,
+         guarded restore, or blocked PATCH fails, terminalization retries with
+          bounded backoff, at most four times after the first terminal attempt.
+           If any terminal write (`complete`, `budgetLimited`, or ordinary
+           `blocked`) committed before its response was lost, the next
+           authoritative terminal read completes the same settlement, releases
+           the matching reservation, and emits one notification without another
+           PATCH. Exhaustion of that resolution window leaves the
+          reservation protected and waits for a later authoritative idle or
+          Resume to start one new bounded resolution window. While pending or
+          escalated, no path may call `prompt_async`. An ambiguous `prompt_async`
         response is reconciled against authoritative session, status, and
         message state. It is never retried as a blind POST. A later status or
         changed tail drops the reservation. If the tail moved before dispatch,
@@ -235,11 +258,12 @@ before touching the filesystem). Rationale: metadata rides every
         preserves its accounting, while lifecycle invalidation restores the
         exact before-state; an identity change either proves the old charge is
         gone or blocks the current goal explicitly when the charge cannot be
-        separated. Resume adopts
-           its authoritative reset
-          (`turnsUsed`, token totals, and accounting cursor), clears the stale
-          reservation state, and only then creates a new continuation
-          reservation. A genuinely new logical goal
+         separated. Resume adopts its authoritative accounting state. When it
+           resets `turnsUsed` while retaining the accounting cursor, any
+           rejected or terminalization reservation for the previous segment is
+           resolved as superseded, its fence is cleared, and the idle kickoff
+           creates one fresh continuation reservation. A genuinely new logical
+           goal
           cleans up the old reservation. Accounting-first ordering remains
           intact.
         The restart scan uses the persisted cursor and authoritative transcript.

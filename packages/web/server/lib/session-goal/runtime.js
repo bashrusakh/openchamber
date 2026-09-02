@@ -66,6 +66,8 @@ const AUDIT_FAIL_LIMIT = 2;
 const MAX_RETRY_ATTEMPTS = 4;
 const MAX_DISPATCH_ATTEMPTS = 4;
 const MAX_LENGTH_RECOVERY_ATTEMPTS = 2;
+const STARTUP_RECOVERY_MAX_ATTEMPTS = 4;
+const STARTUP_RECOVERY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000];
 // Keep restart recovery aligned with lifecycle.js warmup: the last-used
 // directory plus the three most recently opened projects. Recovery is a
 // one-shot safety net, not an unlimited sequential project scan.
@@ -379,6 +381,33 @@ const goalLogicalIdentityKey = (goal) => JSON.stringify([
 // to rebind an undispatched reservation instead of looking like a replacement.
 const goalReservationIdentityKey = (goal) => JSON.stringify([goal.id, goal.createdAt]);
 
+const settlementExpectedState = ({ goal, status, statusReason, note, tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, evaluationProviderID, evaluationModelID }) => {
+  const expected = {
+    status,
+    statusReason: clampText(statusReason, REASON_CHAR_LIMIT),
+    blockedStreak: 0,
+    auditFailStreak: 0,
+    logicalIdentityKey: goalLogicalIdentityKey(goal),
+  };
+  if (note !== undefined) expected.note = clampText(note, NOTE_CHAR_LIMIT);
+  if (tokensUsed !== undefined) expected.tokensUsed = tokensUsed;
+  if (tokensBaseline !== undefined) expected.tokensBaseline = tokensBaseline;
+  if (tokensCommitted !== undefined) expected.tokensCommitted = tokensCommitted;
+  if (lastAccountedMessageID) expected.lastAccountedMessageID = lastAccountedMessageID;
+  if (evaluationProviderID) expected.evaluationProviderID = evaluationProviderID;
+  if (evaluationModelID) expected.evaluationModelID = evaluationModelID;
+  return expected;
+};
+
+const settlementMarkerMatches = (goal, marker) => {
+  if (!goal || !marker) return false;
+  const { expected } = marker;
+  return goalLogicalIdentityKey(goal) === expected.logicalIdentityKey
+    && Object.entries(expected)
+      .filter(([key]) => key !== 'logicalIdentityKey')
+      .every(([key, value]) => goal[key] === value);
+};
+
 const reservationAccountingState = (goal) => ({
   tokensUsed: goal.tokensUsed,
   tokensBaseline: goal.tokensBaseline,
@@ -424,6 +453,8 @@ export const createSessionGoalRuntime = ({
   retryDelaysMs = [idleQuietMs, idleQuietMs * 2, idleQuietMs * 4, idleQuietMs * 8],
   maxRetryAttempts = MAX_RETRY_ATTEMPTS,
   maxDispatchAttempts = MAX_DISPATCH_ATTEMPTS,
+  startupRecoveryDelaysMs = STARTUP_RECOVERY_DELAYS_MS,
+  maxStartupRecoveryAttempts = STARTUP_RECOVERY_MAX_ATTEMPTS,
 }) => {
   const timers = new Map();
   const inflight = new Map();
@@ -455,6 +486,18 @@ export const createSessionGoalRuntime = ({
   // A timer can fire while the feature is disabled; retaining this record lets
   // the settings lifecycle re-arm the goal without relying on another event.
   const activeGoalSessions = new Map();
+  // Dispatch exhaustion is terminal for automatic execution, but the final
+  // authoritative reconciliation can still fail transiently. Keep this
+  // state separate from ordinary work retries so a retry can only reconcile
+  // or settle the protected reservation, never dispatch another prompt.
+  const terminalizationStates = new Map();
+  // A terminal PATCH can commit before its response is lost. Keep the exact
+  // intended terminal mutation until an authoritative read confirms it, so
+  // settlement cleanup and notification remain idempotent without another
+  // PATCH or prompt.
+  const settlementMarkers = new Map();
+  let startupRecoveryTimer = null;
+  let startupRecoveryAttempts = 0;
   // A disabled restart scan cannot keep an ambiguity hold: the hold would be
   // consumed by the skipped tick and no transcript event may follow. Retry
   // only these scanned sessions a bounded number of times so a later setting
@@ -522,7 +565,12 @@ export const createSessionGoalRuntime = ({
       retryStates.set(sessionId, { kind, attempts, exhausted: true });
       console.warn(`[session-goal] ${sessionId} ${kind} retry limit reached (${maxRetryAttempts})`);
       if (settleOnExhaustion) {
-        void settleReservationAfterRetryExhaustion(sessionId, directory, generation, kind).catch((error) => {
+        const reservation = reservations.get(sessionId);
+        if (reservation) {
+          reservation.resolutionState = 'terminalization-pending';
+          reservation.resolutionReason = `${kind} retry limit reached before continuation dispatch`;
+        }
+        void beginTerminalization(sessionId, directory, generation, kind).catch((error) => {
           console.warn(`[session-goal] ${sessionId} retry exhaustion settlement failed: ${error?.message || error}`);
         });
       }
@@ -761,6 +809,22 @@ export const createSessionGoalRuntime = ({
   };
 
   const settleGoal = async ({ sessionId, directory, goal, status, statusReason, note, tokensUsed, tokensBaseline, tokensCommitted, lastAccountedMessageID, evaluationProviderID, evaluationModelID, generation, effectiveObjective }) => {
+    const marker = {
+      directory,
+      expected: settlementExpectedState({
+        goal,
+        status,
+        statusReason,
+        note,
+        tokensUsed,
+        tokensBaseline,
+        tokensCommitted,
+        lastAccountedMessageID,
+        evaluationProviderID,
+        evaluationModelID,
+      }),
+    };
+    settlementMarkers.set(sessionId, marker);
     const written = await writeGoal(sessionId, directory, goal, (current) => ({
       status,
       statusReason: clampText(statusReason, REASON_CHAR_LIMIT),
@@ -778,16 +842,19 @@ export const createSessionGoalRuntime = ({
       finalCheck: () => objectiveSnapshotIsCurrent({ sessionId, goal, effectiveObjective }),
     });
     if (!written) {
+      if (settlementMarkers.get(sessionId) === marker) settlementMarkers.delete(sessionId);
       if (effectiveObjective !== undefined && isGenerationCurrent(sessionId, generation)) {
         scheduleRetry(sessionId, directory, generation, 'objective');
       }
       return;
     }
+    if (settlementMarkers.get(sessionId) !== marker) return;
     activeGoalSessions.delete(sessionId);
     finalizeSettlement({ sessionId, directory, written, status, statusReason });
   };
 
   const finalizeSettlement = ({ sessionId, directory, written, status, statusReason }) => {
+    settlementMarkers.delete(sessionId);
     forgetReservationIfSettled(sessionId, written);
     lengthRecoveryStates.delete(sessionId);
     resetRetry(sessionId);
@@ -799,6 +866,61 @@ export const createSessionGoalRuntime = ({
         console.warn('[session-goal] notification failed:', error?.message || error);
       }
     }
+  };
+
+  const reconcileCommittedSettlement = (sessionId, directory, currentGoal) => {
+    const marker = settlementMarkers.get(sessionId);
+    if (!marker) return false;
+    const { expected } = marker;
+    if (!settlementMarkerMatches(currentGoal, marker)) {
+      settlementMarkers.delete(sessionId);
+      return false;
+    }
+    // Delete before notifying so repeated authoritative ticks cannot emit a
+    // second notification even if the notification consumer re-enters.
+    settlementMarkers.delete(sessionId);
+    finalizeSettlement({
+      sessionId,
+      directory: directory || marker.directory,
+      written: currentGoal,
+      status: expected.status,
+      statusReason: currentGoal.statusReason,
+    });
+    return true;
+  };
+
+  const reconcileCommittedTerminalization = async (sessionId, directory, reservation, generation) => {
+    if (reservations.get(sessionId) !== reservation) return false;
+    let session;
+    try {
+      session = await fetchSession(sessionId, directory || reservation.directory);
+    } catch {
+      return false;
+    }
+    if (!isGenerationCurrent(sessionId, generation)) return false;
+    const currentGoal = parseGoalMetadata(session);
+    if (
+      !currentGoal
+      || currentGoal.status !== 'blocked'
+      || goalLogicalIdentityKey(currentGoal) !== goalLogicalIdentityKey(reservation.goal)
+      || !reservationStateMatches(currentGoal, reservationAccountingState(reservation.after))
+    ) return false;
+
+    // The terminal PATCH may have committed before its response was lost. The
+    // authoritative blocked goal is now the settlement; do not issue another
+    // PATCH or leave the reservation behind to fence future idle work.
+    reservations.delete(sessionId);
+    terminalizationStates.delete(sessionId);
+    activeGoalSessions.delete(sessionId);
+    resetRetry(sessionId);
+    finalizeSettlement({
+      sessionId,
+      directory: directory || reservation.directory,
+      written: currentGoal,
+      status: 'blocked',
+      statusReason: currentGoal.statusReason || reservation.resolutionReason,
+    });
+    return true;
   };
 
   const rebindPendingReservation = (reservation, goal, directory, { resetAccounting = false } = {}) => {
@@ -834,7 +956,7 @@ export const createSessionGoalRuntime = ({
     return true;
   };
 
-  const rollbackReservation = async ({ sessionId, directory, reservation, generation, rebindGeneration = false, allowStopped = false, blockedReason = 'continuation reservation rollback unavailable' }) => {
+  const rollbackReservation = async ({ sessionId, directory, reservation, generation, rebindGeneration = false, allowStopped = false, blockedReason = 'continuation reservation rollback unavailable', scheduleResolutionRetry = true }) => {
     if (reservations.get(sessionId) !== reservation) return false;
     const resolutionReason = reservation.resolutionReason || blockedReason;
     reservation.resolutionReason = resolutionReason;
@@ -890,6 +1012,7 @@ export const createSessionGoalRuntime = ({
     // retry must either restore the before-state or confirm the blocked state;
     // dropping it here would strand the active goal with an undispatched charge.
     reservation.resolutionState = 'pending';
+    if (!scheduleResolutionRetry) return false;
     if (!scheduleRetry(sessionId, directory, generation, 'reservation-rollback', { settleOnExhaustion: false })) {
       reservation.resolutionState = 'escalated';
       console.warn(`[session-goal] ${sessionId} reservation rollback unresolved after bounded retries`);
@@ -897,7 +1020,7 @@ export const createSessionGoalRuntime = ({
     return false;
   };
 
-  const discardReservation = async ({ sessionId, directory, reservation, generation, rebindGeneration = false, rollback = true, blockedReason }) => {
+  const discardReservation = async ({ sessionId, directory, reservation, generation, rebindGeneration = false, rollback = true, blockedReason, scheduleResolutionRetry = true }) => {
     if (reservations.get(sessionId) !== reservation) return;
     // After prompt_async was attempted, the server may have accepted it even
     // when the response was lost. Preserve that accounting and drop only the
@@ -906,19 +1029,12 @@ export const createSessionGoalRuntime = ({
       reservations.delete(sessionId);
       return;
     }
-    await rollbackReservation({ sessionId, directory, reservation, generation, rebindGeneration, blockedReason });
+    await rollbackReservation({ sessionId, directory, reservation, generation, rebindGeneration, blockedReason, scheduleResolutionRetry });
   };
 
   const reconcileDroppedReservation = async ({ sessionId, directory, reservation, generation, preserveAccounting = false }) => {
     if (reservations.get(sessionId) !== reservation) return;
     reservation.resolutionState = 'pending';
-    if (reservation.postAttempts > 0 && reservation.dispatchOutcome !== 'rejected') {
-      // A prompt may have crossed the wire. Its accounting is intentionally
-      // retained; only a genuinely new logical goal makes the old state
-      // irrelevant.
-      reservations.delete(sessionId);
-      return;
-    }
 
     let session;
     try {
@@ -942,6 +1058,19 @@ export const createSessionGoalRuntime = ({
       reconciliationGeneration = getGeneration(sessionId);
     }
     const currentGoal = parseGoalMetadata(session);
+    if (terminalizationStates.has(sessionId)
+      && await reconcileCommittedTerminalization(sessionId, directory || reservation.directory, reservation, reconciliationGeneration)) {
+      return;
+    }
+    if (reservation.postAttempts > 0 && reservation.dispatchOutcome !== 'rejected') {
+      const replacementCarriesCharge = currentGoal
+        && goalLogicalIdentityKey(currentGoal) !== goalLogicalIdentityKey(reservation.goal)
+        && reservationStateMatches(currentGoal, reservation.after);
+      if (currentGoal && !replacementCarriesCharge) {
+        if (!terminalizationStates.has(sessionId)) reservations.delete(sessionId);
+        return;
+      }
+    }
     if (!currentGoal) {
       const rawGoal = session?.metadata?.openchamber?.goal;
       if (rawGoal !== undefined) {
@@ -1033,25 +1162,74 @@ export const createSessionGoalRuntime = ({
 
   const settleReservationAfterRetryExhaustion = async (sessionId, directory, generation, kind) => {
     const reservation = reservations.get(sessionId);
-    if (!reservation) return;
+    if (!reservation) {
+      terminalizationStates.delete(sessionId);
+      return;
+    }
+    if (await reconcileCommittedTerminalization(sessionId, directory, reservation, generation)) return;
+    const terminalReason = kind === 'dispatch'
+      ? 'continuation dispatch retry limit reached'
+      : `${kind} retry limit reached`;
     if (reservation.postAttempts > 0 && reservation.dispatchOutcome !== 'rejected') {
       await settleGoal({
         sessionId,
         directory,
         goal: { ...reservation.goal, ...reservation.after },
         status: 'blocked',
-        statusReason: `${kind} retry limit reached`,
+        statusReason: terminalReason,
         generation,
       });
+    } else {
+      await discardReservation({
+        sessionId,
+        directory,
+        reservation,
+        generation,
+        blockedReason: `${terminalReason} before continuation dispatch`,
+        scheduleResolutionRetry: false,
+      });
+    }
+    if (reservations.get(sessionId) !== reservation) {
+      terminalizationStates.delete(sessionId);
+      resetRetry(sessionId);
       return;
     }
-    await discardReservation({
-      sessionId,
-      directory,
-      reservation,
-      generation,
-      blockedReason: `${kind} retry limit reached before continuation dispatch`,
-    });
+    throw new Error(`${kind} terminalization did not settle the reservation`);
+  };
+
+  const scheduleTerminalizationRetry = (sessionId, directory, generation, kind) => {
+    if (!isGenerationCurrent(sessionId, generation)) return false;
+    const previous = terminalizationStates.get(sessionId);
+    const attempts = (previous?.kind === kind ? previous.attempts : 0) + 1;
+    if (attempts > maxRetryAttempts) {
+      terminalizationStates.set(sessionId, { kind, attempts, exhausted: true });
+      console.warn(`[session-goal] ${sessionId} ${kind} terminalization retry limit reached (${maxRetryAttempts})`);
+      return false;
+    }
+    terminalizationStates.set(sessionId, { kind, attempts, exhausted: false });
+    const delay = Number.isFinite(retryDelaysMs[attempts - 1])
+      ? Math.max(0, retryDelaysMs[attempts - 1])
+      : Math.max(0, idleQuietMs);
+    armTimer(sessionId, directory, delay);
+    return true;
+  };
+
+  const beginTerminalization = (sessionId, directory, generation, kind) => {
+    const reservation = reservations.get(sessionId);
+    if (!reservation) return Promise.resolve();
+    const terminalReason = kind === 'dispatch'
+      ? 'continuation dispatch retry limit reached'
+      : `${kind} retry limit reached`;
+    reservation.resolutionState = 'terminalization-pending';
+    reservation.resolutionReason = `${terminalReason} before continuation dispatch`;
+    terminalizationStates.set(sessionId, { kind, attempts: 0, exhausted: false });
+    return settleReservationAfterRetryExhaustion(sessionId, directory, generation, kind)
+      .catch((error) => {
+        if (isGenerationCurrent(sessionId, generation) && reservations.get(sessionId) === reservation) {
+          scheduleTerminalizationRetry(sessionId, directory, generation, kind);
+        }
+        console.warn(`[session-goal] ${sessionId} terminalization failed: ${error?.message || error}`);
+      });
   };
 
   const runAudit = async ({ goal, assistantText, directory, lastAssistantInfo }) => {
@@ -1261,6 +1439,20 @@ export const createSessionGoalRuntime = ({
 
   const tick = async (sessionId, directory, expectedGeneration = getGeneration(sessionId)) => {
     if (stopped) return;
+    const terminalization = terminalizationStates.get(sessionId);
+    if (terminalization) {
+      if (!terminalization.exhausted) {
+        try {
+          await settleReservationAfterRetryExhaustion(sessionId, directory, expectedGeneration, terminalization.kind);
+        } catch (error) {
+          if (isGenerationCurrent(sessionId, expectedGeneration)) {
+            scheduleTerminalizationRetry(sessionId, directory, expectedGeneration, terminalization.kind);
+          }
+          console.warn(`[session-goal] ${sessionId} terminalization failed: ${error?.message || error}`);
+        }
+      }
+      return;
+    }
     if (!isEnabled()) {
       if (disabledRecoverySessions.has(sessionId)) {
         scheduleRetry(sessionId, directory, expectedGeneration, 'enabled', { settleOnExhaustion: false });
@@ -1287,7 +1479,10 @@ export const createSessionGoalRuntime = ({
 
     const goal = parseGoalMetadata(session);
     if (goal) knownGoalStatuses.set(sessionId, goal.status);
-    if (!goal || goal.status !== 'active') return;
+    if (!goal || goal.status !== 'active') {
+      if (goal) reconcileCommittedSettlement(sessionId, directory, goal);
+      return;
+    }
     const goalSnapshot = goalLogicalIdentityKey(goal);
     const previousGoalSnapshot = goalSnapshots.get(sessionId);
     if (previousGoalSnapshot !== undefined && previousGoalSnapshot !== goalSnapshot) {
@@ -1538,9 +1733,7 @@ export const createSessionGoalRuntime = ({
              });
              return;
            }
-           await settleCurrentGoal({
-            sessionId, directory, goal, status: 'blocked', statusReason: 'continuation dispatch retry limit reached', generation,
-          });
+            await beginTerminalization(sessionId, directory, generation, 'dispatch');
           return;
         }
         const sent = await sendContinuation({
@@ -1614,9 +1807,7 @@ export const createSessionGoalRuntime = ({
             });
             return;
           }
-          await settleCurrentGoal({
-            sessionId, directory, goal, status: 'blocked', statusReason: 'continuation dispatch retry limit reached', generation,
-          });
+          await beginTerminalization(sessionId, directory, generation, 'dispatch');
         } else {
           scheduleRetry(sessionId, directory, generation, 'dispatch');
         }
@@ -2059,9 +2250,7 @@ export const createSessionGoalRuntime = ({
           });
           return;
         }
-        await settleCurrentGoal({
-          sessionId, directory, goal: written, status: 'blocked', statusReason: 'continuation dispatch retry limit reached', generation,
-        });
+        await beginTerminalization(sessionId, directory, generation, 'dispatch');
       } else {
         scheduleRetry(sessionId, directory, generation, 'dispatch');
       }
@@ -2108,6 +2297,32 @@ export const createSessionGoalRuntime = ({
     timers.set(sessionId, { timer, armedAt: now, dueAt: requestedDueAt });
   };
 
+  const clearStartupRecoveryTimer = () => {
+    if (!startupRecoveryTimer) return;
+    clearTimeout(startupRecoveryTimer);
+    startupRecoveryTimer = null;
+  };
+
+  const scheduleStartupRecovery = (listDirectories) => {
+    if (stopped || startupRecoveryTimer) return;
+    const attempt = startupRecoveryAttempts + 1;
+    if (attempt > maxStartupRecoveryAttempts) {
+      console.warn(`[session-goal] startup recovery retry limit reached (${maxStartupRecoveryAttempts})`);
+      return;
+    }
+    startupRecoveryAttempts = attempt;
+    const delay = Number.isFinite(startupRecoveryDelaysMs[attempt - 1])
+      ? Math.max(0, startupRecoveryDelaysMs[attempt - 1])
+      : Math.max(0, idleQuietMs);
+    startupRecoveryTimer = setTimeout(() => {
+      startupRecoveryTimer = null;
+      void start({ listDirectories }).catch((error) => {
+        console.warn(`[session-goal] startup recovery failed: ${error?.message || error}`);
+      });
+    }, delay);
+    startupRecoveryTimer.unref?.();
+  };
+
   // Immediate event path for a user abort: pause the active goal right away,
   // BEFORE any idle tick could send a continuation over the user's explicit
   // "stop". Messages the user sends afterwards leave the paused goal alone;
@@ -2137,6 +2352,7 @@ export const createSessionGoalRuntime = ({
     clearPendingArm(sessionId);
     resetRetry(sessionId);
     disabledRecoverySessions.delete(sessionId);
+    terminalizationStates.delete(sessionId);
     const reservation = reservations.get(sessionId);
     if (!reservation) return generation;
     if (reservation.postAttempts > 0 && reservation.dispatchOutcome !== 'rejected') {
@@ -2162,6 +2378,8 @@ export const createSessionGoalRuntime = ({
     disabledRecoverySessions.delete(sessionId);
     disabledRecoveryDirectories.delete(sessionId);
     activeGoalSessions.delete(sessionId);
+    terminalizationStates.delete(sessionId);
+    settlementMarkers.delete(sessionId);
   };
 
   const acceptSessionUpdate = (update) => {
@@ -2251,7 +2469,15 @@ export const createSessionGoalRuntime = ({
     const status = extractSessionStatus(payload);
     if (status) {
       if (status.type === 'idle') {
-        if (reservations.get(status.sessionId)?.resolutionState && retryStates.get(status.sessionId)?.exhausted) {
+        const terminalization = terminalizationStates.get(status.sessionId);
+        if (terminalization?.exhausted) {
+          terminalizationStates.set(status.sessionId, {
+            ...terminalization,
+            attempts: 0,
+            exhausted: false,
+          });
+          resetRetry(status.sessionId, 'terminalization');
+        } else if (reservations.get(status.sessionId)?.resolutionState && retryStates.get(status.sessionId)?.exhausted) {
           // A later authoritative idle starts a fresh bounded resolution
           // window after an earlier escalation, without a self-sustaining loop.
           resetRetry(status.sessionId, 'reservation-rollback');
@@ -2338,6 +2564,21 @@ export const createSessionGoalRuntime = ({
       return;
     }
     if (update && !update.parentID && update.goal) {
+      const settlementMarker = settlementMarkers.get(update.sessionId);
+      const committedSettlement = settlementMarker
+        && update.goal.status !== 'active'
+        && settlementMarkerMatches(update.goal, settlementMarker)
+        && reconcileCommittedSettlement(
+          update.sessionId,
+          update.directory || directoryHint,
+          update.goal,
+        );
+      if (settlementMarker && !committedSettlement && (
+        update.goal.status === 'active'
+        || !settlementMarkerMatches(update.goal, settlementMarker)
+      )) {
+        settlementMarkers.delete(update.sessionId);
+      }
       const nextGoalSnapshot = goalLogicalIdentityKey(update.goal);
       const previousGoalSnapshot = goalSnapshots.get(update.sessionId);
       freshGoal = previousGoalSnapshot !== undefined && previousGoalSnapshot !== nextGoalSnapshot;
@@ -2358,13 +2599,34 @@ export const createSessionGoalRuntime = ({
       const resumeUpdate = update.goal.status === 'active'
         && update.goal.statusReason === 'resumed';
       const reservation = reservations.get(update.sessionId);
+      const terminalization = terminalizationStates.get(update.sessionId);
+      const isNewReservationIdentity = !reservation
+        || goalReservationIdentityKey(update.goal) !== goalReservationIdentityKey(reservation.goal);
+      if ((freshGoal || newGoalDuringWork)
+        && terminalization
+        && isNewReservationIdentity
+        && (!reservation || goalLogicalIdentityKey(update.goal) !== goalLogicalIdentityKey(reservation.goal))) {
+        // A new logical goal owns a new kickoff. Do not let a terminalization
+        // fence for the previous goal consume that kickoff. Release the old
+        // reservation immediately only when the authoritative replacement no
+        // longer carries its accounting; an indistinguishable charge still
+        // needs the guarded reconciliation below to block explicitly.
+        terminalizationStates.delete(update.sessionId);
+        if (!reservation || !reservationStateMatches(update.goal, reservation.after)) {
+          if (reservations.get(update.sessionId) === reservation) reservations.delete(update.sessionId);
+        }
+      }
       if (resumeUpdate && reservation) {
-        const explicitAccountingReset = update.goal.turnsUsed === 0
-          && update.goal.lastAccountedMessageID === '';
-        if (explicitAccountingReset) {
-          // Resume intentionally establishes a new accounting segment. An old
-          // reservation belongs to the previous segment and must not make the
-          // new tick dispatch without recreating its reservation.
+        const explicitAccountingReset = update.goal.turnsUsed === 0;
+        const reservationCanBeResolvedByResume = explicitAccountingReset
+          && (reservation.postAttempts === 0
+            || reservation.dispatchOutcome === 'rejected'
+            || terminalizationStates.has(update.sessionId));
+        if (reservationCanBeResolvedByResume) {
+          // Resume authoritatively reset the turn counter. A rejected or
+          // terminalization reservation belongs to the previous accounting
+          // segment, so its charge/fence is gone and the kickoff must create a
+          // fresh reservation for the resumed tail.
           reservations.delete(update.sessionId);
         } else {
           // Edit-in-place may change identity/freshness while preserving the
@@ -2422,6 +2684,7 @@ export const createSessionGoalRuntime = ({
       }
       if (isResume) {
         resumeSnapshots.set(update.sessionId, resumeKey);
+        terminalizationStates.delete(update.sessionId);
         recoveryHolds.delete(update.sessionId);
         recoveryHoldDirectories.delete(update.sessionId);
         disabledRecoverySessions.delete(update.sessionId);
@@ -2439,16 +2702,25 @@ export const createSessionGoalRuntime = ({
     }
   };
 
-  const start = async ({ listDirectories } = {}) => {
+  const start = async ({ listDirectories, resetRetryWindow = false } = {}) => {
     if (stopped || !isCallable(listDirectories)) return;
+    if (resetRetryWindow) {
+      startupRecoveryAttempts = 0;
+      clearStartupRecoveryTimer();
+    }
     let directories;
     try {
       directories = await listDirectories();
     } catch (error) {
       console.warn(`[session-goal] restart directory scan failed: ${error?.message || error}`);
+      scheduleStartupRecovery(listDirectories);
       return;
     }
-    if (!Array.isArray(directories)) return;
+    if (!Array.isArray(directories)) {
+      scheduleStartupRecovery(listDirectories);
+      return;
+    }
+    let scanFailed = false;
     for (const directory of [...new Set(directories.filter((value) => isString(value) && value))]
       .slice(0, RESTART_SCAN_DIRECTORY_LIMIT)) {
       if (stopped) return;
@@ -2461,9 +2733,13 @@ export const createSessionGoalRuntime = ({
       } catch (error) {
         // One unavailable project must not prevent recovery in unrelated ones.
         console.warn(`[session-goal] restart scan failed for ${directory}: ${error?.message || error}`);
+        scanFailed = true;
         continue;
       }
-      if (!Array.isArray(sessions)) continue;
+      if (!Array.isArray(sessions)) {
+        scanFailed = true;
+        continue;
+      }
       if (stopped) return;
       for (const candidate of sessions) {
         if (
@@ -2507,6 +2783,19 @@ export const createSessionGoalRuntime = ({
         armTimer(sessionId, sessionDirectory, 0);
       }
     }
+    if (scanFailed) {
+      scheduleStartupRecovery(listDirectories);
+    } else {
+      startupRecoveryAttempts = 0;
+      clearStartupRecoveryTimer();
+      if (resetRetryWindow) {
+        for (const [sessionId, directory] of activeGoalSessions.entries()) {
+          if (terminalizationStates.has(sessionId)) continue;
+          resetRetry(sessionId);
+          armTimer(sessionId, directory, 0);
+        }
+      }
+    }
   };
 
   const onSettingsChanged = () => {
@@ -2542,6 +2831,9 @@ export const createSessionGoalRuntime = ({
     const reservationsToRollback = [...reservations.entries()]
       .filter(([, reservation]) => reservation.postAttempts === 0 || reservation.dispatchOutcome === 'rejected');
     stopped = true;
+    clearStartupRecoveryTimer();
+    terminalizationStates.clear();
+    settlementMarkers.clear();
     for (const sessionId of new Set([
       ...generations.keys(),
       ...timers.keys(),
