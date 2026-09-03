@@ -74,11 +74,9 @@ mock.module('@/stores/useAutoReviewStore', () => ({
   useAutoReviewStore: useAutoReviewStoreMock,
 }));
 
-// The hook reads live status two ways: the effect loop subscribes through
-// useDirectorySync, and the dispatch-time re-check reads the directory child
-// store via getSyncRefs' getDirectoryState. Back the useDirectorySync mock
-// with the same real child store so both observations share one source of
-// truth and a status flip drives the effect like a live snapshot would.
+// The hook reads live status from the current-directory selector and from the
+// target child stores. Back both paths with the same real child store so a
+// status flip drives the effect like a live snapshot would.
 const DIRECTORY = '/repo-auto';
 
 const assistantMessage = (id: string, completed?: number, sessionID = 'ses_1'): Message => {
@@ -99,12 +97,22 @@ type DirectorySyncState = Pick<State, 'session_status' | 'message'> & {
 
 let directoryChildStores: ChildStoreManager | null = null;
 
-const setDirectorySessionStatus = (sessionId: string, type: 'idle' | 'busy' | 'retry', messages: Message[] = []) => {
+const setDirectorySessionStatus = (
+  sessionId: string,
+  type: 'idle' | 'busy' | 'retry',
+  messages: Message[] = [],
+  directory = DIRECTORY,
+) => {
   const manager = directoryChildStores;
-  const store = manager?.ensureChild(DIRECTORY, { bootstrap: false });
+  const store = manager?.ensureChild(directory, { bootstrap: false });
   if (!store) throw new Error('directory child store not bootstrapped');
   const status: SessionStatus = type === 'busy' ? { type: 'busy' } : type === 'retry' ? { type: 'retry', attempt: 1, message: 'test', next: 0 } : { type: 'idle' };
-  store.setState({ status: 'complete', session_status: { [sessionId]: status }, message: messages.length > 0 ? { [sessionId]: messages } : {} });
+  store.setState({
+    status: 'complete',
+    sessionListSource: 'authoritative',
+    session_status: { [sessionId]: status },
+    message: messages.length > 0 ? { [sessionId]: messages } : {},
+  });
 };
 
 const readDirectorySyncState = (): DirectorySyncState => {
@@ -145,11 +153,10 @@ const createControllableQueueStorage = () => {
 // mock mirrors that contract instead of forcing selectors to unknown.
 mock.module('@/sync/sync-context', () => ({
   useDirectorySync: <T,>(selector: (state: DirectorySyncState) => T): T => selector(readDirectorySyncState()),
-}));
-
-mock.module('@/stores/useDirectoryStore', () => ({
-  useDirectoryStore: <T,>(selector: (state: { currentDirectory: string }) => T): T =>
-    selector({ currentDirectory: DIRECTORY }),
+  useChildStoreManager: () => {
+    if (!directoryChildStores) throw new Error('directory child stores not initialized');
+    return directoryChildStores;
+  },
 }));
 
 import {
@@ -482,12 +489,16 @@ describe('useQueuedMessageAutoSend integration', () => {
 
   const rerenderHook = async () => {
     await act(async () => {
-      root.render(React.createElement(HookHost));
+      root.render(React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(HookHost, { key: 0 }),
+      ));
     });
   };
 
-  const primeQueue = (sessionId: string) => {
-    const target = createMessageQueueTarget(sessionId, DIRECTORY, getRuntimeKey());
+  const primeQueue = (sessionId: string, directory = DIRECTORY, runtimeKey = getRuntimeKey()) => {
+    const target = createMessageQueueTarget(sessionId, directory, runtimeKey);
     if (!target) throw new Error('queue target derivation failed');
     // Send config captured at queue time — the hook must send with this exact
     // configuration instead of re-resolving from current config stores.
@@ -498,8 +509,8 @@ describe('useQueuedMessageAutoSend integration', () => {
     return target;
   };
 
-  const queueOf = (sessionId: string): QueuedMessage[] => {
-    const target = createMessageQueueTarget(sessionId, DIRECTORY, getRuntimeKey());
+  const queueOf = (sessionId: string, directory = DIRECTORY, runtimeKey = getRuntimeKey()): QueuedMessage[] => {
+    const target = createMessageQueueTarget(sessionId, directory, runtimeKey);
     if (!target) throw new Error('queue target derivation failed');
     return useMessageQueueStore.getState().getQueueForTarget(target);
   };
