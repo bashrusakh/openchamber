@@ -8,7 +8,7 @@ describe('buildKnownSessionDirectories', () => {
     ]);
 
     expect([...buildKnownSessionDirectories([{ path: '/Repo' }], worktrees)]).toEqual([
-      '/repo',
+      '/Repo',
       '/repo/worktree',
     ]);
     expect([...buildKnownSessionDirectories([{ path: '/Repo' }], worktrees, { includeWorktrees: false })]).toEqual([
