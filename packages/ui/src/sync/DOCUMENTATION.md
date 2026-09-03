@@ -74,7 +74,7 @@ The composer compares normalized attachment MIME types with the selected model's
 
 - The scheduler runs at most two directory bootstraps concurrently.
 - Selected session/current directory demand outranks active-project, expanded, visible, and background demand.
-- Demand is deduplicated by normalized directory and can be promoted while queued.
+- Demand is deduplicated by normalized directory and can be promoted while queued. Queued-message auto-send keeps bootstrap retry/backoff state at the same runtime-directory scope, so several session queues share one retry window while each queue still dispatches independently.
 - The complete known project/worktree set is always published. Collapsed and off-screen directories remain background demand, so they refresh eventually rather than waiting for expansion.
 - A bootstrap holds its scheduler slot through critical state and the authoritative directory session-list fetch. Deferrable command/MCP/LSP/VCS/question/permission enrichment starts afterward without extending slot ownership or competing with the initial session-list request.
 - A system-resume signal, including Capacitor foreground resume, refreshes pending questions and permissions only for the active materialized directory. The refresh is deduplicated while in flight, preserves existing state on fetch failure, and leaves unopened directories untouched; normal stream reconnect recovery remains the broader catch-up path.
@@ -88,7 +88,7 @@ Bootstrap remains stale-while-revalidate: a directory store may paint persisted 
 
 Directory session lists record whether their current snapshot is empty, persisted, live-event-derived, or authoritative. Bootstrap captures a mutation revision before starting its requests. Its completion replaces persisted data, including with a successful empty response, then overlays only session events and direct move/archive/delete mutations newer than that revision. It must not preserve the entire cached list as a race fallback because that would retain stale persisted sessions.
 
-The roots request is authoritative for root completeness. The broader child-session request has independent completeness: a successful empty response clears stale children, while a failed request preserves known children and their required ancestors without turning the failure into an empty snapshot.
+The roots request is authoritative for root completeness. The broader child-session request has independent completeness: a successful empty response clears stale children, while a failed request preserves known children and their required ancestors without turning the failure into an empty snapshot. A roots-only fallback is marked `partial`, not `authoritative`, until the child-session request succeeds.
 
 The persisted session snapshot keeps up to 50 sessions selected by `time.updated`/`time.created`, not ID ordering. Non-empty updates coalesce to the latest runtime-directory snapshot and flush on lifecycle suspension; runtime switches reject stale pending writes. Successful empty results persist an empty v2 tombstone synchronously so legacy data cannot reappear on restart. If localStorage quota prevents the full snapshot, persistence retries with progressively smaller recent snapshots and removes stale current/legacy values rather than leaving an old list indefinitely.
 

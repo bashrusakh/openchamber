@@ -26,9 +26,226 @@ describe("message queue runtime ownership", () => {
     expect(useMessageQueueStore.getState().getQueueForTarget(b)[0]?.content).toBe("from B")
   })
 
+  test("isolates session IDs within one runtime and directory", () => {
+    const first = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    const second = createMessageQueueTarget("session-2", "/repo", "runtime-a")!
+    useMessageQueueStore.getState().addToQueue(first, { content: "first session" })
+    useMessageQueueStore.getState().addToQueue(second, { content: "second session" })
+
+    expect(useMessageQueueStore.getState().getQueueForTarget(first)[0]?.content).toBe("first session")
+    expect(useMessageQueueStore.getState().getQueueForTarget(second)[0]?.content).toBe("second session")
+  })
+
   test("round trips a composite queue key", () => {
     const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
     expect(parseMessageQueueKey(getMessageQueueKey(target))).toEqual(target)
+  })
+
+  test("uses one key for Windows path casing and separators but not POSIX casing", () => {
+    const windowsSlash = createMessageQueueTarget("session-1", "C:/Repo", "runtime-a")!
+    const windowsBackslash = createMessageQueueTarget("session-1", "c:\\repo", "runtime-a")!
+    const uncSlash = createMessageQueueTarget("session-2", "//Server/Share/Repo", "runtime-a")!
+    const uncBackslash = createMessageQueueTarget("session-2", "\\\\server\\share\\repo", "runtime-a")!
+    const posixUpper = createMessageQueueTarget("session-3", "/Repo", "runtime-a")!
+    const posixLower = createMessageQueueTarget("session-3", "/repo", "runtime-a")!
+
+    expect(windowsSlash.directory).toBe("C:/Repo")
+    expect(getMessageQueueKey(windowsSlash)).toBe(getMessageQueueKey(windowsBackslash))
+    expect(getMessageQueueKey(uncSlash)).toBe(getMessageQueueKey(uncBackslash))
+    expect(getMessageQueueKey(posixUpper)).not.toBe(getMessageQueueKey(posixLower))
+
+    useMessageQueueStore.getState().addToQueue(windowsSlash, { content: "from Windows" })
+    expect(useMessageQueueStore.getState().getQueueForTarget(windowsBackslash)[0]?.content).toBe("from Windows")
+  })
+
+  test("migrates aliased v2 queue keys into one FIFO queue without losing item data", () => {
+    const target = createMessageQueueTarget("session-1", "C:/Repo", "runtime-a")!
+    const canonicalKey = getMessageQueueKey(target)
+    const aliasedKey = ["runtime-a", "c:\\Repo\\", "session-1"].join("\n")
+    const first = {
+      id: "queued-old",
+      content: "old alias",
+      createdAt: 1,
+      additionalParts: [{ text: "old context", synthetic: true }],
+      sendConfig: { providerID: "provider-old", modelID: "model-old", agent: "agent-old", variant: "variant-old" },
+    }
+    const second = {
+      id: "queued-new",
+      content: "canonical key",
+      createdAt: 2,
+      additionalParts: [{ text: "new context", synthetic: true }],
+      sendConfig: { providerID: "provider-new", modelID: "model-new", agent: "agent-new", variant: "variant-new" },
+    }
+
+    const migrated = migrateMessageQueueState({
+      queuedMessages: {
+        [aliasedKey]: [first],
+        [canonicalKey]: [second],
+      },
+    }, 2)
+
+    expect(migrated.queuedMessages).toEqual({ [canonicalKey]: [first, second] })
+  })
+
+  test("quarantines an unparseable v2 queue key without discarding its messages", () => {
+    const target = createMessageQueueTarget("session-valid", "/repo", "runtime-a")!
+    const valid = { id: "queued-valid", content: "valid", createdAt: 1 }
+    const malformed = { id: "queued-malformed", content: "malformed", createdAt: 2 }
+
+    const migrated = migrateMessageQueueState({
+      queuedMessages: {
+        [getMessageQueueKey(target)]: [valid],
+        "session-only": [malformed],
+      },
+    }, 2)
+
+    expect(migrated.queuedMessages).toEqual({ [getMessageQueueKey(target)]: [valid] })
+    expect(migrated.quarantinedLegacyMessages).toEqual({ "session-only": [malformed] })
+  })
+
+  test("quarantines composite keys with extra fields", () => {
+    const target = createMessageQueueTarget("session-extra", "/repo", "runtime-a")!
+    const extraFieldKey = `${getMessageQueueKey(target)}\nextra`
+    const queued = { id: "queued-extra", content: "extra field", createdAt: 1 }
+
+    expect(parseMessageQueueKey(extraFieldKey)).toBeNull()
+
+    const migrated = migrateMessageQueueState({
+      queuedMessages: { [extraFieldKey]: [queued] },
+    }, 3)
+
+    expect(migrated.queuedMessages).toEqual({})
+    expect(migrated.quarantinedLegacyMessages).toEqual({ [extraFieldKey]: [queued] })
+  })
+
+  test("canonicalizes a noncanonical Windows alias from the prior v4 snapshot so it remains reachable", () => {
+    const target = createMessageQueueTarget("session-v4", "C:/Repo", "runtime-a")!
+    const aliasKey = ["runtime-a", "c:\\Repo\\", "session-v4"].join("\n")
+    const queued = { id: "queued-v4", content: "v4 alias", createdAt: 1 }
+
+    const migrated = migrateMessageQueueState({
+      queuedMessages: { [aliasKey]: [queued] },
+    }, 4)
+
+    expect(migrated.queuedMessages).toEqual({ [getMessageQueueKey(target)]: [queued] })
+  })
+
+  test("keeps valid sibling queues when persisted queue values or entries are malformed", () => {
+    const validTarget = createMessageQueueTarget("session-valid", "/repo", "runtime-a")!
+    const quarantinedTarget = createMessageQueueTarget("session-quarantined", "/repo", "runtime-a")!
+    const valid = { id: "queued-valid", content: "valid", createdAt: 1 }
+    const quarantined = { id: "queued-quarantined", content: "quarantined", createdAt: 2 }
+    const malformed = { id: "queued-malformed", content: "malformed", createdAt: "not-a-time" }
+    const extraFieldKey = `${getMessageQueueKey(quarantinedTarget)}\nextra`
+
+    const migrated = migrateMessageQueueState({
+      queuedMessages: {
+        [getMessageQueueKey(validTarget)]: [null, valid, malformed],
+        [getMessageQueueKey(quarantinedTarget)]: null,
+        "not-an-array": { id: "not-a-queue" },
+        [extraFieldKey]: [quarantined, null],
+      },
+      quarantinedLegacyMessages: {
+        "already-quarantined": null,
+        "valid-quarantine": [null, quarantined],
+      },
+    }, 3)
+
+    expect(migrated.queuedMessages).toEqual({ [getMessageQueueKey(validTarget)]: [valid] })
+    expect(migrated.quarantinedLegacyMessages).toEqual({
+      "valid-quarantine": [quarantined],
+      [extraFieldKey]: [quarantined],
+    })
+  })
+
+  test("caps merged aliased queues at the newest 20 messages in persisted FIFO order", () => {
+    const target = createMessageQueueTarget("session-1", "C:/Repo", "runtime-a")!
+    const canonicalKey = getMessageQueueKey(target)
+    const aliasedKey = ["runtime-a", "c:\\Repo\\", "session-1"].join("\n")
+    const aliasedMessages = Array.from({ length: 25 }, (_, index) => ({
+      id: `queued-alias-${index}`,
+      content: `alias-${index}`,
+      createdAt: index,
+      contextClaimed: index % 2 === 0,
+      additionalParts: [{ text: `alias-context-${index}`, synthetic: true }],
+      sendConfig: { providerID: `alias-provider-${index}`, modelID: `alias-model-${index}` },
+    }))
+    const canonicalMessages = Array.from({ length: 15 }, (_, index) => ({
+      id: `queued-canonical-${index}`,
+      content: `canonical-${index}`,
+      createdAt: index + 25,
+      contextClaimed: true,
+      additionalParts: [{ text: `context-${index}`, synthetic: true }],
+      sendConfig: { providerID: `provider-${index}`, modelID: `model-${index}` },
+    }))
+
+    const migrated = migrateMessageQueueState({
+      queuedMessages: {
+        [aliasedKey]: aliasedMessages,
+        [canonicalKey]: canonicalMessages,
+      },
+    }, 2)
+
+    expect(migrated.queuedMessages?.[canonicalKey]).toEqual([
+      ...aliasedMessages.slice(-5),
+      ...canonicalMessages,
+    ])
+    expect(migrated.queuedMessages?.[canonicalKey]).toHaveLength(20)
+    expect(migrated.queuedMessages?.[canonicalKey]?.at(-1)).toEqual(canonicalMessages.at(-1))
+  })
+
+  test("migrates old UNC queue keys to the canonical target", () => {
+    const target = createMessageQueueTarget("session-unc", "//Server/Share/Repo", "runtime-a")!
+    const aliasKey = ["runtime-a", "\\\\SERVER\\Share\\Repo\\", "session-unc"].join("\n")
+    const queued = { id: "queued-unc", content: "UNC queue", createdAt: 1 }
+
+    const migrated = migrateMessageQueueState({
+      queuedMessages: { [aliasKey]: [queued] },
+    }, 2)
+
+    expect(migrated.queuedMessages).toEqual({ [getMessageQueueKey(target)]: [queued] })
+  })
+
+  test("keeps POSIX case variants in separate persisted queues", () => {
+    const upper = createMessageQueueTarget("session-posix", "/Repo", "runtime-a")!
+    const lower = createMessageQueueTarget("session-posix", "/repo", "runtime-a")!
+    const upperMessage = { id: "queued-upper", content: "upper", createdAt: 1 }
+    const lowerMessage = { id: "queued-lower", content: "lower", createdAt: 2 }
+
+    const migrated = migrateMessageQueueState({
+      queuedMessages: {
+        [getMessageQueueKey(upper)]: [upperMessage],
+        [getMessageQueueKey(lower)]: [lowerMessage],
+      },
+    }, 2)
+
+    expect(migrated.queuedMessages).toEqual({
+      [getMessageQueueKey(upper)]: [upperMessage],
+      [getMessageQueueKey(lower)]: [lowerMessage],
+    })
+  })
+
+  test("canonicalizes and merges composite keys in quarantined state while retaining legacy keys", () => {
+    const target = createMessageQueueTarget("session-1", "C:/Repo", "runtime-a")!
+    const canonicalKey = getMessageQueueKey(target)
+    const aliasedKey = ["runtime-a", "C:\\repo", "session-1"].join("\n")
+    const quarantined = { id: "quarantined", content: "quarantined", createdAt: 1 }
+    const aliased = { id: "aliased", content: "aliased", createdAt: 2 }
+    const legacy = { id: "legacy", content: "legacy", createdAt: 3 }
+
+    const migrated = migrateMessageQueueState({
+      quarantinedLegacyMessages: {
+        [canonicalKey]: [quarantined],
+        [aliasedKey]: [aliased],
+        "session-legacy": [legacy],
+      },
+    }, 2)
+
+    expect(migrated.queuedMessages).toEqual({})
+    expect(migrated.quarantinedLegacyMessages).toEqual({
+      [canonicalKey]: [quarantined, aliased],
+      "session-legacy": [legacy],
+    })
   })
 
   test("quarantines legacy session-only queues instead of activating them", () => {
@@ -36,10 +253,16 @@ describe("message queue runtime ownership", () => {
       queuedMessages: {
         "session-1": [{ id: "queued-1", content: "legacy", createdAt: 1 }],
       },
+      quarantinedLegacyMessages: {
+        "session-1": [{ id: "queued-0", content: "already quarantined", createdAt: 0 }],
+      },
     }, 1)
 
     expect(migrated.queuedMessages).toEqual({})
-    expect(migrated.quarantinedLegacyMessages?.["session-1"]?.[0]?.content).toBe("legacy")
+    expect(migrated.quarantinedLegacyMessages?.["session-1"]?.map((item) => item.content)).toEqual([
+      "already quarantined",
+      "legacy",
+    ])
   })
 
   test("bounds each queue to the newest 20 messages", () => {

@@ -28,12 +28,16 @@ describe('normalizePath', () => {
   });
 
   describe('drive letter casing', () => {
-    test('uppercases lowercase Windows drive letter', () => {
-      expect(normalizePath('c:\\Users\\me\\project')).toBe('C:/Users/me/project');
+    test('canonicalizes Windows drive paths', () => {
+      expect(normalizePath('c:\\Users\\me\\Project')).toBe('C:/Users/me/Project');
     });
 
-    test('preserves already-uppercase drive letter', () => {
+    test('canonicalizes already-uppercase drive paths', () => {
       expect(normalizePath('C:\\Users\\me\\project')).toBe('C:/Users/me/project');
+    });
+
+    test('preserves Windows component casing', () => {
+      expect(normalizePath('C:/Repo/Worktree')).toBe('C:/Repo/Worktree');
     });
 
     test('does not match multi-character tokens before colon', () => {
@@ -61,8 +65,9 @@ describe('normalizePath', () => {
       expect(normalizePath('/')).toBe('/');
     });
 
-    test('preserves single-char after slash strip', () => {
-      expect(normalizePath('C:/')).toBe('C:');
+    test('preserves a Windows drive root', () => {
+      expect(normalizePath('C:/')).toBe('C:/');
+      expect(normalizePath('c:\\')).toBe('C:/');
     });
   });
 
