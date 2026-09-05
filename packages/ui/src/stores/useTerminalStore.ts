@@ -5,6 +5,7 @@ import { z } from 'zod';
 
 import { getSafeSessionStorage } from '@/stores/utils/safeStorage';
 import type { TerminalServerSession } from '@/lib/api/types';
+import { normalizeTerminalDirectory } from '@/lib/pathNormalization';
 
 export interface TerminalChunk {
   id: number;
@@ -228,13 +229,7 @@ const tabIdNumber = (tabId: string): number | null => {
   return Number.isFinite(num) ? num : null;
 };
 
-function normalizeDirectory(dir: string): string {
-  let normalized = dir.trim();
-  while (normalized.length > 1 && normalized.endsWith('/')) {
-    normalized = normalized.slice(0, -1);
-  }
-  return normalized;
-}
+const normalizeDirectory = normalizeTerminalDirectory;
 
 const actionMutationRevisionKey = (directory: string, actionId: string): string => `${directory}\u0000${actionId}`;
 
@@ -282,6 +277,12 @@ const nextDefaultTabLabel = (tabs: readonly TerminalTab[]): string => {
   }
   return highest === 0 ? 'Terminal' : `Terminal ${highest + 1}`;
 };
+
+/** A project action the user would expect to see marked as running. */
+export const isActiveProjectActionTab = (tab: TerminalTab): boolean =>
+  tab.purpose.type === 'project-action'
+  && tab.purpose.executionId !== null
+  && ACTIVE_PROJECT_ACTION_LIFECYCLES.has(tab.lifecycle);
 
 const isLiveRunningTerminal = (tab: TerminalTab | undefined): boolean =>
   Boolean(tab && tab.terminalSessionId !== null && tab.lifecycle === 'running');
