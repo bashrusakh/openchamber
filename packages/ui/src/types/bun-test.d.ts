@@ -3,8 +3,8 @@
 
 declare module "bun:test" {
   export function describe(name: string, fn: () => void): void;
-  export function test(name: string, fn: () => void | Promise<void>): void;
-  export function expect(value: unknown): {
+  export function test(name: string, fn: () => void | Promise<void>, timeoutMs?: number): void;
+  export interface ExpectResult {
     toEqual(expected: unknown): void;
     toBe(expected: unknown): void;
     toBeTruthy(): void;
@@ -28,12 +28,22 @@ declare module "bun:test" {
       toContain(expected: unknown): void;
       toBeNull(): void;
     };
-  };
+  }
+  export function expect(value: unknown): ExpectResult;
   export function beforeEach(fn: () => void | Promise<void>): void;
   export function afterEach(fn: () => void | Promise<void>): void;
   export function afterAll(fn: () => void | Promise<void>): void;
-  export function mock<T extends (...args: never[]) => unknown>(fn?: T): T;
+  // Mock<T> matches the bun:test runtime mock: T (callable) plus spy methods.
+  // Tests that need to swap implementations at runtime cast through `Mock<T>`.
+  export interface Mock<T extends (...args: never[]) => unknown> {
+    (...args: Parameters<T>): ReturnType<T>;
+    mockImplementation(fn: T): Mock<T>;
+    mockReturnValue(value: ReturnType<T>): Mock<T>;
+    mockReset(): Mock<T>;
+  }
+  export function mock<T extends (...args: never[]) => unknown>(fn?: T): Mock<T>;
   export namespace mock {
     function module(moduleName: string, factory: () => Record<string, unknown>): void;
+    function restore(): void;
   }
 }

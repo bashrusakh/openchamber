@@ -45,7 +45,11 @@ exactly as it already does when the context panel opens.
 
 - the user switched it off;
 - the runtime is mobile or VS Code;
-- the context panel is open for the active directory;
+- the context panel is open for the directory the app is effectively on —
+  looked up through `useEffectiveDirectory` and `normalizeContextPanelDirectoryKey`,
+  the same key the rail and the panel use. It is deliberately **not** the
+  directory this panel reports about: a managed Chat reports about none, and
+  that empty key answered "closed" for a context panel that was plainly open;
 - the row cannot fit `WORK_STATUS_MIN_CHAT_WIDTH` of transcript alongside
   `WORK_STATUS_PANEL_WIDTH` of panel.
 
@@ -53,6 +57,11 @@ exactly as it already does when the context panel opens.
 mode. It remains available on a new-session draft: when the draft targets a
 project or pending worktree, the panel uses that directory for project, MCP,
 and usage readouts before a session exists.
+
+Managed Chats never render or warm the Project repository section. A Chat draft
+also passes no fallback directory to the panel, so an active project's branch
+cannot leak into the draft while directory-independent sections remain
+available.
 
 `rowRef` is a **callback ref, not an object ref**. An object ref gives no signal
 when the node attaches, so the measuring effect read `.current`, found nothing
@@ -86,11 +95,11 @@ which requests only providers enabled for this panel.
 
 | Block | Source | Notes |
 |---|---|---|
-| Context + cost | `contextUsage.ts` over `useSessionMessages`, `Session.cost` | see below — the store getters cannot serve this |
+| Context + cost | `contextUsage.ts` over `useSessionMessages`; cost via `useSubagentCostRollup` (own cost + every descendant subagent, recursively) | see below — the store getters cannot serve this |
 | Branch, ahead/behind, attention | `useGitStore` directory state | warmed via `runBackgroundNetworkTask(ensureStatus)` and refreshed from Git mutation hints |
 | Changed files | `useGitStore` status `files` + `diffStats` | working tree, not session-authored edits |
-| PR + checks | `usePrVisualSummary` | **read-only** |
-| Subagents | child sessions from `useAllLiveSessions` (`parentID`) + `useAllSessionStatuses` | |
+| PR + checks | `useFreshestPrVisualSummaryForBranch` | **read-only**; follows the freshest remote-keyed entry for the branch |
+| Subagents | child sessions from `useAllLiveSessions` (`parentID`) + `useAllSessionStatuses`; per-row cost from `useSubagentCostRollup`'s `perChildCost` (each child's own subtree total, so nested subagent-of-subagent cost rolls up under its immediate parent row) | |
 | Subagent blockers | directory `permission` / `question` maps | one subscription covers every child |
 | Usage | `components/usage/usageGroups.ts` over `useQuotaStore` | grouping shared with the mobile popover; presentation is not |
 | Linked threads | `lib/linkedIssues.ts` over session metadata | written by the flows that attach an issue or PR |
@@ -145,6 +154,10 @@ The panel never calls `startWatching`. PR watching is owned by the background
 tracker, and its concurrency gate exists because per-consumer PR fetches once
 saturated the browser's connection pool and stalled startup for ~20s. A panel
 that started a watch per open session would reintroduce exactly that fan-out.
+The PR surface can watch a concrete remote while passive readers initially know
+only the automatic remote key, so the panel reads the freshest entry for the
+directory and branch across remote keys. This keeps its PR and checks rows in
+sync with the live PR surface without adding another request owner.
 
 ### Changed files come from git status, not the session
 
@@ -165,6 +178,13 @@ The consequence is a real semantic difference: this counts the working tree,
 including edits the user made by hand and excluding session edits that are
 already committed. If a session-authored count is ever needed, it has to come
 from aggregating message summaries, not from `Session.summary`.
+
+One exception: while the directory is a worktree whose creation has not
+finished (`useWorktreeBootstrapPending`), the working tree transiently holds
+bootstrap files that the initial git reset is about to remove. Those are not
+changes on the branch, so the panel neither fetches status nor renders the
+changed-files row until the bootstrap settles, then forces one status fetch so
+the row reflects the reset tree rather than a mid-creation snapshot.
 
 ## Section order
 
@@ -306,8 +326,10 @@ Stored in session metadata as a **snapshot** (`lib/linkedIssues.ts`, namespace
 pinned messages. Number, title, url, author and avatar only — the body,
 comments and state belong to GitHub, and mirroring them would mean owning their
 staleness. The stored title can drift; that is the price of a store that never
-needs refreshing. The row opens the real thread, which is where current state
-lives.
+needs refreshing. A GitHub row opens github.com. A Linear row opens the
+right-hand Linear panel when Linear is connected on desktop/web; otherwise it
+opens the Linear URL (no rail in VS Code or the phone shell, and none while
+disconnected).
 
 Writes happen **after** the send promise resolves and are deliberately
 swallowed on failure: the message went out, and a missing bookkeeping entry
@@ -331,6 +353,28 @@ the matching header dropdown:
   section loads them itself, keyed on the directory, since skills are
   discovered relative to the active project. It does not wrap the call in
   `runBackgroundNetworkTask`: the store already gates its own fetch.
+
+Usage waits for the instance to say it is initialised. Quota providers report
+themselves as configured only once the instance can read their credentials,
+which on a remote instance is not true when the UI mounts — a fetch fired at
+mount gets "nothing configured" for every provider, and since each one then has
+a result, nothing asks again until the three-minute refresh. That is why Usage
+could stay missing from the panel until Settings -> Usage forced a fresh fetch.
+`useQuotaStore.ensureLoadedForRuntime` owns both the readiness rule and the
+once-per-instance bookkeeping, so every caller can ask on each connection
+change.
+
+### These readouts belong to the connected instance
+
+Quotas, MCP status, skills, agent memory and the Linear/GitHub logins are all
+served by whichever OpenChamber instance is connected, and each was cached
+globally or by directory alone — which two instances can share. A switch left
+the previous instance's answers on screen, and its Linear login usable against
+a runtime that has no Linear. `apps/runtimeEndpointReset.ts` now drops all of
+them, each store guarding its own in-flight requests with a generation so a
+response for the previous instance cannot land in the new one. The MCP and
+skills effects take `isConnected` as a dependency — not a gate — because
+`directory` alone does not change when both instances hold the same path.
 
 The panel now performs these itself, silently and through the
 background-network gate, so it cannot compete with chat bootstrap traffic for

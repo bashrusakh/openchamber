@@ -4,10 +4,33 @@ import { readManagedCredential } from '../credentials/providers.js';
 export const providerId = 'ollama-cloud';
 export const providerName = 'Ollama Cloud';
 const aliases = ['ollama-cloud', 'ollamacloud'];
+const OLLAMA_CLOUD_ORIGIN = 'https://ollama.com';
+const OLLAMA_SETTINGS_PATH = '/settings';
+const OLLAMA_SIGNIN_PATH = '/signin';
+const NO_USAGE_PAGE_PATTERN = /(?:^|>)\s*No usage(?: data)?(?: available)? yet\.?\s*(?=<|$)/i;
+
+const assertOllamaCloudResponseUrl = (response) => {
+  let url;
+  try {
+    url = new URL(response.url);
+  } catch {
+    throw new Error('Ollama Cloud returned an invalid final URL');
+  }
+
+  if (url.origin !== OLLAMA_CLOUD_ORIGIN) {
+    throw new Error('Ollama Cloud redirected to an unexpected origin');
+  }
+  if (url.pathname === OLLAMA_SIGNIN_PATH) {
+    throw new Error('Ollama Cloud authentication failed');
+  }
+  if (url.pathname !== OLLAMA_SETTINGS_PATH) {
+    throw new Error('Ollama Cloud returned an unexpected final path');
+  }
+};
 
 export const parseOllamaSettingsHtml = (html) => {
   const windows = {};
-  const sessionMatch = html.match(/Session\s+usage[^0-9]*([0-9.]+)%/i);
+  const sessionMatch = html.match(/Session\s+usage(?:\s|<[^>]*>|[:：])*([0-9]+(?:\.[0-9]+)?)\s*%/i);
   if (sessionMatch) {
     windows.session = toUsageWindow({
       usedPercent: toNumber(sessionMatch[1]),
@@ -15,7 +38,7 @@ export const parseOllamaSettingsHtml = (html) => {
       resetAt: null
     });
   }
-  const weeklyMatch = html.match(/Weekly\s+usage[^0-9]*([0-9.]+)%/i);
+  const weeklyMatch = html.match(/Weekly\s+usage(?:\s|<[^>]*>|[:：])*([0-9]+(?:\.[0-9]+)?)\s*%/i);
   if (weeklyMatch) {
     windows.weekly = toUsageWindow({
       usedPercent: toNumber(weeklyMatch[1]),
@@ -23,7 +46,7 @@ export const parseOllamaSettingsHtml = (html) => {
       resetAt: null
     });
   }
-  const premiumMatch = html.match(/Premium[^0-9]*([0-9]+)\s*\/\s*([0-9]+)/i);
+  const premiumMatch = html.match(/Premium(?:\s|<[^>]*>|[:：])*([0-9]+)(?:\s|<[^>]*>)*\/(?:\s|<[^>]*>)*([0-9]+)/i);
   if (premiumMatch) {
     const used = toNumber(premiumMatch[1]);
     const total = toNumber(premiumMatch[2]);
@@ -35,7 +58,8 @@ export const parseOllamaSettingsHtml = (html) => {
       valueLabel: `${used ?? 0} / ${total ?? 0}`
     });
   }
-  return windows;
+  if (Object.keys(windows).length > 0 || NO_USAGE_PAGE_PATTERN.test(html)) return windows;
+  throw new Error('Ollama Cloud usage response could not be parsed');
 };
 
 export const isConfigured = () => {
@@ -53,17 +77,7 @@ export const fetchOllamaCloudUsage = async (credential, fetchImpl = fetch) => {
     throw new Error('Ollama Cloud authentication failed');
   }
   if (!response.ok) throw new Error(`Ollama Cloud returned HTTP ${response.status}`);
-  // With redirect: 'follow', an invalid cookie redirects to /signin (200 OK).
-  // Detect this to avoid silently returning empty windows for bad credentials.
-  if (response.url && response.url.includes('/signin')) {
-    throw new Error('Ollama Cloud authentication failed');
-  }
-  // NOTE: empty windows ({}) is a valid state (configured cookie, no usage data).
-  // If ollama.com changes its settings page markup, the parser may silently return {}
-  // instead of throwing — the user sees zero usage rather than a parse error.
-  // This tradeoff is intentional: a valid cookie + no usage is more common than
-  // a silently broken parser, and the old empty-windows check blocked legitimate
-  // credential saves when ollama.com returned 303 -> /signin.
+  assertOllamaCloudResponseUrl(response);
   const windows = parseOllamaSettingsHtml(await response.text());
   return windows;
 };

@@ -1,3 +1,4 @@
+import type { ContextPartMetadata } from '@/lib/messages/contextParts';
 import { createOpencodeClient, OpencodeClient } from "@opencode-ai/sdk/v2";
 import type { PermissionV2Request, PermissionV2Effect, PermissionV2Source } from "@opencode-ai/sdk/v2/client";
 import type { FilesAPI } from "../api/types";
@@ -199,10 +200,86 @@ const createTimeoutSignal = (timeoutMs: number): { signal: AbortSignal; cleanup:
   };
 };
 
-const createRuntimeOpencodeClient = (config: { baseUrl: string; directory?: string }): OpencodeClient => {
+/**
+ * Upper bound for non-streaming OpenCode read requests. Without it, a socket
+ * that neither resolves nor rejects (the half-open state described in #2470)
+ * keeps the bootstrap concurrency slot busy forever and the UI stays on
+ * "loading sessions". Long-lived streams (POST prompts, the /event SSE) are
+ * explicitly excluded in {@link createRuntimeOpencodeClient}.
+ */
+const OPENCODE_REQUEST_TIMEOUT_MS = 30_000;
+
+const isEventStreamUrl = (input: string | URL | Request): boolean => {
+  const url = typeof input === 'string'
+    ? input
+    : input instanceof URL
+      ? input.toString()
+      : input.url;
+  return url.includes('/event');
+};
+
+type RuntimeOpencodeClientConfig = {
+  baseUrl: string;
+  directory?: string;
+  /** Read-request timeout in ms. Overridable so tests can use short value. */
+  requestTimeoutMs?: number;
+};
+
+export const createRuntimeOpencodeClient = (config: RuntimeOpencodeClientConfig): OpencodeClient => {
+  const requestTimeoutMs = config.requestTimeoutMs ?? OPENCODE_REQUEST_TIMEOUT_MS;
   return createOpencodeClient({
     ...config,
-    fetch: runtimeFetch,
+    fetch: async (input: string | URL | Request, init?: RequestInit) => {
+      const method = String(
+        init?.method ?? (input instanceof Request ? input.method : 'GET'),
+      ).toUpperCase();
+      if (isEventStreamUrl(input) || method === 'POST') {
+        return runtimeFetch(input, init);
+      }
+      const timeout = createTimeoutSignal(requestTimeoutMs);
+      const callerSignal = init?.signal;
+      const supportsAny = typeof AbortSignal !== 'undefined'
+        && typeof (AbortSignal as { any?: unknown }).any === 'function';
+      let signal: AbortSignal;
+      let detachFallback: (() => void) | null = null;
+      if (callerSignal && supportsAny) {
+        signal = (AbortSignal as typeof AbortSignal & { any: (signals: AbortSignal[]) => AbortSignal })
+          .any([callerSignal, timeout.signal]);
+      } else if (callerSignal) {
+        // No AbortSignal.any: compose manually. Silently dropping the timeout
+        // here would disable the fix on exactly the bootstrap reads it
+        // targets, since those carry a cancellation signal.
+        const controller = new AbortController();
+        const abortFromCaller = () => controller.abort(callerSignal.reason);
+        const abortFromTimeout = () => controller.abort(timeout.signal.reason);
+        if (callerSignal.aborted) {
+          abortFromCaller();
+        } else if (timeout.signal.aborted) {
+          abortFromTimeout();
+        } else {
+          callerSignal.addEventListener('abort', abortFromCaller, { once: true });
+          timeout.signal.addEventListener('abort', abortFromTimeout, { once: true });
+          detachFallback = () => {
+            callerSignal.removeEventListener('abort', abortFromCaller);
+            timeout.signal.removeEventListener('abort', abortFromTimeout);
+          };
+        }
+        signal = controller.signal;
+      } else {
+        signal = timeout.signal;
+      }
+      try {
+        return await runtimeFetch(input, { ...init, signal });
+      } catch (error) {
+        if (timeout.signal.aborted && !callerSignal?.aborted) {
+          throw new Error(`OpenCode request timed out after ${requestTimeoutMs}ms`);
+        }
+        throw error;
+      } finally {
+        detachFallback?.();
+        timeout.cleanup();
+      }
+    },
   });
 };
 
@@ -602,10 +679,11 @@ class OpencodeService {
     return unwrapSdkData(response, 'session.update');
   }
 
-  async getSessionMessages(id: string, limit?: number): Promise<{ info: Message; parts: Part[] }[]> {
+  async getSessionMessages(id: string, limit?: number, directory?: string | null): Promise<{ info: Message; parts: Part[] }[]> {
+    const requestDirectory = this.normalizeCandidatePath(directory) ?? this.currentDirectory;
     const response = await this.client.session.messages({
       sessionID: id,
-      ...(this.currentDirectory ? { directory: this.currentDirectory } : {}),
+      ...(requestDirectory ? { directory: requestDirectory } : {}),
       ...(typeof limit === 'number' ? { limit } : {}),
     });
     return unwrapSdkData(response, 'session.messages');
@@ -791,6 +869,7 @@ class OpencodeService {
     additionalParts?: Array<{
       text: string;
       synthetic?: boolean;
+      metadata?: ContextPartMetadata;
       files?: Array<FileInputLite>;
     }>;
     messageId?: string;
@@ -841,11 +920,10 @@ class OpencodeService {
     if (params.additionalParts && params.additionalParts.length > 0) {
       for (const additional of params.additionalParts) {
         if (additional.text && additional.text.trim()) {
-          parts.push({
-            type: 'text',
-            text: additional.text,
-            ...(additional.synthetic ? { synthetic: true } : {}),
-          });
+          const additionalTextPart: TextPartInput = { type: 'text', text: additional.text };
+          if (additional.synthetic) additionalTextPart.synthetic = true;
+          if (additional.metadata) additionalTextPart.metadata = additional.metadata;
+          parts.push(additionalTextPart);
         }
         if (additional.files && additional.files.length > 0) {
           for (const file of additional.files) {
@@ -1192,7 +1270,7 @@ class OpencodeService {
     options?: {
       id?: string;
       save?: string[];
-      metadata?: Record<string, unknown>;
+      metadata?: ContextPartMetadata;
       source?: PermissionV2Source;
       agent?: string;
     }
@@ -1223,12 +1301,10 @@ class OpencodeService {
    * endpoint introduced in OpenCode SDK v1.17.12. Wraps
    * `session.permission.get`.
    *
-   * Returns a tagged `FetchPermissionResult` so the caller can distinguish
-   * a confirmed-resolved permission (HTTP 404) from a fetch failure
-   * (network error, malformed response, or pre-v1.17.12 server without
-   * the V2 endpoint). The auto-accept flow uses this distinction to drop
-   * resolved permissions from the resync output, preventing stale
-   * `permission.list` entries from sticking around in the UI.
+   * Returns the state of the V2 permission authority. Its HTTP 404 result
+   * does not prove that a request from `permission.list` has settled:
+   * list-derived reconciliation must use that list's own reply path.
+   * Fetch failures remain distinct from the V2 resolved result.
    */
   async fetchPermission(
     sessionID: string,
@@ -1585,52 +1661,7 @@ class OpencodeService {
   // SSE infrastructure removed — EventPipeline in sync/event-pipeline.ts handles
   // all SSE event ingestion via the SDK's global.event() async iterator.
 
-  // File Operations
-  async readFile(path: string): Promise<string> {
-    try {
-      const response = await this.client.file.read({
-        path,
-        ...(this.currentDirectory ? { directory: this.currentDirectory } : {}),
-      });
-      return String(unwrapSdkData(response, 'file.read'));
-    } catch {
-      // Return placeholder for development
-      return `// Content of ${path}\n// This would be loaded from the server`;
-    }
-  }
-
-  async listFiles(directory?: string): Promise<Record<string, unknown>[]> {
-    try {
-      const targetDir = directory || this.currentDirectory || '/';
-      const response = await this.client.file.list({
-        path: targetDir,
-        ...(this.currentDirectory ? { directory: this.currentDirectory } : {}),
-      });
-      const data = unwrapSdkData(response, 'file.list');
-      return Array.isArray(data) ? data as Record<string, unknown>[] : [];
-    } catch {
-      // Return mock data for development
-      return [];
-    }
-  }
-
   // Command Management
-  async listCommands(): Promise<Array<{ name: string; description?: string; agent?: string; model?: string; source?: string }>> {
-    const response = await this.client.command.list(
-      this.currentDirectory ? { directory: this.currentDirectory } : undefined
-    );
-    const commands = unwrapSdkData(response, 'command.list');
-    // Return only lightweight info for autocomplete
-    return (commands || []).map((cmd: Record<string, unknown>) => ({
-      name: cmd.name as string,
-      description: cmd.description as string | undefined,
-      agent: cmd.agent as string | undefined,
-      model: cmd.model as string | undefined,
-      source: cmd.source as string | undefined,
-      // Intentionally excluding template to keep memory usage low
-    }));
-  }
-
   async listCommandsWithDetails(directory?: string | null): Promise<Array<{ name: string; description?: string; agent?: string; model?: string; source?: string; template?: string }>> {
     const requestDirectory = this.normalizeCandidatePath(directory ?? null) ?? this.currentDirectory;
     const response = await this.client.command.list(
@@ -1646,58 +1677,6 @@ class OpencodeService {
       source: cmd.source as string | undefined,
       template: cmd.template as string | undefined,
     }));
-  }
-
-  async listSkillsWithDetails(): Promise<Array<{ name: string; description?: string; location: string; content?: string }>> {
-    try {
-      const response = await this.client.app.skills(
-        this.currentDirectory ? { directory: this.currentDirectory } : undefined,
-      );
-      const data = response.data;
-      if (!Array.isArray(data)) {
-        return [];
-      }
-
-      const skills: Array<{ name: string; description?: string; location: string; content?: string }> = [];
-      for (const item of data as Array<Record<string, unknown>>) {
-          const name = typeof item.name === 'string' ? item.name.trim() : '';
-          const location = typeof item.location === 'string' ? item.location : '';
-          if (!name || !location) {
-            continue;
-          }
-          const skill: { name: string; description?: string; location: string; content?: string } = { name, location };
-          if (typeof item.description === 'string') skill.description = item.description;
-          if (typeof item.content === 'string') skill.content = item.content;
-          skills.push(skill);
-      }
-      return skills;
-    } catch {
-      return [];
-    }
-  }
-
-  async getCommandDetails(name: string): Promise<{ name: string; template: string; description?: string; agent?: string; model?: string } | null> {
-    try {
-      const response = await this.client.command.list(
-        this.currentDirectory ? { directory: this.currentDirectory } : undefined
-      );
-
-      if (response.data) {
-        const command = response.data.find((cmd: Record<string, unknown>) => cmd.name === name);
-        if (command) {
-          return {
-            name: command.name as string,
-            template: command.template as string,
-            description: command.description as string | undefined,
-            agent: command.agent as string | undefined,
-            model: command.model as string | undefined
-          };
-        }
-      }
-      return null;
-    } catch {
-      return null;
-    }
   }
 
   // Lightweight readiness check. Full diagnostics still live at /health.

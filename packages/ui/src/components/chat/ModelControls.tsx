@@ -25,7 +25,8 @@ import { useDeviceInfo } from '@/lib/device';
 import { mergeModelMetadataWithLiveModel } from '@/lib/modelMetadata';
 import { getModelDisplayName as getSharedModelDisplayName } from '@/lib/modelDisplay';
 import { getEditModeColors } from '@/lib/permissions/editModeColors';
-import { cn, fuzzyMatch } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+import { matchesRankQuery, rankByQuery } from '@/lib/search/fuzzySearch';
 import { useContextStore } from '@/stores/contextStore';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
@@ -56,6 +57,28 @@ type MobileVariantTarget = { providerId: string; modelId: string };
 
 const buildModelRefKey = (providerID: string, modelID: string) => `${providerID}:${modelID}`;
 const MAX_INLINE_MOBILE_VARIANT_OPTIONS = 6;
+
+const AgentDescriptionTooltip: React.FC<{
+    description?: string;
+    children: React.ReactElement;
+}> = ({ description, children }) => {
+    if (!description) {
+        return children;
+    }
+
+    return (
+        <Tooltip delayDuration={450}>
+            <TooltipTrigger asChild>{children}</TooltipTrigger>
+            <TooltipContent
+                side="right"
+                sideOffset={8}
+                className="max-w-xs text-left transition-none data-[starting-style]:opacity-100 data-[starting-style]:scale-100 data-[ending-style]:opacity-100 data-[ending-style]:scale-100"
+            >
+                <span className="typography-meta text-muted-foreground">{description}</span>
+            </TooltipContent>
+        </Tooltip>
+    );
+};
 
 const asPermissionRuleset = (value: unknown): PermissionRule[] | null => {
     if (!Array.isArray(value)) {
@@ -301,7 +324,15 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const providers = useConfigStore((state) => state.providers);
     const currentProviderId = useConfigStore((state) => state.currentProviderId);
     const currentModelId = useConfigStore((state) => state.currentModelId);
-    const currentVariant = useConfigStore((state) => state.currentVariant);
+    const effectiveCurrentVariant = useConfigStore((state) => state.currentVariant);
+    const currentVariantSelection = useConfigStore((state) => state.currentVariantSelection);
+    // What the picker shows is what the next send carries: an explicit choice
+    // when there is one, "Default" when "Default" was picked, and otherwise the
+    // inherited effort — showing "Default" while an inherited effort is in
+    // force is how a switch away from it looks like it did not stick.
+    const currentVariant = currentVariantSelection.override === null
+        ? undefined
+        : currentVariantSelection.override ?? effectiveCurrentVariant;
     const currentAgentName = useConfigStore((state) => state.currentAgentName);
     const settingsDefaultVariant = useConfigStore((state) => state.settingsDefaultVariant);
     const settingsDefaultAgent = useConfigStore((state) => state.settingsDefaultAgent);
@@ -309,6 +340,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     const setSelectedProvider = useConfigStore((state) => state.setSelectedProvider);
     const setModel = useConfigStore((state) => state.setModel);
     const setCurrentVariant = useConfigStore((state) => state.setCurrentVariant);
+    const setCurrentVariantOverride = useConfigStore((state) => state.setCurrentVariantOverride);
     const getCurrentModelVariants = useConfigStore((state) => state.getCurrentModelVariants);
     const setAgent = useConfigStore((state) => state.setAgent);
     const getCurrentProvider = useConfigStore((state) => state.getCurrentProvider);
@@ -506,13 +538,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
 
     const sortedAndFilteredAgents = React.useMemo(() => {
         const sorted = [...selectableDesktopAgents].sort((a, b) => a.name.localeCompare(b.name));
-        if (!agentSearchQuery.trim()) {
-            return sorted;
-        }
-        return sorted.filter((agent) =>
-            fuzzyMatch(agent.name, agentSearchQuery) ||
-            (agent.description && fuzzyMatch(agent.description, agentSearchQuery))
-        );
+        return rankByQuery(sorted, agentSearchQuery, (agent) => [agent.name, agent.description]);
     }, [selectableDesktopAgents, agentSearchQuery]);
 
     const defaultAgentName = React.useMemo(() => {
@@ -558,38 +584,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         return result;
     }, [providers, hiddenModels]);
 
-    const normalizeModelSearchValue = React.useCallback((value: string) => {
-        const lower = value.toLowerCase().trim();
-        const compact = lower.replace(/[^a-z0-9]/g, '');
-        const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
-        return { lower, compact, tokens };
-    }, []);
-
-    const matchesModelSearch = React.useCallback((candidate: string, query: string) => {
-        const normalizedQuery = normalizeModelSearchValue(query);
-        if (!normalizedQuery.lower) {
-            return true;
-        }
-
-        const normalizedCandidate = normalizeModelSearchValue(candidate);
-        if (normalizedCandidate.lower.includes(normalizedQuery.lower)) {
-            return true;
-        }
-
-        if (normalizedQuery.compact.length >= 2 && normalizedCandidate.compact.includes(normalizedQuery.compact)) {
-            return true;
-        }
-
-        if (normalizedQuery.tokens.length === 0) {
-            return false;
-        }
-
-        return normalizedQuery.tokens.every((queryToken) =>
-            normalizedCandidate.tokens.some((candidateToken) =>
-                candidateToken.startsWith(queryToken) || candidateToken.includes(queryToken)
-            )
-        );
-    }, [normalizeModelSearchValue]);
+    const matchesModelSearch = React.useCallback(
+        (candidate: string, query: string) => matchesRankQuery([candidate], query),
+        [],
+    );
 
     const currentModelForMetadata = currentModelId
         ? models.find((model: ProviderModel) => model.id === currentModelId)
@@ -641,7 +639,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     ];
 
     const prevAgentNameRef = React.useRef<string | undefined>(undefined);
-    const explicitAgentSwitchRef = React.useRef<string | null>(null);
     const latestLoadedUserChoiceRestoreRef = React.useRef<string | null>(null);
 
     const currentSessionDirectory = currentSessionId ? getDirectoryForSession(currentSessionId) : undefined;
@@ -704,7 +701,38 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         return variants ? Object.keys(variants) : [];
     }, [providers]);
 
-    const resolveModelVariantSelection = React.useCallback((providerId: string, modelId: string) => {
+    const resolveInheritedVariantForModel = React.useCallback((providerId: string, modelId: string, agentName?: string | null) => {
+        const variantOptions = getModelVariantOptions(providerId, modelId);
+        if (variantOptions.length === 0) return undefined;
+
+        let currentInherited: string | undefined;
+        if (currentProviderId === providerId && currentModelId === modelId) {
+            currentInherited = currentVariantSelection.inherited
+                ?? (currentVariantSelection.override === null || currentVariantSelection.override === undefined
+                    ? effectiveCurrentVariant
+                    : undefined);
+        }
+
+        const effectiveAgentName = agentName ?? uiAgentName ?? currentAgentName;
+        const agent = effectiveAgentName ? agents.find((candidate) => candidate.name === effectiveAgentName) : undefined;
+        const agentVariant = (
+            agent?.model?.providerID === providerId
+            && agent.model.modelID === modelId
+        ) ? agent.variant : undefined;
+        const candidates = currentSessionId
+            ? [agentVariant, settingsDefaultVariant, currentInherited]
+            : [currentInherited, agentVariant, settingsDefaultVariant];
+        return candidates.find((candidate) => candidate !== undefined && variantOptions.includes(candidate));
+    }, [agents, currentAgentName, currentModelId, currentProviderId, currentSessionId, currentVariantSelection, effectiveCurrentVariant, getModelVariantOptions, settingsDefaultVariant, uiAgentName]);
+
+    /**
+     * The session's recorded choice for this model, in the selection store's
+     * three states: an effort name, `null` for an explicit "Default", and
+     * `undefined` for no choice at all. Collapsing `null` into `undefined` here
+     * would hand a real "Default" back to the callers as "nothing chosen", and
+     * they would re-record it as a choice on the next write.
+     */
+    const resolveModelVariantSelection = React.useCallback((providerId: string, modelId: string): string | null | undefined => {
         const variantOptions = getModelVariantOptions(providerId, modelId);
         if (variantOptions.length === 0) {
             return undefined;
@@ -713,6 +741,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         const effectiveAgentName = uiAgentName || currentAgentName;
         if (currentSessionId && effectiveAgentName) {
             const savedVariant = getAgentModelVariantForSession(currentSessionId, effectiveAgentName, providerId, modelId);
+            // An explicit "Default" is a choice: it stops the fallbacks below.
+            if (savedVariant === null) {
+                return null;
+            }
             if (savedVariant && variantOptions.includes(savedVariant)) {
                 return savedVariant;
             }
@@ -720,10 +752,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
 
         if (currentProviderId === providerId && currentModelId === modelId && currentVariant && variantOptions.includes(currentVariant)) {
             return currentVariant;
-        }
-
-        if (!currentSessionId && settingsDefaultVariant && variantOptions.includes(settingsDefaultVariant)) {
-            return settingsDefaultVariant;
         }
 
         return undefined;
@@ -735,7 +763,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         currentVariant,
         getAgentModelVariantForSession,
         getModelVariantOptions,
-        settingsDefaultVariant,
         uiAgentName,
     ]);
 
@@ -750,7 +777,16 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         return liveConfigAgentName || currentAgentName;
     }, [currentAgentName, currentSessionId]);
 
-    const commitVariantSelectionForModel = React.useCallback((providerId: string, modelId: string, variant: string | undefined, agentNameOverride?: string | null) => {
+    /**
+     * Records `variant` as this session's effort for the model, in the same
+     * three states the selection store defines: an effort name, `null` for an
+     * explicit "Default", `undefined` for no choice so the inherited effort
+     * applies. Callers decide which one they mean — the picker turns its own
+     * "Default" into `null`, while restore paths pass `undefined` through when
+     * they found nothing, because "the history carries no effort" is not the
+     * user having chosen "Default".
+     */
+    const commitVariantSelectionForModel = React.useCallback((providerId: string, modelId: string, variant: string | null | undefined, agentNameOverride?: string | null) => {
         const variantOptions = getModelVariantOptions(providerId, modelId);
         if (variantOptions.length === 0) {
             manualVariantSelectionRef.current = false;
@@ -759,8 +795,11 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         }
 
         manualVariantSelectionRef.current = true;
-        setCurrentVariant(variant);
-        addRecentEffort(providerId, modelId, variant);
+        setCurrentVariantOverride(
+            variant,
+            resolveInheritedVariantForModel(providerId, modelId, agentNameOverride),
+        );
+        addRecentEffort(providerId, modelId, variant ?? undefined);
 
         const effectiveAgentName = agentNameOverride ?? resolveLiveAgentName();
         if (currentSessionId && effectiveAgentName) {
@@ -770,12 +809,14 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         addRecentEffort,
         currentSessionId,
         getModelVariantOptions,
+        resolveInheritedVariantForModel,
         resolveLiveAgentName,
         saveAgentModelVariantForSession,
         setCurrentVariant,
+        setCurrentVariantOverride,
     ]);
 
-    const applyModelSelectionWithVariant = React.useCallback((providerId: string, modelId: string, variant: string | undefined, agentNameOverride?: string | null) => {
+    const applyModelSelectionWithVariant = React.useCallback((providerId: string, modelId: string, variant: string | null | undefined, agentNameOverride?: string | null) => {
         const effectiveAgentName = agentNameOverride ?? resolveLiveAgentName() ?? undefined;
         const result = tryApplyModelSelection(providerId, modelId, effectiveAgentName);
         if (result !== 'applied') {
@@ -837,25 +878,34 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             && getModelVariantOptions(latestLoadedUserChoice.providerID, latestLoadedUserChoice.modelID).includes(latestLoadedUserChoice.variant)
             ? latestLoadedUserChoice.variant
             : undefined;
+        const restoreAgentName = latestLoadedUserChoice.agent || currentAgentName || undefined;
+        // A message carrying no effort is not evidence that the user has none:
+        // a send under an explicit "Default" carries none either, and the echo
+        // of that very send arrives here. Keep what the session already
+        // recorded, and let a concrete historical effort replace it.
+        const restoredVariant = historicalVariant ?? (currentSessionId && restoreAgentName
+            ? getAgentModelVariantForSession(
+                currentSessionId,
+                restoreAgentName,
+                latestLoadedUserChoice.providerID,
+                latestLoadedUserChoice.modelID,
+            )
+            : undefined);
         const applyResult = applyModelSelectionWithVariant(
             latestLoadedUserChoice.providerID,
             latestLoadedUserChoice.modelID,
-            historicalVariant,
-            latestLoadedUserChoice.agent || currentAgentName || undefined,
+            restoredVariant,
+            restoreAgentName,
         );
         if (applyResult !== 'applied') {
             return;
         }
 
+        // The effort is not written again here: `applyModelSelectionWithVariant`
+        // above already recorded `historicalVariant` for this same agent and
+        // model, and a second write can only disagree with the first.
         if (latestLoadedUserChoice.agent) {
             saveSessionAgentSelection(currentSessionId, latestLoadedUserChoice.agent);
-            saveAgentModelVariantForSession(
-                currentSessionId,
-                latestLoadedUserChoice.agent,
-                latestLoadedUserChoice.providerID,
-                latestLoadedUserChoice.modelID,
-                historicalVariant,
-            );
         }
         saveSessionModelSelection(currentSessionId, latestLoadedUserChoice.providerID, latestLoadedUserChoice.modelID);
         latestLoadedUserChoiceRestoreRef.current = restoreKey;
@@ -869,11 +919,11 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         latestLoadedUserChoice,
         setAgent,
         applyModelSelectionWithVariant,
+        getAgentModelVariantForSession,
         getModelVariantOptions,
         getSessionModelSelection,
         resolveModelVariantSelection,
         saveSessionAgentSelection,
-        saveAgentModelVariantForSession,
         saveSessionModelSelection,
     ]);
 
@@ -893,25 +943,29 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                 ? useSelectionStore.getState().getSessionAgentSelection(currentSessionId)
                 : null;
             if (savedAgentName) {
-                if (currentAgentName !== savedAgentName) {
-                    setAgent(savedAgentName);
-                }
-
                 const savedModel = getAgentModelForSession(currentSessionId, savedAgentName);
                 if (savedModel) {
                     const result = tryApplyModelSelection(savedModel.providerId, savedModel.modelId, savedAgentName);
                     if (result === 'applied') {
+                        if (currentAgentName !== savedAgentName) {
+                            setAgent(savedAgentName);
+                        }
                         return 'resolved';
                     }
                     if (result === 'provider-missing') {
                         return 'waiting';
                     }
+                } else if (currentAgentName !== savedAgentName) {
+                    setAgent(savedAgentName);
                 }
             }
 
             if (savedSessionModel) {
                 const result = tryApplyModelSelection(savedSessionModel.providerId, savedSessionModel.modelId, savedAgentName || currentAgentName || undefined);
                 if (result === 'applied') {
+                    if (savedAgentName && currentAgentName !== savedAgentName) {
+                        setAgent(savedAgentName);
+                    }
                     return 'resolved';
                 }
                 if (result === 'provider-missing') {
@@ -925,16 +979,15 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                     continue;
                 }
 
-                if (currentAgentName !== agent.name) {
-                    setAgent(agent.name);
-                }
-
-                const existingSelection = useSelectionStore.getState().getSessionAgentSelection(currentSessionId) || stickySessionAgentRef.current;
-                if (!existingSelection) {
-                    saveSessionAgentSelection(currentSessionId, agent.name);
-                }
                 const result = tryApplyModelSelection(selection.providerId, selection.modelId, agent.name);
                 if (result === 'applied') {
+                    if (currentAgentName !== agent.name) {
+                        setAgent(agent.name);
+                    }
+                    const existingSelection = useSelectionStore.getState().getSessionAgentSelection(currentSessionId) || stickySessionAgentRef.current;
+                    if (!existingSelection) {
+                        saveSessionAgentSelection(currentSessionId, agent.name);
+                    }
                     return 'resolved';
                 }
                 if (result === 'provider-missing') {
@@ -1032,9 +1085,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                     prevAgentNameRef.current = currentAgentName;
 
                     if (currentAgentName && currentSessionId) {
-                        const shouldPreferAgentModel = explicitAgentSwitchRef.current === currentAgentName;
-                        explicitAgentSwitchRef.current = null;
-
                         await new Promise<void>((resolve) => {
                             const timer = setTimeout(resolve, 50);
                             abortController.signal.addEventListener('abort', () => {
@@ -1045,33 +1095,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
 
                         if (abortController.signal.aborted) {
                             return;
-                        }
-
-                        const selectedAgent = shouldPreferAgentModel
-                            ? agents.find((agent) => agent.name === currentAgentName)
-                            : undefined;
-                        if (selectedAgent?.model?.providerID && selectedAgent.model.modelID) {
-                            const result = tryApplyModelSelection(
-                                selectedAgent.model.providerID,
-                                selectedAgent.model.modelID,
-                                currentAgentName,
-                            );
-                            if (result === 'applied' || result === 'provider-missing') {
-                                if (result === 'applied') {
-                                    saveSessionModelSelection(
-                                        currentSessionId,
-                                        selectedAgent.model.providerID,
-                                        selectedAgent.model.modelID,
-                                    );
-                                    saveAgentModelForSession(
-                                        currentSessionId,
-                                        currentAgentName,
-                                        selectedAgent.model.providerID,
-                                        selectedAgent.model.modelID,
-                                    );
-                                }
-                                return;
-                            }
                         }
 
                         const persistedChoice = getAgentModelForSession(currentSessionId, currentAgentName);
@@ -1099,12 +1122,9 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             abortController.abort();
         };
     }, [
-        agents,
         currentAgentName,
         currentSessionId,
         getAgentModelForSession,
-        saveAgentModelForSession,
-        saveSessionModelSelection,
         tryApplyModelSelection,
         contextHydrated,
     ]);
@@ -1128,19 +1148,21 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             return;
         }
 
+        // The chosen effort does not exist on this model: drop the choice and
+        // inherit, rather than pin an explicit "Default" the user never picked.
         if (currentVariant && !availableVariants.includes(currentVariant)) {
-            setCurrentVariant(undefined);
+            setCurrentVariant(resolveInheritedVariantForModel(currentProviderId, currentModelId));
             return;
         }
 
         // Draft state (no session yet): seed from settings default, but don't override
         // user selection while drafting.
         if (!currentSessionId) {
-            if (!currentVariant && !manualVariantSelectionRef.current) {
+            if (currentVariantSelection.override === undefined && !manualVariantSelectionRef.current) {
                 const desired = settingsDefaultVariant && availableVariants.includes(settingsDefaultVariant)
                     ? settingsDefaultVariant
                     : undefined;
-                setCurrentVariant(desired);
+                setCurrentVariantOverride(desired ?? null, desired);
             }
             return;
         }
@@ -1152,13 +1174,15 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             currentModelId,
         );
 
-        const resolvedSaved = savedVariant && availableVariants.includes(savedVariant)
-            ? savedVariant
-            : settingsDefaultVariant && availableVariants.includes(settingsDefaultVariant)
-                ? settingsDefaultVariant
-                : undefined;
-
-        setCurrentVariant(resolvedSaved);
+        const inheritedVariant = resolveInheritedVariantForModel(currentProviderId, currentModelId);
+        if (savedVariant && availableVariants.includes(savedVariant)) {
+            setCurrentVariantOverride(savedVariant, inheritedVariant);
+        } else if (savedVariant === null || currentVariantSelection.override === null) {
+            // "Default" was picked for this session, or is picked right now.
+            setCurrentVariantOverride(null, inheritedVariant);
+        } else {
+            setCurrentVariant(inheritedVariant);
+        }
         manualVariantSelectionRef.current = false;
     }, [
         availableVariants,
@@ -1168,8 +1192,12 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         currentProviderId,
         currentModelId,
         currentVariant,
+        currentVariantSelection.override,
+        effectiveCurrentVariant,
         getAgentModelVariantForSession,
+        resolveInheritedVariantForModel,
         setCurrentVariant,
+        setCurrentVariantOverride,
         settingsDefaultVariant,
     ]);
 
@@ -1179,13 +1207,14 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
 
     const handleVariantSelect = React.useCallback((variant: string | undefined) => {
         if (currentProviderId && currentModelId) {
-            commitVariantSelectionForModel(currentProviderId, currentModelId, variant);
+            // Picked in the effort menu, so no effort means the user picked
+            // "Default" — a choice, recorded as `null`.
+            commitVariantSelectionForModel(currentProviderId, currentModelId, variant ?? null);
         }
     }, [commitVariantSelectionForModel, currentModelId, currentProviderId]);
 
     const handleAgentChange = React.useCallback((agentName: string, options?: { closeModelSelector?: boolean }) => {
         try {
-            explicitAgentSwitchRef.current = agentName;
             setAgent(agentName);
             addRecentAgent(agentName);
             if (options?.closeModelSelector ?? true) {
@@ -1242,8 +1271,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
     ) => {
         try {
             const effectiveAgentName = options?.agentName ?? resolveLiveAgentName() ?? undefined;
+            // `applyVariant` is only set when the user adjusted the effort in
+            // the model picker, so no effort means an explicit "Default".
             const result = options?.applyVariant
-                ? applyModelSelectionWithVariant(providerId, modelId, options.variant, effectiveAgentName)
+                ? applyModelSelectionWithVariant(providerId, modelId, options.variant ?? null, effectiveAgentName)
                 : tryApplyModelSelection(providerId, modelId, effectiveAgentName);
             if (result !== 'applied') {
                 if (result === 'provider-missing') {
@@ -1600,8 +1631,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             }
         }
 
-        const handleMobileModelApply = (providerId: string, modelId: string, variant: string | undefined) => {
-            const result = applyModelSelectionWithVariant(providerId, modelId, variant);
+        const handleMobileModelApply = (providerId: string, modelId: string, variant: string | null | undefined) => {
+            // Chosen in the mobile model sheet, and the row already showed this
+            // effort: no effort there means the user is applying "Default".
+            const result = applyModelSelectionWithVariant(providerId, modelId, variant ?? null);
             if (result !== 'applied') {
                 if (result === 'provider-missing') {
                     console.error('[ModelControls] Provider not available for selection:', providerId);
@@ -1638,7 +1671,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             const variantOptions = getModelVariantOptions(providerId, modelId);
             const hasVariants = variantOptions.length > 0;
             const resolvedVariant = resolveModelVariantSelection(providerId, modelId);
-            const variantLabel = hasVariants ? formatEffortLabel(resolvedVariant) : null;
+            // Both an explicit "Default" and no choice at all read as "Default".
+            const variantLabel = hasVariants ? formatEffortLabel(resolvedVariant ?? undefined) : null;
             const isExpanded = expandedMobileModelKey === rowKey;
             const inlineVariantOptions = [undefined, ...variantOptions].slice(0, MAX_INLINE_MOBILE_VARIANT_OPTIONS);
             const hasVariantOverflow = inlineVariantOptions.length < variantOptions.length + 1;
@@ -1943,7 +1977,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         };
 
         const handleSelect = (variant: string | undefined) => {
-            const result = applyModelSelectionWithVariant(targetProviderId, targetModelId, variant);
+            // Chosen in the mobile effort panel: no effort means "Default".
+            const result = applyModelSelectionWithVariant(targetProviderId, targetModelId, variant ?? null);
             if (result !== 'applied') {
                 return;
             }
@@ -2256,7 +2291,12 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                 : 'Default';
 
             return (
-                <span className={cn('typography-micro whitespace-nowrap', wasAdjusted ? 'text-foreground' : 'text-muted-foreground')}>
+                <span className={cn(
+                    'typography-micro whitespace-nowrap',
+                    isHighlighted
+                        ? (wasAdjusted ? 'text-interactive-selection-foreground' : 'text-interactive-selection-foreground/70')
+                        : (wasAdjusted ? 'text-foreground' : 'text-muted-foreground'),
+                )}>
                     Thinking: {displayLabel}
                 </span>
             );
@@ -2316,9 +2356,12 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                             </DropdownMenuTrigger>
                         </TooltipTrigger>
                         <DropdownMenuContent
-                            className="w-[min(380px,calc(100vw-2rem))] p-0 flex flex-col"
+                            side="top"
+                            className="w-[min(380px,calc(100vw-2rem))] p-0 flex flex-col overflow-hidden"
                             align="end"
                             alignOffset={-40}
+                            constrainToMain
+                            collisionAvoidance={{ side: 'none', align: 'shift' }}
                             onKeyDownCapture={handleModelShortcutKeyDownCapture}
                         >
                             <div className="p-1 border-b border-border/40">
@@ -2375,6 +2418,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                         </div>
                                     );
                                 }}
+                                maxHeightClassName="max-h-[min(400px,calc(var(--available-height)-4rem))] flex-1"
                                 tooltipsEnabled={agentMenuOpen}
                                 onEscape={() => setAgentMenuOpen(false)}
                             />
@@ -2618,7 +2662,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                             </div>
                         </DropdownMenuTrigger>
                     </TooltipTrigger>
-                    <DropdownMenuContent align="end" alignOffset={-40} className="w-[min(180px,calc(100vw-2rem))]">
+                    <DropdownMenuContent side="top" align="end" alignOffset={-40} className="w-[min(180px,calc(100vw-2rem))]">
                         <DropdownMenuLabel className="typography-ui-header font-semibold text-foreground">{t('chat.modelControls.thinking')}</DropdownMenuLabel>
                         <DropdownMenuItem className="typography-meta" onSelect={() => handleVariantSelect(undefined)}>
                             <div className="flex items-center justify-between gap-2 w-full min-w-0">
@@ -2708,7 +2752,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                     </div>
                                 </DropdownMenuTrigger>
                             </TooltipTrigger>
-                            <DropdownMenuContent align="end" alignOffset={-40} className="w-[min(280px,calc(100vw-2rem))] p-0 flex flex-col">
+                            <DropdownMenuContent side="top" align="end" alignOffset={-40} constrainToMain collisionAvoidance={{ side: 'none', align: 'shift' }} className="w-[min(280px,calc(100vw-2rem))] p-0 flex flex-col overflow-hidden">
                                 <div className="p-2 border-b border-border/40">
                                     <div className="relative">
                                         <Icon name="search" className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
@@ -2724,7 +2768,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                         />
                                     </div>
                                 </div>
-                                <ScrollableOverlay outerClassName="max-h-[min(400px,calc(100dvh-12rem))] flex-1">
+                                <ScrollableOverlay outerClassName="max-h-[min(400px,calc(var(--available-height)-4rem))] flex-1">
                                     <div className="p-1">
                                         {!agentSearchQuery.trim() && defaultAgentName && (
                                             <>
@@ -2746,12 +2790,11 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                             </div>
                                         ) : (
                                             sortedAndFilteredAgents.map((agent) => (
-                                                <DropdownMenuItem
-                                                    key={agent.name}
-                                                    className="typography-meta"
-                                                    onSelect={() => handleAgentChange(agent.name)}
-                                                >
-                                                    <div className="flex flex-col gap-0.5">
+                                                <AgentDescriptionTooltip key={agent.name} description={agent.description}>
+                                                    <DropdownMenuItem
+                                                        className="typography-meta"
+                                                        onSelect={() => handleAgentChange(agent.name)}
+                                                    >
                                                         <div className="flex items-center gap-1.5">
                                                             <div className={cn(
                                                                 'h-1 w-1 rounded-full agent-dot',
@@ -2759,13 +2802,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                                             )} />
                                                             <span className="font-medium">{capitalizeAgentName(agent.name)}</span>
                                                         </div>
-                                                        {agent.description && (
-                                                            <span className="typography-meta text-muted-foreground max-w-[200px] ml-2.5 break-words">
-                                                                {agent.description}
-                                                            </span>
-                                                        )}
-                                                    </div>
-                                                </DropdownMenuItem>
+                                                    </DropdownMenuItem>
+                                                </AgentDescriptionTooltip>
                                             ))
                                         )}
                                     </div>

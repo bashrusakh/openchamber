@@ -138,12 +138,25 @@ const buildMaterializedSubagentSession = () => {
   return { messages, part };
 };
 
-const syncContext = (globalThis as unknown as {
+// SAFETY: sync-context.tsx publishes exactly these two keys on globalThis
+// (SYNC_CONTEXT_GLOBAL_KEY / SYNC_RUNTIME_CONTEXT_GLOBAL_KEY) so every module
+// instance shares one context identity; the cast only adds those two optional
+// keys to the global object type, and the guards below re-check presence.
+const syncGlobals = globalThis as {
   __openchamber_sync_context__?: React.Context<unknown>;
-}).__openchamber_sync_context__;
+  __openchamber_sync_runtime_context__?: React.Context<unknown>;
+};
+
+const syncContext = syncGlobals.__openchamber_sync_context__;
 
 if (!syncContext) {
   throw new Error('sync context was not published on globalThis by @/sync/sync-context');
+}
+
+const syncRuntimeContext = syncGlobals.__openchamber_sync_runtime_context__;
+
+if (!syncRuntimeContext) {
+  throw new Error('sync runtime context was not published on globalThis by @/sync/sync-context');
 }
 
 describe('issue #2903 busy embedded subagent status-line-only', () => {
@@ -173,7 +186,16 @@ describe('issue #2903 busy embedded subagent status-line-only', () => {
     });
 
     const system = { childStores, messageLoader: {}, sdk: {}, runtimeKey: 'test', directory: DIRECTORY };
-    const Provider = syncContext.Provider as React.Provider<unknown>;
+    // Mirrors SyncProvider's own nesting: system context outer, runtime inner.
+    // Directory-scoped hooks read the runtime context, so the harness must
+    // provide it with a currentDirectory source for the store lookups.
+    const runtime = {
+      childStores,
+      messageLoader: {},
+      sdk: {},
+      runtimeKey: 'test',
+      currentDirectory: { get: () => DIRECTORY, subscribe: () => () => undefined },
+    };
     let inactiveCount = -1;
     let activeCount = -1;
     let enabled = false;
@@ -188,15 +210,22 @@ describe('issue #2903 busy embedded subagent status-line-only', () => {
       return null;
     };
 
+    const renderHarness = () =>
+      React.createElement(
+        syncContext.Provider,
+        { value: system },
+        React.createElement(syncRuntimeContext.Provider, { value: runtime }, React.createElement(Harness)),
+      );
+
     try {
       await act(async () => {
-        root.render(React.createElement(Provider, { value: system }, React.createElement(Harness)));
+        root.render(renderHarness());
       });
       expect(inactiveCount).toBe(0);
 
       enabled = true;
       await act(async () => {
-        root.render(React.createElement(Provider, { value: system }, React.createElement(Harness)));
+        root.render(renderHarness());
       });
       expect(activeCount).toBe(14);
     } finally {
@@ -226,20 +255,23 @@ describe('issue #2903 busy embedded subagent status-line-only', () => {
     expect(chatContainerSource).toContain('void ensureSessionRenderable(currentSessionId);');
   });
 
-  test('empty+busy branch skips empty state so StatusRowContainer can stand alone', () => {
+  test('the empty and idle branch leaves the status row to the busy path', () => {
+    // A busy session with no messages yet must fall through to the viewport so
+    // StatusRowContainer is the only thing on screen. The idle branch returns
+    // before it and must not render one of its own. The empty state itself no
+    // longer lives here: the draft surface owns it since the draft transition
+    // animation landed.
     expect(chatContainerSource).toContain('if (sessionMessages.length === 0 && !sessionIsWorking)');
-    expect(chatContainerSource).toContain('<ChatEmptyState');
     expect(chatContainerSource).toContain('<StatusRowContainer />');
 
-    const emptyBusyGuard = 'if (sessionMessages.length === 0 && !sessionIsWorking)';
-    const emptyStateReturn = chatContainerSource.indexOf(emptyBusyGuard);
-    expect(emptyStateReturn).toBeGreaterThan(-1);
-    const emptyStateBlock = chatContainerSource.slice(
-      emptyStateReturn,
-      emptyStateReturn + 1600,
+    const emptyIdleGuard = 'if (sessionMessages.length === 0 && !sessionIsWorking)';
+    const emptyIdleReturn = chatContainerSource.indexOf(emptyIdleGuard);
+    expect(emptyIdleReturn).toBeGreaterThan(-1);
+    const emptyIdleBlock = chatContainerSource.slice(
+      emptyIdleReturn,
+      emptyIdleReturn + 1600,
     );
-    expect(emptyStateBlock).toContain('<ChatEmptyState');
-    expect(emptyStateBlock).not.toContain('<StatusRowContainer />');
+    expect(emptyIdleBlock).not.toContain('<StatusRowContainer />');
   });
 
   test('visibility handshake remains as defense-in-depth for background work', () => {

@@ -9,11 +9,11 @@ import { buildResult } from '../utils/index.js';
 
 import * as claude from './claude/index.js';
 import * as codex from './codex.js';
-import * as commandCode from './command-code.js';
 import * as copilot from './copilot.js';
 import * as crof from './crof.js';
 import * as cursor from './cursor.js';
 import * as deepseek from './deepseek.js';
+import * as exeDev from './exe-dev.js';
 import * as google from './google/index.js';
 import * as kimi from './kimi.js';
 import * as nanogpt from './nanogpt.js';
@@ -30,12 +30,6 @@ import * as opencodeGo from './opencode-go.js';
 import * as xai from './xai.js';
 
 const registry = {
-  'command-code': {
-    providerId: commandCode.providerId,
-    providerName: commandCode.providerName,
-    isConfigured: commandCode.isConfigured,
-    fetchQuota: commandCode.fetchQuota
-  },
   claude: {
     providerId: claude.providerId,
     providerName: claude.providerName,
@@ -65,6 +59,12 @@ const registry = {
     providerName: deepseek.providerName,
     isConfigured: deepseek.isConfigured,
     fetchQuota: deepseek.fetchQuota
+  },
+  'exe-dev': {
+    providerId: exeDev.providerId,
+    providerName: exeDev.providerName,
+    isConfigured: exeDev.isConfigured,
+    fetchQuota: exeDev.fetchQuota
   },
   google: {
     providerId: google.providerId,
@@ -158,6 +158,9 @@ const registry = {
   }
 };
 
+const pendingFetches = new Map();
+
+
 export const listConfiguredQuotaProviders = () => {
   const configured = [];
 
@@ -174,7 +177,7 @@ export const listConfiguredQuotaProviders = () => {
   return configured;
 };
 
-export const fetchQuotaForProvider = async (providerId) => {
+const fetchQuotaForProviderUncoalesced = async (providerId) => {
   const provider = registry[providerId];
 
   if (!provider) {
@@ -198,6 +201,17 @@ export const fetchQuotaForProvider = async (providerId) => {
       error: error instanceof Error ? error.message : 'Request failed'
     });
   }
+};
+
+export const fetchQuotaForProvider = (providerId) => {
+  const existing = pendingFetches.get(providerId);
+  if (existing) return existing;
+
+  const pending = fetchQuotaForProviderUncoalesced(providerId).finally(() => {
+    if (pendingFetches.get(providerId) === pending) pendingFetches.delete(providerId);
+  });
+  pendingFetches.set(providerId, pending);
+  return pending;
 };
 
 export const fetchClaudeQuota = claude.fetchQuota;
