@@ -49,8 +49,9 @@ export const createOpenCodeResolutionRuntime = (dependencies) => {
 
     return {
       configured,
-      // Configured intent from settings. WP2 turns this into the actual launch
-      // selection; the resolved protocol is always the legacy runtime until then.
+      // Configured intent from settings. The V2 compatibility layer
+      // (external) turns this into the actual launch selection; until then the
+      // resolved protocol is always the legacy runtime.
       opencodeRuntime,
       resolvedProtocol: 'legacy',
       resolved,
