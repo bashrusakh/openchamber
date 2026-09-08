@@ -1,0 +1,149 @@
+import React, { act } from 'react';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { createRoot, type Root } from 'react-dom/client';
+import { Window } from 'happy-dom';
+
+import { I18nProvider } from '@/lib/i18n';
+
+const updateCalls: Array<{ opencodeRuntime: 'stable' | 'beta' }> = [];
+const updateDesktopSettings = async (changes: { opencodeRuntime: 'stable' | 'beta' }) => {
+  updateCalls.push(changes);
+  return { ok: true };
+};
+const loadDesktopSettings = async () => ({
+  opencodeBinary: '',
+  opencodeRuntime: 'stable' as const,
+});
+const deferredRestartCalls: Array<['cli', { id: string }]> = [];
+const recordDeferredOpenCodeRestart = (...args: ['cli', { id: string }]) => {
+  deferredRestartCalls.push(args);
+};
+const uiState = {
+  showOpenCodeUpdateNotifications: false,
+  setShowOpenCodeUpdateNotifications: () => undefined,
+};
+
+mock.module('@/lib/desktop', () => ({
+  isDesktopShell: () => false,
+  requestFileAccess: async () => ({ success: false }),
+}));
+mock.module('@/lib/persistence', () => ({ loadDesktopSettings, updateDesktopSettings }));
+mock.module('@/lib/opencode/deferredRestart', () => ({ recordDeferredOpenCodeRestart }));
+mock.module('@/lib/platform', () => ({ isWindowsArm64: () => false }));
+mock.module('@/stores/useUIStore', () => ({
+  useUIStore: <T,>(selector: (state: typeof uiState) => T): T => selector(uiState),
+}));
+mock.module('@/components/ui', () => ({
+  toast: { success: () => undefined, error: () => undefined },
+}));
+
+const { OpenCodeCliSettings } = await import('./OpenCodeCliSettings');
+
+describe('OpenCodeCliSettings', () => {
+  let windowInstance: Window;
+  let root: Root;
+  let host: HTMLDivElement;
+
+  beforeEach(() => {
+    updateCalls.length = 0;
+    deferredRestartCalls.length = 0;
+    windowInstance = new Window({ url: 'http://localhost/' });
+    Object.assign(globalThis, {
+      window: windowInstance,
+      document: windowInstance.document,
+      navigator: windowInstance.navigator,
+      Node: windowInstance.Node,
+      Element: windowInstance.Element,
+      HTMLElement: windowInstance.HTMLElement,
+      Event: windowInstance.Event,
+      MouseEvent: windowInstance.MouseEvent,
+      MutationObserver: windowInstance.MutationObserver,
+      getComputedStyle: windowInstance.getComputedStyle.bind(windowInstance),
+      requestAnimationFrame: windowInstance.requestAnimationFrame.bind(windowInstance),
+      cancelAnimationFrame: windowInstance.cancelAnimationFrame.bind(windowInstance),
+      IS_REACT_ACT_ENVIRONMENT: true,
+    });
+    host = document.createElement('div');
+    document.body.appendChild(host);
+    root = createRoot(host);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    windowInstance.close();
+  });
+
+  test('defaults to the Stable runtime selection', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <OpenCodeCliSettings />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const options = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
+      .filter((option) => option.textContent?.includes('Stable') || option.textContent?.includes('Beta'));
+    const stableOption = options.find((option) => option.textContent?.includes('Stable'));
+    const betaOption = options.find((option) => option.textContent?.includes('Beta'));
+    if (!stableOption || !betaOption) {
+      throw new Error('expected Stable and Beta runtime options');
+    }
+
+    // The settings document defaults to stable, so the Stable option is the
+    // selected one and no persistence write happens on mount.
+    expect(stableOption.getAttribute('aria-pressed')).toBe('true');
+    expect(betaOption.getAttribute('aria-pressed')).toBe('false');
+    expect(updateCalls.length).toBe(0);
+    expect(deferredRestartCalls.length).toBe(0);
+  });
+
+  test('persists a runtime selection and records its deferred restart', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <OpenCodeCliSettings />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const betaOption = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
+      .find((option) => option.textContent?.includes('Beta'));
+    if (!betaOption) {
+      throw new Error('expected Beta runtime option');
+    }
+
+    await act(async () => {
+      betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(updateCalls.at(-1)).toEqual({ opencodeRuntime: 'beta' });
+    expect(deferredRestartCalls.at(-1)).toEqual(['cli', { id: 'opencode-runtime' }]);
+  });
+
+  test('selecting Stable persists it and records the deferred restart', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <OpenCodeCliSettings />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const stableOption = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
+      .find((option) => option.textContent?.includes('Stable'));
+    if (!stableOption) {
+      throw new Error('expected Stable runtime option');
+    }
+
+    await act(async () => {
+      stableOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(updateCalls.at(-1)).toEqual({ opencodeRuntime: 'stable' });
+    expect(deferredRestartCalls.at(-1)).toEqual(['cli', { id: 'opencode-runtime' }]);
+  });
+});

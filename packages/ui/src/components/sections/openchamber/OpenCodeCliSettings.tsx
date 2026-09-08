@@ -96,6 +96,12 @@ export const OpenCodeCliSettings: React.FC = () => {
 
   const handleRuntimeChange = React.useCallback((next: OpenCodeRuntimeValue) => {
     setRuntime(next);
+    // Persist immediately (like the sibling checkbox) so leaving the section
+    // never loses the selection; the deferred-restart marker tells the user
+    // the change applies on the next OpenCode restart. The shared settings
+    // save indicator reports failures for this fire-and-forget write.
+    void updateDesktopSettings({ opencodeRuntime: next });
+    recordDeferredOpenCodeRestart('cli', { id: 'opencode-runtime' });
   }, []);
 
   const handleShowUpdateNotificationsChange = React.useCallback((enabled: boolean) => {

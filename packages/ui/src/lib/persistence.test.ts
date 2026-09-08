@@ -437,7 +437,6 @@ describe('updateDesktopSettings', () => {
     expect(JSON.parse(localStorage.getItem(getRuntimeSettingsMirrorStorageKey('mirror-b')) ?? '{}')).toEqual({
       draftStartersCraftGoalAdded: true,
       draftStartersScheduleTaskAdded: true,
-      opencodeRuntime: 'beta',
     });
   });
 
