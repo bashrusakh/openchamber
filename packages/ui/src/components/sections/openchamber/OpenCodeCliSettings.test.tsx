@@ -10,10 +10,16 @@ const updateDesktopSettings = async (changes: { opencodeRuntime: 'stable' | 'bet
   updateCalls.push(changes);
   return { ok: true };
 };
-const loadDesktopSettings = async () => ({
-  opencodeBinary: '',
-  opencodeRuntime: 'stable' as const,
-});
+let holdLoad = false;
+let loadResolver: (() => void) | null = null;
+const loadDesktopSettings = () =>
+  new Promise<{ opencodeBinary: string; opencodeRuntime: 'stable' }>((resolve) => {
+    if (holdLoad) {
+      loadResolver = () => resolve({ opencodeBinary: '', opencodeRuntime: 'stable' });
+    } else {
+      resolve({ opencodeBinary: '', opencodeRuntime: 'stable' });
+    }
+  });
 const deferredRestartCalls: Array<['cli', { id: string }]> = [];
 const recordDeferredOpenCodeRestart = (...args: ['cli', { id: string }]) => {
   deferredRestartCalls.push(args);
@@ -47,6 +53,8 @@ describe('OpenCodeCliSettings', () => {
   beforeEach(() => {
     updateCalls.length = 0;
     deferredRestartCalls.length = 0;
+    holdLoad = false;
+    loadResolver = null;
     windowInstance = new Window({ url: 'http://localhost/' });
     Object.assign(globalThis, {
       window: windowInstance,
@@ -133,17 +141,96 @@ describe('OpenCodeCliSettings', () => {
       await Promise.resolve();
     });
 
-    const stableOption = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
-      .find((option) => option.textContent?.includes('Stable'));
-    if (!stableOption) {
-      throw new Error('expected Stable runtime option');
+    const options = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
+      .filter((option) => option.textContent?.includes('Stable') || option.textContent?.includes('Beta'));
+    const betaOption = options.find((option) => option.textContent?.includes('Beta'));
+    const stableOption = options.find((option) => option.textContent?.includes('Stable'));
+    if (!betaOption || !stableOption) {
+      throw new Error('expected Stable and Beta runtime options');
     }
 
+    // The load settles on Stable, so move to Beta first: re-clicking the
+    // already-selected option is a no-op by contract.
+    await act(async () => {
+      betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
     await act(async () => {
       stableOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     expect(updateCalls.at(-1)).toEqual({ opencodeRuntime: 'stable' });
     expect(deferredRestartCalls.at(-1)).toEqual(['cli', { id: 'opencode-runtime' }]);
+  });
+
+  test('option click during load does not persist', async () => {
+    holdLoad = true;
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <OpenCodeCliSettings />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const betaOption = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
+      .find((option) => option.textContent?.includes('Beta'));
+    if (!betaOption) {
+      throw new Error('expected Beta runtime option');
+    }
+
+    // The load is still pending, so the option is disabled: the click handler
+    // no-ops and nothing is persisted or marked for restart.
+    expect(betaOption.getAttribute('aria-disabled')).toBe('true');
+    await act(async () => {
+      betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(updateCalls.length).toBe(0);
+    expect(deferredRestartCalls.length).toBe(0);
+
+    // Once the load resolves, the UI settles on the loaded value (stable).
+    await act(async () => {
+      loadResolver?.();
+      await Promise.resolve();
+    });
+    const stableOption = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
+      .find((option) => option.textContent?.includes('Stable'));
+    if (!stableOption) {
+      throw new Error('expected Stable runtime option');
+    }
+    expect(stableOption.getAttribute('aria-pressed')).toBe('true');
+    expect(betaOption.getAttribute('aria-pressed')).toBe('false');
+    expect(updateCalls.length).toBe(0);
+    expect(deferredRestartCalls.length).toBe(0);
+  });
+
+  test('re-clicking the selected option records no restart marker', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <OpenCodeCliSettings />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const betaOption = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
+      .find((option) => option.textContent?.includes('Beta'));
+    if (!betaOption) {
+      throw new Error('expected Beta runtime option');
+    }
+
+    await act(async () => {
+      betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(updateCalls.length).toBe(1);
+    expect(deferredRestartCalls.length).toBe(1);
+
+    // Beta is still selected; clicking it again must not persist or mark a restart.
+    await act(async () => {
+      betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(updateCalls.length).toBe(1);
+    expect(deferredRestartCalls.length).toBe(1);
   });
 });

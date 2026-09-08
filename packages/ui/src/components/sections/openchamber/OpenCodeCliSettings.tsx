@@ -95,6 +95,9 @@ export const OpenCodeCliSettings: React.FC = () => {
   }, [t, value, runtime]);
 
   const handleRuntimeChange = React.useCallback((next: OpenCodeRuntimeValue) => {
+    if (next === runtime) {
+      return;
+    }
     setRuntime(next);
     // Persist immediately (like the sibling checkbox) so leaving the section
     // never loses the selection; the deferred-restart marker tells the user
@@ -102,7 +105,7 @@ export const OpenCodeCliSettings: React.FC = () => {
     // save indicator reports failures for this fire-and-forget write.
     void updateDesktopSettings({ opencodeRuntime: next });
     recordDeferredOpenCodeRestart('cli', { id: 'opencode-runtime' });
-  }, []);
+  }, [runtime]);
 
   const handleShowUpdateNotificationsChange = React.useCallback((enabled: boolean) => {
     setShowOpenCodeUpdateNotifications(enabled);
@@ -164,14 +167,14 @@ export const OpenCodeCliSettings: React.FC = () => {
               onSelect={() => handleRuntimeChange('stable')}
               label={t('settings.openchamber.opencodeCli.runtime.optionStable')}
               ariaLabel={t('settings.openchamber.opencodeCli.runtime.optionStable')}
-              disabled={isSaving}
+              disabled={isLoading || isSaving}
             />
             <SettingsRadioOption
               selected={runtime === 'beta'}
               onSelect={() => handleRuntimeChange('beta')}
               label={t('settings.openchamber.opencodeCli.runtime.optionBeta')}
               ariaLabel={t('settings.openchamber.opencodeCli.runtime.optionBeta')}
-              disabled={isSaving}
+              disabled={isLoading || isSaving}
             />
           </SettingsRadioGroup>
         </SettingsFieldRow>
