@@ -11,6 +11,7 @@ export const createOpenCodeResolutionRuntime = (dependencies) => {
 
   const getOpenCodeResolutionSnapshot = async (settings) => {
     const configured = typeof settings?.opencodeBinary === 'string' ? settings.opencodeBinary : null;
+    const opencodeRuntime = settings?.opencodeRuntime === 'beta' ? 'beta' : 'stable';
 
     const { resolvedOpencodeBinarySource: previousSource } = getResolvedState();
     const detectedNow = resolveOpencodeCliPath();
@@ -48,6 +49,10 @@ export const createOpenCodeResolutionRuntime = (dependencies) => {
 
     return {
       configured,
+      // Configured intent from settings. WP2 turns this into the actual launch
+      // selection; the resolved protocol is always the legacy runtime until then.
+      opencodeRuntime,
+      resolvedProtocol: 'legacy',
       resolved,
       resolvedDir: resolved ? path.dirname(resolved) : null,
       source,

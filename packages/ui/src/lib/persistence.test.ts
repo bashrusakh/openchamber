@@ -407,6 +407,7 @@ describe('updateDesktopSettings', () => {
         themeId: 'theme-a',
         directoryShowHidden: true,
         sttModel: 'model-a',
+        opencodeRuntime: 'beta',
         draftStartersCraftGoalAdded: true, draftStartersScheduleTaskAdded: true,
       },
       source: 'web',
@@ -429,12 +430,14 @@ describe('updateDesktopSettings', () => {
       themeId: 'theme-a',
       directoryShowHidden: true,
       sttModel: 'model-a',
+      opencodeRuntime: 'beta',
       draftStartersCraftGoalAdded: true,
       draftStartersScheduleTaskAdded: true,
     });
     expect(JSON.parse(localStorage.getItem(getRuntimeSettingsMirrorStorageKey('mirror-b')) ?? '{}')).toEqual({
       draftStartersCraftGoalAdded: true,
       draftStartersScheduleTaskAdded: true,
+      opencodeRuntime: 'beta',
     });
   });
 
