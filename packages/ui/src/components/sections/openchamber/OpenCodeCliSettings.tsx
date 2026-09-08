@@ -86,13 +86,13 @@ export const OpenCodeCliSettings: React.FC = () => {
           || (trimmed.startsWith("'") && trimmed.endsWith("'")))
         ? trimmed.slice(1, -1).trim()
         : trimmed;
-      await updateDesktopSettings({ opencodeBinary: unquoted, opencodeRuntime: runtime });
-      recordDeferredOpenCodeRestart('cli', { id: 'opencode-runtime' });
+      await updateDesktopSettings({ opencodeBinary: unquoted });
+      recordDeferredOpenCodeRestart('cli', { id: 'opencode-binary' });
       toast.success(t('settings.view.pendingRestart.saved'));
     } finally {
       setIsSaving(false);
     }
-  }, [t, value, runtime]);
+  }, [t, value]);
 
   const handleRuntimeChange = React.useCallback((next: OpenCodeRuntimeValue) => {
     if (next === runtime) {

@@ -1017,7 +1017,7 @@ export function createOpenCodeManager(context: vscode.ExtensionContext): OpenCod
       // dependency message instead of starting the legacy runtime.
       if (isOpenCodeRuntimeBetaSelected()) {
         throw new Error(
-          'OpenCode runtime is set to Beta, but the V2 compatibility infrastructure required to run it is not available in this build. Install the compatibility layer (openchamber/openchamber#3007) or switch the runtime back to Stable.',
+          'OpenCode Beta runtime is not available in this build yet. Switch the runtime back to Stable.',
         );
       }
 

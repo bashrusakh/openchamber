@@ -712,7 +712,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     // back to V1, so a Beta selection fails the bootstrap attempt explicitly
     // with a dependency message instead of starting the legacy runtime.
     if (await isOpenCodeRuntimeBetaSelected()) {
-      const message = 'OpenCode runtime is set to Beta, but the V2 compatibility infrastructure required to run it is not available in this build. Install the compatibility layer (openchamber/openchamber#3007) or switch the runtime back to Stable.';
+      const message = 'OpenCode Beta runtime is not available in this build yet. Switch the runtime back to Stable.';
       state.lastOpenCodeError = message;
       state.isOpenCodeReady = false;
       syncToHmrState();

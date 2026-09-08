@@ -620,10 +620,10 @@ describe('OpenCode lifecycle', () => {
 
     const rejection = runtime.startOpenCode();
     await expect(rejection).rejects.toThrow(/Beta/);
-    await expect(rejection).rejects.toThrow(/compatibility/);
+    await expect(rejection).rejects.toThrow(/not available/);
 
     expect(runtime.testState.lastOpenCodeError).toContain('Beta');
-    expect(runtime.testState.lastOpenCodeError).toContain('compatibility');
+    expect(runtime.testState.lastOpenCodeError).toContain('not available');
     expect(runtime.testState.isOpenCodeReady).toBe(false);
     // The gate must fail before any legacy process is spawned.
     expect(spawnMock).not.toHaveBeenCalled();

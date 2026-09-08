@@ -1,12 +1,32 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { createRoot, type Root } from 'react-dom/client';
+import type { Root } from 'react-dom/client';
 import { Window } from 'happy-dom';
 
 import { I18nProvider } from '@/lib/i18n';
 
-const updateCalls: Array<{ opencodeRuntime: 'stable' | 'beta' }> = [];
-const updateDesktopSettings = async (changes: { opencodeRuntime: 'stable' | 'beta' }) => {
+// React DOM detects input-event support when imported, so install the DOM
+// first and import react-dom/client dynamically (same pattern as ArchiveView).
+const windowInstance = new Window({ url: 'http://localhost/' });
+Object.assign(globalThis, {
+  window: windowInstance,
+  document: windowInstance.document,
+  navigator: windowInstance.navigator,
+  Node: windowInstance.Node,
+  Element: windowInstance.Element,
+  HTMLElement: windowInstance.HTMLElement,
+  HTMLInputElement: windowInstance.HTMLInputElement,
+  Event: windowInstance.Event,
+  MouseEvent: windowInstance.MouseEvent,
+  MutationObserver: windowInstance.MutationObserver,
+  getComputedStyle: windowInstance.getComputedStyle.bind(windowInstance),
+  requestAnimationFrame: windowInstance.requestAnimationFrame.bind(windowInstance),
+  cancelAnimationFrame: windowInstance.cancelAnimationFrame.bind(windowInstance),
+  IS_REACT_ACT_ENVIRONMENT: true,
+});
+
+const updateCalls: Array<{ opencodeBinary?: string; opencodeRuntime?: 'stable' | 'beta' }> = [];
+const updateDesktopSettings = async (changes: { opencodeBinary?: string; opencodeRuntime?: 'stable' | 'beta' }) => {
   updateCalls.push(changes);
   return { ok: true };
 };
@@ -43,10 +63,11 @@ mock.module('@/components/ui', () => ({
   toast: { success: () => undefined, error: () => undefined },
 }));
 
+const { createRoot } = await import('react-dom/client');
+
 const { OpenCodeCliSettings } = await import('./OpenCodeCliSettings');
 
 describe('OpenCodeCliSettings', () => {
-  let windowInstance: Window;
   let root: Root;
   let host: HTMLDivElement;
 
@@ -55,22 +76,6 @@ describe('OpenCodeCliSettings', () => {
     deferredRestartCalls.length = 0;
     holdLoad = false;
     loadResolver = null;
-    windowInstance = new Window({ url: 'http://localhost/' });
-    Object.assign(globalThis, {
-      window: windowInstance,
-      document: windowInstance.document,
-      navigator: windowInstance.navigator,
-      Node: windowInstance.Node,
-      Element: windowInstance.Element,
-      HTMLElement: windowInstance.HTMLElement,
-      Event: windowInstance.Event,
-      MouseEvent: windowInstance.MouseEvent,
-      MutationObserver: windowInstance.MutationObserver,
-      getComputedStyle: windowInstance.getComputedStyle.bind(windowInstance),
-      requestAnimationFrame: windowInstance.requestAnimationFrame.bind(windowInstance),
-      cancelAnimationFrame: windowInstance.cancelAnimationFrame.bind(windowInstance),
-      IS_REACT_ACT_ENVIRONMENT: true,
-    });
     host = document.createElement('div');
     document.body.appendChild(host);
     root = createRoot(host);
@@ -78,7 +83,7 @@ describe('OpenCodeCliSettings', () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
-    windowInstance.close();
+    document.body.replaceChildren();
   });
 
   test('defaults to the Stable runtime selection', async () => {
@@ -232,5 +237,43 @@ describe('OpenCodeCliSettings', () => {
     });
     expect(updateCalls.length).toBe(1);
     expect(deferredRestartCalls.length).toBe(1);
+  });
+
+  test('saving the binary path persists only the binary and marks the binary restart', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <OpenCodeCliSettings />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const input = host.querySelector<HTMLInputElement>('input[placeholder="/Users/you/.bun/bin/opencode"]');
+    if (!input) {
+      throw new Error('expected binary path input');
+    }
+    const setValue = Object.getOwnPropertyDescriptor(windowInstance.HTMLInputElement.prototype, 'value')?.set;
+    if (!setValue) {
+      throw new Error('input value setter missing');
+    }
+    await act(async () => {
+      setValue.call(input, '/custom/opencode');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const saveButton = Array.from(host.querySelectorAll<HTMLElement>('button'))
+      .find((button) => button.textContent?.includes('Save Changes'));
+    if (!saveButton) {
+      throw new Error('expected save button');
+    }
+    await act(async () => {
+      saveButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    // The binary-path save is independent of the runtime selection: it must
+    // persist only the binary and record the binary restart marker.
+    expect(updateCalls.at(-1)).toEqual({ opencodeBinary: '/custom/opencode' });
+    expect(deferredRestartCalls.at(-1)).toEqual(['cli', { id: 'opencode-binary' }]);
   });
 });

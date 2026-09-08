@@ -160,7 +160,7 @@ describe('VS Code OpenCode runtime selector', () => {
     // never fall back to the legacy spawn.
     expect(manager.getStatus()).toBe('error');
     expect(manager.getDebugInfo().lastError ?? '').toContain('Beta');
-    expect(manager.getDebugInfo().lastError ?? '').toContain('compatibility');
+    expect(manager.getDebugInfo().lastError ?? '').toContain('not available');
     expect(spawnCalls.length).toBe(0);
     expect(portAllocations).toBe(0);
     expect(passwordGenerations).toBe(0);

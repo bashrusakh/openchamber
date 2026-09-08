@@ -49,11 +49,13 @@ export const createOpenCodeResolutionRuntime = (dependencies) => {
 
     return {
       configured,
-      // Configured intent from settings. The V2 compatibility layer
-      // (external) turns this into the actual launch selection; until then the
-      // resolved protocol is always the legacy runtime.
+      // Configured intent from settings. The active protocol is a runtime
+      // fact: Stable resolves and starts the legacy runtime; Beta has no V2
+      // runtime resolved in this build (the compatibility layer is external),
+      // so the resolved protocol is null rather than a claim that legacy is
+      // active.
       opencodeRuntime,
-      resolvedProtocol: 'legacy',
+      resolvedProtocol: opencodeRuntime === 'beta' ? null : 'legacy',
       resolved,
       resolvedDir: resolved ? path.dirname(resolved) : null,
       source,
