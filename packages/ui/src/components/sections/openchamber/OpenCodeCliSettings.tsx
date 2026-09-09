@@ -100,11 +100,17 @@ export const OpenCodeCliSettings: React.FC = () => {
     }
     setRuntime(next);
     // Persist immediately (like the sibling checkbox) so leaving the section
-    // never loses the selection; the deferred-restart marker tells the user
-    // the change applies on the next OpenCode restart. The shared settings
-    // save indicator reports failures for this fire-and-forget write.
-    void updateDesktopSettings({ opencodeRuntime: next });
-    recordDeferredOpenCodeRestart('cli', { id: 'opencode-runtime' });
+    // never loses the selection. The deferred-restart marker is recorded only
+    // after the write settles and only when the value actually reached the
+    // server: a failed save or a quick revert inside the debounce window
+    // (which cancels the write as redundant) must not leave a restart badge
+    // with nothing pending. The shared settings save indicator reports
+    // failures for this fire-and-forget write.
+    void updateDesktopSettings({ opencodeRuntime: next }).then((result) => {
+      if (result.ok && result.written) {
+        recordDeferredOpenCodeRestart('cli', { id: 'opencode-runtime' });
+      }
+    });
   }, [runtime]);
 
   const handleShowUpdateNotificationsChange = React.useCallback((enabled: boolean) => {

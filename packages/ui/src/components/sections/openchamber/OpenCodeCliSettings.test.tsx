@@ -4,6 +4,7 @@ import type { Root } from 'react-dom/client';
 import { Window } from 'happy-dom';
 
 import { I18nProvider } from '@/lib/i18n';
+import type { SettingsWriteResult } from '@/lib/persistence';
 
 // React DOM detects input-event support when imported, so install the DOM
 // first and import react-dom/client dynamically (same pattern as ArchiveView).
@@ -26,9 +27,10 @@ Object.assign(globalThis, {
 });
 
 const updateCalls: Array<{ opencodeBinary?: string; opencodeRuntime?: 'stable' | 'beta' }> = [];
+let updateResult: SettingsWriteResult = { ok: true, written: true };
 const updateDesktopSettings = async (changes: { opencodeBinary?: string; opencodeRuntime?: 'stable' | 'beta' }) => {
   updateCalls.push(changes);
-  return { ok: true };
+  return updateResult;
 };
 let holdLoad = false;
 let loadResolver: (() => void) | null = null;
@@ -73,6 +75,7 @@ describe('OpenCodeCliSettings', () => {
 
   beforeEach(() => {
     updateCalls.length = 0;
+    updateResult = { ok: true, written: true };
     deferredRestartCalls.length = 0;
     holdLoad = false;
     loadResolver = null;
@@ -85,6 +88,15 @@ describe('OpenCodeCliSettings', () => {
     await act(async () => root.unmount());
     document.body.replaceChildren();
   });
+
+  // The deferred-restart marker is recorded after the save promise settles, so
+  // a test that asserts markers must let those microtasks run first.
+  const flushMicrotasks = async () => {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  };
 
   test('defaults to the Stable runtime selection', async () => {
     await act(async () => {
@@ -131,6 +143,7 @@ describe('OpenCodeCliSettings', () => {
     await act(async () => {
       betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
+    await flushMicrotasks();
 
     expect(updateCalls.at(-1)).toEqual({ opencodeRuntime: 'beta' });
     expect(deferredRestartCalls.at(-1)).toEqual(['cli', { id: 'opencode-runtime' }]);
@@ -162,9 +175,65 @@ describe('OpenCodeCliSettings', () => {
     await act(async () => {
       stableOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
+    await flushMicrotasks();
 
     expect(updateCalls.at(-1)).toEqual({ opencodeRuntime: 'stable' });
     expect(deferredRestartCalls.at(-1)).toEqual(['cli', { id: 'opencode-runtime' }]);
+  });
+
+  test('a failed runtime save records no restart marker', async () => {
+    updateResult = { ok: false };
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <OpenCodeCliSettings />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const betaOption = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
+      .find((option) => option.textContent?.includes('Beta'));
+    if (!betaOption) {
+      throw new Error('expected Beta runtime option');
+    }
+
+    await act(async () => {
+      betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushMicrotasks();
+
+    // The write failed, so the selection must not pretend a restart is pending.
+    expect(updateCalls.at(-1)).toEqual({ opencodeRuntime: 'beta' });
+    expect(deferredRestartCalls.length).toBe(0);
+  });
+
+  test('a redundant runtime write records no restart marker', async () => {
+    updateResult = { ok: true, written: false };
+    await act(async () => {
+      root.render(
+        <I18nProvider>
+          <OpenCodeCliSettings />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    const betaOption = Array.from(host.querySelectorAll<HTMLElement>('[role="button"]'))
+      .find((option) => option.textContent?.includes('Beta'));
+    if (!betaOption) {
+      throw new Error('expected Beta runtime option');
+    }
+
+    await act(async () => {
+      betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushMicrotasks();
+
+    // The revert inside the debounce window cancelled the write as redundant:
+    // nothing reached the server, so no restart marker is recorded.
+    expect(updateCalls.at(-1)).toEqual({ opencodeRuntime: 'beta' });
+    expect(deferredRestartCalls.length).toBe(0);
   });
 
   test('option click during load does not persist', async () => {
@@ -228,6 +297,7 @@ describe('OpenCodeCliSettings', () => {
     await act(async () => {
       betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
+    await flushMicrotasks();
     expect(updateCalls.length).toBe(1);
     expect(deferredRestartCalls.length).toBe(1);
 
@@ -235,6 +305,7 @@ describe('OpenCodeCliSettings', () => {
     await act(async () => {
       betaOption.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
+    await flushMicrotasks();
     expect(updateCalls.length).toBe(1);
     expect(deferredRestartCalls.length).toBe(1);
   });
