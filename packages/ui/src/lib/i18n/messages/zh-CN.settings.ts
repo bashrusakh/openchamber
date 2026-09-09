@@ -1051,7 +1051,7 @@ export const settingsDict = {
   'settings.openchamber.opencodeCli.runtime.labelAria': 'OpenCode 运行时',
   'settings.openchamber.opencodeCli.runtime.optionStable': '稳定版 (V1)',
   'settings.openchamber.opencodeCli.runtime.optionBeta': '测试版 (V2，实验性)',
-  'settings.openchamber.opencodeCli.runtime.info': '切换需要重启 OpenCode。测试版使用单独安装的 opencode2 运行时。',
+  'settings.openchamber.opencodeCli.runtime.info': '切换需要重启 OpenCode。测试版在此版本中尚不可用。',
   'settings.mcp.sidebar.title': 'MCP 服务器',
   'settings.mcp.sidebar.total': '总计 {count}',
   'settings.mcp.sidebar.actions.refreshStatusAria': '刷新 MCP 状态',

@@ -1025,7 +1025,7 @@ export const settingsDict = {
   'settings.openchamber.opencodeCli.runtime.labelAria': 'OpenCode 執行環境',
   'settings.openchamber.opencodeCli.runtime.optionStable': '穩定版 (V1)',
   'settings.openchamber.opencodeCli.runtime.optionBeta': '測試版 (V2，實驗性)',
-  'settings.openchamber.opencodeCli.runtime.info': '切換需要重新啟動 OpenCode。測試版使用另行安裝的 opencode2 執行環境。',
+  'settings.openchamber.opencodeCli.runtime.info': '切換需要重新啟動 OpenCode。測試版在此版本中尚不可用。',
   'settings.mcp.sidebar.title': 'MCP 伺服器',
   'settings.mcp.sidebar.total': '總計 {count}',
   'settings.mcp.sidebar.actions.refreshStatusAria': '重新整理 MCP 狀態',

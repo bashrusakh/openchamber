@@ -1084,7 +1084,7 @@ export const settingsDict = {
   'settings.openchamber.opencodeCli.runtime.labelAria': 'OpenCode ランタイム',
   'settings.openchamber.opencodeCli.runtime.optionStable': '安定版 (V1)',
   'settings.openchamber.opencodeCli.runtime.optionBeta': 'ベータ (V2、実験的)',
-  'settings.openchamber.opencodeCli.runtime.info': '切り替えには OpenCode の再起動が必要です。ベータは別途インストールされた opencode2 ランタイムを使用します。',
+  'settings.openchamber.opencodeCli.runtime.info': '切り替えには OpenCode の再起動が必要です。ベータはこのビルドではまだ利用できません。',
   'settings.mcp.sidebar.title': 'MCP サーバー',
   'settings.mcp.sidebar.total': '合計 {count}',
   'settings.mcp.sidebar.actions.refreshStatusAria': 'MCP ステータスを更新',

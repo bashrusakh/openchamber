@@ -1051,7 +1051,7 @@ export const settingsDict = {
   "settings.openchamber.opencodeCli.runtime.labelAria": "Runtime de OpenCode",
   "settings.openchamber.opencodeCli.runtime.optionStable": "Estable (V1)",
   "settings.openchamber.opencodeCli.runtime.optionBeta": "Beta (V2, experimental)",
-  "settings.openchamber.opencodeCli.runtime.info": "Cambiar requiere reiniciar OpenCode. Beta usa el runtime opencode2 instalado por separado.",
+  "settings.openchamber.opencodeCli.runtime.info": "Cambiar requiere reiniciar OpenCode. Beta aún no está disponible en esta versión.",
   "settings.mcp.sidebar.title": "Servidores MCP",
   "settings.mcp.sidebar.total": "Total {count}",
   "settings.mcp.sidebar.actions.refreshStatusAria": "Actualizar estado MCP",

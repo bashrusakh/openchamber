@@ -1079,7 +1079,7 @@ export const settingsDict = {
   'settings.openchamber.opencodeCli.runtime.labelAria': 'OpenCode çalışma ortamı',
   'settings.openchamber.opencodeCli.runtime.optionStable': 'Kararlı (V1)',
   'settings.openchamber.opencodeCli.runtime.optionBeta': 'Beta (V2, deneysel)',
-  'settings.openchamber.opencodeCli.runtime.info': 'Değişiklik, OpenCode\'un yeniden başlatılmasını gerektirir. Beta, ayrı yüklenmiş opencode2 çalışma ortamını kullanır.',
+  'settings.openchamber.opencodeCli.runtime.info': 'Değişiklik, OpenCode\'un yeniden başlatılmasını gerektirir. Beta bu sürümde henüz kullanılamıyor.',
   'settings.mcp.sidebar.title': 'MCP Sunucuları',
   'settings.mcp.sidebar.total': 'Toplam {count}',
   'settings.mcp.sidebar.actions.refreshStatusAria': 'MCP durumunu yenile',

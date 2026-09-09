@@ -892,7 +892,7 @@ export const settingsDict = {
   'settings.openchamber.opencodeCli.runtime.labelAria': 'Środowisko OpenCode',
   'settings.openchamber.opencodeCli.runtime.optionStable': 'Stabilne (V1)',
   'settings.openchamber.opencodeCli.runtime.optionBeta': 'Beta (V2, eksperymentalne)',
-  'settings.openchamber.opencodeCli.runtime.info': 'Zmiana wymaga ponownego uruchomienia OpenCode. Beta używa osobno zainstalowanego środowiska opencode2.',
+  'settings.openchamber.opencodeCli.runtime.info': 'Zmiana wymaga ponownego uruchomienia OpenCode. Beta nie jest jeszcze dostępna w tej wersji.',
   'settings.openchamber.opencodeCli.tipPrefix': 'Wskazówka: możesz również użyć',
   'settings.openchamber.opencodeCli.title': 'OpenCode CLI',
   'settings.openchamber.tools.title': 'Narzędzia OpenChamber',

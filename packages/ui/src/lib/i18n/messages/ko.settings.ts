@@ -1051,7 +1051,7 @@ export const settingsDict = {
   'settings.openchamber.opencodeCli.runtime.labelAria': 'OpenCode 런타임',
   'settings.openchamber.opencodeCli.runtime.optionStable': '안정版 (V1)',
   'settings.openchamber.opencodeCli.runtime.optionBeta': '베타 (V2, 실험적)',
-  'settings.openchamber.opencodeCli.runtime.info': '변경하려면 OpenCode를 다시 시작해야 합니다. 베타는 별도로 설치된 opencode2 런타임을 사용합니다.',
+  'settings.openchamber.opencodeCli.runtime.info': '변경하려면 OpenCode를 다시 시작해야 합니다. 베타는 이 빌드에서 아직 사용할 수 없습니다.',
   'settings.mcp.sidebar.title': 'MCP 서버',
   'settings.mcp.sidebar.total': '총 {count}개',
   'settings.mcp.sidebar.actions.refreshStatusAria': 'MCP 상태 새로고침',

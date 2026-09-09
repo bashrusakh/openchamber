@@ -1051,7 +1051,7 @@ export const settingsDict = {
   "settings.openchamber.opencodeCli.runtime.labelAria": "Середовище виконання OpenCode",
   "settings.openchamber.opencodeCli.runtime.optionStable": "Стабільне (V1)",
   "settings.openchamber.opencodeCli.runtime.optionBeta": "Бета (V2, експериментальне)",
-  "settings.openchamber.opencodeCli.runtime.info": "Зміна потребує перезапуску OpenCode. Бета використовує окремо встановлене середовище виконання opencode2.",
+  "settings.openchamber.opencodeCli.runtime.info": "Зміна потребує перезапуску OpenCode. Бета-версія ще недоступна в цій збірці.",
   "settings.mcp.sidebar.title": "MCP сервери",
   "settings.mcp.sidebar.total": "Усього {count}",
   "settings.mcp.sidebar.actions.refreshStatusAria": "Оновити статус MCP",
