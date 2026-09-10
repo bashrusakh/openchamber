@@ -431,7 +431,7 @@ function enqueueSessionMaterialization(
       countSyncPerformance("materializationRequests")
       await materializeSessionFromServer(directory, sessionID, store, {
         ...request,
-        isStale: () => childStores.children.get(directory) !== store
+        isStale: () => childStores.getChild(directory) !== store
           || pendingSessionMaterializations.get(k) !== pending,
       })
     } catch {
@@ -2305,7 +2305,7 @@ export function SyncProvider(props: {
     const sdk = opencodeClient.getSdkClient()
     const expectedRuntimeKey = getRuntimeKey()
     const isStale = () => getRuntimeKey() !== expectedRuntimeKey
-      || opencodeClient.getSdkClient() !== sdk || childStores.children.get(directory) !== store
+      || opencodeClient.getSdkClient() !== sdk || childStores.getChild(directory) !== store
     void resyncDirectoryAfterReconnect(directory, store, routingIndex, reason, isStale)
       .catch(() => {
         // Transient failure — the watchdog, next SSE event, or reconnect will catch up.

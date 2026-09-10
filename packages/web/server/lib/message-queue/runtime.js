@@ -385,9 +385,15 @@ export function createMessageQueueRuntime({
   const timers = new Map(); // sessionId → timeout
   const failures = new Map(); // sessionId → { itemId, failures, nextAttemptAt }
   const abortedAt = new Map(); // sessionId → timestamp
-  const holds = new Map(); // sessionId → expiresAt
+  const holds = new Map(); // sessionId → { expiresAt, generation, directory, clientToken, sequence }
   const observedQueueMutations = new Set();
-  const holdMutationSequences = new Map();
+  // The latest accepted owner mutation remains after expiry/release so stale
+  // requests cannot be mistaken for a new owner's first assertion.
+  const holdMutationSequences = new Map(); // sessionId → { clientToken, sequence, generation, directory }
+  // A generation-zero hold can be captured before the first enqueue creates
+  // the session lifecycle. Keep one narrow bridge for its captured cleanup;
+  // all other generation mismatches remain rejected.
+  const holdGenerationTransitions = new Map(); // sessionId → { fromGeneration, toGeneration, directory, clientToken }
   // sessionId → directory, kept after the queue empties: the UI keys its
   // projection by directory, so the broadcast that removes the last item must
   // still name it or the client cannot tell which queue just finished.
@@ -414,8 +420,9 @@ export function createMessageQueueRuntime({
     sending: new Map(sending),
     failures: new Map(Array.from(failures.entries()).map(([sessionId, failure]) => [sessionId, { ...failure }])),
     abortedAt: new Map(abortedAt),
-    holds: new Map(holds),
+    holds: new Map(Array.from(holds.entries()).map(([sessionId, hold]) => [sessionId, { ...hold }])),
     holdMutationSequences: new Map(Array.from(holdMutationSequences.entries()).map(([sessionId, sequence]) => [sessionId, { ...sequence }])),
+    holdGenerationTransitions: new Map(Array.from(holdGenerationTransitions.entries()).map(([sessionId, transition]) => [sessionId, { ...transition }])),
     observedQueueMutations: new Set(observedQueueMutations),
     timerSessions: new Set(timers.keys()),
   });
@@ -442,9 +449,11 @@ export function createMessageQueueRuntime({
     abortedAt.clear();
     for (const [sessionId, timestamp] of state.abortedAt) abortedAt.set(sessionId, timestamp);
     holds.clear();
-    for (const [sessionId, expiresAt] of state.holds) holds.set(sessionId, expiresAt);
+    for (const [sessionId, hold] of state.holds) holds.set(sessionId, { ...hold });
     holdMutationSequences.clear();
     for (const [sessionId, sequence] of state.holdMutationSequences) holdMutationSequences.set(sessionId, { ...sequence });
+    holdGenerationTransitions.clear();
+    for (const [sessionId, transition] of state.holdGenerationTransitions) holdGenerationTransitions.set(sessionId, { ...transition });
     observedQueueMutations.clear();
     for (const sessionId of state.observedQueueMutations) observedQueueMutations.add(sessionId);
     revision = state.revision;
@@ -731,6 +740,28 @@ export function createMessageQueueRuntime({
   };
 
   const sessionGeneration = (sessionId) => sessionLifecycles.get(sessionId)?.generation ?? 0;
+
+  const promoteGenerationZeroHold = (sessionId, directory, generation) => {
+    const hold = holds.get(sessionId);
+    if (!hold || hold.generation !== 0 || generation === 0) return false;
+    if (directory && hold.directory !== directory) {
+      holds.delete(sessionId);
+      holdMutationSequences.delete(sessionId);
+      holdGenerationTransitions.delete(sessionId);
+      return false;
+    }
+    const promotedDirectory = directory || hold.directory;
+    holds.set(sessionId, { ...hold, generation, directory: promotedDirectory });
+    const previous = holdMutationSequences.get(sessionId);
+    if (previous?.generation === 0) holdMutationSequences.set(sessionId, { ...previous, generation, directory: promotedDirectory });
+    holdGenerationTransitions.set(sessionId, {
+      fromGeneration: 0,
+      toGeneration: generation,
+      directory: promotedDirectory,
+      clientToken: hold.clientToken,
+    });
+    return true;
+  };
 
   const trimSessionItems = (items, protectedItemIds = new Set()) => {
     if (items.length <= MAX_ITEMS_PER_SESSION) return items;
@@ -1081,13 +1112,17 @@ export function createMessageQueueRuntime({
   };
 
   const isHeld = (sessionId) => {
-    const expiresAt = holds.get(sessionId);
-    if (expiresAt === undefined) return false;
-    if (expiresAt > now()) {
+    const hold = holds.get(sessionId);
+    if (!hold) return false;
+    const queue = queues.get(sessionId);
+    const lifecycle = sessionLifecycles.get(sessionId);
+    const authoritativeDirectory = queue?.directory ?? directories.get(sessionId) ?? lifecycle?.directory;
+    if (hold.generation !== sessionGeneration(sessionId) || (authoritativeDirectory && hold.directory !== authoritativeDirectory)) return false;
+    if (hold.expiresAt > now()) {
       // A queue can be enqueued after the hold was asserted, so make sure an
       // active hold always has a wake-up even if the enqueue's quiet timer was
       // the first timer to observe it.
-      armDispatch(sessionId, expiresAt - now());
+      armDispatch(sessionId, hold.expiresAt - now());
       return true;
     }
     holds.delete(sessionId);
@@ -1247,7 +1282,10 @@ export function createMessageQueueRuntime({
     assertSessionMutationGeneration(sessionId, expectedGenerationInput, lifecycleEstablished, directory);
     if (lifecycleEstablished) {
       sessionLifecycles.set(sessionId, { generation: 1, deleted: false, restoreRequiresReceipt: true, directory });
-      holdMutationSequences.delete(sessionId);
+      if (!promoteGenerationZeroHold(sessionId, directory, 1)) {
+        holdMutationSequences.delete(sessionId);
+        holdGenerationTransitions.delete(sessionId);
+      }
     } else if (sessionLifecycles.get(sessionId) && !sessionLifecycles.get(sessionId).directory) {
       sessionLifecycles.set(sessionId, { ...sessionLifecycles.get(sessionId), directory });
     }
@@ -1514,33 +1552,48 @@ export function createMessageQueueRuntime({
     const clientToken = parseHoldClientToken(clientTokenInput);
     const generation = sessionGeneration(sessionId);
     const lifecycle = sessionLifecycles.get(sessionId);
-    if (lifecycle?.deleted || (expectedGeneration === null && generation > 0) || (expectedGeneration !== null && expectedGeneration !== generation)) {
+    const hold = holds.get(sessionId);
+    const transition = holdGenerationTransitions.get(sessionId);
+    const isCapturedGenerationZeroRelease = !held
+      && expectedGeneration !== null
+      && transition?.fromGeneration === expectedGeneration
+      && transition.toGeneration === generation
+      && hold?.generation === generation
+      && hold.clientToken === clientToken;
+    if (lifecycle?.deleted || (!isCapturedGenerationZeroRelease && (expectedGeneration === null && generation > 0)) || (!isCapturedGenerationZeroRelease && expectedGeneration !== null && expectedGeneration !== generation)) {
       const error = httpError('session lifecycle changed; queue hold was not updated', 409);
       error.generation = generation;
       error.deleted = lifecycle?.deleted === true;
       throw error;
     }
-    assertSessionDirectory(sessionId, directoryInput);
+    const directory = assertSessionDirectory(sessionId, directoryInput);
     const previous = holdMutationSequences.get(sessionId);
-    if (sequence !== null && previous && previous.clientToken !== clientToken && sequence !== 1) {
-      const expiresAt = holds.get(sessionId);
-      return { held: expiresAt !== undefined, expiresAt: expiresAt ?? null, sequence: previous.sequence };
+    const currentExpiresAt = hold?.expiresAt;
+    const holdResponse = (isHeld, expiresAt, responseSequence) => {
+      const response = { held: isHeld, expiresAt };
+      if (responseSequence !== null) response.sequence = responseSequence;
+      return response;
+    };
+    if (previous && previous.clientToken !== clientToken && !(held && sequence === 1)) {
+      return holdResponse(currentExpiresAt !== undefined, currentExpiresAt ?? null, previous.sequence);
     }
-    if (sequence !== null && previous && sequence < previous.sequence) {
-      const expiresAt = holds.get(sessionId);
-      return { held: expiresAt !== undefined, expiresAt: expiresAt ?? null, sequence: previous.sequence };
+    if (sequence !== null && previous && previous.clientToken === clientToken && previous.sequence !== null && sequence < previous.sequence) {
+      return holdResponse(currentExpiresAt !== undefined, currentExpiresAt ?? null, previous.sequence);
     }
-    if (sequence !== null) holdMutationSequences.set(sessionId, { clientToken, sequence });
+    const nextMutation = { clientToken, sequence, generation, directory };
+    holdMutationSequences.set(sessionId, nextMutation);
     if (held) {
       const ttl = Math.min(asCount(ttlMs) || HOLD_DEFAULT_TTL_MS, HOLD_MAX_TTL_MS);
-      holds.set(sessionId, now() + ttl);
+      holds.set(sessionId, { expiresAt: now() + ttl, ...nextMutation });
+      if (previous && previous.clientToken !== clientToken) holdGenerationTransitions.delete(sessionId);
       clearTimer(sessionId);
       if (queues.has(sessionId)) armDispatch(sessionId, ttl);
-      return { held: true, expiresAt: holds.get(sessionId), ...(sequence === null ? {} : { sequence }) };
+      return holdResponse(true, holds.get(sessionId).expiresAt, sequence);
     }
     holds.delete(sessionId);
+    holdGenerationTransitions.delete(sessionId);
     armDispatch(sessionId);
-    return { held: false, expiresAt: null, ...(sequence === null ? {} : { sequence }) };
+    return holdResponse(false, null, sequence);
   };
 
   // --- events --------------------------------------------------------------
@@ -1569,7 +1622,10 @@ export function createMessageQueueRuntime({
         });
       } else return;
       const before = captureState();
-      holdMutationSequences.delete(createdSession.sessionId);
+      if (!promoteGenerationZeroHold(createdSession.sessionId, createdSession.directory, sessionGeneration(createdSession.sessionId))) {
+        holdMutationSequences.delete(createdSession.sessionId);
+        holdGenerationTransitions.delete(createdSession.sessionId);
+      }
       if (createdSession.directory) directories.set(createdSession.sessionId, createdSession.directory);
       await commit(createdSession.sessionId, before);
       return;
@@ -1614,6 +1670,7 @@ export function createMessageQueueRuntime({
       abortedAt.delete(deletedSessionId);
       holds.delete(deletedSessionId);
       holdMutationSequences.delete(deletedSessionId);
+      holdGenerationTransitions.delete(deletedSessionId);
       pruneSessionLifecycles();
       await commit(deletedSessionId, before);
       directories.delete(deletedSessionId);

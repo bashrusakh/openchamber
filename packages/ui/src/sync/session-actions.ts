@@ -1098,7 +1098,7 @@ function removeSessionsFromLiveStores(sessionIds: Iterable<string>, preferredDir
   const candidates: Array<[string, DirectoryStoreApi]> = []
 
   if (preferredDirectory) {
-    const preferredStore = _childStores.children.get(preferredDirectory)
+     const preferredStore = _childStores.getChild(preferredDirectory)
     if (preferredStore) {
       candidates.push([preferredDirectory, preferredStore])
       visited.add(preferredDirectory)
