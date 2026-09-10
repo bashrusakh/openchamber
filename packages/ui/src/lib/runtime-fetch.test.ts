@@ -81,6 +81,35 @@ describe('runtimeFetch transport contract', () => {
     }
   });
 
+  test('sends cleanup to a captured runtime after the active runtime changes', async () => {
+    const previous = getRuntimeUrlResolver();
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    try {
+      configureRuntimeUrlResolver({ apiBaseUrl: 'https://new.example' });
+      globalThis.fetch = async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        calls.push({ url: request.url, headers: request.headers });
+        return new Response(null, { status: 204 });
+      };
+
+      await runtimeFetch('/api/message-queue/sessions/ses_1/hold', {
+        method: 'PUT',
+        runtimeTarget: {
+          apiBaseUrl: 'https://old.example',
+          requestHeaders: { Authorization: 'Bearer old-runtime' },
+          urlAuthToken: 'old-url-token',
+        },
+      });
+
+      expect(calls[0]?.url).toBe('https://old.example/api/message-queue/sessions/ses_1/hold?oc_url_token=old-url-token');
+      expect(calls[0]?.headers.get('authorization')).toBe('Bearer old-runtime');
+    } finally {
+      setRuntimeUrlResolver(previous);
+      globalThis.fetch = originalFetch;
+      clearRuntimeAuthCredentialProvider();
+    }
+  });
+
   test('preserves bodies from actual SDK mutation requests on same-origin runtimes', async () => {
     const previous = getRuntimeUrlResolver();
     const originalWindow = globalThis.window;

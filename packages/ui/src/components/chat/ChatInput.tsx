@@ -950,7 +950,9 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const markSending = useMessageQueueStore((state) => state.markSending);
     const clearSending = useMessageQueueStore((state) => state.clearSending);
     const completeSending = useMessageQueueStore((state) => state.completeSending);
+    const claimLocalSend = useMessageQueueStore((state) => state.claimLocalSend);
     const takeForSend = useMessageQueueStore((state) => state.takeForSend);
+    const acknowledgeTakenServerBatch = useMessageQueueStore((state) => state.acknowledgeTakenServerBatch);
 
     // Inline comment drafts
     const inlineDraftSessionKey = isBtwActive ? btwComposerSessionId ?? '' : currentSessionId ?? (newSessionDraftOpen ? 'draft' : '');
@@ -1472,6 +1474,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const queuedOnly = options?.queuedOnly ?? false;
         const queuedMessageId = options?.queuedMessageId;
         const capturedTarget = messageQueueTarget;
+        const isLocalQueuedSend = queuedOnly && capturedTarget !== null && !isServerOwnedMessageQueue();
         const queueRestorationGuard = capturedTarget
             ? useMessageQueueStore.getState().getQueueRestorationGuard(capturedTarget)
             : null;
@@ -1718,21 +1721,34 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         }
         const preparedDocumentMentions = documentMentions.prepared;
 
-        // The composer delivers these itself, so they leave the queue now — the
-        // queue's own delivery (server-side, or the auto-send hook in VS Code)
-        // skips anything already in flight, and a message already being
-        // delivered stays out of this send so it cannot go out twice.
+        // Server-owned queue items are taken here for the composer to deliver.
+        // Local queued-only sends stay visible and claim their head immediately
+        // before dispatch, so the auto-send hook and this action cannot overlap.
         let queuedMessagesToSend: QueuedMessage[] = [];
         if (capturedTarget && hasQueuedMessages && !commandPlan) {
-            try {
-                queuedMessagesToSend = await takeForSend(capturedTarget, queuedMessageId);
-            } catch (error) {
-                console.warn('[queue] failed to take queued messages for sending:', error);
-                toast.error(t('chat.queuedMessage.toast.takeFailed'));
-                return;
+            if (isLocalQueuedSend) {
+                const queuedMessage = queuedMessagesForSelection[0];
+                if (queuedMessage) queuedMessagesToSend = [queuedMessage];
+            } else {
+                try {
+                    queuedMessagesToSend = await takeForSend(capturedTarget, queuedMessageId);
+                } catch (error) {
+                    console.warn('[queue] failed to take queued messages for sending:', error);
+                    toast.error(t('chat.queuedMessage.toast.takeFailed'));
+                    return;
+                }
             }
             if (queuedOnly && queuedMessagesToSend.length === 0) return;
         }
+
+        let queueRestoredAfterSubmitExit = false;
+        const restoreQueuedMessagesAfterSubmitExit = async (): Promise<void> => {
+            if (queueRestoredAfterSubmitExit || !capturedTarget || !queueRestorationGuard) return;
+            queueRestoredAfterSubmitExit = true;
+            if (queuedMessagesToSend.length > 0) {
+                await restoreQueue(capturedTarget, queuedMessagesToSend, queueRestorationGuard);
+            }
+        };
 
         const historySubmissions = buildChatInputHistorySubmissions({
             inputMode,
@@ -1755,9 +1771,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             queueWasInFlightAtSubmit,
         );
         if (preparedSendDisposition === 'preserve-queued') {
+            await restoreQueuedMessagesAfterSubmitExit();
             return;
         }
         if (preparedSendDisposition === 'queue') {
+            await restoreQueuedMessagesAfterSubmitExit();
             await queueBusySubmission(options?.presetText);
             return;
         }
@@ -1814,7 +1832,10 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         let primaryText = outgoing.primaryText;
         const { primaryAttachments, additionalParts, agentMentionName } = outgoing;
 
-        if (outgoing.isEmpty) return;
+        if (outgoing.isEmpty) {
+            await restoreQueuedMessagesAfterSubmitExit();
+            return;
+        }
 
         let removedQueuedMessages: QueuedMessage[] = [];
         const clearSubmittedInput = (preserveQueueOnFailure = false) => {
@@ -1859,10 +1880,12 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 queueWasInFlightAtSubmit,
             );
             if (disposition === 'preserve-queued') {
+                await restoreQueuedMessagesAfterSubmitExit();
                 restoreConsumedContext();
                 return true;
             }
             if (disposition === 'queue') {
+                await restoreQueuedMessagesAfterSubmitExit();
                 restoreConsumedContext();
                 await queueBusySubmission(options?.presetText, magicPrompt);
                 return true;
@@ -1878,7 +1901,10 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             // send them as one message.
             const magicPrompt = getMagicPromptInvocation(primaryText);
             if (magicPrompt) {
-                if (await guardMainSessionSend(magicPrompt)) return;
+                if (await guardMainSessionSend(magicPrompt)) {
+                    await restoreQueuedMessagesAfterSubmitExit();
+                    return;
+                }
                 clearSubmittedInput(true);
                 try {
                     await withComposerContextRestore(consumedContext, async () => {
@@ -1902,9 +1928,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                     });
                     scrollToBottom?.();
                 } catch (error) {
-                    if (capturedTarget && queueRestorationGuard && removedQueuedMessages.length > 0) {
-                        restoreQueue(capturedTarget, removedQueuedMessages, queueRestorationGuard);
-                    }
+                    await restoreQueuedMessagesAfterSubmitExit();
+                    if (capturedTarget && queueRestorationGuard && removedQueuedMessages.length > 0) await restoreQueue(capturedTarget, removedQueuedMessages, queueRestorationGuard);
                     restoreConsumedInput();
                     toast.error(getSubmitErrorMessage(error instanceof Error ? error : undefined, t(magicPrompt.command.errorToastKey)));
                 }
@@ -1912,7 +1937,10 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             }
         }
 
-        if (await guardMainSessionSend()) return;
+        if (await guardMainSessionSend()) {
+            await restoreQueuedMessagesAfterSubmitExit();
+            return;
+        }
         clearSubmittedInput(true);
 
         const currentSessionDirectory = capturedTarget?.directory ?? currentDirectory;
@@ -1944,6 +1972,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         if (isBtwActive && btwPanel.pending && currentSessionId) {
             pendingBtwSend = await preparePendingBtwSend(currentSessionId, submitRuntimeKey, expandOutgoingSnippets);
             if (!pendingBtwSend) {
+                await restoreQueuedMessagesAfterSubmitExit();
                 if (getRuntimeKey() !== submitRuntimeKey) restoreComposerText();
                 return;
             }
@@ -1970,12 +1999,24 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         // Keep this check immediately before the queue claim. The earlier
         // async guard can become stale while send preparation is yielding.
         if (queuedSend && isQueuedSendBlockedForTarget(queuedSend.target)) {
+            await restoreQueuedMessagesAfterSubmitExit();
             restoreConsumedContext();
             return;
         }
-        if (queuedSend && !markSending(queuedSend.target, queuedSend.messageId)) {
-            restoreConsumedContext();
-            return;
+        if (queuedSend) {
+            if (isLocalQueuedSend) {
+                const claimedMessage = claimLocalSend(queuedSend.target, queuedSend.messageId);
+                if (!claimedMessage) {
+                    await restoreQueuedMessagesAfterSubmitExit();
+                    restoreConsumedContext();
+                    return;
+                }
+                queuedMessagesToSend = [claimedMessage];
+            } else if (!markSending(queuedSend.target, queuedSend.messageId)) {
+                await restoreQueuedMessagesAfterSubmitExit();
+                restoreConsumedContext();
+                return;
+            }
         }
         if (isBtwActive && btwPanel.pending && currentSessionId && btwComposerSessionId) {
             const targetDirectory = useSessionUIStore.getState().getDirectoryForSession(currentSessionId)
@@ -2043,6 +2084,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             sendMessageOptions,
         );
         void sendPromise.then(() => {
+            if (capturedTarget && queuedMessagesToSend.length > 0 && isServerOwnedMessageQueue()) {
+                void acknowledgeTakenServerBatch(capturedTarget, queuedMessagesToSend).catch(() => {
+                    console.warn('[queue] failed to acknowledge delivered queue messages');
+                });
+            }
             if (queuedSend) {
                 completeSending(queuedSend.target, queuedSend.messageId);
             }
@@ -2067,7 +2113,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             setLinkedIssue(null);
             setLinkedPr(null);
             setLinkedLinearIssue(null);
-        }).catch((error: unknown) => {
+        }).catch(async (error: unknown) => {
              const rawMessage =
                 error instanceof Error
                     ? error.message
@@ -2077,9 +2123,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             const normalized = rawMessage.toLowerCase();
 
             console.error('Message send failed:', rawMessage || error);
-            if (capturedTarget && queueRestorationGuard && removedQueuedMessages.length > 0) {
-                restoreQueue(capturedTarget, removedQueuedMessages, queueRestorationGuard);
-            }
+            await restoreQueuedMessagesAfterSubmitExit();
+            if (capturedTarget && queueRestorationGuard && removedQueuedMessages.length > 0) await restoreQueue(capturedTarget, removedQueuedMessages, queueRestorationGuard);
             restoreConsumedInput();
 
             const isSoftNetworkError =

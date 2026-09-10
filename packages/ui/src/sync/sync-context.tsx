@@ -2556,6 +2556,7 @@ export function SyncProvider(props: {
           hasEverConnected: true,
           connectionPhase: "connected",
         })
+        void useMessageQueueStore.getState().hydrate().catch(() => undefined)
         const isFirstConnect = !pipelineHasConnectedRef.current
         pipelineHasConnectedRef.current = true
         if (!replayReset && isFirstConnect && !pipelineDisconnectedBeforeFirstConnectRef.current) {

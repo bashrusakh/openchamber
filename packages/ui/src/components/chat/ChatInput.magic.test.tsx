@@ -4,9 +4,18 @@ import { Window } from 'happy-dom';
 import { createRoot, type Root } from 'react-dom/client';
 
 import { getDefaultTheme } from '@/lib/theme/themes';
+import type { RuntimeFetchOptions } from '@/lib/runtime-fetch';
 
 const DIRECTORY = '/repo-chat-input';
 const RUNTIME_KEY = 'runtime-chat-input';
+let activeRuntimeKey = RUNTIME_KEY;
+let liveSessionStatus: 'idle' | 'busy' = 'idle';
+let sendShouldFail = false;
+let sendMessageCalls: unknown[][] = [];
+let vscodeRuntime = true;
+type RuntimeFetchCall = { path: string; method: string; runtimeKey: string };
+let runtimeFetchCalls: RuntimeFetchCall[] = [];
+let runtimeFetchHandler: (path: string, init?: RuntimeFetchOptions) => Response | Promise<Response> = () => new Response(null, { status: 404 });
 
 type SessionUIState = {
     currentSessionId: string | null;
@@ -37,7 +46,10 @@ const sessionUIState: SessionUIState = {
     newSessionDraft: { open: false, target: 'project' },
     abortPromptSessionId: null,
     getDirectoryForSession: () => DIRECTORY,
-    sendMessage: async () => undefined,
+    sendMessage: async (...args: never[]) => {
+        sendMessageCalls.push(args);
+        if (sendShouldFail) throw new Error('send failed');
+    },
     setNewSessionDraftTarget: () => undefined,
     setDraftPermissionAutoAcceptEnabled: () => undefined,
     openNewSessionDraft: () => undefined,
@@ -54,7 +66,7 @@ const useSessionUIStoreMock = Object.assign(
 );
 
 mock.module('@/sync/session-ui-store', () => ({ useSessionUIStore: useSessionUIStoreMock }));
-mock.module('@/lib/runtime-switch', () => ({ getRuntimeKey: () => RUNTIME_KEY }));
+mock.module('@/lib/runtime-switch', () => ({ getRuntimeKey: () => activeRuntimeKey }));
 mock.module('@/lib/i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 mock.module('@/lib/chatDraftPersistence', () => ({
     createChatDraftIdentity: (runtimeKey: string, directory: string | null | undefined, sessionId: string | null) => ({
@@ -70,7 +82,7 @@ mock.module('@/lib/chatDraftPersistence', () => ({
 }));
 mock.module('@/hooks/useQueuedMessageAutoSend', () => ({
     isQueuedSendBlockedForTarget: () => false,
-    resolveQueuedSessionStatusType: () => 'idle',
+    resolveQueuedSessionStatusType: () => liveSessionStatus,
 }));
 mock.module('@/hooks/useSessionActivity', () => ({
     useCurrentSessionActivity: () => ({ phase: 'idle', isWorking: false, isBusy: false, isCooldown: false }),
@@ -82,7 +94,7 @@ mock.module('@/hooks/useRuntimeAPIs', () => ({ useRuntimeAPIs: () => ({ git: nul
 mock.module('@/hooks/useKeybind', () => ({ useKeybind: () => undefined }));
 mock.module('@/lib/hardwareKeyboard', () => ({ useHardwareKeyboard: () => false }));
 mock.module('@/lib/device', () => ({ useTabletLayout: () => ({ enabled: false }) }));
-mock.module('@/lib/desktop', () => ({ isVSCodeRuntime: () => true }));
+mock.module('@/lib/desktop', () => ({ isVSCodeRuntime: () => vscodeRuntime }));
 // ChatInput reads the auto-review store both as a hook and via getState. The
 // hook-only mock QueuedMessageChips.test.tsx registers leaks into this file
 // when the group runs in one process, so keep a self-contained stub here.
@@ -100,7 +112,12 @@ mock.module('@/stores/useAutoReviewStore', () => ({
 }));
 mock.module('@/lib/ime', () => ({ isIMECompositionEvent: () => false }));
 mock.module('@/contexts/useThemeSystem', () => ({ useThemeSystem: () => ({ currentTheme: getDefaultTheme(true) }) }));
-mock.module('@/lib/runtime-fetch', () => ({ runtimeFetch: async () => new Response(null, { status: 404 }) }));
+mock.module('@/lib/runtime-fetch', () => ({
+    runtimeFetch: async (path: string, init?: RuntimeFetchOptions) => {
+        runtimeFetchCalls.push({ path, method: init?.method ?? 'GET', runtimeKey: activeRuntimeKey });
+        return runtimeFetchHandler(path, init);
+    },
+}));
 mock.module('@/lib/opencode/client', () => ({ opencodeClient: { getDirectory: () => DIRECTORY } }));
 mock.module('@/lib/shortcuts', () => ({
     eventMatchesShortcut: () => false,
@@ -245,7 +262,17 @@ mock.module('@/components/chat/FileAttachment', () => ({
     AttachedVSCodeFileChips: () => null,
     ActiveEditorFileSuggestion: () => null,
 }));
-mock.module('@/components/chat/QueuedMessageChips', () => ({ QueuedMessageChips: () => null }));
+mock.module('@/components/chat/QueuedMessageChips', () => ({
+    QueuedMessageChips: ({ onSendMessage }: { onSendMessage: (messageId: string) => void }) => React.createElement(
+        'button',
+        {
+            type: 'button',
+            'data-testid': 'queued-message-send',
+            onClick: () => onSendMessage('queued-chat-input'),
+        },
+        'send queued',
+    ),
+}));
 mock.module('@/components/chat/AutoReviewBanner', () => ({ AutoReviewBanner: () => null }));
 mock.module('@/components/chat/ModelControls', () => ({ ModelControls: () => null }));
 mock.module('@/components/chat/ComposerStatusBar', () => ({ ComposerStatusBar: () => null }));
@@ -369,8 +396,48 @@ mock.module(localModule('./composer/submit/slashCommands.ts'), () => ({
     },
 }));
 
-import { createMessageQueueTarget, useMessageQueueStore } from '@/stores/messageQueueStore';
+import { createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore, type QueuedMessage } from '@/stores/messageQueueStore';
 import { useInputStore } from '@/sync/input-store';
+
+const createChatInputTarget = () => {
+    const target = createMessageQueueTarget('session-chat-input', DIRECTORY, RUNTIME_KEY);
+    if (!target) throw new Error('queue target derivation failed');
+    return target;
+};
+
+const createServerQueueItem = (id: string, content: string) => ({
+    id,
+    createdAt: 1,
+    content,
+    text: content,
+    attachments: [],
+    context: [{ kind: 'synthetic' as const, text: 'queued server context' }],
+    sendConfig: { providerID: 'provider-chat-input', modelID: 'model-chat-input' },
+});
+
+const createServerQueueSession = (items: ReturnType<typeof createServerQueueItem>[]) => ({
+    sessionId: 'session-chat-input',
+    directory: DIRECTORY,
+    items,
+    sendingId: null,
+});
+
+const seedServerQueue = () => {
+    const target = createChatInputTarget();
+    const queuedProjection = {
+        id: 'queued-chat-input',
+        content: 'queued server prompt',
+        text: 'queued server prompt',
+        createdAt: 1,
+        sendConfig: { providerID: 'provider-chat-input', modelID: 'model-chat-input' },
+    };
+    useMessageQueueStore.getState().forgetQueue(target);
+    useMessageQueueStore.setState({
+        queuedMessages: { [getMessageQueueKey(target)]: [queuedProjection] },
+        sendingIds: {},
+    });
+    return { target, queuedProjection, takenItem: createServerQueueItem(queuedProjection.id, queuedProjection.content) };
+};
 
 describe('ChatInput magic prompt failure', () => {
     let windowInstance: Window;
@@ -378,6 +445,17 @@ describe('ChatInput magic prompt failure', () => {
     let root: Root;
 
     beforeEach(() => {
+        liveSessionStatus = 'idle';
+        sendShouldFail = false;
+        activeRuntimeKey = RUNTIME_KEY;
+        sendMessageCalls = [];
+        vscodeRuntime = true;
+        runtimeFetchCalls = [];
+        runtimeFetchHandler = () => new Response(null, { status: 404 });
+        sessionUIState.sendMessage = async (...args: never[]) => {
+            sendMessageCalls.push(args);
+            if (sendShouldFail) throw new Error('send failed');
+        };
         windowInstance = new Window();
         Object.assign(globalThis, {
             window: windowInstance,
@@ -396,6 +474,13 @@ describe('ChatInput magic prompt failure', () => {
             sendingIds: {},
             queueDeletionGenerations: {},
             quarantinedLegacyMessages: {},
+            pendingLegacyMessages: {},
+            pendingServerRestores: {},
+            pendingServerTakes: {},
+            pendingServerTakeAcks: {},
+            pendingServerEnqueues: {},
+            takenServerOperations: {},
+            retryPendingIds: {},
         });
     });
 
@@ -434,5 +519,400 @@ describe('ChatInput magic prompt failure', () => {
 
         expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual(beforeSend);
         expect(useMessageQueueStore.getState().getQueueForTarget(target)[0]?.capturedContext).toEqual(capturedContext);
+    });
+
+    test('sends a local queued item once and keeps its context until the send resolves', async () => {
+        const { ChatInput } = await import('./ChatInput');
+        const target = createMessageQueueTarget('session-chat-input', DIRECTORY, RUNTIME_KEY);
+        if (!target) throw new Error('queue target derivation failed');
+        const queuedMessage = {
+            id: 'queued-chat-input',
+            content: 'queued local prompt',
+            text: 'queued local prompt',
+            createdAt: 1,
+            context: [{ kind: 'synthetic' as const, text: 'queued local context' }],
+            sendConfig: { providerID: 'provider-chat-input', modelID: 'model-chat-input' },
+        };
+        useMessageQueueStore.setState({
+            queuedMessages: { [getMessageQueueKey(target)]: [queuedMessage] },
+            sendingIds: {},
+        });
+        let resolveSend: (() => void) | undefined;
+        const sendOutcome = new Promise<void>((resolve) => {
+            resolveSend = resolve;
+        });
+        sessionUIState.sendMessage = async (...args: never[]) => {
+            sendMessageCalls.push(args);
+            await sendOutcome;
+        };
+
+        await act(async () => {
+            root.render(React.createElement(ChatInput));
+            await Promise.resolve();
+        });
+        const submit = host.querySelector<HTMLButtonElement>('[data-testid="queued-message-send"]');
+        if (!submit) throw new Error('ChatInput queued-send harness did not render');
+
+        await act(async () => {
+            submit.click();
+            submit.click();
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(sendMessageCalls).toHaveLength(1);
+        expect(sendMessageCalls[0]?.[0]).toBe('queued local prompt');
+        expect(sendMessageCalls[0]?.[6]).toEqual([{ text: 'queued local context', synthetic: true }]);
+        expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([queuedMessage]);
+        expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([queuedMessage.id]);
+
+        await act(async () => {
+            resolveSend?.();
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([]);
+        expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+    });
+
+    test('keeps a local queued item retryable when queued Send fails', async () => {
+        const { ChatInput } = await import('./ChatInput');
+        const target = createMessageQueueTarget('session-chat-input', DIRECTORY, RUNTIME_KEY);
+        if (!target) throw new Error('queue target derivation failed');
+        const queuedMessage = {
+            id: 'queued-chat-input',
+            content: 'retryable local prompt',
+            text: 'retryable local prompt',
+            createdAt: 1,
+            sendConfig: { providerID: 'provider-chat-input', modelID: 'model-chat-input' },
+        };
+        useMessageQueueStore.setState({
+            queuedMessages: { [getMessageQueueKey(target)]: [queuedMessage] },
+            sendingIds: {},
+        });
+        sendShouldFail = true;
+
+        await act(async () => {
+            root.render(React.createElement(ChatInput));
+            await Promise.resolve();
+        });
+        const submit = host.querySelector<HTMLButtonElement>('[data-testid="queued-message-send"]');
+        if (!submit) throw new Error('ChatInput queued-send harness did not render');
+
+        await act(async () => {
+            submit.click();
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(sendMessageCalls).toHaveLength(1);
+        expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([queuedMessage]);
+        expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+        expect(useMessageQueueStore.getState().getSendableQueue(target)).toEqual([queuedMessage]);
+    });
+
+    test('restores a taken queue item when the session becomes busy during preparation', async () => {
+        const { ChatInput } = await import('./ChatInput');
+        const target = createMessageQueueTarget('session-chat-input', DIRECTORY, RUNTIME_KEY);
+        if (!target) throw new Error('queue target derivation failed');
+        useMessageQueueStore.getState().addToQueue(target, {
+            content: 'already queued',
+            sendConfig: { providerID: 'provider-chat-input', modelID: 'model-chat-input' },
+        });
+        useInputStore.getState().setPendingInputText('new prompt', 'replace');
+
+        await act(async () => {
+            root.render(React.createElement(ChatInput));
+            await Promise.resolve();
+        });
+        liveSessionStatus = 'busy';
+        const submit = host.querySelector<HTMLButtonElement>('[data-testid="chat-submit"]');
+        if (!submit) throw new Error('ChatInput submit harness did not render');
+
+        await act(async () => {
+            submit.click();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(useMessageQueueStore.getState().getQueueForTarget(target).map((message) => message.content)).toEqual([
+            'already queued',
+            'new prompt',
+        ]);
+    });
+
+    test('restores a taken queue item when the send promise fails', async () => {
+        const { ChatInput } = await import('./ChatInput');
+        const target = createMessageQueueTarget('session-chat-input', DIRECTORY, RUNTIME_KEY);
+        if (!target) throw new Error('queue target derivation failed');
+        useMessageQueueStore.getState().addToQueue(target, {
+            content: 'restore after failure',
+            sendConfig: { providerID: 'provider-chat-input', modelID: 'model-chat-input' },
+        });
+        useInputStore.getState().setPendingInputText('send this', 'replace');
+        sendShouldFail = true;
+
+        await act(async () => {
+            root.render(React.createElement(ChatInput));
+            await Promise.resolve();
+        });
+        const submit = host.querySelector<HTMLButtonElement>('[data-testid="chat-submit"]');
+        if (!submit) throw new Error('ChatInput submit harness did not render');
+
+        await act(async () => {
+            submit.click();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await Promise.resolve();
+        });
+
+        expect(useMessageQueueStore.getState().getQueueForTarget(target).map((message) => message.content)).toEqual([
+            'restore after failure',
+        ]);
+    });
+
+    test('takes and acknowledges a server-owned queued chip exactly once', async () => {
+        vscodeRuntime = false;
+        const { target, takenItem } = seedServerQueue();
+        runtimeFetchHandler = (path) => {
+            if (path.endsWith(`/items/${takenItem.id}/take`)) {
+                return new Response(JSON.stringify({
+                    revision: 1,
+                    session: createServerQueueSession([]),
+                    item: takenItem,
+                }));
+            }
+            if (path.includes('/take-receipts/')) return new Response(JSON.stringify({ acknowledged: true }));
+            return new Response(null, { status: 404 });
+        };
+        const { ChatInput } = await import('./ChatInput');
+
+        await act(async () => {
+            root.render(React.createElement(ChatInput));
+            await Promise.resolve();
+        });
+        const submit = host.querySelector<HTMLButtonElement>('[data-testid="queued-message-send"]');
+        if (!submit) throw new Error('ChatInput queued-send harness did not render');
+
+        await act(async () => {
+            submit.click();
+            submit.click();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await Promise.resolve();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await Promise.resolve();
+        });
+
+        expect(runtimeFetchCalls.filter((call) => call.path.endsWith(`/items/${takenItem.id}/take`))).toHaveLength(1);
+        expect(sendMessageCalls).toHaveLength(1);
+        expect(sendMessageCalls[0]?.[0]).toBe(takenItem.text);
+        expect(sendMessageCalls[0]?.[6]).toEqual([{ text: 'queued server context', synthetic: true }]);
+        expect(runtimeFetchCalls.filter((call) => call.path.includes('/take-receipts/'))).toHaveLength(1);
+        expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([]);
+        expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+    });
+
+    test('restores a server-taken queued item when preparation observes a busy session', async () => {
+        vscodeRuntime = false;
+        const { target, takenItem } = seedServerQueue();
+        runtimeFetchHandler = (path) => {
+            if (path.endsWith(`/items/${takenItem.id}/take`)) {
+                liveSessionStatus = 'busy';
+                return new Response(JSON.stringify({
+                    revision: 1,
+                    session: createServerQueueSession([]),
+                    item: takenItem,
+                }));
+            }
+            if (path.endsWith('/restore')) {
+                return new Response(JSON.stringify({
+                    revision: 2,
+                    session: createServerQueueSession([takenItem]),
+                }));
+            }
+            return new Response(null, { status: 404 });
+        };
+        const { ChatInput } = await import('./ChatInput');
+
+        await act(async () => {
+            root.render(React.createElement(ChatInput));
+            await Promise.resolve();
+        });
+        const submit = host.querySelector<HTMLButtonElement>('[data-testid="queued-message-send"]');
+        if (!submit) throw new Error('ChatInput queued-send harness did not render');
+
+        await act(async () => {
+            submit.click();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await Promise.resolve();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+
+        expect(runtimeFetchCalls.filter((call) => call.path.endsWith(`/items/${takenItem.id}/take`))).toHaveLength(1);
+        expect(runtimeFetchCalls.filter((call) => call.path.endsWith('/restore'))).toHaveLength(1);
+        expect(runtimeFetchCalls.some((call) => call.path.includes('/take-receipts/'))).toBe(false);
+        expect(sendMessageCalls).toHaveLength(0);
+        expect(useMessageQueueStore.getState().getQueueForTarget(target).map((message) => message.content)).toEqual([
+            takenItem.content,
+        ]);
+    });
+
+    test('restores a server-taken queued item when the send promise fails', async () => {
+        vscodeRuntime = false;
+        const { target, takenItem } = seedServerQueue();
+        sendShouldFail = true;
+        runtimeFetchHandler = (path) => {
+            if (path.endsWith(`/items/${takenItem.id}/take`)) {
+                return new Response(JSON.stringify({
+                    revision: 1,
+                    session: createServerQueueSession([]),
+                    item: takenItem,
+                }));
+            }
+            if (path.endsWith('/restore')) {
+                return new Response(JSON.stringify({
+                    revision: 2,
+                    session: createServerQueueSession([takenItem]),
+                }));
+            }
+            return new Response(null, { status: 404 });
+        };
+        const { ChatInput } = await import('./ChatInput');
+
+        await act(async () => {
+            root.render(React.createElement(ChatInput));
+            await Promise.resolve();
+        });
+        const submit = host.querySelector<HTMLButtonElement>('[data-testid="queued-message-send"]');
+        if (!submit) throw new Error('ChatInput queued-send harness did not render');
+
+        await act(async () => {
+            submit.click();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await Promise.resolve();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await Promise.resolve();
+        });
+
+        expect(runtimeFetchCalls.filter((call) => call.path.endsWith(`/items/${takenItem.id}/take`))).toHaveLength(1);
+        expect(sendMessageCalls).toHaveLength(1);
+        expect(runtimeFetchCalls.filter((call) => call.path.endsWith('/restore'))).toHaveLength(1);
+        expect(runtimeFetchCalls.some((call) => call.path.includes('/take-receipts/'))).toBe(false);
+        expect(useMessageQueueStore.getState().getQueueForTarget(target).map((message) => message.content)).toEqual([
+            takenItem.content,
+        ]);
+        expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([]);
+    });
+
+    test('persists a taken item across a runtime switch and retries it on the original runtime', async () => {
+        vscodeRuntime = false;
+        const { target, takenItem } = seedServerQueue();
+        let serverItems = [takenItem];
+        let restoreAttempts = 0;
+        let takeAttempts = 0;
+        let acknowledgementAttempts = 0;
+        let hydrationAttempts = 0;
+        runtimeFetchHandler = (path) => {
+            if (path === '/api/message-queue') {
+                hydrationAttempts += 1;
+                return new Response(JSON.stringify({
+                    revision: hydrationAttempts,
+                    sessions: [{ ...createServerQueueSession(serverItems), generation: 3 }],
+                    sessionLifecycles: {
+                        [target.sessionId]: { directory: target.directory, generation: 3, restoreRequiresReceipt: true },
+                    },
+                }));
+            }
+            if (path.endsWith(`/items/${takenItem.id}/take`)) {
+                takeAttempts += 1;
+                serverItems = [];
+                return new Response(JSON.stringify({
+                    revision: 10 + takeAttempts,
+                    session: { ...createServerQueueSession([]), generation: 3 },
+                    generation: 3,
+                    item: takenItem,
+                }));
+            }
+            if (path.endsWith('/restore')) {
+                restoreAttempts += 1;
+                serverItems = [takenItem];
+                return new Response(JSON.stringify({
+                    revision: 20,
+                    session: { ...createServerQueueSession(serverItems), generation: 3 },
+                }));
+            }
+            if (path.includes('/take-receipts/')) {
+                acknowledgementAttempts += 1;
+                return new Response(JSON.stringify({ acknowledged: true }));
+            }
+            return new Response(null, { status: 404 });
+        };
+        sessionUIState.sendMessage = async (...args: never[]) => {
+            sendMessageCalls.push(args);
+            activeRuntimeKey = 'runtime-chat-input-other';
+            vscodeRuntime = true;
+            useMessageQueueStore.getState().resetForRuntimeSwitch(RUNTIME_KEY);
+            throw new Error('send failed after runtime switch');
+        };
+
+        const { ChatInput } = await import('./ChatInput');
+        await act(async () => {
+            root.render(React.createElement(ChatInput));
+            await Promise.resolve();
+        });
+        const submit = host.querySelector<HTMLButtonElement>('[data-testid="queued-message-send"]');
+        if (!submit) throw new Error('ChatInput queued-send harness did not render');
+
+        await act(async () => {
+            submit.click();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await Promise.resolve();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await Promise.resolve();
+        });
+
+        const key = getMessageQueueKey(target);
+        const pendingRestore = useMessageQueueStore.getState().pendingServerRestores[key];
+        expect(sendMessageCalls).toHaveLength(1);
+        expect(pendingRestore?.target).toEqual(target);
+        expect(pendingRestore?.messages.map((message) => message.id)).toEqual([takenItem.id]);
+        expect(pendingRestore?.mutationGeneration).toBe(3);
+        expect(runtimeFetchCalls.some((call) => call.path.endsWith('/restore'))).toBe(false);
+        expect(runtimeFetchCalls.some((call) => call.path.includes('/take-receipts/'))).toBe(false);
+
+        activeRuntimeKey = RUNTIME_KEY;
+        vscodeRuntime = false;
+        useMessageQueueStore.getState().resetForRuntimeSwitch('runtime-chat-input-other');
+        await act(async () => {
+            await useMessageQueueStore.getState().hydrate();
+        });
+
+        expect(runtimeFetchCalls.filter((call) => call.path.endsWith('/restore')).map((call) => call.runtimeKey)).toEqual([RUNTIME_KEY]);
+        expect(restoreAttempts).toBe(1);
+        expect(useMessageQueueStore.getState().pendingServerRestores[key]).toBe(undefined);
+        expect(useMessageQueueStore.getState().getQueueForTarget(target).map((message) => message.id)).toEqual([takenItem.id]);
+
+        await act(async () => {
+            await useMessageQueueStore.getState().hydrate();
+        });
+        expect(restoreAttempts).toBe(1);
+
+        let retried: QueuedMessage | null = null;
+        await act(async () => {
+            const taken = await useMessageQueueStore.getState().takeForSend(target, takenItem.id);
+            retried = taken[0] ?? null;
+        });
+        if (!retried) throw new Error('restored queued item could not be taken again');
+        const retriedMessage = retried;
+        await act(async () => {
+            await useMessageQueueStore.getState().acknowledgeTakenServerBatch(target, [retriedMessage]);
+        });
+
+        expect(takeAttempts).toBe(2);
+        expect(restoreAttempts).toBe(1);
+        expect(acknowledgementAttempts).toBe(1);
     });
 });

@@ -18,7 +18,7 @@ const {
 } = await import("./messageQueueStore")
 
 beforeEach(() => {
-  useMessageQueueStore.setState({ queuedMessages: {}, quarantinedLegacyMessages: {}, queueDeletionGenerations: {}, sendingIds: {} })
+  useMessageQueueStore.setState({ queuedMessages: {}, quarantinedLegacyMessages: {}, pendingLegacyMessages: {}, queueDeletionGenerations: {}, sendingIds: {}, pendingServerRestores: {}, pendingServerTakes: {}, pendingServerTakeAcks: {}, pendingServerEnqueues: {}, takenServerOperations: {}, retryPendingIds: {} })
 })
 
 describe("message queue runtime ownership", () => {
@@ -71,6 +71,7 @@ describe("message queue runtime ownership", () => {
     const first = {
       id: "queued-old",
       content: "old alias",
+      text: "old alias",
       createdAt: 1,
       additionalParts: [{ text: "old context", synthetic: true }],
       sendConfig: { providerID: "provider-old", modelID: "model-old", agent: "agent-old", variant: "variant-old" },
@@ -78,6 +79,7 @@ describe("message queue runtime ownership", () => {
     const second = {
       id: "queued-new",
       content: "canonical key",
+      text: "canonical key",
       createdAt: 2,
       additionalParts: [{ text: "new context", synthetic: true }],
       sendConfig: { providerID: "provider-new", modelID: "model-new", agent: "agent-new", variant: "variant-new" },
@@ -95,8 +97,8 @@ describe("message queue runtime ownership", () => {
 
   test("quarantines an unparseable v2 queue key without discarding its messages", () => {
     const target = createMessageQueueTarget("session-valid", "/repo", "runtime-a")!
-    const valid = { id: "queued-valid", content: "valid", createdAt: 1 }
-    const malformed = { id: "queued-malformed", content: "malformed", createdAt: 2 }
+    const valid = { id: "queued-valid", content: "valid", text: "valid", createdAt: 1 }
+    const malformed = { id: "queued-malformed", content: "malformed", text: "malformed", createdAt: 2 }
 
     const migrated = migrateMessageQueueState({
       queuedMessages: {
@@ -112,7 +114,7 @@ describe("message queue runtime ownership", () => {
   test("quarantines composite keys with extra fields", () => {
     const target = createMessageQueueTarget("session-extra", "/repo", "runtime-a")!
     const extraFieldKey = `${getMessageQueueKey(target)}\nextra`
-    const queued = { id: "queued-extra", content: "extra field", createdAt: 1 }
+    const queued = { id: "queued-extra", content: "extra field", text: "extra field", createdAt: 1 }
 
     expect(parseMessageQueueKey(extraFieldKey)).toBeNull()
 
@@ -127,7 +129,7 @@ describe("message queue runtime ownership", () => {
   test("canonicalizes a noncanonical Windows alias from the prior v4 snapshot so it remains reachable", () => {
     const target = createMessageQueueTarget("session-v4", "C:/Repo", "runtime-a")!
     const aliasKey = ["runtime-a", "c:\\Repo\\", "session-v4"].join("\n")
-    const queued = { id: "queued-v4", content: "v4 alias", createdAt: 1 }
+    const queued = { id: "queued-v4", content: "v4 alias", text: "v4 alias", createdAt: 1 }
 
     const migrated = migrateMessageQueueState({
       queuedMessages: { [aliasKey]: [queued] },
@@ -139,8 +141,8 @@ describe("message queue runtime ownership", () => {
   test("keeps valid sibling queues when persisted queue values or entries are malformed", () => {
     const validTarget = createMessageQueueTarget("session-valid", "/repo", "runtime-a")!
     const quarantinedTarget = createMessageQueueTarget("session-quarantined", "/repo", "runtime-a")!
-    const valid = { id: "queued-valid", content: "valid", createdAt: 1 }
-    const quarantined = { id: "queued-quarantined", content: "quarantined", createdAt: 2 }
+    const valid = { id: "queued-valid", content: "valid", text: "valid", createdAt: 1 }
+    const quarantined = { id: "queued-quarantined", content: "quarantined", text: "quarantined", createdAt: 2 }
     const malformed = { id: "queued-malformed", content: "malformed", createdAt: "not-a-time" }
     const extraFieldKey = `${getMessageQueueKey(quarantinedTarget)}\nextra`
 
@@ -164,6 +166,57 @@ describe("message queue runtime ownership", () => {
     })
   })
 
+  test("keeps a removed pending server enqueue invalidated across migration", () => {
+    const target = createMessageQueueTarget("session-pending", "/repo", "runtime-a")!
+    const enqueueKey = JSON.stringify([getMessageQueueKey(target), "local-pending"])
+    const migrated = migrateMessageQueueState({
+      pendingServerEnqueues: {
+        [enqueueKey]: {
+          target,
+          removed: true,
+          message: { id: "local-pending", content: "removed", createdAt: 1, sendConfig: { providerID: "p", modelID: "m" } },
+        },
+      },
+    }, 5)
+
+    expect(migrated.pendingServerEnqueues?.[enqueueKey]).toMatchObject({ removed: true })
+    expect(migrated.pendingServerEnqueues?.[enqueueKey]?.message.text).toBe("removed")
+  })
+
+  test("migrates durable take and restore operations to canonical runtime keys", () => {
+    const target = createMessageQueueTarget("session-recovery", "/repo", "runtime-a")!
+    const key = getMessageQueueKey(target)
+    const message = { id: "recover-me", content: "recover", text: "recover", createdAt: 1, context: [{ kind: "synthetic" as const, text: "captured" }] }
+    const migrated = migrateMessageQueueState({
+      pendingServerTakes: {
+        legacyTakeKey: { target, operationId: "take-1", deletionGeneration: 3, takeGeneration: 4, messageId: message.id },
+      },
+      pendingServerRestores: {
+        legacyRestoreKey: { target, messages: [message], deletionGeneration: 3, operationId: "restore-1" },
+      },
+    }, 5)
+
+    expect(migrated.pendingServerTakes?.[key]).toMatchObject({ operationId: "take-1", takeGeneration: 4 })
+    expect(migrated.pendingServerRestores?.[key]).toMatchObject({ operationId: "restore-1", deletionGeneration: 3 })
+    expect(migrated.pendingServerRestores?.[key]?.messages[0]?.context).toEqual(message.context)
+  })
+
+  test("preserves message ids for durable take acknowledgement retries", () => {
+    const target = createMessageQueueTarget("session-ack", "/repo", "runtime-a")!
+    const migrated = migrateMessageQueueState({
+      pendingServerTakeAcks: {
+        legacyAckKey: { target, operationId: "take-ack-1", generation: 4, messageIds: ["item-1", "item-2"] },
+      },
+    }, 5)
+
+    const ackKey = `${getMessageQueueKey(target)}\ntake-ack-1`
+    expect(migrated.pendingServerTakeAcks?.[ackKey]).toMatchObject({
+      operationId: "take-ack-1",
+      generation: 4,
+      messageIds: ["item-1", "item-2"],
+    })
+  })
+
   test("caps merged aliased queues at the newest 20 messages in persisted FIFO order", () => {
     const target = createMessageQueueTarget("session-1", "C:/Repo", "runtime-a")!
     const canonicalKey = getMessageQueueKey(target)
@@ -171,6 +224,7 @@ describe("message queue runtime ownership", () => {
     const aliasedMessages = Array.from({ length: 25 }, (_, index) => ({
       id: `queued-alias-${index}`,
       content: `alias-${index}`,
+      text: `alias-${index}`,
       createdAt: index,
       contextClaimed: index % 2 === 0,
       additionalParts: [{ text: `alias-context-${index}`, synthetic: true }],
@@ -179,6 +233,7 @@ describe("message queue runtime ownership", () => {
     const canonicalMessages = Array.from({ length: 15 }, (_, index) => ({
       id: `queued-canonical-${index}`,
       content: `canonical-${index}`,
+      text: `canonical-${index}`,
       createdAt: index + 25,
       contextClaimed: true,
       additionalParts: [{ text: `context-${index}`, synthetic: true }],
@@ -203,7 +258,7 @@ describe("message queue runtime ownership", () => {
   test("migrates old UNC queue keys to the canonical target", () => {
     const target = createMessageQueueTarget("session-unc", "//Server/Share/Repo", "runtime-a")!
     const aliasKey = ["runtime-a", "\\\\SERVER\\Share\\Repo\\", "session-unc"].join("\n")
-    const queued = { id: "queued-unc", content: "UNC queue", createdAt: 1 }
+    const queued = { id: "queued-unc", content: "UNC queue", text: "UNC queue", createdAt: 1 }
 
     const migrated = migrateMessageQueueState({
       queuedMessages: { [aliasKey]: [queued] },
@@ -215,8 +270,8 @@ describe("message queue runtime ownership", () => {
   test("keeps POSIX case variants in separate persisted queues", () => {
     const upper = createMessageQueueTarget("session-posix", "/Repo", "runtime-a")!
     const lower = createMessageQueueTarget("session-posix", "/repo", "runtime-a")!
-    const upperMessage = { id: "queued-upper", content: "upper", createdAt: 1 }
-    const lowerMessage = { id: "queued-lower", content: "lower", createdAt: 2 }
+    const upperMessage = { id: "queued-upper", content: "upper", text: "upper", createdAt: 1 }
+    const lowerMessage = { id: "queued-lower", content: "lower", text: "lower", createdAt: 2 }
 
     const migrated = migrateMessageQueueState({
       queuedMessages: {
@@ -235,9 +290,9 @@ describe("message queue runtime ownership", () => {
     const target = createMessageQueueTarget("session-1", "C:/Repo", "runtime-a")!
     const canonicalKey = getMessageQueueKey(target)
     const aliasedKey = ["runtime-a", "C:\\repo", "session-1"].join("\n")
-    const quarantined = { id: "quarantined", content: "quarantined", createdAt: 1 }
-    const aliased = { id: "aliased", content: "aliased", createdAt: 2 }
-    const legacy = { id: "legacy", content: "legacy", createdAt: 3 }
+    const quarantined = { id: "quarantined", content: "quarantined", text: "quarantined", createdAt: 1 }
+    const aliased = { id: "aliased", content: "aliased", text: "aliased", createdAt: 2 }
+    const legacy = { id: "legacy", content: "legacy", text: "legacy", createdAt: 3 }
 
     const migrated = migrateMessageQueueState({
       quarantinedLegacyMessages: {
@@ -633,5 +688,51 @@ describe("in-flight queued sends", () => {
     expect(useMessageQueueStore.getState().getQueueForTarget(target)).toEqual([tail])
     expect(useMessageQueueStore.getState().getQueueDispatchState(target).sendingIds).toEqual([])
     expect(useMessageQueueStore.getState().getSendableQueue(target)).toEqual([tail])
+  })
+
+  test("atomically claims the local queue head and leaves it visible while sending", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    const store = useMessageQueueStore.getState()
+    store.addToQueue(target, { content: "head" })
+    store.addToQueue(target, { content: "tail" })
+    const [head, tail] = store.getQueueForTarget(target)
+    if (!head || !tail) throw new Error("queue items were not created")
+
+    expect(store.claimLocalSend(target, head.id)).toEqual(head)
+    expect(store.getQueueForTarget(target)).toEqual([head, tail])
+    expect(store.getQueueDispatchState(target).sendingIds).toEqual([head.id])
+    expect(store.claimLocalSend(target, head.id)).toBeNull()
+    expect(store.claimLocalSend(target, tail.id)).toBeNull()
+  })
+
+  test("allows only one concurrent local sender to claim the head", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    const store = useMessageQueueStore.getState()
+    store.addToQueue(target, { content: "head" })
+    const head = store.getQueueForTarget(target)[0]
+    if (!head) throw new Error("queue head was not created")
+
+    const claims = [
+      store.claimLocalSend(target, head.id),
+      store.claimLocalSend(target, head.id),
+    ]
+
+    expect(claims.filter((message) => message !== null)).toHaveLength(1)
+    expect(store.getQueueDispatchState(target).sendingIds).toEqual([head.id])
+  })
+
+  test("keeps a failed local claim queued and retryable after clearing its send claim", () => {
+    const target = createMessageQueueTarget("session-1", "/repo", "runtime-a")!
+    const store = useMessageQueueStore.getState()
+    store.addToQueue(target, { content: "retry me" })
+    const head = store.getQueueForTarget(target)[0]
+    if (!head) throw new Error("queue head was not created")
+
+    expect(store.claimLocalSend(target, head.id)).toEqual(head)
+    store.clearSending(target, head.id)
+
+    expect(store.getQueueForTarget(target)).toEqual([head])
+    expect(store.getSendableQueue(target)).toEqual([head])
+    expect(store.claimLocalSend(target, head.id)).toEqual(head)
   })
 })
