@@ -168,4 +168,182 @@ describe('RecentSessionSection external worktree resolve', () => {
       dom.restore();
     }
   });
+
+  test('resolves <worktree>/sub via prefix and session-keyed metadata without leaking the project root', async () => {
+    capturedSections.length = 0;
+    const dom = installHookTestDom();
+    const root = createRoot(dom.container);
+    const noop = () => undefined;
+    const sessions = [
+      worktreeSession('sub-outside', '/tmp/wt-feature/sub'),
+      worktreeSession('sub-inside', '/workspace/app/.worktrees/inner/sub'),
+      worktreeSession('sub-keyed', '/tmp/wt-feature/nested'),
+      worktreeSession('root-session', '/workspace/app'),
+    ];
+
+    try {
+      await act(async () => {
+        root.render(
+          <I18nProvider>
+            <RecentSessionSection
+              projects={[{ id: 'app', label: 'App', normalizedPath: '/workspace/app' }]}
+              availableWorktreesByProject={new Map([
+                ['/workspace/app', [
+                  worktreeMeta('/tmp/wt-feature', 'feature-1'),
+                  worktreeMeta('/workspace/app/.worktrees/inner', 'inner-1'),
+                ]],
+              ])}
+              worktreeMetadata={new Map([
+                ['sub-keyed', worktreeMeta('/tmp/wt-feature', 'feature-keyed')],
+              ])}
+              gitBranches={new Map()}
+              homeDirectory={null}
+              hasSessionSearchQuery={false}
+              normalizedSessionSearchQuery=""
+              isDesktopShellRuntime={false}
+              sessions={sessions}
+              childrenMap={new Map()}
+              pinnedSessionIds={new Set()}
+              recentSessions={sessions}
+              expandedParents={new Set()}
+              notifyOnSubtasks={false}
+              editingId={null}
+              editTitle=""
+              copiedSessionId={null}
+              openSidebarMenuKey={null}
+              mobileVariant={false}
+              alwaysShowActions={false}
+              chatSessions={[]}
+              renderChatsSection={() => null}
+              onNewChat={noop}
+              showRecentSection
+              setEditingId={noop}
+              setEditTitle={noop}
+              toggleParent={noop}
+              setOpenSidebarMenuKey={noop}
+              allowReselect={false}
+              isSessionSearchOpen={false}
+              sessionSearchQuery=""
+              setSessionSearchQuery={noop}
+              setIsSessionSearchOpen={noop}
+              deleteSessionConfirm={null}
+              setDeleteSessionConfirm={noop}
+              startFolderRename={noop}
+              setCopiedSessionId={noop}
+              startSessionWorktreeMenuLoad={noopStartSessionWorktreeMenuLoad}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      const recent = capturedSections.at(-1)?.find((section) => section.key === 'active-now');
+      const byId = new Map(recent?.items.map((item) => [item.node.session.id, item]));
+
+      // Prefix match outside the project root owns the session and its worktree.
+      const outside = byId.get('sub-outside');
+      expect(outside?.projectId).toBe('app');
+      expect(outside?.groupDirectory).toBe('/tmp/wt-feature/sub');
+      expect(outside?.secondaryMeta).toEqual({ projectLabel: 'App', branchLabel: 'feature-1' });
+      expect(outside?.node.worktree?.path).toBe('/tmp/wt-feature');
+
+      // Prefix match inside the project root resolves the inner worktree.
+      const inside = byId.get('sub-inside');
+      expect(inside?.projectId).toBe('app');
+      expect(inside?.secondaryMeta).toEqual({ projectLabel: 'App', branchLabel: 'inner-1' });
+      expect(inside?.node.worktree?.path).toBe('/workspace/app/.worktrees/inner');
+
+      // Session-keyed metadata wins over the indexed worktree branch.
+      const keyed = byId.get('sub-keyed');
+      expect(keyed?.projectId).toBe('app');
+      expect(keyed?.secondaryMeta).toEqual({ projectLabel: 'App', branchLabel: 'feature-keyed' });
+      expect(keyed?.node.worktree?.path).toBe('/tmp/wt-feature');
+      expect(keyed?.node.worktree?.branch).toBe('feature-keyed');
+
+      // The project root itself never resolves to a worktree.
+      const rootSession = byId.get('root-session');
+      expect(rootSession?.projectId).toBe('app');
+      expect(rootSession?.node.worktree).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      capturedSections.length = 0;
+      dom.restore();
+    }
+  });
+
+  test('prefers live git branch over stored worktree metadata, including <worktree>/sub', async () => {
+    capturedSections.length = 0;
+    const dom = installHookTestDom();
+    const root = createRoot(dom.container);
+    const noop = () => undefined;
+    const sessions = [
+      worktreeSession('desync-exact', '/tmp/wt-feature'),
+      worktreeSession('desync-sub', '/tmp/wt-feature/sub'),
+    ];
+
+    try {
+      await act(async () => {
+        root.render(
+          <I18nProvider>
+            <RecentSessionSection
+              projects={[{ id: 'app', label: 'App', normalizedPath: '/workspace/app' }]}
+              availableWorktreesByProject={new Map([
+                ['/workspace/app', [worktreeMeta('/tmp/wt-feature', 'stored-1')]],
+              ])}
+              gitBranches={new Map([
+                ['/tmp/wt-feature', 'live-1'],
+              ])}
+              homeDirectory={null}
+              hasSessionSearchQuery={false}
+              normalizedSessionSearchQuery=""
+              isDesktopShellRuntime={false}
+              sessions={sessions}
+              childrenMap={new Map()}
+              pinnedSessionIds={new Set()}
+              recentSessions={sessions}
+              expandedParents={new Set()}
+              notifyOnSubtasks={false}
+              editingId={null}
+              editTitle=""
+              copiedSessionId={null}
+              openSidebarMenuKey={null}
+              mobileVariant={false}
+              alwaysShowActions={false}
+              chatSessions={[]}
+              renderChatsSection={() => null}
+              onNewChat={noop}
+              showRecentSection
+              setEditingId={noop}
+              setEditTitle={noop}
+              toggleParent={noop}
+              setOpenSidebarMenuKey={noop}
+              allowReselect={false}
+              isSessionSearchOpen={false}
+              sessionSearchQuery=""
+              setSessionSearchQuery={noop}
+              setIsSessionSearchOpen={noop}
+              deleteSessionConfirm={null}
+              setDeleteSessionConfirm={noop}
+              startFolderRename={noop}
+              setCopiedSessionId={noop}
+              startSessionWorktreeMenuLoad={noopStartSessionWorktreeMenuLoad}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      const recent = capturedSections.at(-1)?.find((section) => section.key === 'active-now');
+      const byId = new Map(recent?.items.map((item) => [item.node.session.id, item]));
+      // Live-first: the stored branch is visible only through node.worktree,
+      // never as the displayed branch label.
+      expect(byId.get('desync-exact')?.secondaryMeta).toEqual({ projectLabel: 'App', branchLabel: 'live-1' });
+      expect(byId.get('desync-exact')?.node.worktree?.branch).toBe('stored-1');
+      // Subdirectory sessions reuse the worktree-root live branch.
+      expect(byId.get('desync-sub')?.secondaryMeta).toEqual({ projectLabel: 'App', branchLabel: 'live-1' });
+      expect(byId.get('desync-sub')?.node.worktree?.path).toBe('/tmp/wt-feature');
+    } finally {
+      await act(async () => root.unmount());
+      capturedSections.length = 0;
+      dom.restore();
+    }
+  });
 });
