@@ -143,10 +143,13 @@ when the run ends. A hold expires on its own (default 5 min, cap 10 min)
 because the UI that asserted it may be gone. Expiry re-arms a queued session
 through the normal quiet, abort, and retry gates. The UI re-asserts it every
 two minutes while the run continues. Each UI incarnation supplies a fresh
-`clientToken` and monotonically increasing `sequence`; a delayed release from
-an older runtime or reload is ignored after a newer token asserts the hold.
-Hold requests also carry the captured session generation, so deletion and
-session-ID reuse reject stale holds. Releasing arms a dispatch.
+`clientToken` and monotonically increasing `sequence`. While a hold is active,
+only its current token can mutate it; a different token's sequence-1 assertion
+cannot replace the active owner. After the hold is released or expires, a
+different token may establish a new hold at sequence 1. Delayed lower-sequence
+mutations from the same token are ignored. Hold requests also carry the
+captured session generation, so deletion and session-ID reuse reject stale
+holds. Releasing arms a dispatch.
 
 ## Routes (`/api/message-queue`)
 
@@ -164,7 +167,7 @@ allowlists.
 | `POST .../sessions/:id/take-receipts/:operationId/ack` | Acknowledge a successfully delivered take receipt with `{ directory, generation? }` |
 | `PUT .../sessions/:id/order` | `{ directory, itemIds }`; `itemIds` must be a complete permutation |
 | `DELETE .../sessions/:id` | Clear `{ directory, generation? }`; the in-flight item stays |
-| `PUT .../sessions/:id/hold` | `{ directory, held, ttlMs?, generation?, sequence?, clientToken? }`; stale hold sequences are ignored |
+| `PUT .../sessions/:id/hold` | `{ directory, held, ttlMs?, generation?, sequence?, clientToken? }`; active holds reject other tokens, and stale same-token sequences are ignored |
 
 Every mutation broadcasts `openchamber:message-queue.updated` with
 `{ revision, session }` to all connected clients (SSE and WS), so several

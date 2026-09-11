@@ -1578,8 +1578,14 @@ export function createMessageQueueRuntime({
       if (responseSequence !== null) response.sequence = responseSequence;
       return response;
     };
-    if (previous && previous.clientToken !== clientToken && !(held && sequence === 1)) {
-      return holdResponse(currentExpiresAt !== undefined, currentExpiresAt ?? null, previous.sequence);
+    const activeHold = hold
+      && hold.expiresAt > now()
+      && hold.generation === generation
+      && hold.directory === directory
+      ? hold
+      : null;
+    if (activeHold && activeHold.clientToken !== clientToken) {
+      return holdResponse(true, activeHold.expiresAt, activeHold.sequence);
     }
     if (sequence !== null && previous && previous.clientToken === clientToken && previous.sequence !== null && sequence < previous.sequence) {
       return holdResponse(currentExpiresAt !== undefined, currentExpiresAt ?? null, previous.sequence);

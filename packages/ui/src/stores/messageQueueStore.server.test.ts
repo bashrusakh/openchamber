@@ -194,6 +194,42 @@ describe("server-owned message queue", () => {
     expect(useMessageQueueStore.getState().pendingServerEnqueues).toEqual({})
   })
 
+  test("keeps migration item cleanup ahead of a queued clear", async () => {
+    activeRuntimeKey = "runtime-migration-clear-race"
+    const migrationTarget = createMessageQueueTarget("session-migration-clear-race", "/repo", activeRuntimeKey)!
+    const migrationKey = getMessageQueueKey(migrationTarget)
+    const message = { id: "legacy-clear", content: "clear during migration", text: "clear during migration", createdAt: 1, sendConfig: { providerID: "p", modelID: "m" } }
+    const post = deferredResponse()
+    const accepted = serverItem("accepted-clear-migration", message.content)
+    useMessageQueueStore.setState({ queuedMessages: { [migrationKey]: [message] } })
+    respond = (call) => {
+      if (call.method === "GET") return json({ revision: 1, sessions: [{ ...session([]), sessionId: migrationTarget.sessionId, directory: migrationTarget.directory }] })
+      if (call.method === "POST") return post.promise
+      if (call.path.endsWith(`/items/${accepted.id}`)) return json({ revision: 2, session: { ...session([]), sessionId: migrationTarget.sessionId, directory: migrationTarget.directory } })
+      if (call.method === "DELETE") return json({ revision: 3, session: { ...session([]), sessionId: migrationTarget.sessionId, directory: migrationTarget.directory } })
+      return json({ revision: 4, sessions: [] })
+    }
+
+    const hydrating = useMessageQueueStore.getState().hydrate()
+    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(calls.map((call) => call.method)).toEqual(["GET", "POST"])
+
+    useMessageQueueStore.getState().clearQueue(migrationTarget)
+    post.resolve(json({
+      revision: 1,
+      itemId: accepted.id,
+      session: { ...session([accepted]), sessionId: migrationTarget.sessionId, directory: migrationTarget.directory },
+    }))
+    await hydrating
+
+    expect(calls.map((call) => call.method)).toEqual(["GET", "POST", "DELETE", "DELETE"])
+    expect(calls[2]?.path).toBe(`/api/message-queue/sessions/${migrationTarget.sessionId}/items/${accepted.id}`)
+    expect(calls[3]?.path).toBe(`/api/message-queue/sessions/${migrationTarget.sessionId}`)
+    expect(useMessageQueueStore.getState().queuedMessages[migrationKey]).toBe(undefined)
+    expect(useMessageQueueStore.getState().pendingServerEnqueues).toEqual({})
+  })
+
   test("retries a failed legacy upload on a later hydration", async () => {
     activeRuntimeKey = "runtime-migration-retry"
     const retryTarget = createMessageQueueTarget("session-migration-retry", "/repo", activeRuntimeKey)!
@@ -514,6 +550,97 @@ describe("server-owned message queue", () => {
       "DELETE /api/message-queue/sessions/session-1/items/accepted-after-remove",
     ])
     expect(useMessageQueueStore.getState().queuedMessages[key]?.map((message) => message.id)).toEqual(["keep"])
+  })
+
+  test("serializes accepted-item cleanup before a queued clear", async () => {
+    activeRuntimeKey = "runtime-enqueue-clear-race"
+    const clearTarget = createMessageQueueTarget("session-enqueue-clear-race", "/repo", activeRuntimeKey)!
+    const clearKey = getMessageQueueKey(clearTarget)
+    const post = deferredResponse()
+    const accepted = serverItem("accepted-clear", "clear after acceptance")
+    respond = (call) => {
+      if (call.method === "POST") return post.promise
+      if (call.path.endsWith(`/items/${accepted.id}`)) {
+        return json({ revision: 2, session: { ...session([]), sessionId: clearTarget.sessionId, directory: clearTarget.directory } })
+      }
+      if (call.method === "DELETE") {
+        return json({ revision: 3, session: { ...session([]), sessionId: clearTarget.sessionId, directory: clearTarget.directory } })
+      }
+      return json({ revision: 4, sessions: [] })
+    }
+
+    const adding = useMessageQueueStore.getState().addToQueue(clearTarget, {
+      content: accepted.content,
+      sendConfig: { providerID: "p", modelID: "m" },
+    })
+    await Promise.resolve()
+    expect(calls.map((call) => call.method)).toEqual(["POST"])
+
+    useMessageQueueStore.getState().clearQueue(clearTarget)
+    post.resolve(json({
+      revision: 1,
+      itemId: accepted.id,
+      session: { ...session([accepted]), sessionId: clearTarget.sessionId, directory: clearTarget.directory },
+    }))
+
+    await adding
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(calls.map((call) => call.method)).toEqual(["POST", "DELETE", "DELETE"])
+    expect(calls[1]?.path).toBe(`/api/message-queue/sessions/${clearTarget.sessionId}/items/${accepted.id}`)
+    expect(calls[2]?.path).toBe(`/api/message-queue/sessions/${clearTarget.sessionId}`)
+    expect(useMessageQueueStore.getState().queuedMessages[clearKey]).toBe(undefined)
+    expect(useMessageQueueStore.getState().pendingServerEnqueues).toEqual({})
+  })
+
+  test("retains an accepted removal marker when compensating cleanup fails", async () => {
+    activeRuntimeKey = "runtime-enqueue-cleanup-retry"
+    const retryTarget = createMessageQueueTarget("session-enqueue-cleanup-retry", "/repo", activeRuntimeKey)!
+    const retryKey = getMessageQueueKey(retryTarget)
+    const post = deferredResponse()
+    const accepted = serverItem("accepted-retry", "retry cleanup")
+    let cleanupAttempts = 0
+    respond = (call) => {
+      if (call.method === "POST") return post.promise
+      if (call.path.endsWith(`/items/${accepted.id}`)) {
+        cleanupAttempts += 1
+        return cleanupAttempts === 1
+          ? new Response("cleanup failed", { status: 503 })
+          : json({ revision: 5, session: { ...session([]), sessionId: retryTarget.sessionId, directory: retryTarget.directory } })
+      }
+      if (call.method === "GET") {
+        return json({
+          revision: cleanupAttempts === 1 ? 3 : 4,
+          sessions: [{ ...session([accepted]), sessionId: retryTarget.sessionId, directory: retryTarget.directory }],
+        })
+      }
+      return json({ revision: 6, sessions: [] })
+    }
+
+    const adding = useMessageQueueStore.getState().addToQueue(retryTarget, {
+      content: accepted.content,
+      sendConfig: { providerID: "p", modelID: "m" },
+    })
+    await Promise.resolve()
+    const [optimistic] = useMessageQueueStore.getState().getQueueForTarget(retryTarget)
+    if (!optimistic) throw new Error("optimistic queue item was not created")
+    expect(useMessageQueueStore.getState().removeFromQueue(retryTarget, optimistic.id)?.id).toBe(optimistic.id)
+
+    post.resolve(json({
+      revision: 1,
+      itemId: accepted.id,
+      session: { ...session([accepted]), sessionId: retryTarget.sessionId, directory: retryTarget.directory },
+    }))
+    await expect(adding).rejects.toThrow()
+
+    expect(useMessageQueueStore.getState().queuedMessages[retryKey]?.map((message) => message.id)).toEqual([accepted.id])
+    const pending = Object.values(useMessageQueueStore.getState().pendingServerEnqueues)
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).toMatchObject({ acceptedItemId: accepted.id, removed: true })
+
+    await useMessageQueueStore.getState().hydrate()
+    expect(cleanupAttempts).toBe(2)
+    expect(useMessageQueueStore.getState().pendingServerEnqueues).toEqual({})
+    expect(useMessageQueueStore.getState().queuedMessages[retryKey]).toBe(undefined)
   })
 
   test("accepted queue history survives automatic delivery and manual take without recapture", async () => {

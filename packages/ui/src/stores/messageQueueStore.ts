@@ -1630,11 +1630,11 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     }
                 };
 
-                const serverMutation = async (
-                    target: MessageQueueTarget,
-                    path: string,
-                    init: RequestInit,
-                ): Promise<boolean> => {
+                 const serverMutation = async (
+                     target: MessageQueueTarget,
+                     path: string,
+                     init: RequestInit,
+                 ): Promise<boolean> => {
                     try {
                         const result = await enqueueServerMutation(target, () => requestJson(serverSessionResponseSchema, path, init));
                         applyServerSession(result.session, result.revision, target.runtimeKey);
@@ -1642,9 +1642,66 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     } catch (error) {
                         console.warn('[queue] server update failed:', error);
                         await refreshSession(target);
-                        return false;
-                    }
-                };
+                         return false;
+                     }
+                 };
+
+                 type ServerEnqueueResult = z.infer<typeof serverEnqueueResponseSchema>;
+                 type ServerEnqueueMutationResult = {
+                     result: ServerEnqueueResult;
+                     acceptedItemId?: string;
+                     removedFromServer: boolean;
+                 };
+
+                 /**
+                  * Keep an enqueue and its compensating delete in one chain
+                  * callback. Calling serverMutation for the delete here would
+                  * wait on this callback's own keyed chain.
+                  */
+                 const enqueueServerEnqueueMutation = async (
+                     target: MessageQueueTarget,
+                     enqueueKey: string,
+                     message: QueuedMessage,
+                     sendConfig: QueuedMessageSendConfig,
+                     operation: () => Promise<ServerEnqueueResult>,
+                 ): Promise<ServerEnqueueMutationResult> => {
+                     let acceptedItemId: string | undefined;
+                     let removedFromServer = false;
+                     const result = await enqueueServerMutation(target, async () => {
+                         const accepted = await operation();
+                         serverOwnedRuntimeKeys.add(target.runtimeKey);
+                         acceptedItemId = accepted.itemId ?? findAcceptedQueueItemId(accepted.session, message, sendConfig);
+                         if (acceptedItemId) {
+                             set((state) => {
+                                 const current = state.pendingServerEnqueues[enqueueKey];
+                                 if (!current) return state;
+                                 return {
+                                     pendingServerEnqueues: {
+                                         ...state.pendingServerEnqueues,
+                                         [enqueueKey]: { ...current, acceptedItemId },
+                                     },
+                                 };
+                             });
+                         }
+
+                         const pending = get().pendingServerEnqueues[enqueueKey];
+                         if (!pending?.removed || !acceptedItemId) return accepted;
+                         try {
+                             const removed = await requestJson(
+                                 serverSessionResponseSchema,
+                                 `${sessionPath(target.sessionId)}/items/${encodeURIComponent(acceptedItemId)}`,
+                                 queueMutationInit(target, 'DELETE'),
+                             );
+                             applyServerSession(removed.session, removed.revision, target.runtimeKey);
+                             removedFromServer = true;
+                         } catch (error) {
+                             await refreshSession(target);
+                             throw error;
+                         }
+                         return accepted;
+                     });
+                     return { result, acceptedItemId, removedFromServer };
+                 };
 
                 const clearTakenOperation = (target: MessageQueueTarget, operationId: string, messages: readonly QueuedMessage[]): void => {
                     const sessionKey = getServerSessionKey(target.runtimeKey, target.sessionId);
@@ -1948,33 +2005,20 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         const historyIdentity = createInputHistoryIdentity(target.runtimeKey, target.directory, target.sessionId);
                         const historySubmission = createInputHistorySubmission(message.content, message.attachments ?? []);
                         try {
-                            const result = await enqueueServerMutation(target, () => requestJson(serverEnqueueResponseSchema, `${sessionPath(target.sessionId)}/items`, jsonInit('POST', {
-                                directory: target.directory,
-                                item: toServerItemInput(message, sendConfig),
-                                idempotencyKey: enqueueKey,
-                                generation: pendingEnqueue.generation,
-                            })));
-                             const pending = get().pendingServerEnqueues[enqueueKey];
-                             const acceptedItemId = result.itemId ?? findAcceptedQueueItemId(result.session, message, sendConfig);
+                            const { result, acceptedItemId, removedFromServer } = await enqueueServerEnqueueMutation(target, enqueueKey, queuedMessage, sendConfig, () => requestJson(serverEnqueueResponseSchema, `${sessionPath(target.sessionId)}/items`, jsonInit('POST', {
+                                 directory: target.directory,
+                                 item: toServerItemInput(message, sendConfig),
+                                 idempotencyKey: enqueueKey,
+                                 generation: pendingEnqueue.generation,
+                             })));
                             // The server accepted this item. Mark the runtime
                             // authoritative before replacing the optimistic
                             // projection, so a hydration already in flight
                             // cannot persist that projection and upload it
                              // again after a restart under a new key.
                              serverOwnedRuntimeKeys.add(target.runtimeKey);
-                             if (acceptedItemId) {
-                                 set((state) => {
-                                     const current = state.pendingServerEnqueues[enqueueKey];
-                                     if (!current) return state;
-                                     return {
-                                         pendingServerEnqueues: {
-                                             ...state.pendingServerEnqueues,
-                                             [enqueueKey]: { ...current, acceptedItemId },
-                                         },
-                                     };
-                                 });
-                             }
-                             if (pending?.removed) {
+                              const pending = get().pendingServerEnqueues[enqueueKey];
+                              if (pending?.removed) {
                                 // The remove happened before the server had an
                                 // id for this item. Do not apply the POST's
                                 // projection; remove the accepted server item
@@ -1982,16 +2026,17 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                                 // remaining queue authoritatively.
                                 if (acceptedItemId) moveLocalQueueContext(key, id, acceptedItemId);
                                  set((state) => removeMessageLocally(state, key, id));
-                                 if (acceptedItemId) {
-                                     const removedFromServer = await serverMutation(
-                                         target,
-                                         `${sessionPath(target.sessionId)}/items/${encodeURIComponent(acceptedItemId)}`,
-                                         queueMutationInit(target, 'DELETE'),
-                                     );
-                                     if (removedFromServer) {
-                                         set((state) => ({ pendingServerEnqueues: withoutKey(state.pendingServerEnqueues, enqueueKey) }));
-                                     }
-                                 } else {
+                                  if (acceptedItemId) {
+                                      if (removedFromServer) {
+                                          set((state) => ({ pendingServerEnqueues: withoutKey(state.pendingServerEnqueues, enqueueKey) }));
+                                      } else if (await serverMutation(
+                                          target,
+                                          `${sessionPath(target.sessionId)}/items/${encodeURIComponent(acceptedItemId)}`,
+                                          queueMutationInit(target, 'DELETE'),
+                                      )) {
+                                          set((state) => ({ pendingServerEnqueues: withoutKey(state.pendingServerEnqueues, enqueueKey) }));
+                                      }
+                                  } else {
                                      await refreshSession(target);
                                  }
                                  return id;
@@ -2743,8 +2788,8 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                                      if (!target || target.runtimeKey !== runtimeKey) continue;
                                      for (const message of messages) registerLegacy(target, message);
                                  }
-                                 for (const pending of Object.values(state.pendingServerEnqueues)) {
-                                     if (pending.target.runtimeKey !== runtimeKey || pending.removed || pending.blocked) continue;
+                              for (const pending of Object.values(state.pendingServerEnqueues)) {
+                                  if (pending.target.runtimeKey !== runtimeKey || pending.blocked) continue;
                                      if (pending.message.sendConfig) {
                                          migrationEntries.set(
                                              queueItemEphemeralKey(getMessageQueueKey(pending.target), pending.message.id),
@@ -2850,31 +2895,21 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                                      }));
                                  }
                                  try {
-                                     const result = await enqueueServerMutation(target, () => requestJson(serverEnqueueResponseSchema, `${sessionPath(target.sessionId)}/items`, queueMutationInit(target, 'POST', {
-                                         directory: target.directory,
-                                         item: toServerItemInput(message, sendConfig),
-                                         idempotencyKey: pending.idempotencyKey ?? enqueueKey,
-                                         generation: generationToSend,
-                                     }, generationToSend)));
-                                     if (!isCurrent()) return;
-                                     const acceptedItemId = result.itemId ?? findAcceptedQueueItemId(result.session, message, sendConfig);
-                                     const latest = get().pendingServerEnqueues[enqueueKey];
-                                     if (acceptedItemId) {
-                                         set((state) => {
-                                             const current = state.pendingServerEnqueues[enqueueKey];
-                                             return current
-                                                 ? { pendingServerEnqueues: { ...state.pendingServerEnqueues, [enqueueKey]: { ...current, acceptedItemId } } }
-                                                 : state;
-                                         });
-                                     }
-                                     if (latest?.removed) {
-                                         set((state) => removeMessageLocally(state, getMessageQueueKey(target), message.id));
-                                         if (acceptedItemId) {
-                                             const removedFromServer = await serverMutation(target, `${sessionPath(target.sessionId)}/items/${encodeURIComponent(acceptedItemId)}`, queueMutationInit(target, 'DELETE'));
-                                             if (removedFromServer) {
-                                                 set((state) => ({ pendingServerEnqueues: withoutKey(state.pendingServerEnqueues, enqueueKey) }));
-                                             }
-                                         } else {
+                                      const { result, acceptedItemId, removedFromServer } = await enqueueServerEnqueueMutation(target, enqueueKey, message, sendConfig, () => requestJson(serverEnqueueResponseSchema, `${sessionPath(target.sessionId)}/items`, queueMutationInit(target, 'POST', {
+                                          directory: target.directory,
+                                          item: toServerItemInput(message, sendConfig),
+                                          idempotencyKey: pending.idempotencyKey ?? enqueueKey,
+                                          generation: generationToSend,
+                                      }, generationToSend)));
+                                      if (!isCurrent()) return;
+                                      const latest = get().pendingServerEnqueues[enqueueKey];
+                                      if (latest?.removed) {
+                                          set((state) => removeMessageLocally(state, getMessageQueueKey(target), message.id));
+                                          if (acceptedItemId) {
+                                              if (removedFromServer) {
+                                                  set((state) => ({ pendingServerEnqueues: withoutKey(state.pendingServerEnqueues, enqueueKey) }));
+                                              }
+                                          } else {
                                              set((state) => ({ pendingServerEnqueues: withoutKey(state.pendingServerEnqueues, enqueueKey) }));
                                          }
                                      } else {

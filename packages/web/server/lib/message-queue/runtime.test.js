@@ -733,6 +733,45 @@ describe('message queue runtime', () => {
     expect(openCode.state.sent).toHaveLength(1);
   });
 
+  it('does not let a delayed first assertion replace an active hold owner', async () => {
+    const { runtime } = createRuntime();
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+
+    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'token-b')).toMatchObject({ held: true, sequence: 1 });
+    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'token-a')).toMatchObject({ held: true, sequence: 1 });
+    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 2, 'token-b')).toMatchObject({ held: false, sequence: 2 });
+  });
+
+  it('allows a different token to establish sequence one after release', async () => {
+    const { runtime } = createRuntime();
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+
+    runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'token-b');
+    runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 2, 'token-b');
+
+    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'token-a')).toMatchObject({ held: true, sequence: 1 });
+  });
+
+  it('allows a different token to establish sequence one after expiry', async () => {
+    let currentTime = 0;
+    const { runtime } = createRuntime({ now: () => currentTime });
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+
+    expect(runtime.setHold(SESSION, DIRECTORY, true, 20, 1, 1, 'token-b')).toMatchObject({ held: true, expiresAt: 20, sequence: 1 });
+    currentTime = 20;
+
+    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'token-a')).toMatchObject({ held: true, sequence: 1 });
+  });
+
+  it('ignores a lower sequence from the active hold token', async () => {
+    const { runtime } = createRuntime();
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+
+    runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 3, 'token-a');
+
+    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 2, 'token-a')).toMatchObject({ held: true, sequence: 3 });
+  });
+
   it('carries a generation-zero hold across the first enqueue for captured cleanup', async () => {
     const { runtime, openCode, emit } = createRuntime();
     runtime.start();
@@ -750,26 +789,25 @@ describe('message queue runtime', () => {
     expect(queued.session.generation).toBe(1);
   });
 
-  it('does not let an old incarnation release a newer hold', async () => {
+  it('does not let a new incarnation take over an active hold', async () => {
     const { runtime } = createRuntime();
     await runtime.enqueue(SESSION, DIRECTORY, item());
 
     expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'old-incarnation').held).toBe(true);
-    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'new-incarnation').held).toBe(true);
-    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 2, 'old-incarnation')).toMatchObject({ held: true, sequence: 1 });
-    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 2, 'new-incarnation')).toMatchObject({ held: true, sequence: 2 });
-    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 3, 'new-incarnation')).toMatchObject({ held: false, sequence: 3 });
+    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'new-incarnation')).toMatchObject({ held: true, sequence: 1 });
+    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 2, 'old-incarnation')).toMatchObject({ held: false, sequence: 2 });
+    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'new-incarnation')).toMatchObject({ held: true, sequence: 1 });
+    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 2, 'new-incarnation')).toMatchObject({ held: false, sequence: 2 });
   });
 
-  it('does not let an old token release a newer hold with sequence one', async () => {
+  it('does not let a different token release an active hold without ordering history', async () => {
     const { runtime } = createRuntime();
     await runtime.enqueue(SESSION, DIRECTORY, item());
 
-    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'old-token')).toMatchObject({ held: true, sequence: 1 });
-    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'new-token')).toMatchObject({ held: true, sequence: 1 });
-    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, undefined, 'old-token')).toMatchObject({ held: true, sequence: 1 });
-    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 1, 'old-token')).toMatchObject({ held: true, sequence: 1 });
-    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 2, 'new-token')).toMatchObject({ held: false, sequence: 2 });
+    expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, 1, 1, 'token-b')).toMatchObject({ held: true, sequence: 1 });
+    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, undefined, 'token-a')).toMatchObject({ held: true, sequence: 1 });
+    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 1, 'token-a')).toMatchObject({ held: true, sequence: 1 });
+    expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, 1, 2, 'token-b')).toMatchObject({ held: false, sequence: 2 });
   });
 
   it('rejects an old hold after deletion and session-id reuse', async () => {
