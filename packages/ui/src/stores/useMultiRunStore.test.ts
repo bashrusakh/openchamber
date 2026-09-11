@@ -21,12 +21,14 @@ const worktreeBootstrapWaitCalls: string[] = [];
 const operationOrder: string[] = [];
 let isGitRepository = false;
 let waitForWorktreeSetup = false;
+// The platform-shaped worktree path each test's mocked creation reports.
+let createdWorktreePath = '/repo-worktrees/fix-thing';
 const createWorktreeWithDefaultsMock = mock((project: { id?: string; path: string }, args: Record<string, unknown>, options: unknown) => {
   worktreeCreateCalls.push({ project, args, options });
   return Promise.resolve({
     source: 'sdk',
     name: 'fix-thing',
-    path: '/repo-worktrees/fix-thing',
+    path: createdWorktreePath,
     projectDirectory: '/repo',
     branch: 'fix-thing',
     label: 'fix-thing',
@@ -178,7 +180,7 @@ mock.module('@/sync/sync-refs', () => ({
 }));
 
 const { useMultiRunStore } = await import('./useMultiRunStore');
-const { useAgentsStore } = await import('./useAgentsStore');
+const { resolveAvailableAgentForDirectory, useAgentsStore } = await import('./useAgentsStore');
 
 const agent = (name: string): AgentWithExtras => ({
   name,
@@ -209,6 +211,7 @@ describe('useMultiRunStore', () => {
     operationOrder.length = 0;
     isGitRepository = false;
     waitForWorktreeSetup = false;
+    createdWorktreePath = '/repo-worktrees/fix-thing';
     childState.session = [];
     childState.sessionTotal = 0;
     childState.limit = 5;
@@ -422,6 +425,37 @@ describe('useMultiRunStore', () => {
     expect(listAgentsCalls).toEqual([WORKTREE]);
     for (const call of routeMessageCalls) {
       expect(call.directory).toBe(WORKTREE);
+      expect(call.agent).toBeUndefined();
+    }
+    expect(toastInfoCalls).toHaveLength(1);
+    const noticeId = String(toastInfoCalls[0]?.[1]?.id);
+    expect(noticeId.startsWith('agent-unavailable:multirun:')).toBe(true);
+    expect(noticeId.endsWith(`:${AGENT}`)).toBe(true);
+  });
+
+  test('loads a Windows-shaped worktree path under the key the guard reads', async () => {
+    isGitRepository = true;
+    // Raw Windows spelling: backslashes, a lowercase drive letter, and a
+    // trailing slash. The guard normalizes before reading, so the pre-dispatch
+    // load must land under that same normalized key; otherwise the entry is
+    // invisible, the guard cannot prove absence, and the agent is sent anyway.
+    const rawWorktree = 'c:\\repo-worktrees\\fix-thing\\';
+    const normalizedWorktree = 'C:/repo-worktrees/fix-thing';
+    createdWorktreePath = rawWorktree;
+    listAgentsImpl = async (directory) => (directory === normalizedWorktree ? [agent('build')] : []);
+
+    const result = await createIsolatedRuns(2);
+    await flushBackgroundDispatch();
+
+    expect(result?.sessionIds).toHaveLength(2);
+    expect(listAgentsCalls).toEqual([normalizedWorktree]);
+    // The load seeded the canonical key, not the raw Windows spelling.
+    expect(useAgentsStore.getState().agentsByDirectory[normalizedWorktree]?.map((entry) => entry.name)).toEqual(['build']);
+    expect(useAgentsStore.getState().agentsByDirectory[rawWorktree]).toBeUndefined();
+    // The guard reads that same entry, so the missing agent is provable.
+    expect(resolveAvailableAgentForDirectory(rawWorktree, AGENT)).toEqual({ reason: 'missing' });
+    for (const call of routeMessageCalls) {
+      expect(call.directory).toBe(rawWorktree);
       expect(call.agent).toBeUndefined();
     }
     expect(toastInfoCalls).toHaveLength(1);

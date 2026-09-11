@@ -15,6 +15,7 @@ import { useProjectsStore } from './useProjectsStore';
 import { useSnippetsStore } from './useSnippetsStore';
 import { useGlobalSessionsStore } from './useGlobalSessionsStore';
 import { getMultiRunSessionTitle } from '@/lib/multirun/title';
+import { normalizePath } from '@/lib/pathNormalization';
 import { getSyncChildStores, registerSessionDirectory } from '@/sync/sync-refs';
 import { resolveAvailableAgentForDirectory, useAgentsStore } from './useAgentsStore';
 import { toast } from '@/components/ui';
@@ -45,16 +46,8 @@ const generateWorktreeNameSeed = (groupSlug: string, modelSlug: string): string 
  */
 let multiRunNoticeBatchSequence = 0;
 
-const normalizePath = (value: string): string => {
-  const replaced = value.replace(/\\/g, '/');
-  if (replaced === '/') {
-    return '/';
-  }
-  return replaced.length > 1 ? replaced.replace(/\/+$/, '') : replaced;
-};
-
 const registerCreatedSession = (session: Session, directory: string): Session => {
-  const normalizedDirectory = normalizePath(directory);
+  const normalizedDirectory = normalizePath(directory) ?? directory;
   const sessionDirectory = (session as Session & { directory?: string | null }).directory;
   const sessionWithDirectory = typeof sessionDirectory === 'string' && sessionDirectory.trim().length > 0
     ? session
@@ -311,11 +304,17 @@ export const useMultiRunStore = create<MultiRunStore>()(
               // absence against that directory's list. A freshly created
               // worktree has never loaded: load each distinct run directory
               // before resolving, or the guard fails open and the unavailable
-              // agent still reaches the wire. A failed load leaves the entry
+              // agent still reaches the wire. Loading uses the same normalized
+              // spelling the guard reads, so the entry lands under the key it
+              // checks on every platform. A failed load leaves the entry
               // missing, which keeps that fail-open behavior. Without a
               // requested agent there is nothing to resolve, so no load runs.
               if (agent) {
-                const runDirectories = Array.from(new Set(createdRuns.map((run) => run.worktreePath)));
+                const runDirectories = Array.from(new Set(
+                  createdRuns
+                    .map((run) => normalizePath(run.worktreePath))
+                    .filter((directory): directory is string => directory !== null),
+                ));
                 await Promise.allSettled(
                   runDirectories.map((directory) => useAgentsStore.getState().loadAgents(directory)),
                 );
