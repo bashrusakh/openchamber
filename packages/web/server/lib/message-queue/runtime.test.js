@@ -144,7 +144,7 @@ describe('parseQueuedItemInput', () => {
   });
 
   it('accepts an enqueue idempotency key exactly once', async () => {
-    const { runtime } = createRuntime();
+    const { runtime } = createRuntime({ dispatchQuietMs: 60_000 });
     const first = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'once' }), 'enqueue-once');
     const replay = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'once' }), 'enqueue-once', first.session.generation);
 
@@ -165,7 +165,7 @@ describe('parseQueuedItemInput', () => {
   });
 
   it('restores a taken batch through its durable receipt and makes replay harmless', async () => {
-    const { runtime } = createRuntime();
+    const { runtime } = createRuntime({ dispatchQuietMs: 60_000 });
     const queued = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'restore me' }));
     const taken = await runtime.take(SESSION, DIRECTORY, queued.itemId, false, 'take-once', queued.session.generation);
 
@@ -530,7 +530,7 @@ describe('parseQueuedItemInput', () => {
   });
 
   it('rejects an oversized take receipt before removing the queued item', async () => {
-    const { runtime } = createRuntime({ takeReceiptPayloadLimitBytes: 100 });
+    const { runtime } = createRuntime({ takeReceiptPayloadLimitBytes: 100, dispatchQuietMs: 60_000 });
     const queued = await runtime.enqueue(SESSION, DIRECTORY, item({
       attachments: [{ id: 'large', filename: 'large.txt', mimeType: 'text/plain', size: 1000, source: 'local', dataUrl: `data:text/plain,${'x'.repeat(200)}` }],
     }));
@@ -867,7 +867,7 @@ describe('message queue runtime', () => {
     const original = JSON.stringify(persistedEnvelope({ revision: 7, sessions: { [SESSION]: { directory: DIRECTORY, items: [{ id: 'recoverable', createdAt: 1, ...item() }] } }, ...invalidField }));
     const filePath = path.join(dataDir, 'message-queue.json');
     fs.writeFileSync(filePath, original);
-    const { runtime } = createRuntime({ dataDir });
+    const { runtime } = createRuntime({ dataDir, dispatchQuietMs: 60_000 });
 
     await runtime.load();
 
@@ -980,7 +980,7 @@ describe('message queue runtime', () => {
   });
 
   it('retains a bounded context preview in snapshots and broadcasts without exposing the full payload', async () => {
-    const { runtime, broadcasts } = createRuntime();
+    const { runtime, broadcasts } = createRuntime({ dispatchQuietMs: 60_000 });
     runtime.start();
     const context = [{ kind: 'context', text: 'Full quoted content', metadata: { openchamberContext: { kind: 'chat-quote', quote: 'Original answer', text: 'Explain this' } } }];
     const { itemId, session } = await runtime.enqueue(SESSION, DIRECTORY, item({ content: '', text: '', context, contextPreview: 'Explain this' }));
@@ -999,7 +999,7 @@ describe('message queue runtime', () => {
   });
 
   it('derives a preview for older queued annotations without a saved summary', async () => {
-    const { runtime } = createRuntime();
+    const { runtime } = createRuntime({ dispatchQuietMs: 60_000 });
     runtime.start();
     await runtime.enqueue(SESSION, DIRECTORY, item({ content: '', text: '', context: [
       { kind: 'instruction', text: 'Use the skill' },
@@ -1197,7 +1197,7 @@ describe('message queue runtime', () => {
   });
 
   it('keeps captured context out of snapshots and broadcasts, and hands it back on take', async () => {
-    const { runtime, broadcasts } = createRuntime();
+    const { runtime, broadcasts } = createRuntime({ dispatchQuietMs: 60_000 });
     runtime.start();
     const context = [{ kind: 'synthetic', text: 'a large diff' }];
     const queued = await runtime.enqueue(SESSION, DIRECTORY, item({ context }));
