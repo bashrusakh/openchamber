@@ -105,6 +105,15 @@ describe('QueuedMessageChips', () => {
   const findSendButton = (): HTMLButtonElement | null =>
     Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'chat.queuedMessage.send') ?? null;
 
+  // The panel starts collapsed: chip rows and their buttons only mount after
+  // the header toggle expands it.
+  const expandPanel = async () => {
+    const toggle = host.querySelector<HTMLButtonElement>('button[aria-expanded]');
+    if (!toggle) throw new Error('queue panel toggle was not rendered');
+    if (toggle.getAttribute('aria-expanded') === 'true') return;
+    await act(async () => toggle.click());
+  };
+
   beforeEach(() => {
     resetMockStates();
     windowInstance = new Window();
@@ -139,6 +148,7 @@ describe('QueuedMessageChips', () => {
     });
 
     await renderChips();
+    await expandPanel();
 
     expect(host.textContent).toContain('chat.queuedMessage.title');
     expect(host.textContent).toContain('chat.queuedMessage.waiting');
@@ -166,6 +176,7 @@ describe('QueuedMessageChips', () => {
     });
 
     await renderChips();
+    await expandPanel();
 
     expect(host.textContent).not.toContain('chat.queuedMessage.waiting');
     expect(host.querySelector<SVGElement>('use[href="#oc-loader-4"]')).toBeNull();
@@ -184,6 +195,7 @@ describe('QueuedMessageChips', () => {
     });
 
     await renderChips();
+    await expandPanel();
 
     const sendButtons = () => Array.from(host.querySelectorAll('button')).filter(
       (button) => button.textContent === 'chat.queuedMessage.send',
@@ -198,6 +210,7 @@ describe('QueuedMessageChips', () => {
       useMessageQueueStore.getState().markSending(target, head.id);
     });
     await renderChips();
+    await expandPanel();
 
     expect(sendButtons()[0]?.disabled).toBe(true);
     expect(sendButtons()[1]?.disabled).toBe(true);
@@ -232,6 +245,7 @@ describe('QueuedMessageChips', () => {
     await renderChips((message) => {
       edited = { content: message.content, additionalParts: message.additionalParts };
     });
+    await expandPanel();
 
     const editButton = Array.from(host.querySelectorAll('button')).find(
       (button) => button.textContent === 'chat.queuedMessage.edit',
@@ -251,6 +265,7 @@ describe('QueuedMessageChips', () => {
     });
 
     await renderChips();
+    await expandPanel();
 
     expect(findSendButton()?.disabled).toBe(true);
     expect(host.querySelector<SVGElement>('use[href="#oc-loader-4"]')).not.toBeNull();
@@ -259,6 +274,7 @@ describe('QueuedMessageChips', () => {
       activityMockState.phase = 'idle';
     });
     await renderChips();
+    await expandPanel();
 
     expect(host.textContent).not.toContain('chat.queuedMessage.waiting');
     expect(host.querySelector<SVGElement>('use[href="#oc-loader-4"]')).toBeNull();
@@ -279,6 +295,7 @@ describe('QueuedMessageChips', () => {
     });
 
     await renderChips();
+    await expandPanel();
 
     expect(host.textContent).toContain('chat.queuedMessage.waiting');
     const sendButton = findSendButton();
