@@ -27,6 +27,40 @@ mock.module("@/lib/desktop", () => ({ ...desktop, isVSCodeRuntime: () => false }
 mock.module("@/lib/runtime-switch", () => ({ getRuntimeKey: () => activeRuntimeKey, getRuntimeApiBaseUrl: () => activeRuntimeBaseUrl }))
 mock.module("@/lib/persistence", () => ({ loadDesktopSettings: async () => ({}), updateDesktopSettings: async () => undefined }))
 
+const HOLD_IDENTITY_STORAGE_KEY = "openchamber-message-queue-hold.v1"
+
+const createFakeStorage = (): Storage => {
+  const store = new Map<string, string>()
+  const storage: Storage = {
+    getItem: (key) => store.get(key) ?? null,
+    setItem: (key, value) => {
+      store.set(key, String(value))
+    },
+    removeItem: (key) => {
+      store.delete(key)
+    },
+    clear: () => store.clear(),
+    key: (index) => Array.from(store.keys())[index] ?? null,
+    get length() {
+      return store.size
+    },
+  }
+  return storage
+}
+
+// Hold identity is persisted per runtime; tests control that storage directly
+// so a fresh module instance can be exercised as a page reload.
+const realSafeStorage = await import("./utils/safeStorage")
+let holdIdentityStorage = createFakeStorage()
+mock.module("./utils/safeStorage", () => ({
+  ...realSafeStorage,
+  getSafeStorage: () => holdIdentityStorage,
+}))
+
+const importFreshMessageQueueStore = async (): Promise<typeof import("./messageQueueStore")> => (
+  import(`./messageQueueStore.ts?test=${Date.now()}-${Math.random()}`)
+)
+
 const {
   applyMessageQueueUpdatedEvent,
   createMessageQueueTarget,
@@ -103,6 +137,7 @@ const attachment: AttachedFile = {
 }
 
 beforeEach(() => {
+  holdIdentityStorage = createFakeStorage()
   useMessageQueueStore.getState().resetForRuntimeSwitch(activeRuntimeKey)
   activeRuntimeKey = "runtime-a"
   activeRuntimeBaseUrl = "http://runtime-a.test"
@@ -1394,5 +1429,160 @@ describe("server-owned message queue", () => {
     expect(oldRuntimeReleases.every((call) => call.body.clientToken === oldTarget.clientToken)).toBe(true)
     expect(oldRuntimeReleases.every((call) => call.body.sequence === 2)).toBe(true)
     expect(calls[1]?.body.held).toBe(true)
+  })
+
+  test("a reload keeps the persisted hold owner and continues its sequence", async () => {
+    // Emulate the strict server owner rule: a foreign token cannot mutate an
+    // active hold, and a stale same-token sequence is refused with an echo.
+    let ownerToken: string | null = null
+    let ownerSequence = 0
+    respond = (call) => {
+      if (!call.path.endsWith("/hold")) return json({ revision: 1, session: session([]) })
+      const held = call.body.held === true
+      const sequence = call.body.sequence
+      const clientToken = call.body.clientToken
+      if (ownerToken !== null && ownerToken !== clientToken) {
+        return json({ held: true, expiresAt: 100, sequence: ownerSequence })
+      }
+      if (sequence < ownerSequence) {
+        return json({ held: ownerToken !== null, expiresAt: ownerToken !== null ? 100 : null, sequence: ownerSequence })
+      }
+      ownerToken = held ? clientToken : null
+      ownerSequence = sequence
+      return json({ held, expiresAt: held ? 100 : null, sequence })
+    }
+
+    const firstTarget = useMessageQueueStore.getState().getServerHoldTarget(target.sessionId, target.directory)
+    await useMessageQueueStore.getState().setServerHold(firstTarget, true)
+    expect(calls[0]?.body).toMatchObject({ held: true, sequence: 1, clientToken: firstTarget.clientToken })
+    expect(ownerToken).toBe(firstTarget.clientToken)
+
+    // Simulate a page reload: fresh module state, same browser storage.
+    const reloaded = await importFreshMessageQueueStore()
+    const reloadedTarget = reloaded.useMessageQueueStore.getState().getServerHoldTarget(target.sessionId, target.directory)
+    expect(reloadedTarget.clientToken).toBe(firstTarget.clientToken)
+
+    // The previous incarnation's hold is re-asserted as its owner, not refused
+    // as a foreign token, and the sequence continues past the server's echo.
+    await reloaded.useMessageQueueStore.getState().setServerHold(reloadedTarget, true)
+    expect(calls[1]?.body).toMatchObject({ held: true, sequence: 2, clientToken: firstTarget.clientToken })
+    expect(ownerToken).toBe(firstTarget.clientToken)
+
+    await reloaded.useMessageQueueStore.getState().setServerHold(reloadedTarget, false)
+    expect(calls[2]?.body).toMatchObject({ held: false, sequence: 3, clientToken: firstTarget.clientToken })
+    expect(ownerToken).toBeNull()
+  })
+
+  test("switching away and back keeps the runtime's persisted hold owner", () => {
+    const firstTarget = useMessageQueueStore.getState().getServerHoldTarget(target.sessionId, target.directory)
+    activeRuntimeKey = "runtime-b"
+    useMessageQueueStore.getState().resetForRuntimeSwitch("runtime-a")
+    const otherTarget = useMessageQueueStore.getState().getServerHoldTarget(target.sessionId, target.directory)
+    activeRuntimeKey = "runtime-a"
+    useMessageQueueStore.getState().resetForRuntimeSwitch("runtime-b")
+    const backTarget = useMessageQueueStore.getState().getServerHoldTarget(target.sessionId, target.directory)
+
+    expect(backTarget.clientToken).toBe(firstTarget.clientToken)
+    expect(otherTarget.clientToken).not.toBe(firstTarget.clientToken)
+  })
+
+  test("a release refused with a newer echoed sequence retries and clears the hold", async () => {
+    let serverHeld = false
+    let serverSequence = 0
+    respond = (call) => {
+      if (!call.path.endsWith("/hold")) return json({ revision: 1, session: session([]) })
+      const held = call.body.held === true
+      const sequence = call.body.sequence
+      if (serverSequence > sequence) {
+        return json({ held: serverHeld, expiresAt: serverHeld ? 100 : null, sequence: serverSequence })
+      }
+      serverHeld = held
+      serverSequence = sequence
+      return json({ held, expiresAt: held ? 100 : null, sequence })
+    }
+
+    const holdTarget = useMessageQueueStore.getState().getServerHoldTarget(target.sessionId, target.directory)
+    await useMessageQueueStore.getState().setServerHold(holdTarget, true)
+    // The server's owner sequence is ahead of the client's counter; the first
+    // release is refused with that echo and must retry above it.
+    serverSequence = 40
+    await useMessageQueueStore.getState().setServerHold(holdTarget, false)
+
+    expect(serverHeld).toBe(false)
+    const releaseCalls = calls.filter((call) => call.body.held === false)
+    expect(releaseCalls.map((call) => call.body.sequence)).toEqual([2, 41])
+  })
+
+  test("a stale hold assertion follows the server's echoed sequence", async () => {
+    let serverHeld = false
+    let serverSequence = 0
+    respond = (call) => {
+      if (!call.path.endsWith("/hold")) return json({ revision: 1, session: session([]) })
+      const held = call.body.held === true
+      const sequence = call.body.sequence
+      if (sequence < serverSequence) {
+        return json({ held: serverHeld, expiresAt: serverHeld ? 100 : null, sequence: serverSequence })
+      }
+      serverHeld = held
+      serverSequence = sequence
+      return json({ held, expiresAt: held ? 100 : null, sequence })
+    }
+
+    const holdTarget = useMessageQueueStore.getState().getServerHoldTarget(target.sessionId, target.directory)
+    await useMessageQueueStore.getState().setServerHold(holdTarget, true)
+    // A concurrent owner advanced the sequence; the stale assert must retry
+    // above the echo instead of leaving the old hold unextended.
+    serverSequence = 10
+    await useMessageQueueStore.getState().setServerHold(holdTarget, true)
+
+    expect(calls.map((call) => call.body)).toMatchObject([
+      { held: true, sequence: 1 },
+      { held: true, sequence: 2 },
+      { held: true, sequence: 11 },
+    ])
+    expect(serverHeld).toBe(true)
+    expect(serverSequence).toBe(11)
+  })
+
+  test("corrupt hold identity storage falls back to a working in-memory identity", async () => {
+    holdIdentityStorage.setItem(HOLD_IDENTITY_STORAGE_KEY, "{not json")
+    respond = (call) => call.path.endsWith("/hold")
+      ? json({ held: call.body.held === true, expiresAt: call.body.held === true ? 100 : null, sequence: call.body.sequence })
+      : json({ revision: 1, session: session([]) })
+
+    const holdTarget = useMessageQueueStore.getState().getServerHoldTarget(target.sessionId, target.directory)
+    await useMessageQueueStore.getState().setServerHold(holdTarget, true)
+    await useMessageQueueStore.getState().setServerHold(holdTarget, false)
+
+    expect(calls.map((call) => call.body)).toMatchObject([
+      { held: true, sequence: 1 },
+      { held: false, sequence: 2 },
+    ])
+    expect(calls[0]?.body.clientToken).toBeTruthy()
+  })
+
+  test("blocked hold identity storage keeps a stable in-memory identity", async () => {
+    const blockedStorage: Storage = {
+      getItem: () => { throw new Error("storage blocked") },
+      setItem: () => { throw new Error("storage blocked") },
+      removeItem: () => { throw new Error("storage blocked") },
+      clear: () => { throw new Error("storage blocked") },
+      key: () => { throw new Error("storage blocked") },
+      get length(): number { throw new Error("storage blocked") },
+    }
+    holdIdentityStorage = blockedStorage
+    respond = (call) => call.path.endsWith("/hold")
+      ? json({ held: call.body.held === true, expiresAt: call.body.held === true ? 100 : null, sequence: call.body.sequence })
+      : json({ revision: 1, session: session([]) })
+
+    const holdTarget = useMessageQueueStore.getState().getServerHoldTarget(target.sessionId, target.directory)
+    await useMessageQueueStore.getState().setServerHold(holdTarget, true)
+    await useMessageQueueStore.getState().setServerHold(holdTarget, false)
+
+    expect(calls.map((call) => call.body)).toMatchObject([
+      { held: true, sequence: 1 },
+      { held: false, sequence: 2 },
+    ])
+    expect(calls[1]?.body.clientToken).toBe(calls[0]?.body.clientToken)
   })
 })

@@ -142,14 +142,18 @@ idle between iterations; the UI tells the server to hold that session's queue
 when the run ends. A hold expires on its own (default 5 min, cap 10 min)
 because the UI that asserted it may be gone. Expiry re-arms a queued session
 through the normal quiet, abort, and retry gates. The UI re-asserts it every
-two minutes while the run continues. Each UI incarnation supplies a fresh
-`clientToken` and monotonically increasing `sequence`. While a hold is active,
-only its current token can mutate it; a different token's sequence-1 assertion
-cannot replace the active owner. After the hold is released or expires, a
-different token may establish a new hold at sequence 1. Delayed lower-sequence
-mutations from the same token are ignored. Hold requests also carry the
-captured session generation, so deletion and session-ID reuse reject stale
-holds. Releasing arms a dispatch.
+two minutes while the run continues. The UI persists one `clientToken` per
+runtime and the last accepted or echoed `sequence` per session in browser
+storage, so a reload continues as the same owner with a monotonically
+increasing sequence. While a hold is active, only its current token can
+mutate it; a different token's sequence-1 assertion cannot replace the active
+owner. After the hold is released or expires, a different token may establish
+a new hold at sequence 1. Delayed lower-sequence mutations from the same
+token are ignored. When the server refuses a stale sequence it echoes the
+sequence it holds, and the UI retries just above that echo (bounded; failed
+releases keep retrying in the UI's bounded release lane). Hold requests also
+carry the captured session generation, so deletion and session-ID reuse
+reject stale holds. Releasing arms a dispatch.
 
 ## Routes (`/api/message-queue`)
 

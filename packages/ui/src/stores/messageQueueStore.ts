@@ -3,7 +3,7 @@ import { devtools, persist } from 'zustand/middleware';
 import { z } from 'zod';
 import type { Event } from '@opencode-ai/sdk/v2';
 import { createInputHistoryIdentity, createInputHistorySubmission, useInputHistoryStore } from './useInputHistoryStore';
-import { createDeferredSafeJSONStorage } from './utils/safeStorage';
+import { createDeferredSafeJSONStorage, getSafeStorage } from './utils/safeStorage';
 import type { AttachedFile } from './types/sessionTypes';
 import { contextPartMetadataSchema, type ContextPartMetadata } from '@/lib/messages/contextParts';
 import { updateDesktopSettings } from '@/lib/persistence';
@@ -281,7 +281,6 @@ const serverHoldResponseSchema = z.object({
 type ServerHoldResponse = z.infer<typeof serverHoldResponseSchema>;
 
 const createMessageQueueClientToken = (): string => `queue-client-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
-let messageQueueClientToken = createMessageQueueClientToken();
 const serverErrorSchema = z.object({
     error: z.string().optional(),
     generation: z.number().int().nonnegative().optional(),
@@ -559,6 +558,108 @@ const serverSessionDirectoryRevisions = new Map<string, number>();
 const serverHoldMutationVersions = new Map<string, number>();
 const serverHoldReleaseChains = new Map<string, Promise<void>>();
 const HOLD_RELEASE_RETRY_DELAYS_MS = [0, 2_000, 10_000, 30_000, 120_000] as const;
+const MAX_HOLD_MUTATION_ECHO_RETRIES = 2;
+
+/**
+ * Hold ownership is the UI's identity, not a credential: the server refuses a
+ * hold mutation from any token but the active hold's owner. That token has to
+ * outlive a page load, or a reload can neither re-assert nor release the
+ * previous incarnation's hold and the queue sits behind a foreign hold until
+ * the TTL expires. Persist one token per runtime plus the last sequence the
+ * server accepted or echoed for each session, so a reload continues where the
+ * previous incarnation stopped. The stored payload is an owner id and sequence
+ * numbers only.
+ */
+const HOLD_IDENTITY_STORAGE_KEY = 'openchamber-message-queue-hold.v1';
+const MAX_HOLD_IDENTITY_RUNTIMES = 8;
+const MAX_HOLD_IDENTITY_SESSIONS = 50;
+
+const persistedHoldIdentitySessionSchema = z.object({
+    sequence: z.number().int().nonnegative(),
+    updatedAt: z.number().finite(),
+});
+const persistedHoldIdentityRuntimeSchema = z.object({
+    clientToken: z.string().min(1),
+    updatedAt: z.number().finite(),
+    sequences: z.record(z.string(), persistedHoldIdentitySessionSchema),
+});
+const persistedHoldIdentityEnvelopeSchema = z.object({
+    version: z.literal(1),
+    runtimes: z.record(z.string(), persistedHoldIdentityRuntimeSchema),
+});
+type PersistedHoldIdentityEnvelope = z.infer<typeof persistedHoldIdentityEnvelopeSchema>;
+
+const emptyHoldIdentityEnvelope = (): PersistedHoldIdentityEnvelope => ({ version: 1, runtimes: {} });
+
+const readHoldIdentityEnvelope = (): PersistedHoldIdentityEnvelope => {
+    try {
+        const raw = getSafeStorage().getItem(HOLD_IDENTITY_STORAGE_KEY);
+        if (!raw) return emptyHoldIdentityEnvelope();
+        const parsed = persistedHoldIdentityEnvelopeSchema.safeParse(JSON.parse(raw));
+        return parsed.success ? parsed.data : emptyHoldIdentityEnvelope();
+    } catch {
+        // A blocked, corrupt, or over-quota store must not break hold mutations.
+        return emptyHoldIdentityEnvelope();
+    }
+};
+
+const writeHoldIdentityEnvelope = (envelope: PersistedHoldIdentityEnvelope): void => {
+    try {
+        getSafeStorage().setItem(HOLD_IDENTITY_STORAGE_KEY, JSON.stringify(envelope));
+    } catch {
+        // The in-memory maps remain authoritative for this load.
+    }
+};
+
+const cachedHoldIdentityClientTokens = new Map<string, string>();
+
+/** One hold owner per runtime; persisted so a reload keeps the same identity. */
+const getMessageQueueClientToken = (runtimeKey: string): string => {
+    const cached = cachedHoldIdentityClientTokens.get(runtimeKey);
+    if (cached) return cached;
+    const persisted = readHoldIdentityEnvelope().runtimes[runtimeKey]?.clientToken;
+    const clientToken = persisted ?? createMessageQueueClientToken();
+    cachedHoldIdentityClientTokens.set(runtimeKey, clientToken);
+    return clientToken;
+};
+
+const readPersistedHoldMutationSequence = (runtimeKey: string, sessionId: string): number | undefined =>
+    readHoldIdentityEnvelope().runtimes[runtimeKey]?.sequences[sessionId]?.sequence;
+
+const persistHoldMutationSequence = (runtimeKey: string, sessionId: string, sequence: number): void => {
+    const envelope = readHoldIdentityEnvelope();
+    const previous = envelope.runtimes[runtimeKey];
+    const existing = previous?.sequences[sessionId];
+    if (existing && existing.sequence >= sequence) return;
+    const now = Date.now();
+    const sequences = { ...(previous?.sequences ?? {}), [sessionId]: { sequence, updatedAt: now } };
+    envelope.runtimes[runtimeKey] = {
+        clientToken: getMessageQueueClientToken(runtimeKey),
+        updatedAt: now,
+        sequences: Object.fromEntries(
+            Object.entries(sequences)
+                .sort(([, left], [, right]) => right.updatedAt - left.updatedAt)
+                .slice(0, MAX_HOLD_IDENTITY_SESSIONS),
+        ),
+    };
+    envelope.runtimes = Object.fromEntries(
+        Object.entries(envelope.runtimes)
+            .sort(([, left], [, right]) => right.updatedAt - left.updatedAt)
+            .slice(0, MAX_HOLD_IDENTITY_RUNTIMES),
+    );
+    writeHoldIdentityEnvelope(envelope);
+};
+
+const prunePersistedHoldMutationSequence = (runtimeKey: string, sessionId: string): void => {
+    const envelope = readHoldIdentityEnvelope();
+    const previous = envelope.runtimes[runtimeKey];
+    if (!previous || !(sessionId in previous.sequences)) return;
+    const sequences = { ...previous.sequences };
+    delete sequences[sessionId];
+    envelope.runtimes[runtimeKey] = { ...previous, sequences };
+    writeHoldIdentityEnvelope(envelope);
+};
+
 type PendingServerHoldRelease = {
     target: MessageQueueHoldTarget;
     sequence: number;
@@ -642,15 +743,26 @@ const queueMutationInit = (target: Pick<MessageQueueTarget, 'runtimeKey' | 'dire
     return jsonInit(method, capturedGeneration === undefined ? requestBody : { ...requestBody, generation: capturedGeneration });
 };
 const nextServerHoldMutationSequence = (target: MessageQueueHoldTarget): number => {
-    const key = `${getServerSessionKey(target.runtimeKey, target.sessionId)}\n${target.clientToken}`;
-    const sequence = (serverHoldMutationSequences.get(key) ?? 0) + 1;
+    const key = getServerSessionKey(target.runtimeKey, target.sessionId);
+    const previous = Math.max(
+        serverHoldMutationSequences.get(key) ?? 0,
+        readPersistedHoldMutationSequence(target.runtimeKey, target.sessionId) ?? 0,
+    );
+    const sequence = previous + 1;
     serverHoldMutationSequences.set(key, sequence);
+    persistHoldMutationSequence(target.runtimeKey, target.sessionId, sequence);
     return sequence;
 };
 const observeServerHoldMutationSequence = (target: MessageQueueHoldTarget, sequence: number | undefined): void => {
-    if (sequence === undefined) return;
-    const key = `${getServerSessionKey(target.runtimeKey, target.sessionId)}\n${target.clientToken}`;
-    serverHoldMutationSequences.set(key, Math.max(serverHoldMutationSequences.get(key) ?? 0, sequence));
+    if (sequence === undefined || !Number.isSafeInteger(sequence) || sequence < 0) return;
+    const key = getServerSessionKey(target.runtimeKey, target.sessionId);
+    const current = Math.max(
+        serverHoldMutationSequences.get(key) ?? 0,
+        readPersistedHoldMutationSequence(target.runtimeKey, target.sessionId) ?? 0,
+    );
+    if (sequence <= current) return;
+    serverHoldMutationSequences.set(key, sequence);
+    persistHoldMutationSequence(target.runtimeKey, target.sessionId, sequence);
 };
 const nextServerHoldMutationVersion = (target: MessageQueueHoldTarget): number => {
     const key = getServerSessionKey(target.runtimeKey, target.sessionId);
@@ -1579,8 +1691,10 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     pending.timer = setTimeout(() => {
                         pending.timer = undefined;
                         if (pendingServerHoldReleases.get(key) !== pending) return;
-                        void sendServerHoldMutation(pending.target, false, pending.sequence, {
+                        void convergeServerHoldMutation(pending.target, false, pending.sequence, {
                             releaseForRuntimeSwitch: true,
+                        }).then(() => {
+                            if (pendingServerHoldReleases.get(key) === pending) pendingServerHoldReleases.delete(key);
                         }).catch((error) => {
                             if (pendingServerHoldReleases.get(key) !== pending || !(error instanceof Error) || !shouldRetryServerHoldRelease(error)) {
                                 if (pendingServerHoldReleases.get(key) === pending) pendingServerHoldReleases.delete(key);
@@ -1609,15 +1723,41 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         ? enqueueServerHoldRelease(target, send, options)
                         : enqueueServerMutation(target, send));
                     observeServerHoldMutationSequence(target, result.sequence);
-                    if (!held && result.held) {
-                        if (result.sequence !== undefined && result.sequence !== sequence) {
-                            clearPendingServerHoldRelease(target);
-                            return result;
-                        }
-                        throw new Error('Queue hold release was not accepted');
-                    }
-                    if (!held) clearPendingServerHoldRelease(target);
                     return result;
+                };
+
+                /**
+                 * The server refuses a mutation it does not apply and echoes the
+                 * sequence it currently holds: a stale same-token sequence, or a
+                 * different active owner. Follow that echo with a fresh sequence
+                 * so an assert or release converges instead of being abandoned.
+                 * Bounded here; releases that still fail land in the pending
+                 * release lane, which owns the longer backoff.
+                 */
+                const convergeServerHoldMutation = async (
+                    target: MessageQueueHoldTarget,
+                    held: boolean,
+                    sequence: number,
+                    options: MessageQueueHoldOptions,
+                ): Promise<number> => {
+                    let attemptSequence = sequence;
+                    for (let attempt = 0; ; attempt += 1) {
+                        const result = await sendServerHoldMutation(target, held, attemptSequence, options);
+                        const settled = held
+                            ? result.held && (result.sequence === undefined || result.sequence === attemptSequence)
+                            : !result.held;
+                        if (settled) return attemptSequence;
+                        const echoed = result.sequence;
+                        if (echoed === undefined || echoed === attemptSequence || attempt >= MAX_HOLD_MUTATION_ECHO_RETRIES) {
+                            // A held session owned by another token satisfies an
+                            // assertion: the queue stays held while that owner
+                            // lasts, and the next re-assert tries again. Only a
+                            // release that keeps being refused is an error.
+                            if (held && result.held) return attemptSequence;
+                            throw new Error(held ? 'Queue hold was not accepted' : 'Queue hold release was not accepted');
+                        }
+                        attemptSequence = echoed + 1;
+                    }
                 };
 
                 /** Server state wins; a failed round-trip re-reads it instead of guessing. */
@@ -2195,7 +2335,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                                   return [localCompatibilityMessage];
                               }
                               if (existingPendingTake && !existingPendingTake.invalidated) return [];
-                             const operationId = `take-${messageQueueClientToken}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                             const operationId = `take-${getMessageQueueClientToken(target.runtimeKey)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                              const pendingTake: PendingServerTake = {
                                  target: { ...target },
                                  operationId,
@@ -2370,6 +2510,8 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         serverSessionDirectoryRevisions.delete(sessionKey);
                         serverSessionDeleted.delete(sessionKey);
                         serverSessionRestoreRequirements.delete(sessionKey);
+                        serverHoldMutationSequences.delete(sessionKey);
+                        prunePersistedHoldMutationSequence(target.runtimeKey, target.sessionId);
                         clearLocalQueueContexts(key);
                         set((state) => ({
                             queuedMessages: withoutKey(state.queuedMessages, key),
@@ -2565,7 +2707,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                              return false;
                          }
                          const operationId = capturedOperationId
-                             ?? `restore-${messageQueueClientToken}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                             ?? `restore-${getMessageQueueClientToken(target.runtimeKey)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                          const takenGeneration = pendingTake?.operationId === operationId
                              ? pendingTake.serverGeneration ?? pendingTake.takeGeneration
                              : messages.map((message) => takenServerGenerations.get(key)?.get(message.id)).find((value): value is number => value !== undefined);
@@ -2661,6 +2803,8 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                               && candidate.sessionId === target.sessionId
                               && (getMessageQueueKey(candidate) === targetKey || authoritativeDirectory === target.directory);
                           clearLocalQueueContexts(targetKey);
+                         serverHoldMutationSequences.delete(sessionKey);
+                         prunePersistedHoldMutationSequence(target.runtimeKey, target.sessionId);
                          set((state) => {
                              // This is the scoped cleanup path used by a
                              // directory/session deletion identity. Explicit
@@ -2976,7 +3120,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                               directory: serverSessionDirectories.get(sessionKey) ?? directoryInput ?? fallbackTarget?.directory ?? '',
                               sessionId,
                               generation: serverSessionLifecycleGenerations.get(sessionKey) ?? 0,
-                              clientToken: messageQueueClientToken,
+                              clientToken: getMessageQueueClientToken(runtimeKey),
                               deleted: serverSessionDeleted.has(sessionKey),
                               runtimeTarget: captureRuntimeFetchTarget(),
                           };
@@ -2997,11 +3141,11 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                           const sequence = nextServerHoldMutationSequence(target);
                           if (held) clearPendingServerHoldRelease(target, sequence);
                           try {
-                              const result = await sendServerHoldMutation(target, held, sequence, {
+                              const settledSequence = await convergeServerHoldMutation(target, held, sequence, {
                                   ...options,
                                   releaseForRuntimeSwitch,
                               });
-                              if (held) clearPendingServerHoldRelease(target, result.sequence ?? sequence);
+                              if (held) clearPendingServerHoldRelease(target, settledSequence);
                               return;
                          } catch (error) {
                              if (
@@ -3026,7 +3170,10 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                          hydrationGeneration += 1;
                          hydrationInFlight = null;
                          resyncRequested = false;
-                         messageQueueClientToken = createMessageQueueClientToken();
+                         // The hold owner token is per runtime and persisted: a
+                         // switch must not rotate it, or the previous runtime's
+                         // captured targets could never release their hold and
+                         // switching back would look like a foreign owner.
                          if (previousRuntimeKey) {
                              snapshotRevisions.delete(previousRuntimeKey);
                              for (const key of appliedRevisions.keys()) {
