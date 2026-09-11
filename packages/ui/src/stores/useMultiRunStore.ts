@@ -16,6 +16,9 @@ import { useSnippetsStore } from './useSnippetsStore';
 import { useGlobalSessionsStore } from './useGlobalSessionsStore';
 import { getMultiRunSessionTitle } from '@/lib/multirun/title';
 import { getSyncChildStores, registerSessionDirectory } from '@/sync/sync-refs';
+import { resolveAvailableAgentForDirectory } from './useAgentsStore';
+import { toast } from '@/components/ui';
+import { formatMessage, useI18nStore } from '@/lib/i18n';
 
 const toGitSafeSlug = (value: string): string => {
   return value
@@ -34,6 +37,13 @@ const toModelSlug = (providerID: string, modelID: string): string => {
 const generateWorktreeNameSeed = (groupSlug: string, modelSlug: string): string => {
   return `${groupSlug}/${modelSlug}`;
 };
+
+/**
+ * Distinguishes notices from separate `createMultiRun` batches. Two concurrent
+ * batches can drop the same agent name, and the toast store dedupes by id, so
+ * without a per-batch token the second batch's notice would be swallowed.
+ */
+let multiRunNoticeBatchSequence = 0;
 
 const normalizePath = (value: string): string => {
   const replaced = value.replace(/\\/g, '/');
@@ -289,13 +299,25 @@ export const useMultiRunStore = create<MultiRunStore>()(
             url: f.url,
           }));
 
+          // One identity for this batch's notices: a later batch dropping the
+          // same agent must still show its own toast.
+          const noticeBatchToken = `batch-${++multiRunNoticeBatchSequence}`;
+
           void (async () => {
             try {
               const expandText = useSnippetsStore.getState().expandText;
+              const droppedAgentNames = new Set<string>();
               await Promise.allSettled(
                 createdRuns.map(async (run) => {
                   try {
                     const text = await expandText(run.prompt).catch(() => run.prompt);
+                    // Each run sends into its own directory; a name that one
+                    // directory cannot resolve is dropped for that run and the
+                    // server applies its default. One notice covers the batch.
+                    const runAgentAvailability = resolveAvailableAgentForDirectory(run.worktreePath, agent);
+                    if (runAgentAvailability.reason === 'missing' && agent) {
+                      droppedAgentNames.add(agent);
+                    }
                     await routeMessage({
                       sessionId: run.sessionId,
                       directory: run.worktreePath,
@@ -303,7 +325,7 @@ export const useMultiRunStore = create<MultiRunStore>()(
                       providerID: run.providerID,
                       modelID: run.modelID,
                       variant: run.variant,
-                      agent,
+                      agent: runAgentAvailability.agent,
                       files: filesForMessage,
                     });
                   } catch (err) {
@@ -311,6 +333,14 @@ export const useMultiRunStore = create<MultiRunStore>()(
                   }
                 }),
               );
+              if (droppedAgentNames.size > 0) {
+                const { dictionary } = useI18nStore.getState();
+                for (const droppedName of droppedAgentNames) {
+                  toast.info(formatMessage(dictionary, 'chat.toast.agentUnavailable', { agent: droppedName }), {
+                    id: `agent-unavailable:multirun:${noticeBatchToken}:${droppedName}`,
+                  });
+                }
+              }
             } catch (err) {
               console.warn('[MultiRun] Failed to start runs:', err);
             }
