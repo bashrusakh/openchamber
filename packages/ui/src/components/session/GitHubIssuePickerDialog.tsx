@@ -88,7 +88,8 @@ export function GitHubIssuePickerDialog({
   const debouncedQuery = useDebouncedValue(query, 350);
   const isTextSearch = debouncedQuery.trim().length > 0 && !directNumber;
 
-  const refresh = React.useCallback(async () => {
+  const refresh = React.useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
     if (!projectDirectory) {
       setResult(null);
       setError(t('session.githubIssuePicker.error.noActiveProject'));
@@ -111,7 +112,8 @@ export function GitHubIssuePickerDialog({
     setIsLoading(true);
     setError(null);
     try {
-      const next = await github.issuesList(projectDirectory, { page: 1 });
+      const next = await github.issuesList(projectDirectory, { page: 1, signal });
+      if (signal?.aborted) return;
       setResult(next);
       setIssues(next.issues ?? []);
       setPage(next.page ?? 1);
@@ -120,9 +122,10 @@ export function GitHubIssuePickerDialog({
         setError(null);
       }
     } catch (e) {
+      if (signal?.aborted) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setIsLoading(false);
+      if (!signal?.aborted) setIsLoading(false);
     }
   }, [github, githubAuthChecked, githubAuthStatus, projectDirectory, t]);
 
@@ -131,8 +134,12 @@ export function GitHubIssuePickerDialog({
     if (githubAuthChecked && githubAuthStatus?.connected === false) return;
     if (!github?.issuesList) return;
     if (!debouncedQuery.trim()) {
-      void refresh();
-      return;
+      const controller = new AbortController();
+      void refresh(controller.signal);
+      return () => {
+        controller.abort();
+        setIsLoading(false);
+      };
     }
 
     const controller = new AbortController();
@@ -157,6 +164,7 @@ export function GitHubIssuePickerDialog({
           }
           if (!issueRes.issue) {
             setError(t('session.githubIssuePicker.error.issueNotFound'));
+            setResult({ connected: true, repo: issueRes.repo ?? null, issues: [], page: 1, hasMore: false });
             setIssues([]);
             setHasMore(false);
             setPage(1);
@@ -248,8 +256,14 @@ export function GitHubIssuePickerDialog({
       setIsLoading(false);
       return;
     }
-    void refresh();
-  }, [open, refresh]);
+    if (debouncedQuery.trim()) return;
+    const controller = new AbortController();
+    void refresh(controller.signal);
+    return () => {
+      controller.abort();
+      setIsLoading(false);
+    };
+  }, [open, refresh, debouncedQuery]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -720,7 +734,7 @@ export function GitHubIssuePickerDialog({
                   </a>
                 </Button>
               ) : null}
-              <Button variant="outline" size="sm" onClick={refresh} disabled={isLoading || Boolean(startingIssueNumber)}>
+              <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={isLoading || Boolean(startingIssueNumber)}>
                 {t('session.githubIssuePicker.actions.refresh')}
               </Button>
             </div>

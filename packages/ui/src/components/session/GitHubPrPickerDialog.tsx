@@ -76,7 +76,8 @@ export function GitHubPrPickerDialog({
   const debouncedQuery = useDebouncedValue(query, 350);
   const isTextSearch = debouncedQuery.trim().length > 0 && !directNumber;
 
-  const refresh = React.useCallback(async () => {
+  const refresh = React.useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted) return;
     if (!projectDirectory) {
       setResult(null);
       setError(t('session.githubPrPicker.error.noActiveProject'));
@@ -99,7 +100,8 @@ export function GitHubPrPickerDialog({
     setIsLoading(true);
     setError(null);
     try {
-      const next = await github.prsList(projectDirectory, { page: 1 });
+      const next = await github.prsList(projectDirectory, { page: 1, signal });
+      if (signal?.aborted) return;
       setResult(next);
       setPrs(next.prs ?? []);
       setPage(next.page ?? 1);
@@ -108,9 +110,10 @@ export function GitHubPrPickerDialog({
         setError(null);
       }
     } catch (e) {
+      if (signal?.aborted) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setIsLoading(false);
+      if (!signal?.aborted) setIsLoading(false);
     }
   }, [github, githubAuthChecked, githubAuthStatus, projectDirectory, t]);
 
@@ -119,8 +122,12 @@ export function GitHubPrPickerDialog({
     if (githubAuthChecked && githubAuthStatus?.connected === false) return;
     if (!github?.prsList) return;
     if (!debouncedQuery.trim()) {
-      void refresh();
-      return;
+      const controller = new AbortController();
+      void refresh(controller.signal);
+      return () => {
+        controller.abort();
+        setIsLoading(false);
+      };
     }
 
     const controller = new AbortController();
@@ -148,6 +155,7 @@ export function GitHubPrPickerDialog({
           }
           if (!context.pr) {
             setError(t('session.githubPrPicker.error.prNotFound'));
+            setResult({ connected: true, repo: context.repo ?? null, prs: [], page: 1, hasMore: false });
             setPrs([]);
             setHasMore(false);
             setPage(1);
@@ -239,8 +247,14 @@ export function GitHubPrPickerDialog({
       setIsLoading(false);
       return;
     }
-    void refresh();
-  }, [open, refresh]);
+    if (debouncedQuery.trim()) return;
+    const controller = new AbortController();
+    void refresh(controller.signal);
+    return () => {
+      controller.abort();
+      setIsLoading(false);
+    };
+  }, [open, refresh, debouncedQuery]);
 
   React.useEffect(() => {
     if (!open) return;

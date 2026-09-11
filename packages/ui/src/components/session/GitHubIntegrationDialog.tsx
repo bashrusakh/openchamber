@@ -85,7 +85,8 @@ export function GitHubIntegrationDialog({
 
   const debouncedSearchQuery = useDebouncedValue(searchQuery, 350);
 
-  const loadData = React.useCallback(async (query?: string) => {
+  const loadData = React.useCallback(async (query?: string, signal?: AbortSignal) => {
+    if (signal?.aborted) return;
     if (!projectDirectory || !github) return;
     if (githubAuthChecked && githubAuthStatus?.connected === false) return;
     
@@ -96,7 +97,8 @@ export function GitHubIntegrationDialog({
     
     try {
       if (activeTab === 'issues' && github.issuesList) {
-        const result = await github.issuesList(projectDirectory, { page: 1, query });
+        const result = await github.issuesList(projectDirectory, { page: 1, query, signal });
+        if (signal?.aborted) return;
         if (result.connected === false) {
           setError(t('session.githubIntegration.error.notConnected'));
           setIssues([]);
@@ -106,7 +108,8 @@ export function GitHubIntegrationDialog({
           setHasMore(Boolean(result.hasMore));
         }
       } else if (activeTab === 'prs' && github.prsList) {
-        const result = await github.prsList(projectDirectory, { page: 1, query });
+        const result = await github.prsList(projectDirectory, { page: 1, query, signal });
+        if (signal?.aborted) return;
         if (result.connected === false) {
           setError(t('session.githubIntegration.error.notConnected'));
           setPrs([]);
@@ -117,9 +120,10 @@ export function GitHubIntegrationDialog({
         }
       }
     } catch (err) {
+      if (signal?.aborted) return;
       setError(err instanceof Error ? err.message : t('session.githubIntegration.error.loadDataFailed'));
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, [projectDirectory, github, githubAuthChecked, githubAuthStatus, activeTab, t]);
 
@@ -128,8 +132,12 @@ export function GitHubIntegrationDialog({
     if (githubAuthChecked && githubAuthStatus?.connected === false) return;
     if (!github) return;
     if (!debouncedSearchQuery.trim()) {
-      void loadData();
-      return;
+      const controller = new AbortController();
+      void loadData(undefined, controller.signal);
+      return () => {
+        controller.abort();
+        setLoading(false);
+      };
     }
 
     const controller = new AbortController();
@@ -151,11 +159,15 @@ export function GitHubIntegrationDialog({
           if (issueRes.connected === false) {
             setError(t('session.githubIntegration.error.notConnected'));
             setIssues([]);
+            setSelectedIssue(null);
+            setSelectedPr(null);
             return;
           }
           if (!issueRes.issue) {
             setError(t('session.githubIntegration.error.loadDataFailed'));
             setIssues([]);
+            setSelectedIssue(null);
+            setSelectedPr(null);
             return;
           }
           setIssues([issueRes.issue]);
@@ -170,11 +182,15 @@ export function GitHubIntegrationDialog({
           if (prRes.connected === false) {
             setError(t('session.githubIntegration.error.notConnected'));
             setPrs([]);
+            setSelectedIssue(null);
+            setSelectedPr(null);
             return;
           }
           if (!prRes.pr) {
             setError(t('session.githubIntegration.error.loadDataFailed'));
             setPrs([]);
+            setSelectedIssue(null);
+            setSelectedPr(null);
             return;
           }
           setPrs([prRes.pr]);
@@ -216,6 +232,8 @@ export function GitHubIntegrationDialog({
             : result.error);
           setIssues([]);
           setPrs([]);
+          setSelectedIssue(null);
+          setSelectedPr(null);
           return;
         }
         if ('issues' in result) {
@@ -304,9 +322,15 @@ export function GitHubIntegrationDialog({
       setHasMore(false);
       return;
     }
+    if (debouncedSearchQuery.trim()) return;
     
-    void loadData();
-  }, [open, loadData]);
+    const controller = new AbortController();
+    void loadData(undefined, controller.signal);
+    return () => {
+      controller.abort();
+      setLoading(false);
+    };
+  }, [open, loadData, debouncedSearchQuery]);
 
   // Validate branches for worktree creation
   const validateBranch = React.useCallback(async (branchName: string) => {
