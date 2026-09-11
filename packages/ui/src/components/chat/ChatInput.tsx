@@ -933,7 +933,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const parentMessageQueueKey = parentMessageQueueTarget ? getMessageQueueKey(parentMessageQueueTarget) : null;
     const messageQueueTarget = !isBtwActive ? parentMessageQueueTarget : null;
     const messageQueueKey = !isBtwActive ? parentMessageQueueKey : null;
-    const followUpBehavior = useMessageQueueStore((state) => state.followUpBehavior);
     const queuedMessages = useMessageQueueStore(
         React.useCallback(
             (state) => {

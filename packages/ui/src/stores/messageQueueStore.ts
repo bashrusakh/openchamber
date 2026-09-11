@@ -542,12 +542,6 @@ const findAcceptedQueueItemId = (
  * stale local copy would resurrect messages the server already delivered.
  */
 const serverOwnedRuntimeKeys = new Set<string>();
-type LegacyQueueMigration = {
-    items: Array<{ target: MessageQueueTarget; message: QueuedMessage }>;
-    pending: Promise<void> | null;
-};
-const legacyMigrations = new Map<string, LegacyQueueMigration>();
-
 /** Server revision last applied per queue key; older snapshots are ignored. */
 const appliedRevisions = new Map<string, number>();
 /** A full snapshot also owns sessions it omits, including previously unseen keys. */

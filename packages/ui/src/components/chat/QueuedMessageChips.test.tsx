@@ -143,7 +143,7 @@ describe('QueuedMessageChips', () => {
     expect(host.textContent).toContain('chat.queuedMessage.title');
     expect(host.textContent).toContain('chat.queuedMessage.waiting');
     expect(host.querySelector<SVGElement>('use[href="#oc-loader-4"]')).not.toBeNull();
-    expect(host.querySelector<SVGElement>('use[href="#oc-time"]')).toBeNull();
+    expect(host.querySelector<SVGElement>('use[href="#oc-time"]')).not.toBeNull();
 
     const sendButton = findSendButton();
     expect(sendButton).not.toBeNull();
