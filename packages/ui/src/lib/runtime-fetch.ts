@@ -285,6 +285,8 @@ export const runtimeFetch = async (input: string | URL | Request, init: RuntimeF
     const inputHeaders = resolvedInput instanceof Request ? resolvedInput.headers : undefined;
     const headers = await mergeHeaders(inputHeaders, requestInit.headers, false);
     for (const [key, value] of Object.entries(runtimeTarget.requestHeaders ?? {})) headers.set(key, value);
+    const resolvedUrl = resolvedInput instanceof Request ? resolvedInput.url : String(resolvedInput);
+    addRuntimeProxyHeaders(resolvedUrl, headers);
     const credentials = requestInit.credentials ?? 'include';
     const request = resolvedInput instanceof Request
       ? new Request(resolvedInput, { ...requestInit, credentials, headers })
