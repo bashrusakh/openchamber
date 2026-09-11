@@ -115,6 +115,17 @@ function withTimeout(promise, timeoutMs, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// @octokit/request rethrows a fetch AbortError unwrapped but wraps a
+// TimeoutError from AbortSignal.timeout in octokit.js into a RequestError
+// (name "HttpError") with the original error on `cause`. Check both so a real
+// octokit timeout is still recognised.
+function isTimeoutError(error) {
+  return error?.name === 'TimeoutError'
+    || error?.name === 'AbortError'
+    || error?.cause?.name === 'TimeoutError'
+    || error?.cause?.name === 'AbortError';
+}
+
 function getRequestedRepo(req) {
   const owner = typeof req.query?.owner === 'string' ? req.query.owner.trim() : '';
   const repo = typeof req.query?.repo === 'string' ? req.query.repo.trim() : '';
@@ -1268,7 +1279,7 @@ export function registerGitHubRoutes(app) {
           return res.json({ connected: true, repo, issues, page: effectivePage, hasMore });
         } catch (error) {
           console.error('Failed to search GitHub issues:', error);
-          const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+          const timedOut = isTimeoutError(error);
           const payload = {
             connected: true,
             repo,
@@ -1524,7 +1535,7 @@ export function registerGitHubRoutes(app) {
           return res.json({ connected: true, repo, prs, page: effectivePage, hasMore });
         } catch (error) {
           console.error('Failed to search GitHub PRs:', error);
-          const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+          const timedOut = isTimeoutError(error);
           if (timedOut) {
             const payload = {
               connected: true,

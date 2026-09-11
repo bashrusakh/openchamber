@@ -188,9 +188,12 @@ export function GitHubIntegrationDialog({
           setError(err instanceof Error ? err.message : t('session.githubIntegration.error.loadDataFailed'));
         })
         .finally(() => {
-          setLoading(false);
+          if (!controller.signal.aborted) setLoading(false);
         });
-      return () => controller.abort();
+      return () => {
+        controller.abort();
+        setLoading(false);
+      };
     }
 
     const apiCall = activeTab === 'issues' && github.issuesList
@@ -240,10 +243,13 @@ export function GitHubIntegrationDialog({
         setError(err instanceof Error ? err.message : t('session.githubIntegration.error.loadDataFailed'));
       })
       .finally(() => {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       });
 
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      setLoading(false);
+    };
   }, [open, projectDirectory, github, githubAuthChecked, githubAuthStatus, activeTab, debouncedSearchQuery, loadData, t]);
 
   const loadMore = React.useCallback(async () => {

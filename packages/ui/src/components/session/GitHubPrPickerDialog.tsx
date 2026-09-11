@@ -163,9 +163,12 @@ export function GitHubPrPickerDialog({
           setError(e instanceof Error ? e.message : String(e));
         })
         .finally(() => {
-          setIsLoading(false);
+          if (!controller.signal.aborted) setIsLoading(false);
         });
-      return () => controller.abort();
+      return () => {
+        controller.abort();
+        setIsLoading(false);
+      };
     }
 
     github.prsList(projectDirectory, { page: 1, query: trimmedQuery, signal: controller.signal })
@@ -190,10 +193,13 @@ export function GitHubPrPickerDialog({
         setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
-        setIsLoading(false);
+        if (!controller.signal.aborted) setIsLoading(false);
       });
 
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      setIsLoading(false);
+    };
   }, [open, projectDirectory, github, githubAuthChecked, githubAuthStatus, debouncedQuery, refresh, t]);
 
   const loadMore = React.useCallback(async () => {
