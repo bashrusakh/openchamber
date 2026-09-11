@@ -960,6 +960,110 @@ describe("server-owned message queue", () => {
     expect(acknowledgementAttempts).toBe(1)
   })
 
+  test("keeps a restore pending across a directory move and retries only against the new owner", async () => {
+    const oldTarget = createMessageQueueTarget("session-directory-restore", "/old-repo", "runtime-a")!
+    const newTarget = createMessageQueueTarget("session-directory-restore", "/new-repo", "runtime-a")!
+    const oldKey = getMessageQueueKey(oldTarget)
+    const newKey = getMessageQueueKey(newTarget)
+    const item = serverItem("directory-restore-item", "restore after move", { context: [{ kind: "synthetic", text: "captured" }] })
+    let serverItems: ServerItem[] = [item]
+    let restoreAttempts = 0
+    let hydrationAttempts = 0
+
+    respond = (call) => {
+      if (call.method === "GET") {
+        hydrationAttempts += 1
+        return json({
+          revision: hydrationAttempts,
+          sessions: [{ ...session(serverItems), sessionId: newTarget.sessionId, directory: hydrationAttempts === 1 ? oldTarget.directory : newTarget.directory, generation: 3 }],
+          sessionLifecycles: {
+            [newTarget.sessionId]: { directory: hydrationAttempts === 1 ? oldTarget.directory : newTarget.directory, generation: 3, restoreRequiresReceipt: true },
+          },
+        })
+      }
+      if (call.path.endsWith(`/items/${item.id}/take`)) {
+        serverItems = []
+        return json({ revision: 10, session: { ...session([]), sessionId: oldTarget.sessionId, directory: oldTarget.directory, generation: 3 }, generation: 3, item })
+      }
+      if (call.path.endsWith("/restore")) {
+        restoreAttempts += 1
+        expect(call.body.directory).toBe(newTarget.directory)
+        serverItems = [item]
+        return json({ revision: 20, session: { ...session(serverItems), sessionId: newTarget.sessionId, directory: newTarget.directory, generation: 3 } })
+      }
+      return json({ acknowledged: true })
+    }
+
+    await useMessageQueueStore.getState().hydrate()
+    const guard = useMessageQueueStore.getState().getQueueRestorationGuard(oldTarget)
+    const [taken] = await useMessageQueueStore.getState().takeForSend(oldTarget, item.id)
+    if (!taken) throw new Error("server take did not return the item")
+
+    applyMessageQueueUpdatedEvent(updated(12, {
+      ...session([]),
+      sessionId: oldTarget.sessionId,
+      directory: newTarget.directory,
+      generation: 3,
+    }), oldTarget.runtimeKey)
+    expect(await useMessageQueueStore.getState().restoreQueue(oldTarget, [taken], guard)).toBe(false)
+    expect(useMessageQueueStore.getState().pendingServerRestores[oldKey]?.messages).toEqual([taken])
+    expect(restoreAttempts).toBe(0)
+
+    await useMessageQueueStore.getState().hydrate()
+
+    expect(restoreAttempts).toBe(1)
+    expect(useMessageQueueStore.getState().pendingServerRestores[oldKey]).toBe(undefined)
+    expect(useMessageQueueStore.getState().queuedMessages[newKey]?.map((message) => message.id)).toEqual([item.id])
+  })
+
+  test("retains the complete payload when a recoverable identity update invalidates the restore guard", async () => {
+    const oldTarget = createMessageQueueTarget("session-identity-restore", "/repo", "runtime-a")!
+    const newTarget = createMessageQueueTarget("session-identity-restore", "/repo-new", "runtime-a")!
+    const oldKey = getMessageQueueKey(oldTarget)
+    const item = serverItem("identity-restore-item", "restore after identity update", {
+      attachments: [{ id: "att-1", filename: "note.txt", mimeType: "text/plain", size: 2, source: "local", dataUrl: "data:text/plain;base64,aGk=" }],
+      context: [{ kind: "synthetic", text: "captured context" }],
+    })
+    let restoreAttempts = 0
+    applyMessageQueueUpdatedEvent(updated(1, {
+      ...session([item]),
+      sessionId: oldTarget.sessionId,
+      directory: oldTarget.directory,
+      generation: 3,
+    }), oldTarget.runtimeKey)
+    respond = (call) => {
+      if (call.path.endsWith(`/items/${item.id}/take`)) {
+        return json({ revision: 2, session: { ...session([]), sessionId: oldTarget.sessionId, directory: oldTarget.directory, generation: 3 }, generation: 3, item })
+      }
+       restoreAttempts += 1
+       return json({ revision: 3, session: { ...session([item]), sessionId: newTarget.sessionId, directory: newTarget.directory, generation: 3 } })
+    }
+
+    const guard = useMessageQueueStore.getState().getQueueRestorationGuard(oldTarget)
+    const [taken] = await useMessageQueueStore.getState().takeForSend(oldTarget, item.id)
+    if (!taken) throw new Error("server take did not return the item")
+
+    useMessageQueueStore.getState().applyServerSession({
+      ...session([]),
+      sessionId: newTarget.sessionId,
+      directory: newTarget.directory,
+      generation: 3,
+    }, 4, oldTarget.runtimeKey)
+    expect(await useMessageQueueStore.getState().restoreQueue(oldTarget, [taken], guard)).toBe(false)
+
+    expect(restoreAttempts).toBe(0)
+    expect(useMessageQueueStore.getState().pendingServerRestores[oldKey]).toMatchObject({
+      operationId: useMessageQueueStore.getState().pendingServerTakes[oldKey]?.operationId,
+      mutationGeneration: 3,
+      messages: [taken],
+    })
+    expect(useMessageQueueStore.getState().pendingServerRestores[oldKey]?.messages[0]?.attachments?.[0]?.dataUrl).toBe(item.attachments[0]?.dataUrl)
+    expect(useMessageQueueStore.getState().pendingServerRestores[oldKey]?.messages[0]?.context).toEqual(item.context)
+
+    useMessageQueueStore.getState().clearQueue(newTarget)
+    expect(useMessageQueueStore.getState().pendingServerRestores[oldKey]?.blocked).toBe(true)
+  })
+
   test("invalidates a pending restore on clear and session deletion", async () => {
     const invalidationTarget = createMessageQueueTarget("session-restore-invalidation", "/repo", "runtime-a")!
     const invalidationKey = getMessageQueueKey(invalidationTarget)

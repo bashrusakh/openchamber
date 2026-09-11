@@ -547,6 +547,48 @@ describe('parseQueuedItemInput', () => {
 });
 
 describe('message queue runtime', () => {
+  it('keeps a newer hold authoritative when a queue write rolls back', async () => {
+    const { runtime, openCode, emit, dataDir } = createRuntime({ dispatchQuietMs: 0 });
+    runtime.start();
+    await runtime.load();
+    openCode.state.statuses = { [SESSION]: { type: 'busy' } };
+    const first = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'durable queue' }));
+    await settle();
+
+    let rejectWrite;
+    let writeStarted;
+    const writeStartedPromise = new Promise((resolve) => { writeStarted = resolve; });
+    const writeSpy = vi.spyOn(fs.promises, 'writeFile').mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      writeStarted();
+      rejectWrite = reject;
+    }));
+
+    try {
+      const failedEnqueue = runtime.enqueue(SESSION, DIRECTORY, item({ content: 'rolled back' }), undefined, first.session.generation);
+      await writeStartedPromise;
+      expect(runtime.setHold(SESSION, DIRECTORY, true, 60_000, first.session.generation, 1, 'newer-hold')).toMatchObject({ held: true, sequence: 1 });
+
+      rejectWrite(new Error('queue write failed'));
+      await expect(failedEnqueue).rejects.toThrow('queue write failed');
+
+      expect(runtime.sessionSnapshot(SESSION).items.map((queued) => queued.content)).toEqual(['durable queue']);
+      expect(JSON.parse(fs.readFileSync(path.join(dataDir, 'message-queue.json'), 'utf8')).sessions[SESSION].items).toHaveLength(1);
+      expect(runtime.setHold(SESSION, DIRECTORY, false, 60_000, first.session.generation, 1, 'stale-hold')).toMatchObject({ held: true, sequence: 1 });
+
+      openCode.state.statuses = {};
+      emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+      await settle();
+      expect(openCode.state.sent).toHaveLength(0);
+
+      runtime.setHold(SESSION, DIRECTORY, false, 60_000, first.session.generation, 2, 'newer-hold');
+      await settle();
+      expect(openCode.state.sent).toHaveLength(1);
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
   it('delivers the head of the queue when the session goes idle, in order', async () => {
     const { runtime, openCode, emit, promptSent, broadcasts } = createRuntime();
     runtime.start();

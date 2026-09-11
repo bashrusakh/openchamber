@@ -1421,24 +1421,31 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         let pendingServerRestores = state.pendingServerRestores;
                         let pendingServerTakes = state.pendingServerTakes;
                         let pendingLegacyMessages = state.pendingLegacyMessages;
-                        if (invalidatePending && session.items.length === 0) {
-                            pendingServerEnqueues = markPendingServerEnqueuesRemoved(pendingServerEnqueues, key);
-                            const pendingRestore = pendingServerRestores[key];
-                            if (pendingRestore && pendingRestore.operationId !== preserveOperationId) {
-                                pendingServerRestores = {
-                                    ...pendingServerRestores,
-                                    [key]: { ...pendingRestore, blocked: true },
-                                };
-                            }
-                            const pendingTake = pendingServerTakes[key];
-                            if (pendingTake && pendingTake.operationId !== preserveOperationId) {
-                                pendingServerTakes = {
-                                    ...pendingServerTakes,
-                                    [key]: { ...pendingTake, invalidated: true, invalidateAll: true },
-                                };
-                            }
-                            pendingLegacyMessages = withoutKey(pendingLegacyMessages, key);
-                        }
+                         // An empty update caused by a directory move is not
+                         // proof that a take was delivered. The take and any
+                         // restore it may need still belong to the same
+                         // session incarnation, just under the new owner.
+                         const directoryMoved = previousDirectory !== undefined && previousDirectory !== target.directory;
+                         if (invalidatePending && session.items.length === 0) {
+                             pendingServerEnqueues = markPendingServerEnqueuesRemoved(pendingServerEnqueues, key);
+                             if (!directoryMoved) {
+                                 const pendingRestore = pendingServerRestores[key];
+                                 if (pendingRestore && pendingRestore.operationId !== preserveOperationId) {
+                                     pendingServerRestores = {
+                                         ...pendingServerRestores,
+                                         [key]: { ...pendingRestore, blocked: true },
+                                     };
+                                 }
+                                 const pendingTake = pendingServerTakes[key];
+                                 if (pendingTake && pendingTake.operationId !== preserveOperationId) {
+                                     pendingServerTakes = {
+                                         ...pendingServerTakes,
+                                         [key]: { ...pendingTake, invalidated: true, invalidateAll: true },
+                                     };
+                                 }
+                                 pendingLegacyMessages = withoutKey(pendingLegacyMessages, key);
+                             }
+                         }
                         const queue = [
                             ...session.items.map(toQueuedMessage),
                             ...(pendingLegacyMessages[key] ?? []),
@@ -2249,10 +2256,17 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                           }
                      },
 
-                     clearQueue: (target) => {
-                         const key = getMessageQueueKey(target);
-                         let removed: QueuedMessage[] = [];
-                         set((state) => {
+                      clearQueue: (target) => {
+                          const key = getMessageQueueKey(target);
+                          const sessionKey = getServerSessionKey(target.runtimeKey, target.sessionId);
+                          const authoritativeDirectory = serverSessionDirectories.get(sessionKey);
+                          const matchesTargetIdentity = (candidate: MessageQueueTarget): boolean => (
+                              candidate.runtimeKey === target.runtimeKey
+                              && candidate.sessionId === target.sessionId
+                              && (getMessageQueueKey(candidate) === key || authoritativeDirectory === target.directory)
+                          );
+                          let removed: QueuedMessage[] = [];
+                          set((state) => {
                             // Clearing drops what is still queued, never a message
                             // already handed to the server: that send will resolve
                             // and must find its entry to remove or restore.
@@ -2261,20 +2275,22 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                             removed = currentQueue.filter((message) => !sending.includes(message.id));
                             const retained = currentQueue.filter((m) => sending.includes(m.id));
                             const pendingLegacyMessages = withoutKey(state.pendingLegacyMessages, key);
-                             const pendingTake = state.pendingServerTakes[key];
-                             const pendingServerTakes = pendingTake
-                                 ? {
-                                     ...state.pendingServerTakes,
-                                     [key]: { ...pendingTake, invalidated: true, invalidateAll: true },
-                                 }
-                                 : state.pendingServerTakes;
-                             const pendingRestore = state.pendingServerRestores[key];
-                             const pendingServerRestores = pendingRestore
-                                 ? {
-                                     ...state.pendingServerRestores,
-                                     [key]: { ...pendingRestore, blocked: true },
-                                 }
-                                 : state.pendingServerRestores;
+                              let pendingServerTakes = state.pendingServerTakes;
+                              for (const [pendingKey, pendingTake] of Object.entries(state.pendingServerTakes)) {
+                                  if (!matchesTargetIdentity(pendingTake.target)) continue;
+                                  pendingServerTakes = {
+                                      ...pendingServerTakes,
+                                      [pendingKey]: { ...pendingTake, invalidated: true, invalidateAll: true },
+                                  };
+                              }
+                              let pendingServerRestores = state.pendingServerRestores;
+                              for (const [pendingKey, pendingRestore] of Object.entries(state.pendingServerRestores)) {
+                                  if (!matchesTargetIdentity(pendingRestore.target)) continue;
+                                  pendingServerRestores = {
+                                      ...pendingServerRestores,
+                                      [pendingKey]: { ...pendingRestore, blocked: true },
+                                  };
+                              }
                              if (retained.length > 0) {
                                  return {
                                      queuedMessages: { ...state.queuedMessages, [key]: retained },
@@ -2524,40 +2540,47 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                          const guardTargetMatches = guard.target.runtimeKey === target.runtimeKey
                              && guard.target.sessionId === target.sessionId
                              && getMessageQueueKey(guard.target) === key;
-                         const invalidated = !guardTargetMatches
-                             || (state.queueDeletionGenerations[key] ?? 0) !== guard.deletionGeneration
-                             || serverSessionDeleted.has(sessionKey)
-                             || pendingTake?.invalidated === true
-                             || guard.authoritativeDirectory !== authoritativeDirectory
-                             || guard.authoritativeDirectoryRevision !== authoritativeDirectoryRevision
-                             || (guardMutationGeneration !== undefined && guardMutationGeneration !== currentLifecycleGeneration);
-                         if (invalidated) return false;
-                         const effectiveGuard: MessageQueueRestorationGuard = {
-                             ...guard,
-                             requiresReceipt,
-                             mutationGeneration: guardMutationGeneration,
-                         };
+                          const identityChanged = guard.authoritativeDirectory !== authoritativeDirectory
+                              || guard.authoritativeDirectoryRevision !== authoritativeDirectoryRevision;
+                           const hardInvalidated = !guardTargetMatches
+                               || (state.queueDeletionGenerations[key] ?? 0) !== guard.deletionGeneration
+                               || serverSessionDeleted.has(sessionKey)
+                               || pendingTake?.invalidated === true
+                               || (guardMutationGeneration !== undefined && guardMutationGeneration !== currentLifecycleGeneration);
+                          const effectiveGuard: MessageQueueRestorationGuard = {
+                              ...guard,
+                              requiresReceipt,
+                              mutationGeneration: guardMutationGeneration,
+                          };
                          const pending: PendingServerRestore = {
                              target: { ...target },
                              messages: messages.map((message) => ({ ...message })),
                              deletionGeneration: guard.deletionGeneration,
                              operationId,
-                             sourceRevision: appliedRevisions.get(key),
-                             mutationGeneration,
-                         };
-                         set((state) => ({ pendingServerRestores: { ...state.pendingServerRestores, [key]: pending } }));
+                              sourceRevision: appliedRevisions.get(key),
+                              mutationGeneration,
+                          };
+                           // Directory/identity changes are recoverable: keep
+                           // the full take payload durable, but do not send it
+                           // until retry can resolve the current owner.
+                           if (hardInvalidated) return false;
+                           set((state) => ({ pendingServerRestores: { ...state.pendingServerRestores, [key]: pending } }));
+                           if (identityChanged) return false;
                          // The pending record is the recovery boundary. A
                          // captured operation may have completed against its
                          // original server just before the runtime switched,
                          // so retain it before rejecting the stale request.
                          if (!get().isQueueRestorationGuardCurrent(target, effectiveGuard) || target.runtimeKey !== getRuntimeKey()) return false;
                          try {
-                             const result = await enqueueServerMutation(target, () => requestJson(serverSessionResponseSchema, `${sessionPath(target.sessionId)}/restore`, queueMutationInit(target, 'POST', {
-                                 directory: target.directory,
-                                 items: messages.map(toServerRestoreItemInput),
-                                 operationId,
-                                 generation: mutationGeneration,
-                             }, mutationGeneration)));
+                              const requestTarget = authoritativeDirectory === target.directory
+                                  ? target
+                                  : { ...target, directory: authoritativeDirectory };
+                              const result = await enqueueServerMutation(requestTarget, () => requestJson(serverSessionResponseSchema, `${sessionPath(requestTarget.sessionId)}/restore`, queueMutationInit(requestTarget, 'POST', {
+                                  directory: requestTarget.directory,
+                                  items: messages.map(toServerRestoreItemInput),
+                                  operationId,
+                                  generation: mutationGeneration,
+                              }, mutationGeneration)));
                              set((state) => ({ pendingServerRestores: withoutKey(state.pendingServerRestores, key), retryPendingIds: withoutKey(state.retryPendingIds, key) }));
                              applyServerSession(result.session, result.revision, target.runtimeKey);
                              clearTakenOperation(target, operationId, messages);
@@ -2590,9 +2613,15 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         }
                     },
 
-                    clearQueueForSessionDeletion: (target) => {
-                        const targetKey = getMessageQueueKey(target);
-                        clearLocalQueueContexts(targetKey);
+                     clearQueueForSessionDeletion: (target) => {
+                          const targetKey = getMessageQueueKey(target);
+                          const sessionKey = getServerSessionKey(target.runtimeKey, target.sessionId);
+                          const authoritativeDirectory = serverSessionDirectories.get(sessionKey);
+                          const matchesTargetIdentity = (candidate: MessageQueueTarget | null): boolean => candidate !== null
+                              && candidate.runtimeKey === target.runtimeKey
+                              && candidate.sessionId === target.sessionId
+                              && (getMessageQueueKey(candidate) === targetKey || authoritativeDirectory === target.directory);
+                          clearLocalQueueContexts(targetKey);
                          set((state) => {
                              // This is the scoped cleanup path used by a
                              // directory/session deletion identity. Explicit
@@ -2600,7 +2629,13 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                              // the server declares that a session id is gone
                              // across directory aliases; local cleanup must not
                              // erase a colliding session in another directory.
-                             const keys = new Set([targetKey]);
+                              const keys = new Set([
+                                  targetKey,
+                                  ...Object.keys(state.queuedMessages),
+                                  ...Object.keys(state.pendingServerEnqueues),
+                                  ...Object.keys(state.pendingServerRestores),
+                                  ...Object.keys(state.pendingServerTakes),
+                              ].filter((key) => matchesTargetIdentity(parseMessageQueueKey(key))));
                              const queueDeletionGenerations = { ...state.queueDeletionGenerations };
                               const queuedMessages = { ...state.queuedMessages };
                               const sendingIds = { ...state.sendingIds };
@@ -2618,7 +2653,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                                  if (sending.length > 0 && retained.length > 0) sendingIds[key] = sending;
                                  else delete sendingIds[key];
                                  clearLocalQueueContexts(key);
-                                 pendingServerEnqueues = markPendingServerEnqueuesRemoved(pendingServerEnqueues, key);
+                                  pendingServerEnqueues = markPendingServerEnqueuesRemoved(pendingServerEnqueues, key);
                                  pendingServerRestores = withoutKey(pendingServerRestores, key);
                                  pendingServerTakes = withoutKey(pendingServerTakes, key);
                              }
@@ -2629,7 +2664,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                                   queueDeletionGenerations,
                                   pendingServerRestores,
                                   pendingServerTakes,
-                                  pendingServerTakeAcks: Object.fromEntries(Object.entries(state.pendingServerTakeAcks).filter(([ackKey]) => !ackKey.startsWith(`${targetKey}\n`))),
+                                   pendingServerTakeAcks: Object.fromEntries(Object.entries(state.pendingServerTakeAcks).filter(([ackKey, pending]) => !matchesTargetIdentity(pending.target) && !ackKey.startsWith(`${targetKey}\n`))),
                                  takenServerOperations: withoutKey(state.takenServerOperations, getServerSessionKey(target.runtimeKey, target.sessionId)),
                                  pendingServerEnqueues: isServerOwnedMessageQueue()
                                      ? pendingServerEnqueues

@@ -405,9 +405,9 @@ export function createMessageQueueRuntime({
   const cloneRestoreOperation = (operation) => ({ ...operation, itemIds: [...operation.itemIds] });
   const cloneEnqueueOperation = (operation) => ({ ...operation });
 
-  // Persistence failures must roll back the complete in-memory transaction,
-  // not just the queue entry that happened to be changed. This also protects
-  // receipts and lifecycle metadata, which are part of the durable contract.
+  // Persistence failures roll back the durable queue transaction, not the
+  // independent in-memory hold ownership state. Send bookkeeping remains part
+  // of the transaction so a failed removal can be retried safely.
   const captureState = () => ({
     revision,
     lifecyclePruned,
@@ -420,16 +420,26 @@ export function createMessageQueueRuntime({
     sending: new Map(sending),
     failures: new Map(Array.from(failures.entries()).map(([sessionId, failure]) => [sessionId, { ...failure }])),
     abortedAt: new Map(abortedAt),
-    holds: new Map(Array.from(holds.entries()).map(([sessionId, hold]) => [sessionId, { ...hold }])),
-    holdMutationSequences: new Map(Array.from(holdMutationSequences.entries()).map(([sessionId, sequence]) => [sessionId, { ...sequence }])),
-    holdGenerationTransitions: new Map(Array.from(holdGenerationTransitions.entries()).map(([sessionId, transition]) => [sessionId, { ...transition }])),
     observedQueueMutations: new Set(observedQueueMutations),
-    timerSessions: new Set(timers.keys()),
   });
 
-  const restoreState = (state) => {
+  const reconcileDispatchTimers = () => {
     for (const timer of timers.values()) clearTimeout(timer);
     timers.clear();
+    const currentTime = now();
+    for (const [sessionId, queue] of queues) {
+      const hold = holds.get(sessionId);
+      const lifecycle = sessionLifecycles.get(sessionId);
+      const authoritativeDirectory = queue.directory ?? directories.get(sessionId) ?? lifecycle?.directory;
+      const holdIsActive = hold
+        && hold.expiresAt > currentTime
+        && hold.generation === sessionGeneration(sessionId)
+        && (!authoritativeDirectory || hold.directory === authoritativeDirectory);
+      armDispatch(sessionId, holdIsActive ? hold.expiresAt - currentTime : dispatchQuietMs);
+    }
+  };
+
+  const restoreState = (state) => {
     queues.clear();
     for (const [sessionId, queue] of state.queues) queues.set(sessionId, cloneQueue(queue));
     sessionLifecycles.clear();
@@ -448,17 +458,11 @@ export function createMessageQueueRuntime({
     for (const [sessionId, failure] of state.failures) failures.set(sessionId, { ...failure });
     abortedAt.clear();
     for (const [sessionId, timestamp] of state.abortedAt) abortedAt.set(sessionId, timestamp);
-    holds.clear();
-    for (const [sessionId, hold] of state.holds) holds.set(sessionId, { ...hold });
-    holdMutationSequences.clear();
-    for (const [sessionId, sequence] of state.holdMutationSequences) holdMutationSequences.set(sessionId, { ...sequence });
-    holdGenerationTransitions.clear();
-    for (const [sessionId, transition] of state.holdGenerationTransitions) holdGenerationTransitions.set(sessionId, { ...transition });
     observedQueueMutations.clear();
     for (const sessionId of state.observedQueueMutations) observedQueueMutations.add(sessionId);
     revision = state.revision;
     lifecyclePruned = state.lifecyclePruned;
-    for (const sessionId of state.timerSessions) if (queues.has(sessionId)) armDispatch(sessionId);
+    reconcileDispatchTimers();
   };
 
   // Public routes and post-load hub events share this FIFO. Start the head
