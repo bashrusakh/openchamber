@@ -162,10 +162,23 @@ describe('mounted subagents section with live sync stores', () => {
     expect(commits).toBeGreaterThan(0);
     expect(dom.container.textContent).toContain('child-2');
     // Rows order by stable `time.created` desc (newest first), so the later
-    // child-2 (created 3) renders above child-1 (created 1). A comparator that
-    // regressed to volatile `time.updated` would flip this order.
+    // child-2 (created 3) renders above child-1 (created 1).
     const rendered = dom.container.textContent ?? '';
     expect(rendered.indexOf('child-2')).toBeLessThan(rendered.indexOf('child-1'));
+
+    // Now bump child-1's `time.updated` past child-2's (99 > 3) while leaving
+    // `time.created` unchanged (1 < 3). The section ignores `time.updated`-only
+    // changes, so it must not re-render and the stable order must hold. A
+    // comparator regressed to volatile `time.updated` would fail on both counts:
+    // the snapshot would change (commits > 0) and child-1 would sort above
+    // child-2.
+    commits = 0;
+    await act(async () => store().setState({
+      session: [parent, { ...child, time: { created: 1, updated: 99 } }, sibling, other],
+    }));
+    expect(commits).toBe(0);
+    const afterUpdatedBump = dom.container.textContent ?? '';
+    expect(afterUpdatedBump.indexOf('child-2')).toBeLessThan(afterUpdatedBump.indexOf('child-1'));
 
     commits = 0;
     await act(async () => store().setState({ session: [parent, other] }));
