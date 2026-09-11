@@ -983,18 +983,18 @@ describe('message queue runtime', () => {
     const { runtime, broadcasts } = createRuntime();
     runtime.start();
     const context = [{ kind: 'context', text: 'Full quoted content', metadata: { openchamberContext: { kind: 'chat-quote', quote: 'Original answer', text: 'Explain this' } } }];
-    const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, item({ content: '', text: '', context, contextPreview: 'Explain this' }));
+    const { itemId, session } = await runtime.enqueue(SESSION, DIRECTORY, item({ content: '', text: '', context, contextPreview: 'Explain this' }));
     const projected = runtime.sessionSnapshot(SESSION).items[0];
     expect(projected.contextPreview).toBe('Explain this');
     expect(projected.content).toBe('');
     expect(projected.text).toBe('');
     expect(projected).not.toHaveProperty('context');
     expect(broadcasts.at(-1).properties.session.items[0].contextPreview).toBe('Explain this');
-    const taken = await runtime.take(SESSION, itemId);
+    const taken = await runtime.take(SESSION, DIRECTORY, itemId, false, undefined, session.generation);
     expect(taken.item.context).toEqual(context);
     expect(taken.item.content).toBe('');
 
-    await runtime.enqueue(SESSION, DIRECTORY, item({ content: '', text: '', context, contextPreview: 'a'.repeat(5000) }));
+    await runtime.enqueue(SESSION, DIRECTORY, item({ content: '', text: '', context, contextPreview: 'a'.repeat(5000) }), undefined, session.generation);
     expect(runtime.sessionSnapshot(SESSION).items[0].contextPreview).toBe('a'.repeat(100) + '...');
   });
 
