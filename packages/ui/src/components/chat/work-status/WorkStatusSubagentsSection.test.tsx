@@ -161,6 +161,11 @@ describe('mounted subagents section with live sync stores', () => {
     await act(async () => store().setState({ session: [parent, child, sibling, other] }));
     expect(commits).toBeGreaterThan(0);
     expect(dom.container.textContent).toContain('child-2');
+    // Rows order by stable `time.created` desc (newest first), so the later
+    // child-2 (created 3) renders above child-1 (created 1). A comparator that
+    // regressed to volatile `time.updated` would flip this order.
+    const rendered = dom.container.textContent ?? '';
+    expect(rendered.indexOf('child-2')).toBeLessThan(rendered.indexOf('child-1'));
 
     commits = 0;
     await act(async () => store().setState({ session: [parent, other] }));
