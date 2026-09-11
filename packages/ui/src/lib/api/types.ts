@@ -963,6 +963,8 @@ export type GitHubPullRequestsListResult = {
   prs?: GitHubPullRequestSummary[];
   page?: number;
   hasMore?: boolean;
+  /** Distinguishable server-side failure, e.g. `'search timed out'` for a search that hit the per-request bound. */
+  error?: string;
 };
 
 export type GitHubPullRequestContextResult = {
@@ -1076,6 +1078,8 @@ export type GitHubIssuesListResult = {
   issues?: GitHubIssueSummary[];
   page?: number;
   hasMore?: boolean;
+  /** Distinguishable server-side failure, e.g. `'search timed out'` for a search that hit the per-request bound. */
+  error?: string;
 };
 
 export type GitHubRepoUpstreamResult = {
@@ -1339,14 +1343,14 @@ export interface GitHubAPI {
   prMerge(payload: GitHubPullRequestMergeInput): Promise<GitHubPullRequestMergeResult>;
   prReady(payload: GitHubPullRequestReadyInput): Promise<GitHubPullRequestReadyResult>;
 
-  prsList(directory: string, options?: { page?: number; query?: string }): Promise<GitHubPullRequestsListResult>;
+  prsList(directory: string, options?: { page?: number; query?: string; signal?: AbortSignal }): Promise<GitHubPullRequestsListResult>;
   prContext(
     directory: string,
     number: number,
     options?: { includeDiff?: boolean; includeCheckDetails?: boolean; sourceRepo?: GitHubRepoSelector | null }
   ): Promise<GitHubPullRequestContextResult>;
 
-  issuesList(directory: string, options?: { page?: number; query?: string }): Promise<GitHubIssuesListResult>;
+  issuesList(directory: string, options?: { page?: number; query?: string; signal?: AbortSignal }): Promise<GitHubIssuesListResult>;
   issueGet(directory: string, number: number, options?: { sourceRepo?: GitHubRepoSelector | null }): Promise<GitHubIssueGetResult>;
   issueComments(directory: string, number: number, options?: { sourceRepo?: GitHubRepoSelector | null }): Promise<GitHubIssueCommentsResult>;
   repoUpstream(directory: string): Promise<GitHubRepoUpstreamResult>;

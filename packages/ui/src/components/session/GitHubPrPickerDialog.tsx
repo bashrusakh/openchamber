@@ -21,27 +21,9 @@ import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
 import { renderMagicPrompt } from '@/lib/magicPrompts';
 import { useDeviceInfo } from '@/lib/device';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { parseGitHubNumber } from '@/lib/github';
 import type { GitHubPullRequestContextResult, GitHubPullRequestSummary, GitHubPullRequestsListResult, GitHubRepoSelector } from '@/lib/api/types';
 import { useI18n } from '@/lib/i18n';
-
-const parsePrNumber = (value: string): number | null => {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  const urlMatch = trimmed.match(/\/pull\/(\d+)(?:\b|\/|$)/i);
-  if (urlMatch) {
-    const parsed = Number(urlMatch[1]);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-  }
-
-  const hashMatch = trimmed.match(/^#?(\d+)$/);
-  if (hashMatch) {
-    const parsed = Number(hashMatch[1]);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-  }
-
-  return null;
-};
 
 const buildPullRequestContextText = (payload: GitHubPullRequestContextResult) => {
   return `GitHub pull request context (JSON)\n${JSON.stringify(payload, null, 2)}`;
@@ -90,7 +72,7 @@ export function GitHubPrPickerDialog({
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
-  const directNumber = React.useMemo(() => parsePrNumber(query), [query]);
+  const directNumber = React.useMemo(() => parseGitHubNumber(query, 'pr'), [query]);
   const debouncedQuery = useDebouncedValue(query, 350);
   const isTextSearch = debouncedQuery.trim().length > 0 && !directNumber;
 
@@ -136,7 +118,7 @@ export function GitHubPrPickerDialog({
     if (!open || !projectDirectory) return;
     if (githubAuthChecked && githubAuthStatus?.connected === false) return;
     if (!github?.prsList) return;
-    if (!debouncedQuery.trim() || directNumber) {
+    if (!debouncedQuery.trim()) {
       void refresh();
       return;
     }
@@ -145,9 +127,59 @@ export function GitHubPrPickerDialog({
     setIsLoading(true);
     setError(null);
 
-    github.prsList(projectDirectory, { page: 1, query: debouncedQuery.trim() })
+    const trimmedQuery = debouncedQuery.trim();
+    const directNumber = parseGitHubNumber(trimmedQuery, 'pr');
+
+    // A bare number, #N, or PR URL resolves the single PR directly instead of
+    // running a full search (which can time out on the Search API).
+    if (directNumber !== null) {
+      github.prContext(projectDirectory, directNumber, {
+        includeDiff: false,
+        includeCheckDetails: false,
+      })
+        .then((context) => {
+          if (controller.signal.aborted) return;
+          if (context.connected === false) {
+            setResult({ connected: false });
+            setPrs([]);
+            setHasMore(false);
+            setPage(1);
+            return;
+          }
+          if (!context.pr) {
+            setError(t('session.githubPrPicker.error.prNotFound'));
+            setPrs([]);
+            setHasMore(false);
+            setPage(1);
+            return;
+          }
+          setResult({ connected: true, repo: context.repo ?? null, prs: [context.pr], page: 1, hasMore: false });
+          setPrs([context.pr]);
+          setPage(1);
+          setHasMore(false);
+        })
+        .catch((e) => {
+          if (controller.signal.aborted) return;
+          setError(e instanceof Error ? e.message : String(e));
+        })
+        .finally(() => {
+          setIsLoading(false);
+        });
+      return () => controller.abort();
+    }
+
+    github.prsList(projectDirectory, { page: 1, query: trimmedQuery, signal: controller.signal })
       .then((next) => {
         if (controller.signal.aborted) return;
+        if (next.error) {
+          setError(next.error === 'search timed out'
+            ? t('session.githubPrPicker.error.searchTimedOut')
+            : next.error);
+          setPrs([]);
+          setHasMore(false);
+          setPage(1);
+          return;
+        }
         setResult(next);
         setPrs(next.prs ?? []);
         setPage(next.page ?? 1);
@@ -158,11 +190,11 @@ export function GitHubPrPickerDialog({
         setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
-        if (!controller.signal.aborted) setIsLoading(false);
+        setIsLoading(false);
       });
 
     return () => controller.abort();
-  }, [open, projectDirectory, github, githubAuthChecked, githubAuthStatus, debouncedQuery, directNumber, refresh, t]);
+  }, [open, projectDirectory, github, githubAuthChecked, githubAuthStatus, debouncedQuery, refresh, t]);
 
   const loadMore = React.useCallback(async () => {
     if (!projectDirectory) return;

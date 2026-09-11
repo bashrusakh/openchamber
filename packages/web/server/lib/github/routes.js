@@ -1268,7 +1268,18 @@ export function registerGitHubRoutes(app) {
           return res.json({ connected: true, repo, issues, page: effectivePage, hasMore });
         } catch (error) {
           console.error('Failed to search GitHub issues:', error);
-          return res.json({ connected: true, repo, issues: [], page: effectivePage, hasMore: false });
+          const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+          const payload = {
+            connected: true,
+            repo,
+            issues: [],
+            page: effectivePage,
+            hasMore: false,
+          };
+          if (timedOut) {
+            payload.error = 'search timed out';
+          }
+          return res.json(payload);
         }
       }
 
@@ -1513,6 +1524,18 @@ export function registerGitHubRoutes(app) {
           return res.json({ connected: true, repo, prs, page: effectivePage, hasMore });
         } catch (error) {
           console.error('Failed to search GitHub PRs:', error);
+          const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+          if (timedOut) {
+            const payload = {
+              connected: true,
+              repo,
+              prs: [],
+              page: effectivePage,
+              hasMore: false,
+            };
+            payload.error = 'search timed out';
+            return res.json(payload);
+          }
           throw error;
         }
       }

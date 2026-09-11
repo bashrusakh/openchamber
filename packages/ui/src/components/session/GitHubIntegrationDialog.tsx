@@ -20,6 +20,7 @@ import { SortableTabsStrip } from '@/components/ui/sortable-tabs-strip';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { Icon } from "@/components/icon/Icon";
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { parseGitHubNumber } from '@/lib/github';
 import type {
   GitHubIssue,
   GitHubIssueSummary,
@@ -137,10 +138,65 @@ export function GitHubIntegrationDialog({
     setPage(1);
     setHasMore(false);
 
+    const trimmedQuery = debouncedSearchQuery.trim();
+    const directNumber = parseGitHubNumber(trimmedQuery, activeTab === 'issues' ? 'issue' : 'pr');
+
+    // A bare number, #N, or issue/PR URL resolves the single item directly
+    // instead of running a full search (which can time out on the Search API).
+    if (directNumber !== null) {
+      const fetchDirect = async () => {
+        if (activeTab === 'issues') {
+          const issueRes = await github.issueGet(projectDirectory, directNumber);
+          if (controller.signal.aborted) return;
+          if (issueRes.connected === false) {
+            setError(t('session.githubIntegration.error.notConnected'));
+            setIssues([]);
+            return;
+          }
+          if (!issueRes.issue) {
+            setError(t('session.githubIntegration.error.loadDataFailed'));
+            setIssues([]);
+            return;
+          }
+          setIssues([issueRes.issue]);
+          setSelectedIssue(issueRes.issue);
+          setSelectedPr(null);
+        } else if (activeTab === 'prs') {
+          const prRes = await github.prContext(projectDirectory, directNumber, {
+            includeDiff: false,
+            includeCheckDetails: false,
+          });
+          if (controller.signal.aborted) return;
+          if (prRes.connected === false) {
+            setError(t('session.githubIntegration.error.notConnected'));
+            setPrs([]);
+            return;
+          }
+          if (!prRes.pr) {
+            setError(t('session.githubIntegration.error.loadDataFailed'));
+            setPrs([]);
+            return;
+          }
+          setPrs([prRes.pr]);
+          setSelectedPr(prRes.pr);
+          setSelectedIssue(null);
+        }
+      };
+      fetchDirect()
+        .catch((err) => {
+          if (controller.signal.aborted) return;
+          setError(err instanceof Error ? err.message : t('session.githubIntegration.error.loadDataFailed'));
+        })
+        .finally(() => {
+          setLoading(false);
+        });
+      return () => controller.abort();
+    }
+
     const apiCall = activeTab === 'issues' && github.issuesList
-      ? github.issuesList(projectDirectory, { page: 1, query: debouncedSearchQuery.trim() })
+      ? github.issuesList(projectDirectory, { page: 1, query: trimmedQuery, signal: controller.signal })
       : activeTab === 'prs' && github.prsList
-        ? github.prsList(projectDirectory, { page: 1, query: debouncedSearchQuery.trim() })
+        ? github.prsList(projectDirectory, { page: 1, query: trimmedQuery, signal: controller.signal })
         : null;
 
     if (!apiCall) {
@@ -151,6 +207,14 @@ export function GitHubIntegrationDialog({
     apiCall
       .then((result) => {
         if (controller.signal.aborted) return;
+        if (result.error) {
+          setError(result.error === 'search timed out'
+            ? t('session.githubIntegration.error.searchTimedOut')
+            : result.error);
+          setIssues([]);
+          setPrs([]);
+          return;
+        }
         if ('issues' in result) {
           if (result.connected === false) {
             setError(t('session.githubIntegration.error.notConnected'));
@@ -176,7 +240,7 @@ export function GitHubIntegrationDialog({
         setError(err instanceof Error ? err.message : t('session.githubIntegration.error.loadDataFailed'));
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        setLoading(false);
       });
 
     return () => controller.abort();

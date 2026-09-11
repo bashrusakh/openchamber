@@ -29,27 +29,9 @@ import { useDeviceInfo } from '@/lib/device';
 import { createWorktreeSessionForNewBranch } from '@/lib/worktreeSessionCreator';
 import { generateBranchSlug } from '@/lib/git/branchNameGenerator';
 import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { parseGitHubNumber } from '@/lib/github';
 import type { GitHubIssue, GitHubIssueComment, GitHubIssuesListResult, GitHubIssueSummary, GitHubRepoSelector } from '@/lib/api/types';
 import { useI18n } from '@/lib/i18n';
-
-const parseIssueNumber = (value: string): number | null => {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  const urlMatch = trimmed.match(/\/issues\/(\d+)(?:\b|\/|$)/i);
-  if (urlMatch) {
-    const parsed = Number(urlMatch[1]);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-  }
-
-  const hashMatch = trimmed.match(/^#?(\d+)$/);
-  if (hashMatch) {
-    const parsed = Number(hashMatch[1]);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-  }
-
-  return null;
-};
 
 const buildIssueContextText = (args: {
   repo: GitHubIssuesListResult['repo'] | undefined;
@@ -102,7 +84,7 @@ export function GitHubIssuePickerDialog({
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
-  const directNumber = React.useMemo(() => parseIssueNumber(query), [query]);
+  const directNumber = React.useMemo(() => parseGitHubNumber(query, 'issue'), [query]);
   const debouncedQuery = useDebouncedValue(query, 350);
   const isTextSearch = debouncedQuery.trim().length > 0 && !directNumber;
 
@@ -148,7 +130,7 @@ export function GitHubIssuePickerDialog({
     if (!open || !projectDirectory) return;
     if (githubAuthChecked && githubAuthStatus?.connected === false) return;
     if (!github?.issuesList) return;
-    if (!debouncedQuery.trim() || directNumber) {
+    if (!debouncedQuery.trim()) {
       void refresh();
       return;
     }
@@ -157,9 +139,56 @@ export function GitHubIssuePickerDialog({
     setIsLoading(true);
     setError(null);
 
-    github.issuesList(projectDirectory, { page: 1, query: debouncedQuery.trim() })
+    const trimmedQuery = debouncedQuery.trim();
+    const directNumber = parseGitHubNumber(trimmedQuery, 'issue');
+
+    // A bare number, #N, or issue URL resolves the single issue directly
+    // instead of running a full search (which can time out on the Search API).
+    if (directNumber !== null) {
+      github.issueGet(projectDirectory, directNumber)
+        .then((issueRes) => {
+          if (controller.signal.aborted) return;
+          if (issueRes.connected === false) {
+            setResult({ connected: false });
+            setIssues([]);
+            setHasMore(false);
+            setPage(1);
+            return;
+          }
+          if (!issueRes.issue) {
+            setError(t('session.githubIssuePicker.error.issueNotFound'));
+            setIssues([]);
+            setHasMore(false);
+            setPage(1);
+            return;
+          }
+          setResult({ connected: true, repo: issueRes.repo ?? null, issues: [issueRes.issue], page: 1, hasMore: false });
+          setIssues([issueRes.issue]);
+          setPage(1);
+          setHasMore(false);
+        })
+        .catch((e) => {
+          if (controller.signal.aborted) return;
+          setError(e instanceof Error ? e.message : String(e));
+        })
+        .finally(() => {
+          setIsLoading(false);
+        });
+      return () => controller.abort();
+    }
+
+    github.issuesList(projectDirectory, { page: 1, query: trimmedQuery, signal: controller.signal })
       .then((next) => {
         if (controller.signal.aborted) return;
+        if (next.error) {
+          setError(next.error === 'search timed out'
+            ? t('session.githubIssuePicker.error.searchTimedOut')
+            : next.error);
+          setIssues([]);
+          setHasMore(false);
+          setPage(1);
+          return;
+        }
         setResult(next);
         setIssues(next.issues ?? []);
         setPage(next.page ?? 1);
@@ -170,11 +199,11 @@ export function GitHubIssuePickerDialog({
         setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
-        if (!controller.signal.aborted) setIsLoading(false);
+        setIsLoading(false);
       });
 
     return () => controller.abort();
-  }, [open, projectDirectory, github, githubAuthChecked, githubAuthStatus, debouncedQuery, directNumber, refresh, t]);
+  }, [open, projectDirectory, github, githubAuthChecked, githubAuthStatus, debouncedQuery, refresh, t]);
 
   const loadMore = React.useCallback(async () => {
     if (!projectDirectory) return;
