@@ -111,24 +111,34 @@ These stores coordinate persistent project/session metadata across multiple view
 `useProjectContextStore.ts` caches server-owned project notes, todos, and plan links, keyed by the path-derived project id. It replaced a pair of `window` CustomEvents that made every mounted notes panel re-read the whole project config. Writes are optimistic and roll back on failure; they are serialized per project, because the server's own store does a read-modify-write and two concurrent saves would otherwise race it. A load that resolves while a write is in flight keeps the local value for that field group only, so a slow snapshot cannot undo newer typing while still delivering the plan list it fetched. A failed load sets `error` and preserves the cached snapshot — an unreachable server must never render as "this project has no notes". Note and plan creation are deliberately not optimistic, since ids and timestamps are assigned by the server. Notes, todos, and plans are written through separate routes and tracked by separate in-flight flags, so a todo toggle cannot clobber a note edit in the same window. Pinned notes and plans are assembled into a synthetic context part by `lib/projectContextPinning.ts` at send time; that module tracks per-session what it already sent so an unchanged pinned set is not re-sent every turn.
 
 `messageQueueStore.ts` has two owners, decided by `isServerOwnedMessageQueue()`.
-On web, desktop, and mobile the server delivers the queue independently of the
-UI. The store projects authoritative snapshots and revisioned session updates.
+On web, desktop, and mobile the OpenChamber server owns the queue
+(`packages/web/server/lib/message-queue/`): it delivers queued messages when the
+session goes idle whether or not any UI is open, and the store projects its
+authoritative snapshots and revisioned session updates.
+`openchamber:message-queue.updated` broadcasts keep the projection current.
 `sync/message-queue-sync.ts` receives queue events through the shared control SSE
 stream at `/api/openchamber/events`, including while OpenCode uses SSE fallback.
 It adds no poller or per-session connection. Either stream reconnecting requests
 `resync()`, independently of directory-bootstrap suppression.
 
-Hydration and recovery share one in-flight request per runtime. A recovery edge
-during its snapshot read earns one trailing read; legacy uploads are attempted
-once per runtime rather than repeated on reconnect or snapshot failure. Snapshot
-reads have a 15-second deadline. Failure preserves the projection and runtime
-switches reject stale completions. Full-snapshot revisions also cover omitted
+Hydration and recovery share one in-flight request per runtime; `hydrate()`
+loads the complete snapshot for the active runtime, including empty-session
+directory and lifecycle metadata. A recovery edge during its snapshot read earns
+one trailing read; legacy uploads are attempted once per runtime rather than
+repeated on reconnect or snapshot failure. Snapshot reads have a 15-second
+deadline. Failure preserves the projection and runtime switches reject stale
+completions. A per-key server revision and a session-incarnation guard reject
+stale snapshots and late rollbacks. Full-snapshot revisions also cover omitted
 sessions, so a delayed mutation response cannot resurrect a cleared queue;
 session events newer than that snapshot survive reconciliation.
 
-Mutations are optimistic and then settled on the server's copy; failed
-round-trips re-read instead of guessing. Empty legacy events without a directory
-clear all projections of their session in that runtime. Projection items carry
+Mutations are optimistic and then settled on the server's copy of that session;
+failed round-trips re-read instead of guessing, and same-session mutations are
+serialized. Enqueue requests carry an idempotency key, takes carry durable
+receipts, and failed restores stay in a bounded persisted retry set instead of
+being silently dropped. An empty legacy event without a directory, as sent by
+servers before 1.22.2, clears every projection of that session id in the runtime,
+because a session id is unique across directories. Projection items carry
 attachment metadata only and no captured context, so `popToInput()` and
 `takeForSend()` asynchronously remove the message on the server and retrieve its
 complete captured payload, including the context captured when it was accepted.
@@ -137,7 +147,6 @@ complete captured payload, including the context captured when it was accepted.
 Persisted queue keys use exactly `runtime\ndirectory\nsession`. Persistence version 6 revalidates and canonicalizes composite keys from versions 2 through 5, so noncanonical aliases in the previously current version cannot remain stranded. Windows aliases merge in persisted FIFO order and retain the newest 20 messages, matching normal queue overflow, while POSIX case variants, runtimes, and sessions remain separate. Unparseable and legacy session-only queues keep valid messages in quarantine. Null, non-array, and malformed queue records are discarded, while valid sibling queues continue migrating. Pending server enqueues and taken-item operation ids are migrated with the queue, including removal invalidation, so a reload cannot upload a message the user already removed or lose the receipt needed to acknowledge a successful send.
 
 `removeFromQueue()` and `popToInput()` also refuse an item while its send is in flight. Successful completion uses `completeSending()` so removing the item and clearing its claim happen together. `clearAllQueues()` retains the same in-flight entries and claims as `clearQueue()` while dropping every other queued item. Queue actions return discarded entries; explicit chip removal routes through `removeQueuedMessageWithContextRestore` so captured context returns to composer state, while a merged composer send owns its `clearQueue()` + guarded `restoreQueue()` rollback and restores discarded queue entries only when its request fails and the target's deletion generation is unchanged. Session deletion cleanup advances that target-scoped generation before clearing the queue, so a late rejection cannot resurrect deleted-session messages or context. `restoreQueue()` applies the same overflow rule as `addToQueue()`: in-flight entries stay first, and newer queued additions win over older restored entries when capacity is exceeded.
-`messageQueueStore.ts` has two owners, decided by `isServerOwnedMessageQueue()`. On web, desktop, and mobile the OpenChamber server owns the queue (`packages/web/server/lib/message-queue/`): it delivers queued messages when the session goes idle whether or not any UI is open, and the store is a projection of it. `hydrate()` loads the complete snapshot for the active runtime, including empty-session directory and lifecycle metadata. `openchamber:message-queue.updated` broadcasts keep it current, and every mutation is optimistic locally then settled on the server's copy of that session. A failed round-trip re-reads the server instead of guessing. A per-key server revision and session incarnation guard reject stale snapshots and late rollbacks. Same-session mutations are serialized; enqueue requests carry an idempotency key, takes carry durable receipts, and failed restores remain in a bounded persisted retry set instead of being silently dropped. An empty session that arrives without a directory, as sent by servers before 1.22.2, clears every projection of that session id in the runtime, because a session id is unique across directories. Projection items carry attachment metadata only and no captured context; `popToInput()` and `takeForSend()` remove the message on the server and get the full payload back, which is why both are async.
 
 `lib/messages/queuedMessagePreview.ts` derives the queue row from typed text,
 then attached comments/context, then the first filename. The store sends a
