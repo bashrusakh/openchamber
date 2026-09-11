@@ -1028,6 +1028,25 @@ export async function reloadOpenCodeConfiguration(options?: {
 
 let unsubscribeAgentsConfigChanges: (() => void) | null = null;
 
+// OpenCode reload can emit several `agents` config events in a burst. Every
+// refresh refetches each loaded directory plus one config request per agent,
+// so the subscription schedules at most one trailing refresh per burst
+// instead of one per event. A lone event still runs on the next macrotask.
+// The immediate call sites (effective create/update/delete mutations and
+// performConfigRefresh) keep calling refreshLoadedAgentDirectories directly.
+let externalAgentsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+const scheduleExternalAgentsRefresh = (): void => {
+  if (externalAgentsRefreshTimer !== null) {
+    return;
+  }
+
+  externalAgentsRefreshTimer = setTimeout(() => {
+    externalAgentsRefreshTimer = null;
+    void refreshLoadedAgentDirectories();
+  }, 0);
+};
+
 if (!unsubscribeAgentsConfigChanges) {
   unsubscribeAgentsConfigChanges = subscribeToConfigChanges((event) => {
     if (event.source === CONFIG_EVENT_SOURCE) {
@@ -1037,7 +1056,7 @@ if (!unsubscribeAgentsConfigChanges) {
     if (scopeMatches(event, "agents")) {
       // Refresh every loaded directory, not only the ambient one: a composer
       // scoped elsewhere must not keep resolving a pre-change list.
-      void refreshLoadedAgentDirectories();
+      scheduleExternalAgentsRefresh();
     }
   });
 }

@@ -16,7 +16,7 @@ import { useSnippetsStore } from './useSnippetsStore';
 import { useGlobalSessionsStore } from './useGlobalSessionsStore';
 import { getMultiRunSessionTitle } from '@/lib/multirun/title';
 import { getSyncChildStores, registerSessionDirectory } from '@/sync/sync-refs';
-import { resolveAvailableAgentForDirectory } from './useAgentsStore';
+import { resolveAvailableAgentForDirectory, useAgentsStore } from './useAgentsStore';
 import { toast } from '@/components/ui';
 import { formatMessage, useI18nStore } from '@/lib/i18n';
 
@@ -307,6 +307,19 @@ export const useMultiRunStore = create<MultiRunStore>()(
             try {
               const expandText = useSnippetsStore.getState().expandText;
               const droppedAgentNames = new Set<string>();
+              // A run sends into its own directory, so the guard can only prove
+              // absence against that directory's list. A freshly created
+              // worktree has never loaded: load each distinct run directory
+              // before resolving, or the guard fails open and the unavailable
+              // agent still reaches the wire. A failed load leaves the entry
+              // missing, which keeps that fail-open behavior. Without a
+              // requested agent there is nothing to resolve, so no load runs.
+              if (agent) {
+                const runDirectories = Array.from(new Set(createdRuns.map((run) => run.worktreePath)));
+                await Promise.allSettled(
+                  runDirectories.map((directory) => useAgentsStore.getState().loadAgents(directory)),
+                );
+              }
               await Promise.allSettled(
                 createdRuns.map(async (run) => {
                   try {

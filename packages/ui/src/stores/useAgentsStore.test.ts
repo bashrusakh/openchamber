@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, jest, mock, test } from 'bun:test';
 
 import { emitConfigChange } from '@/lib/configSync';
 import { resolveComposerAgentDirectory } from '@/lib/composerAgentDirectory';
@@ -221,8 +221,11 @@ describe('stale per-directory lists after an agent change', () => {
   };
 
   const settleDeferredWork = async () => {
-    // Flush the fire-and-forget refresh a mutation schedules: its whole chain
-    // is microtasks once the mocked list resolves, so one macrotask is enough.
+    // Flush the fire-and-forget refresh a mutation schedules, or the trailing
+    // timer the config-change subscription schedules. The subscription
+    // refresh first fires its macrotask timer; two turns cover that plus the
+    // microtask chain once the mocked list resolves.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
   };
 
@@ -530,6 +533,9 @@ describe('stale per-directory lists after an agent change', () => {
     gate = createGate();
 
     emitConfigChange('agents', { source: 'external-config-change-test' });
+    // The subscription coalesces the event into a trailing refresh; wait for
+    // its timer to run before asserting the in-flight state.
+    await settleDeferredWork();
 
     // The refresh clears both entries before its fetches start, so the guard
     // fails open instead of trusting the pre-change lists.
@@ -549,6 +555,44 @@ describe('stale per-directory lists after an agent change', () => {
       agent: 'newcomer',
       reason: 'available',
     });
+  });
+
+  /**
+   * OpenCode reload can emit several `agents` config events in a burst. Every
+   * refresh refetches each loaded directory plus one config request per agent,
+   * so the subscription must collapse a burst into one trailing refresh while
+   * a lone event still refreshes on the next macrotask.
+   */
+  test('a burst of external agents config changes coalesces into one refresh', async () => {
+    // A stable known-directory set lets an explicit immediate refresh serve as
+    // the call-count baseline: the coalesced refresh must fan out over the same
+    // directories, and the trailing refresh below is the only extra fan-out.
+    await refreshLoadedAgentDirectories();
+    listAgentsCalls.length = 0;
+    await refreshLoadedAgentDirectories();
+    const callsPerRefresh = listAgentsCalls.length;
+    expect(callsPerRefresh).toBeGreaterThan(0);
+
+    jest.useFakeTimers();
+    try {
+      listAgentsCalls.length = 0;
+      emitConfigChange('agents', { source: 'external-burst-test' });
+      emitConfigChange('agents', { source: 'external-burst-test' });
+
+      // Both events arrived before the trailing timer ran: still no refresh.
+      expect(listAgentsCalls).toHaveLength(0);
+
+      jest.advanceTimersByTime(0);
+      expect(listAgentsCalls).toHaveLength(callsPerRefresh);
+
+      // A later event is a new burst and schedules one more refresh.
+      emitConfigChange('agents', { source: 'external-burst-test' });
+      expect(listAgentsCalls).toHaveLength(callsPerRefresh);
+      jest.advanceTimersByTime(0);
+      expect(listAgentsCalls).toHaveLength(callsPerRefresh * 2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   /**

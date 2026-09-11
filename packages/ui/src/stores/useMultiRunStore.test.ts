@@ -42,6 +42,8 @@ const childState = {
   limit: 5,
 };
 let currentDirectory = '/repo';
+const listAgentsCalls: Array<string | null | undefined> = [];
+let listAgentsImpl: (directory: string | null | undefined) => Promise<AgentWithExtras[]> = async () => [];
 
 mock.module('@/sync/session-ui-store', () => ({
   routeMessage: routeMessageMock,
@@ -57,6 +59,11 @@ mock.module('@/sync/session-ui-store', () => ({
 
 mock.module('@/lib/opencode/client', () => ({
   opencodeClient: {
+    getDirectory: () => null,
+    listAgents: (directory: string | null | undefined) => {
+      listAgentsCalls.push(directory);
+      return listAgentsImpl(directory);
+    },
     withDirectory: async (directory: string, fn: () => Promise<Session>) => {
       const previous = currentDirectory;
       currentDirectory = directory;
@@ -80,6 +87,15 @@ mock.module('@/lib/opencode/client', () => ({
 
 mock.module('@/lib/gitApi', () => ({
   checkIsGitRepository: mock(() => Promise.resolve(isGitRepository)),
+}));
+
+// `loadAgents` tags each agent through its config route; these tests only need
+// the directory list, so the route is a local no-op.
+mock.module('@/lib/runtime-fetch', () => ({
+  runtimeFetch: async () =>
+    new Response(JSON.stringify({}), {
+      headers: { 'Content-Type': 'application/json' },
+    }),
 }));
 
 mock.module('@/lib/worktrees/worktreeCreate', () => ({
@@ -197,6 +213,8 @@ describe('useMultiRunStore', () => {
     childState.sessionTotal = 0;
     childState.limit = 5;
     currentDirectory = '/repo';
+    listAgentsCalls.length = 0;
+    listAgentsImpl = async () => [];
     toastInfoCalls.length = 0;
     originalToastInfo = toast.info;
     toast.info = (...args: Parameters<typeof toast.info>) => {
@@ -341,6 +359,7 @@ describe('useMultiRunStore', () => {
         [WORKTREE]: [agent('build')],
       },
     });
+    listAgentsImpl = async (directory) => (directory === WORKTREE ? [agent('build')] : []);
 
     const result = await createIsolatedRuns(2);
     await flushBackgroundDispatch();
@@ -362,6 +381,7 @@ describe('useMultiRunStore', () => {
     useAgentsStore.setState({
       agentsByDirectory: { [WORKTREE]: [agent('build')] },
     });
+    listAgentsImpl = async (directory) => (directory === WORKTREE ? [agent('build')] : []);
 
     await createIsolatedRuns(1);
     await createIsolatedRuns(1);
@@ -378,6 +398,7 @@ describe('useMultiRunStore', () => {
     useAgentsStore.setState({
       agentsByDirectory: { [WORKTREE]: [agent(AGENT)] },
     });
+    listAgentsImpl = async (directory) => (directory === WORKTREE ? [agent(AGENT)] : []);
 
     await createIsolatedRuns(1);
     await flushBackgroundDispatch();
@@ -387,13 +408,42 @@ describe('useMultiRunStore', () => {
     expect(toastInfoCalls).toHaveLength(0);
   });
 
+  test('loads a fresh worktree directory before resolving its runs', async () => {
+    isGitRepository = true;
+    // No pre-seeded store: a freshly created worktree has never loaded its
+    // agent list, so the dispatch must load that directory before the guard
+    // runs; otherwise the guard fails open and the unavailable agent is sent.
+    listAgentsImpl = async (directory) => (directory === WORKTREE ? [agent('build')] : []);
+
+    const result = await createIsolatedRuns(2);
+    await flushBackgroundDispatch();
+
+    expect(result?.sessionIds).toHaveLength(2);
+    expect(listAgentsCalls).toEqual([WORKTREE]);
+    for (const call of routeMessageCalls) {
+      expect(call.directory).toBe(WORKTREE);
+      expect(call.agent).toBeUndefined();
+    }
+    expect(toastInfoCalls).toHaveLength(1);
+    const noticeId = String(toastInfoCalls[0]?.[1]?.id);
+    expect(noticeId.startsWith('agent-unavailable:multirun:')).toBe(true);
+    expect(noticeId.endsWith(`:${AGENT}`)).toBe(true);
+  });
+
   test('fails open while the run directory list has not loaded', async () => {
     isGitRepository = true;
     useAgentsStore.setState({ agentsByDirectory: {} });
+    // The directory's own load fails, so its entry stays missing and the guard
+    // cannot prove the agent is unavailable: the request stands and no notice
+    // claims the agent was dropped.
+    listAgentsImpl = async () => {
+      throw new Error('network down');
+    };
 
     await createIsolatedRuns(1);
     await flushBackgroundDispatch();
 
+    expect(listAgentsCalls).toContain(WORKTREE);
     expect(routeMessageCalls).toHaveLength(1);
     expect(routeMessageCalls[0]?.directory).toBe(WORKTREE);
     expect(routeMessageCalls[0]?.agent).toBe(AGENT);
