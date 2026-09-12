@@ -297,6 +297,19 @@ export const shouldVirtualizeSessionGroup = (input: {
   && (input.isArchivedBucket || input.hasSessionSearchQuery)
 );
 
+/**
+ * The scroll element a group virtualizer should use: the locally resolved one
+ * wins once set (it may come from the ancestor walk when no ref is threaded),
+ * otherwise the element threaded in by the scroller. Readiness can therefore
+ * be true on the same commit that turns virtualization on whenever the parent
+ * has already mounted its scroller, instead of waiting a commit for the
+ * layout-effect state update.
+ */
+export const selectSessionGroupScrollElement = <T>(input: {
+  providedScrollElement: T | null;
+  resolvedScrollElement: T | null;
+}): T | null => input.resolvedScrollElement ?? input.providedScrollElement;
+
 const sessionObjectVersions = new WeakMap<object, number>();
 let nextSessionObjectVersion = 1;
 

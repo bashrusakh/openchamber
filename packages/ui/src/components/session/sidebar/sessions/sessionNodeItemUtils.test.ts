@@ -13,6 +13,7 @@ import {
   selectFolderRootNodes,
   selectQuestionBadgeSessionScopes,
   selectRowBadgeVisibilityClass,
+  selectSessionGroupScrollElement,
   shouldVirtualizeSessionGroup,
 } from './sessionNodeItemUtils';
 import type { SessionNode } from '../types';
@@ -241,6 +242,24 @@ describe('shouldVirtualizeSessionGroup', () => {
         expect(decide({ isArchivedBucket, hasSessionSearchQuery, visibleSessionCount: underThreshold })).toBe(false);
       }
     }
+  });
+});
+
+describe('selectSessionGroupScrollElement', () => {
+  type ScrollStub = { id: string };
+  const resolved: ScrollStub = { id: 'resolved' };
+  const provided: ScrollStub = { id: 'provided' };
+
+  test('prefers the locally resolved element over the provided one', () => {
+    expect(selectSessionGroupScrollElement({ providedScrollElement: provided, resolvedScrollElement: resolved })).toBe(resolved);
+  });
+
+  test('falls back to the provided element while nothing is resolved', () => {
+    expect(selectSessionGroupScrollElement({ providedScrollElement: provided, resolvedScrollElement: null })).toBe(provided);
+  });
+
+  test('returns null when neither source has an element', () => {
+    expect(selectSessionGroupScrollElement<ScrollStub>({ providedScrollElement: null, resolvedScrollElement: null })).toBeNull();
   });
 });
 

@@ -29,6 +29,7 @@ import {
   resolveMenuOpenSessionId,
   selectFolderIdsForProjection,
   selectFolderRootNodes,
+  selectSessionGroupScrollElement,
   shouldVirtualizeSessionGroup,
 } from '../sessions/sessionNodeItemUtils';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
@@ -673,19 +674,27 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   // ScrollableOverlay), so scrollMargin translates its scrollTop into
   // container-relative coordinates — the tanstack equivalent of virtua's
   // startMargin this replaces.
-  // Enable ONLY once the ancestor scroll element is resolved. While the
-  // virtualizer is disabled the core resets its cached scroll offset, so the
-  // first enabled read takes initialOffset() from the LIVE scrollTop below —
-  // making the core's attach-time scrollTo target the current position (a
-  // visual no-op) instead of a stale 0 that reset the sidebar to the top.
+  // Enable ONLY once a scroll element is known. The parent-threaded ref is
+  // already populated after the first mount, so readiness is true on the same
+  // commit that turns virtualization on; the locally resolved element from
+  // the layout effect remains the fallback source (and wins once set). While
+  // the virtualizer is disabled the core resets its cached scroll offset, so
+  // the first enabled read takes initialOffset() from the LIVE scrollTop
+  // below — making the core's attach-time scrollTo target the current position
+  // (a visual no-op) instead of a stale 0 that reset the sidebar to the top.
   // The core only learns the offset from scroll events after that, so this
   // initial seeding is what makes the first render window correct too.
-  const virtualizerReady = shouldVirtualize && virtualScrollEl !== null;
+  const providedScrollElement = scrollContainerRef?.current ?? null;
+  const effectiveScrollElement = selectSessionGroupScrollElement({
+    providedScrollElement,
+    resolvedScrollElement: virtualScrollEl,
+  });
+  const virtualizerReady = shouldVirtualize && effectiveScrollElement !== null;
   const sessionVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
     count: visibleSessions.length,
     enabled: virtualizerReady,
-    getScrollElement: () => virtualScrollEl,
-    initialOffset: () => virtualScrollEl?.scrollTop ?? 0,
+    getScrollElement: () => effectiveScrollElement,
+    initialOffset: () => effectiveScrollElement?.scrollTop ?? 0,
     estimateSize: () => ROW_ESTIMATE_PX,
     // Expanded parents render children inline and dwarf the row estimate;
     // widen the window so their extra height stays covered.
@@ -1037,11 +1046,12 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
       {shouldVirtualize ? (
         <div ref={virtualContainerRef}>
           {!virtualizerReady ? (
-            // At most one pre-paint frame: this wrapper must exist for the
-            // layout effect to resolve the ancestor scroll element, which
-            // re-renders synchronously before paint. Rendering the plain rows
-            // meanwhile keeps the container's height real so the scroller
-            // never collapses/clamps during the flip.
+            // No scroll element yet: the initial mount before the parent ref
+            // is committed, or a section without a provided ref (e.g. the
+            // chats section) until the ancestor walk resolves one. This
+            // wrapper must exist for that resolution; rendering the plain
+            // rows meanwhile keeps the container's height real so the
+            // scroller never collapses/clamps during the flip.
             visibleSessions.map(renderSessionNode)
           ) : (
           <div style={{ height: sessionVirtualizer.getTotalSize(), position: 'relative' }}>
