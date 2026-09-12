@@ -179,4 +179,36 @@ describe('sidebar search over standalone groups', () => {
     expect(sections.groupSearchDataByGroup.has(group)).toBe(false);
     expect(sections.searchMatchCount).toBe(0);
   });
+
+  test('counts archived text matches and keeps the flat merge counts exact', () => {
+    const active = { ...chatSession('ses_active', 'Release notes'), directory: CHATS_ROOT };
+    const archived = {
+      ...chatSession('ses_archived', 'Release archive'),
+      directory: CHATS_ROOT,
+      time: { created: 1, updated: 1, archived: 2 },
+    };
+    const sections = renderSections(chatsGroup([]), 'release', [active, archived]);
+    const rootGroup = sections.sectionsForRender[0]?.groups.find((group) => group.isMain);
+    const archivedGroup = sections.sectionsForRender[0]?.groups.find((group) => group.isArchivedBucket);
+    if (!rootGroup || !archivedGroup) throw new Error('expected the active and archived groups');
+
+    expect(sections.groupSearchDataByGroup.get(rootGroup)?.matchedSessionCount).toBe(1);
+    expect(sections.groupSearchDataByGroup.get(archivedGroup)?.matchedSessionCount).toBe(1);
+    expect(sections.searchMatchCount).toBe(2);
+    expect(sections.flatSectionsForRender[0]?.groups[0]?.sessions.map((node) => node.session.id)).toEqual(['ses_active']);
+  });
+
+  test('keeps group and folder name matches in the header count', () => {
+    const group = chatsGroup([chatSession('ses_a', 'Unrelated grocery list')]);
+    group.label = 'Release workspace';
+
+    const sections = renderSections(group, 'release');
+    const data = sections.groupSearchDataByGroup.get(group);
+
+    expect(data?.matchedSessionCount).toBe(0);
+    expect(data?.groupMatches).toBe(true);
+    expect(data?.folderNameMatchCount).toBe(1);
+    expect(data?.hasMatch).toBe(true);
+    expect(sections.searchMatchCount).toBe(2);
+  });
 });

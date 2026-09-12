@@ -12,7 +12,7 @@ import { createSessionOwnershipIndex } from './sessions/sessionOwnership';
 import { useProjectSessionLists } from './projects/useProjectSessionLists';
 import { useSessionGrouping } from './projects/useSessionGrouping';
 import { useSessionSidebarSections } from './projects/useSessionSidebarSections';
-import type { SessionGroup, SessionNode } from './types';
+import type { SessionGroup, SessionNode, SessionNodeSearchResult } from './types';
 import { installHookTestDom } from './test-utils/testDom';
 
 /**
@@ -149,7 +149,7 @@ const useWiredSearchState = ({
     isVSCode: false,
   });
   const { filterSessionNodesForSearch: runFilterSessionNodesForSearch } = grouping;
-  const filterSessionNodesForSearch = React.useCallback((nodes: SessionNode[], query: string): SessionNode[] => {
+  const filterSessionNodesForSearch = React.useCallback((nodes: SessionNode[], query: string): SessionNodeSearchResult => {
     filterCost.calls += 1;
     const startedAt = performance.now();
     const filtered = runFilterSessionNodesForSearch(nodes, query);
