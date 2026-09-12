@@ -130,6 +130,8 @@ mock.module('./GitHubIntegrationDialog', () => ({
   },
 }));
 mock.module('./LinearIssuePickerDialog', () => ({ LinearIssuePickerDialog: () => null }));
+mock.module('@/components/model-picker/ModelPickerList', () => ({ ModelPickerList: () => null }));
+mock.module('@/hooks/useModelLists', () => ({ useModelLists: () => ({ favoriteModelsList: [], recentModelsList: [] }) }));
 
 const { NewWorktreeDialog } = await import('./NewWorktreeDialog');
 const { I18nProvider } = await import('@/lib/i18n');
