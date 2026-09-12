@@ -322,6 +322,7 @@ mock.module("@/lib/git/branchNameGenerator", () => ({
 mock.module("@/lib/openchamberConfig", () => ({
   getWorktreeSetupCommands: async () => [],
   getWorktreeSetupWaitEnabled: async () => false,
+  substituteCommandVariables: (command: string) => command,
 }))
 mock.module("@/lib/sharedTrustConfirmation", () => ({
   resolveWorktreeSetupCommands: async () => [],

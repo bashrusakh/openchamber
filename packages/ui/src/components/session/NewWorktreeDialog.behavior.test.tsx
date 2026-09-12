@@ -58,6 +58,7 @@ mock.module('@/components/ui', () => ({
 mock.module('@/components/ui/dropdown-menu', () => ({
   DropdownMenu: passthrough,
   DropdownMenuContent: passthrough,
+  DropdownMenuItem: passthrough,
   DropdownMenuTrigger: passthrough,
 }));
 
