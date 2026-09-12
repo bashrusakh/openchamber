@@ -34,12 +34,30 @@ const flushMicrotasks = async () => {
   await Promise.resolve();
 };
 
+// Fake timers replace the global timers. Capture the real setImmediate at
+// module load so a test can drain the current macrotask/microtask chain
+// without advancing the fake clock. This is one event-loop turn, not a sleep.
+const realSetImmediate = globalThis.setImmediate;
+const flushEventLoop = () => new Promise((resolve) => realSetImmediate(resolve));
+
+// vi.waitFor polls with real timers and advances the fake clock by the poll
+// interval on every check, which can fire timers the test did not intend.
+// Pump only fake timers and microtasks until the barrier condition holds.
+const pumpUntil = async (condition, iterations = 8) => {
+  for (let pump = 0; pump < iterations && !condition(); pump += 1) {
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+  }
+};
+
 const deferred = () => {
   let resolve;
-  const promise = new Promise((resolvePromise) => {
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 };
 
 const startIdleTick = async (fetchImpl, options = {}) => {
@@ -568,7 +586,8 @@ describe('session goal live activity gate', () => {
     expect(emitGoalNotification).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(10);
-    await vi.waitFor(() => expect(emitGoalNotification).toHaveBeenCalledOnce());
+    await pumpUntil(() => emitGoalNotification.mock.calls.length > 0);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
     expect(currentGoal).toMatchObject({ status, statusReason });
     expect(patchAttempts).toBe(1);
     expect(promptAttempts).toBe(0);
@@ -1064,7 +1083,8 @@ describe('session goal live activity gate', () => {
     await vi.advanceTimersByTimeAsync(10);
     await flushMicrotasks();
 
-    await vi.waitFor(() => expect(emitGoalNotification).toHaveBeenCalledOnce());
+    await pumpUntil(() => emitGoalNotification.mock.calls.length > 0);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
     expect(currentGoal).toMatchObject({
       status: 'blocked',
       statusReason: 'fetch retry limit reached',
@@ -1145,6 +1165,264 @@ describe('session goal live activity gate', () => {
     const requestsAfterExhaustion = fetchImpl.mock.calls.length;
     await vi.advanceTimersByTimeAsync(100);
     expect(fetchImpl.mock.calls).toHaveLength(requestsAfterExhaustion);
+    runtime.stop();
+  });
+
+  it('revives an exhausted terminalization fence on readiness and settles the goal', async () => {
+    let currentGoal = { ...goal, updatedAt: 1 };
+    let statusFailures = 0;
+    let blockedWrites = 0;
+    let blockedAvailable = false;
+    const emitGoalNotification = vi.fn();
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        const nextGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (nextGoal.status === 'blocked') {
+          blockedWrites += 1;
+          if (!blockedAvailable) throw new Error('blocked write unavailable');
+          currentGoal = nextGoal;
+          return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+        }
+        currentGoal = nextGoal;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') {
+        if (statusFailures < 3) {
+          statusFailures += 1;
+          return jsonResponse({ error: 'unavailable' }, 503);
+        }
+        return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      }
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: vi.fn(),
+      emitGoalNotification,
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      retryDelaysMs: [10],
+      maxRetryAttempts: 1,
+    });
+
+    runtime.processPayload({
+      type: 'session.updated',
+      properties: { info: { ...session, time: { updated: 1 }, metadata: { openchamber: { goal: currentGoal } } } },
+    });
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushMicrotasks();
+
+    // Parked: the bounded terminalization window exhausted with zero timers
+    // while the goal is still active.
+    expect(currentGoal.status).toBe('active');
+    expect(blockedWrites).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // OpenCode is ready again: the readiness edge must revive the same fence
+    // for one fresh bounded window instead of staying stranded.
+    blockedAvailable = true;
+    await runtime.start({ listDirectories: async () => [], resetRetryWindow: true });
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushMicrotasks();
+
+    expect(currentGoal).toMatchObject({ status: 'blocked', statusReason: 'fetch retry limit reached' });
+    expect(blockedWrites).toBe(3);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(blockedWrites).toBe(3);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
+    runtime.stop();
+  });
+
+  it('re-parks a revived terminalization fence when settlement fails again', async () => {
+    let currentGoal = { ...goal, updatedAt: 1 };
+    let statusFailures = 0;
+    let blockedWrites = 0;
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        blockedWrites += 1;
+        throw new Error('blocked write unavailable');
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') {
+        if (statusFailures < 3) {
+          statusFailures += 1;
+          return jsonResponse({ error: 'unavailable' }, 503);
+        }
+        return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      }
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: vi.fn(),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      retryDelaysMs: [10],
+      maxRetryAttempts: 1,
+    });
+
+    runtime.processPayload({
+      type: 'session.updated',
+      properties: { info: { ...session, time: { updated: 1 }, metadata: { openchamber: { goal: currentGoal } } } },
+    });
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushMicrotasks();
+    expect(blockedWrites).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Revival with the terminal write still unavailable runs one fresh bounded
+    // window, then parks again instead of looping forever.
+    await runtime.start({ listDirectories: async () => [], resetRetryWindow: true });
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushMicrotasks();
+
+    expect(currentGoal.status).toBe('active');
+    expect(blockedWrites).toBe(4);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(blockedWrites).toBe(4);
+    expect(vi.getTimerCount()).toBe(0);
+    runtime.stop();
+  });
+
+  it('revives an exhausted terminalization fence when the feature is re-enabled', async () => {
+    let currentGoal = { ...goal, updatedAt: 1 };
+    let enabled = true;
+    let statusFailures = 0;
+    let blockedWrites = 0;
+    let blockedAvailable = false;
+    const emitGoalNotification = vi.fn();
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        const nextGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (nextGoal.status === 'blocked') {
+          blockedWrites += 1;
+          if (!blockedAvailable) throw new Error('blocked write unavailable');
+          currentGoal = nextGoal;
+          return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+        }
+        currentGoal = nextGoal;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') {
+        if (statusFailures < 3) {
+          statusFailures += 1;
+          return jsonResponse({ error: 'unavailable' }, 503);
+        }
+        return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      }
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: vi.fn(),
+      emitGoalNotification,
+      isEnabled: () => enabled,
+      idleQuietMs: 10,
+      retryDelaysMs: [10],
+      maxRetryAttempts: 1,
+    });
+
+    runtime.processPayload({
+      type: 'session.updated',
+      properties: { info: { ...session, time: { updated: 1 }, metadata: { openchamber: { goal: currentGoal } } } },
+    });
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushMicrotasks();
+    expect(currentGoal.status).toBe('active');
+    expect(blockedWrites).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Disable then re-enable: the re-enable edge revives the fence and settles
+    // once the terminal write is available again.
+    enabled = false;
+    runtime.onSettingsChanged();
+    enabled = true;
+    blockedAvailable = true;
+    runtime.onSettingsChanged();
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(100);
+    await flushMicrotasks();
+
+    expect(currentGoal).toMatchObject({ status: 'blocked', statusReason: 'fetch retry limit reached' });
+    expect(blockedWrites).toBe(3);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(blockedWrites).toBe(3);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
     runtime.stop();
   });
 
@@ -1881,6 +2159,219 @@ describe('session goal live activity gate', () => {
     runtime.stop();
   });
 
+  it('discards a stale abort when a first goal arrives after the pause read fails', async () => {
+    vi.setSystemTime(1_000);
+    const newGoal = {
+      ...goal,
+      id: 'goal_new',
+      objective: 'New task',
+      turnsUsed: 0,
+      createdAt: 2_000,
+      updatedAt: 2_000,
+    };
+    let currentGoal = newGoal;
+    let sessionReads = 0;
+    let pauseWrites = 0;
+    let promptAttempts = 0;
+    const assistant = {
+      info: {
+        id: 'msg_assistant', sessionID: SESSION_ID, role: 'assistant', providerID: 'provider', modelID: 'model',
+        time: { completed: 2 }, tokens: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+      },
+      parts: [{ type: 'text', text: 'More work remains.' }],
+    };
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        const nextGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (nextGoal.status === 'paused') pauseWrites += 1;
+        currentGoal = nextGoal;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        sessionReads += 1;
+        // The abort-time pause read fails once; authoritative reads return
+        // the current goal afterwards.
+        if (sessionReads === 1) throw new Error('transient session read failure');
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([assistant]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => ({ generateSmallModelText: vi.fn(async () => ({
+        text: '{"verdict":"continue","note":"More work remains"}', providerID: 'provider', modelID: 'model',
+      })) }),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      kickoffQuietMs: 10,
+    });
+
+    // The abort finds no goal because the pause read fails, and the session
+    // had no prior goal tracking. Drain the abort chain (no timer advance) so
+    // the session is genuinely idle when the first goal appears.
+    runtime.processPayload({
+      type: 'message.updated',
+      properties: { info: { role: 'assistant', sessionID: SESSION_ID, error: { name: 'MessageAbortedError' } } },
+    }, DIRECTORY);
+    await flushEventLoop();
+    expect(pauseWrites).toBe(0);
+
+    // A first goal is neither a "fresh goal" (no previous snapshot) nor
+    // "during work"; the stale stop must not pause it.
+    runtime.processPayload({
+      type: 'session.updated',
+      properties: { info: { ...session, time: { updated: 2_000 }, metadata: { openchamber: { goal: newGoal } } } },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(pauseWrites).toBe(0);
+    expect(currentGoal).toMatchObject({ id: newGoal.id, status: 'active' });
+    expect(promptAttempts).toBeGreaterThanOrEqual(1);
+    runtime.stop();
+  });
+
+  it('drops a failed-read abort after an authoritative no-goal tick', async () => {
+    vi.setSystemTime(1_000);
+    const newGoal = {
+      ...goal,
+      id: 'goal_new',
+      objective: 'New task',
+      turnsUsed: 0,
+      createdAt: 2_000,
+      updatedAt: 2_000,
+    };
+    let currentGoal = null;
+    let sessionReads = 0;
+    let pauseWrites = 0;
+    let promptAttempts = 0;
+    const assistant = {
+      info: {
+        id: 'msg_assistant', sessionID: SESSION_ID, role: 'assistant', providerID: 'provider', modelID: 'model',
+        time: { completed: 2 }, tokens: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+      },
+      parts: [{ type: 'text', text: 'More work remains.' }],
+    };
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        currentGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (currentGoal.status === 'paused') pauseWrites += 1;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        sessionReads += 1;
+        if (sessionReads === 1) throw new Error('transient session read failure');
+        // No goal exists yet: the namespace is present, the key is absent.
+        if (!currentGoal) return jsonResponse({ ...session, metadata: { openchamber: {} } });
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([assistant]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => ({ generateSmallModelText: vi.fn(async () => ({
+        text: '{"verdict":"continue","note":"More work remains"}', providerID: 'provider', modelID: 'model',
+      })) }),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      kickoffQuietMs: 10,
+    });
+
+    runtime.processPayload({
+      type: 'message.updated',
+      properties: { info: { role: 'assistant', sessionID: SESSION_ID, error: { name: 'MessageAbortedError' } } },
+    }, DIRECTORY);
+    // Let the failed pause read retry on its failure-armed tick; the
+    // authoritative response has no goal, so the pending abort must not linger.
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.runOnlyPendingTimersAsync();
+    expect(pauseWrites).toBe(0);
+    expect(promptAttempts).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    currentGoal = newGoal;
+    runtime.processPayload({
+      type: 'session.updated',
+      properties: { info: { ...session, time: { updated: 2_000 }, metadata: { openchamber: { goal: newGoal } } } },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.runOnlyPendingTimersAsync();
+    expect(pauseWrites).toBe(0);
+    expect(currentGoal).toMatchObject({ id: newGoal.id, status: 'active' });
+    expect(promptAttempts).toBeGreaterThanOrEqual(1);
+    runtime.stop();
+  });
+
+  it('still pauses the aborted goal when the pause read fails but the goal is unchanged', async () => {
+    vi.setSystemTime(1_000);
+    const abortedGoal = { ...goal, createdAt: 1, updatedAt: 1 };
+    let currentGoal = abortedGoal;
+    let sessionReads = 0;
+    let pauseWrites = 0;
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        currentGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (currentGoal.status === 'paused') pauseWrites += 1;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        sessionReads += 1;
+        if (sessionReads === 1) throw new Error('transient session read failure');
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) throw new Error('must not dispatch');
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => ({ generateSmallModelText: vi.fn() }),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+    });
+
+    runtime.processPayload({
+      type: 'message.updated',
+      properties: { info: { role: 'assistant', sessionID: SESSION_ID, error: { name: 'MessageAbortedError' } } },
+    }, DIRECTORY);
+    await flushMicrotasks();
+    expect(pauseWrites).toBe(0);
+
+    // The failure-armed retry tick observes the same active goal, whose
+    // creation predates the abort, so stop semantics still apply.
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(pauseWrites).toBe(1);
+    expect(currentGoal).toMatchObject({ status: 'paused', statusReason: 'paused after abort' });
+    runtime.stop();
+  });
+
   it('invalidates an in-flight audit when busy status arrives', async () => {
     const audit = deferred();
     const requests = [];
@@ -2586,6 +3077,82 @@ describe('session goal live activity gate', () => {
     runtime.stop();
   });
 
+  it('runs exactly one follow-up tick when an external idle arrives during a tick', async () => {
+    const auditGate = deferred();
+    let auditCalls = 0;
+    let promptAttempts = 0;
+    let currentGoal = { ...goal, lastAccountedMessageID: '' };
+    const assistant = {
+      info: {
+        id: 'msg_assistant', sessionID: SESSION_ID, role: 'assistant', providerID: 'provider', modelID: 'model',
+        time: { created: 2, completed: 3 }, tokens: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+      },
+      parts: [{ type: 'text', text: 'More work remains.' }],
+    };
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        currentGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([assistant]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => ({ generateSmallModelText: vi.fn(async () => {
+        auditCalls += 1;
+        if (auditCalls === 1) return auditGate.promise;
+        return {
+          text: '{"verdict":"complete","note":"Verified"}',
+          providerID: 'provider',
+          modelID: 'model',
+        };
+      }) }),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+    });
+    const idle = {
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    };
+
+    // Tick #1 starts and parks inside the audit barrier.
+    runtime.processPayload(idle);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(auditCalls).toBe(1);
+
+    // An authoritative external idle event arrives while the tick is in
+    // flight; it must be remembered as a pending arm, not dropped.
+    runtime.processPayload(idle);
+    expect(vi.getTimerCount()).toBe(0);
+
+    auditGate.resolve({ text: '{"verdict":"continue","note":"More work remains"}', providerID: 'provider', modelID: 'model' });
+    await vi.runOnlyPendingTimersAsync();
+    await vi.runOnlyPendingTimersAsync();
+    await flushMicrotasks();
+
+    // Exactly one follow-up tick ran: it audited and settled the goal.
+    expect(auditCalls).toBe(2);
+    expect(promptAttempts).toBe(1);
+    expect(currentGoal).toMatchObject({ status: 'complete' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(auditCalls).toBe(2);
+    expect(vi.getTimerCount()).toBe(0);
+    runtime.stop();
+  });
+
   it('replaces an existing idle timer with the explicit resume kickoff', async () => {
     const paths = [];
     const fetchImpl = vi.fn(async (input) => {
@@ -2777,8 +3344,8 @@ describe('session goal live activity gate', () => {
     expect(dispatchAttempts).toBe(0);
     expect(currentGoal).toMatchObject({ turnsUsed: 2, lastAccountedMessageID: 'msg_assistant' });
 
-    await vi.advanceTimersByTimeAsync(10);
-    await vi.waitFor(() => expect(dispatchAttempts).toBe(1));
+    await pumpUntil(() => dispatchAttempts >= 1);
+    expect(dispatchAttempts).toBe(1);
     expect(requests.filter((request) => request.method === 'PATCH')).toHaveLength(1);
     expect(service.generateSmallModelText).toHaveBeenCalledOnce();
     runtime.stop();
@@ -2839,12 +3406,14 @@ describe('session goal live activity gate', () => {
       type: 'session.status',
       properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
     });
+    // The accepted-but-lost accounting PATCH and the lost prompt response each
+    // arm bounded retries; pump fake timers until the settlement completes
+    // instead of racing a real-time poll against newly armed timers.
+    await pumpUntil(() => currentGoal.status === 'blocked');
     await vi.runOnlyPendingTimersAsync();
-    expect(patchAttempts).toBe(1);
-    expect(currentGoal.turnsUsed).toBe(2);
+    await flushMicrotasks();
 
-    await vi.advanceTimersByTimeAsync(10);
-    await vi.waitFor(() => expect(dispatchAttempts).toBe(1));
+    expect(dispatchAttempts).toBe(1);
     expect(patchAttempts).toBe(2);
     expect(currentGoal).toMatchObject({ status: 'blocked', statusReason: 'continuation admission unresolved' });
     runtime.stop();
@@ -3001,12 +3570,19 @@ describe('session goal live activity gate', () => {
       properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
     });
     await vi.runOnlyPendingTimersAsync();
-    // The first tick persists accounting (turns 1 -> 2) before the missing
-    // provider/model dispatch fails. Wait for that write so the bounded
-    // dispatch retry is armed before advancing: a fixed microtask flush
-    // cannot drain this multi-fetch chain deterministically.
-    await vi.waitFor(() => expect(patchWrites).toBeGreaterThanOrEqual(1));
-    await vi.advanceTimersByTimeAsync(10);
+    // Drive both bounded configuration attempts without real-time waitFor
+    // polling: pump fake timers and microtasks until the second attempt's
+    // guarded rollback write is observed. The deferred rollback response is
+    // the deterministic barrier; a fixed microtask flush cannot drain the
+    // multi-fetch chain, and real-time polling advances the clock arbitrarily.
+    let rollbackStarted = false;
+    rollbackPatchStarted.promise.then(() => {
+      rollbackStarted = true;
+    });
+    for (let pump = 0; pump < 6 && !rollbackStarted; pump += 1) {
+      await vi.runOnlyPendingTimersAsync();
+      await flushMicrotasks();
+    }
     // The bounded retry exhausts maxDispatchAttempts and rolls the
     // undispatched charge back (turns 2 -> 1).
     await rollbackPatchStarted.promise;
@@ -3054,6 +3630,260 @@ describe('session goal live activity gate', () => {
     await vi.advanceTimersByTimeAsync(10);
     expect(promptAttempts).toBe(1);
     expect(patchWrites).toBe(settledPatchWrites + 1);
+    runtime.stop();
+  });
+
+  it('ignores a dispatch failure whose reservation was invalidated while in flight', async () => {
+    vi.setSystemTime(1_000);
+    let currentGoal = { ...goal, turnsUsed: 1, lastAccountedMessageID: '' };
+    let promptAttempts = 0;
+    let blockedWrites = 0;
+    const postStarted = deferred();
+    const postResponse = deferred();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const assistant = {
+      info: {
+        id: 'msg_assistant', sessionID: SESSION_ID, role: 'assistant', providerID: 'provider', modelID: 'model',
+        time: { created: 2, completed: 3 }, tokens: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+      },
+      parts: [{ type: 'text', text: 'More work remains.' }],
+    };
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        currentGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (currentGoal.status === 'blocked') blockedWrites += 1;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([assistant]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        postStarted.resolve();
+        return postResponse.promise;
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => ({ generateSmallModelText: vi.fn(async () => ({
+        text: '{"verdict":"continue","note":"More work remains"}', providerID: 'provider', modelID: 'model',
+      })) }),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+    });
+    const pumpUntil = async (condition, iterations = 8) => {
+      for (let pump = 0; pump < iterations && !condition(); pump += 1) {
+        await vi.runOnlyPendingTimersAsync();
+        await flushMicrotasks();
+      }
+    };
+
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await pumpUntil(() => promptAttempts >= 1);
+    await postStarted.promise;
+    expect(currentGoal).toMatchObject({ status: 'active', turnsUsed: 2 });
+
+    // A genuinely newer user message invalidates the in-flight reservation and
+    // advances the generation before the POST fails.
+    runtime.processPayload({
+      type: 'message.updated',
+      properties: { info: { id: 'msg_user_new', sessionID: SESSION_ID, role: 'user', time: { created: 1_010 } } },
+    });
+    postResponse.reject(new Error('transport lost after invalidation'));
+    await flushEventLoop();
+    await flushEventLoop();
+
+    // The removed reservation's failure must not crash the dispatch handler,
+    // settle the goal, or arm bogus work.
+    const tickFailures = warn.mock.calls.filter(([message]) => String(message).includes('tick failed'));
+    expect(tickFailures).toHaveLength(0);
+    expect(blockedWrites).toBe(0);
+    expect(currentGoal).toMatchObject({ status: 'active', turnsUsed: 2 });
+
+    const requestsAfterFailure = fetchImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(100);
+    await flushMicrotasks();
+    expect(fetchImpl.mock.calls).toHaveLength(requestsAfterFailure);
+    expect(promptAttempts).toBe(1);
+    warn.mockRestore();
+    runtime.stop();
+  });
+
+  it('keeps a rejected dispatch outcome across a transient pre-POST read failure', async () => {
+    let currentGoal = { ...goal, turnsUsed: 1, lastAccountedMessageID: '' };
+    let promptAttempts = 0;
+    let blockedWrites = 0;
+    let transientReadFailed = false;
+    let failPrePostRead = false;
+    let lastPathname = '';
+    const assistant = {
+      info: {
+        id: 'msg_assistant', sessionID: SESSION_ID, role: 'assistant', providerID: 'provider', modelID: 'model',
+        time: { created: 2, completed: 3 }, tokens: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+      },
+      parts: [{ type: 'text', text: 'More work remains.' }],
+    };
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        currentGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (currentGoal.status === 'blocked') blockedWrites += 1;
+        lastPathname = pathname;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        // The pre-POST read follows the final tail read. Fail it once, like a
+        // transient network error on a GET, after the first POST rejection.
+        if (failPrePostRead && !transientReadFailed && lastPathname === `/session/${SESSION_ID}/message`) {
+          transientReadFailed = true;
+          lastPathname = pathname;
+          throw new Error('transient session read failure');
+        }
+        lastPathname = pathname;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      lastPathname = pathname;
+      if (pathname === '/session/status') return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([assistant]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        if (promptAttempts === 1) failPrePostRead = true;
+        return jsonResponse({ error: 'dispatch rejected' }, 400);
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => ({ generateSmallModelText: vi.fn(async () => ({
+        text: '{"verdict":"continue","note":"More work remains"}', providerID: 'provider', modelID: 'model',
+      })) }),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      retryDelaysMs: [10],
+      maxDispatchAttempts: 2,
+    });
+    const pumpUntil = async (condition, iterations = 8) => {
+      for (let pump = 0; pump < iterations && !condition(); pump += 1) {
+        await vi.runOnlyPendingTimersAsync();
+        await flushMicrotasks();
+      }
+    };
+
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await pumpUntil(() => transientReadFailed);
+    expect(transientReadFailed).toBe(true);
+
+    // A pre-POST read failure carries no admission: it must not overwrite the
+    // proven rejected outcome, settle the goal, or skip the rollback window.
+    // Drain microtasks without advancing timers so the retry stays pending.
+    await flushEventLoop();
+
+    expect(currentGoal).toMatchObject({ status: 'active', turnsUsed: 2 });
+    expect(blockedWrites).toBe(0);
+
+    // Once the bounded dispatch window closes, the undispatched charge is
+    // rolled back and the goal settles blocked with restored accounting.
+    await pumpUntil(() => currentGoal.status === 'blocked');
+    expect(promptAttempts).toBe(2);
+    expect(blockedWrites).toBe(1);
+    expect(currentGoal).toMatchObject({
+      status: 'blocked',
+      turnsUsed: 1,
+      tokensUsed: 0,
+      lastAccountedMessageID: '',
+    });
+    runtime.stop();
+  });
+
+  it('settles a rejected reservation as budgetLimited instead of redispatching over budget', async () => {
+    let currentGoal = { ...goal, tokenBudget: 100, turnsUsed: 1, lastAccountedMessageID: '' };
+    let promptAttempts = 0;
+    let blockedWrites = 0;
+    const assistant = {
+      info: {
+        id: 'msg_assistant', sessionID: SESSION_ID, role: 'assistant', providerID: 'provider', modelID: 'model',
+        time: { created: 2, completed: 3 }, tokens: { input: 5, output: 5, cache: { read: 0, write: 0 } },
+      },
+      parts: [{ type: 'text', text: 'More work remains.' }],
+    };
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        currentGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        if (currentGoal.status === 'blocked') blockedWrites += 1;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([assistant]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        return jsonResponse({ error: 'dispatch rejected' }, 400);
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => ({ generateSmallModelText: vi.fn(async () => ({
+        text: '{"verdict":"continue","note":"More work remains"}', providerID: 'provider', modelID: 'model',
+      })) }),
+      isEnabled: () => true,
+      idleQuietMs: 10,
+      retryDelaysMs: [10],
+      maxDispatchAttempts: 2,
+    });
+    const pumpUntil = async (condition, iterations = 8) => {
+      for (let pump = 0; pump < iterations && !condition(); pump += 1) {
+        await vi.runOnlyPendingTimersAsync();
+        await flushMicrotasks();
+      }
+    };
+
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await pumpUntil(() => promptAttempts >= 1);
+    expect(currentGoal).toMatchObject({ status: 'active', turnsUsed: 2, tokensUsed: 10 });
+
+    // The user shrinks the budget below the persisted usage while the rejected
+    // reservation waits for its bounded redispatch.
+    currentGoal = { ...currentGoal, tokenBudget: 3 };
+    await pumpUntil(() => currentGoal.status === 'budgetLimited');
+
+    expect(promptAttempts).toBe(1);
+    expect(blockedWrites).toBe(0);
+    expect(currentGoal).toMatchObject({
+      status: 'budgetLimited',
+      statusReason: 'token budget reached',
+      turnsUsed: 2,
+      tokensUsed: 10,
+    });
+    const requestsAfterSettlement = fetchImpl.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchImpl.mock.calls).toHaveLength(requestsAfterSettlement);
+    expect(promptAttempts).toBe(1);
     runtime.stop();
   });
 
@@ -4950,14 +5780,15 @@ describe('session goal live activity gate', () => {
     await flushMicrotasks();
 
     expect(promptAttempts).toBe(0);
-    await vi.waitFor(() => expect(currentGoal).toMatchObject({
+    await pumpUntil(() => currentGoal.status === 'paused');
+    expect(currentGoal).toMatchObject({
       status: 'paused',
       turnsUsed: 1,
       tokensUsed: 7,
       tokensBaseline: 2,
       tokensCommitted: 3,
       lastAccountedMessageID: 'msg_before',
-    }));
+    });
     runtime.stop();
   });
 
@@ -5066,7 +5897,8 @@ describe('session goal live activity gate', () => {
       properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
     });
     await vi.runOnlyPendingTimersAsync();
-    await vi.waitFor(() => expect(currentGoal).toMatchObject({ turnsUsed: 1, tokensUsed: 7 }));
+    await pumpUntil(() => currentGoal.turnsUsed === 1 && currentGoal.tokensUsed === 7);
+    expect(currentGoal).toMatchObject({ turnsUsed: 1, tokensUsed: 7 });
 
     expect(promptAttempts).toBe(0);
   });
@@ -5130,11 +5962,12 @@ describe('session goal live activity gate', () => {
       properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
     });
     await vi.runOnlyPendingTimersAsync();
-    await vi.waitFor(() => expect(currentGoal).toMatchObject({
+    await pumpUntil(() => currentGoal.id === 'goal_replacement' && currentGoal.status === 'blocked');
+    expect(currentGoal).toMatchObject({
       id: 'goal_replacement',
       status: 'blocked',
       statusReason: 'continuation reservation could not be reconciled',
-    }));
+    });
 
     expect(promptAttempts).toBe(0);
     runtime.stop();
@@ -5536,7 +6369,8 @@ describe('session goal live activity gate', () => {
     await vi.runOnlyPendingTimersAsync();
     await flushMicrotasks();
     expect(dispatchAttempts).toBe(2);
-    await vi.waitFor(() => expect(emitGoalNotification).toHaveBeenCalledOnce());
+    await pumpUntil(() => emitGoalNotification.mock.calls.length > 0);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
     expect(currentGoal.status).toBe('blocked');
     expect(blockedWrites).toBe(1);
     expect(emitGoalNotification).toHaveBeenCalledOnce();
@@ -5606,7 +6440,8 @@ describe('session goal live activity gate', () => {
     expect(currentGoal).toMatchObject({ status: 'active', turnsUsed: 2 });
 
     await vi.advanceTimersByTimeAsync(10);
-    await vi.waitFor(() => expect(emitGoalNotification).toHaveBeenCalledOnce());
+    await pumpUntil(() => emitGoalNotification.mock.calls.length > 0);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
     expect(dispatchAttempts).toBe(2);
     expect(currentGoal).toMatchObject({
       status: 'blocked',
@@ -5690,7 +6525,8 @@ describe('session goal live activity gate', () => {
     await vi.runOnlyPendingTimersAsync();
     expect(dispatchAttempts).toBe(1);
     await vi.advanceTimersByTimeAsync(10);
-    await vi.waitFor(() => expect(emitGoalNotification).toHaveBeenCalledOnce());
+    await pumpUntil(() => emitGoalNotification.mock.calls.length > 0);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
 
     expect(rollbackAttempts).toBe(1);
     expect(blockedWrites).toBe(1);
@@ -5766,7 +6602,8 @@ describe('session goal live activity gate', () => {
     runtime.processPayload(idle);
     await vi.advanceTimersByTimeAsync(10);
     await vi.advanceTimersByTimeAsync(10);
-    await vi.waitFor(() => expect(emitGoalNotification).toHaveBeenCalledOnce());
+    await pumpUntil(() => emitGoalNotification.mock.calls.length > 0);
+    expect(emitGoalNotification).toHaveBeenCalledOnce();
 
     expect(dispatchAttempts).toBe(2);
     expect(blockedWrites).toBe(1);
@@ -6932,6 +7769,77 @@ describe('session goal live activity gate', () => {
     expect(objectiveReads).toBe(3);
     expect(patchAttempts).toBe(0);
     expect(currentGoal.status).toBe('active');
+    runtime.stop();
+  });
+
+  it('rechecks the file objective after the final status fetch before dispatching', async () => {
+    let currentGoal = { ...goal, objective: '', objectiveFile: true, lastAccountedMessageID: '' };
+    let fileObjective = 'Original objective';
+    let statusCalls = 0;
+    let promptAttempts = 0;
+    const finalStatusStarted = deferred();
+    const finalStatusGate = deferred();
+    const assistant = {
+      info: {
+        id: 'msg_assistant', sessionID: SESSION_ID, role: 'assistant', providerID: 'provider', modelID: 'model',
+        time: { created: 2, completed: 3 }, tokens: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+      },
+      parts: [{ type: 'text', text: 'More work remains.' }],
+    };
+    readGoalObjective.mockImplementation(async () => fileObjective);
+    const fetchImpl = vi.fn(async (input, init = {}) => {
+      const pathname = requestPath(input);
+      if (pathname === `/session/${SESSION_ID}` && init.method === 'PATCH') {
+        currentGoal = JSON.parse(init.body).metadata.openchamber.goal;
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === `/session/${SESSION_ID}`) {
+        return jsonResponse({ ...session, metadata: { openchamber: { goal: currentGoal } } });
+      }
+      if (pathname === '/session/status') {
+        statusCalls += 1;
+        if (statusCalls === 3) {
+          // The final admission status fetch: hold it open while the
+          // objective file changes underneath the tick.
+          finalStatusStarted.resolve();
+          return finalStatusGate.promise;
+        }
+        return jsonResponse({ [SESSION_ID]: { type: 'idle' } });
+      }
+      if (pathname === `/session/${SESSION_ID}/children`) return jsonResponse([]);
+      if (pathname === `/session/${SESSION_ID}/message`) return jsonResponse([assistant]);
+      if (pathname === `/session/${SESSION_ID}/prompt_async`) {
+        promptAttempts += 1;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request: ${pathname} ${init.method ?? 'GET'}`);
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const runtime = createSessionGoalRuntime({
+      buildOpenCodeUrl: (pathname) => `http://opencode.test${pathname}`,
+      getOpenCodeAuthHeaders: () => ({}),
+      getSmallModelService: async () => ({ generateSmallModelText: vi.fn(async () => ({
+        text: '{"verdict":"continue","note":"More work remains"}', providerID: 'provider', modelID: 'model',
+      })) }),
+      readGoalObjective,
+      isEnabled: () => true,
+      idleQuietMs: 10,
+    });
+    runtime.processPayload({
+      type: 'session.status',
+      properties: { sessionID: SESSION_ID, status: { type: 'idle' }, directory: DIRECTORY },
+    });
+    await vi.runOnlyPendingTimersAsync();
+    await finalStatusStarted.promise;
+
+    // The user edits the objective file while the final status fetch is open.
+    fileObjective = 'Edited objective';
+    finalStatusGate.resolve(jsonResponse({ [SESSION_ID]: { type: 'idle' } }));
+    await flushEventLoop();
+    await flushEventLoop();
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(promptAttempts).toBe(0);
     runtime.stop();
   });
 });

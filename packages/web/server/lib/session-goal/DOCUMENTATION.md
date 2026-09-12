@@ -139,8 +139,10 @@ before touching the filesystem). Rationale: metadata rides every
      The guarded write uses the current goal revision and generation, with a
      `statusReason` that identifies the exhausted fetch retry. If the read or
      blocked PATCH is unavailable, terminalization retries with bounded backoff
-     and then stops until a later authoritative idle event or Resume starts a
-     fresh bounded window. This path never calls `prompt_async`.
+     and then stops until a later authoritative idle event, a confirmed
+     readiness edge (`start` with `resetRetryWindow`), an explicit Resume, or a
+     feature re-enable starts a fresh bounded window. This path never calls
+     `prompt_async`.
     Authoritative activity and successful audit/continuation progress reset the
     corresponding retry state; a failed fetch never becomes an empty success.
     A `message.updated` user event invalidates an armed timer or in-flight tick
@@ -202,7 +204,10 @@ before touching the filesystem). Rationale: metadata rides every
       prevents stale ticks from writing metadata or dispatching after abort. If
       busy/retry advances the generation before the pause write completes, the
       pending abort is rebound to the new generation and the next authoritative
-      idle pauses the goal before audit/dispatch.
+      idle pauses the goal before audit/dispatch. The pending abort is bound to
+      the goal revision that was active when it arrived (metadata identity when
+      known, otherwise the abort arrival time), so a newer goal revision is
+      discarded instead of being paused by a stale stop.
       Messages sent while paused leave the goal alone; Resume re-arms the loop,
       and resuming over an aborted tail skips the audit and goes straight to a
       continuation nudge;
@@ -271,11 +276,18 @@ before touching the filesystem). Rationale: metadata rides every
            authoritative terminal read completes the same settlement, releases
            the matching reservation, and emits one notification without another
            PATCH. Exhaustion of that resolution window leaves the
-          reservation protected and waits for a later authoritative idle or
-          Resume to start one new bounded resolution window. While pending or
+          reservation protected and waits for a later authoritative idle,
+          readiness edge, feature re-enable, or Resume to start one new
+          bounded resolution window. While pending or
           escalated, no path may call `prompt_async`. An ambiguous `prompt_async`
         response is reconciled against authoritative session, status, and
-        message state. It is never retried as a blind POST. A later status
+        message state. It is never retried as a blind POST. Only the POST
+        attempt itself classifies admission: a pre-POST read failure follows
+        the ordinary bounded fetch retry and cannot overwrite a proven
+        `rejected`/`ambiguous` dispatch outcome. Before redispatching a
+        rejected reservation the token-budget hard stop is re-applied against
+        the current authoritative goal, so an over-budget goal settles as
+        `budgetLimited` instead of dispatching. A later status
         drops the reservation only after an ambiguous dispatch, when activity
         proves admission. Rejected or still-pending dispatches retain the
         reservation. A changed tail drops the reservation. If the tail moved
@@ -284,7 +296,8 @@ before touching the filesystem). Rationale: metadata rides every
         explicitly blocked rather than silently charged. If both the restore
         and blocked writes fail, the reservation remains as an explicit local
          pending or escalated state and retries through the bounded policy; a
-          later authoritative idle or Resume starts another bounded resolution
+          later authoritative idle, readiness edge, feature re-enable, or
+          Resume starts another bounded resolution
            window. Pause, replacement/edit, abort, and runtime stop never
         silently drop an undispatched reservation: an active edit-in-place that
         retains the reservation identity (`id` + `createdAt`) rebinds it and
