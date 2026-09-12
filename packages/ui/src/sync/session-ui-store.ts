@@ -2071,7 +2071,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     } | null = null
 
     if (execution.createWorktree) {
-      const worktreeSourceDirectory = sourceDirectory ?? sourceWorktreeMetadata?.projectDirectory
+      const worktreeSourceDirectory = sourceWorktreeMetadata?.projectDirectory ?? sourceDirectory
       if (!worktreeSourceDirectory) {
         throw new Error("Project is not registered in OpenChamber")
       }

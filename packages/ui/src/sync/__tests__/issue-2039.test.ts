@@ -668,4 +668,64 @@ describe("assistant answer worktree routing", () => {
     expect(createdWorktreeProjects).toEqual([{ id: "project", path: "/repo" }])
     expect(createdDirectory).toBe("/worktrees/generated-branch")
   })
+
+  test("prefers recorded worktree metadata when the topology map misses the source worktree", async () => {
+    projects = [{ id: "project", path: "/repo", label: "Repo" }]
+    createdWorktreeProjects.length = 0
+    const sourceWorktree = {
+      path: "/worktrees/source",
+      projectDirectory: "/repo",
+      branch: "source",
+      label: "source",
+    }
+    const state = useSessionUIStore.getState()
+    const createFromAssistantMessage = state.createSessionFromAssistantMessage
+    const originalCreateSession = state.createSession
+    const originalSendMessage = state.sendMessage
+    const originalWorktreeMetadata = state.worktreeMetadata
+    let createdDirectory: string | null | undefined
+
+    useSessionUIStore.setState({
+      availableWorktreesByProject: new Map(),
+      worktreeMetadata: new Map([["source-session", sourceWorktree]]),
+      createSession: async (_title, directory) => {
+        createdDirectory = directory
+        return {
+          id: "created-session",
+          slug: "created-session",
+          projectID: "project",
+          directory: directory ?? "",
+          title: "Created session",
+          version: "1",
+          time: { created: 1, updated: 1 },
+        }
+      },
+      sendMessage: async () => undefined,
+    })
+
+    try {
+      await createFromAssistantMessage({
+        sessionId: "source-session",
+        directory: "/worktrees/source",
+        text: "Implement the plan",
+      }, {
+        providerID: "provider",
+        modelID: "model",
+        variant: "",
+        agent: "build",
+        instructions: "Follow the answer",
+        createWorktree: true,
+      })
+    } finally {
+      useSessionUIStore.setState({
+        createSession: originalCreateSession,
+        sendMessage: originalSendMessage,
+        worktreeMetadata: originalWorktreeMetadata,
+      })
+      projects = []
+    }
+
+    expect(createdWorktreeProjects).toEqual([{ id: "project", path: "/repo" }])
+    expect(createdDirectory).toBe("/worktrees/generated-branch")
+  })
 })
