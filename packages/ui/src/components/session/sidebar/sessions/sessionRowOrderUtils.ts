@@ -32,8 +32,6 @@ type AppendSessionNodeRowsOptions = {
   expandedParents: ReadonlySet<string>;
   /** When provided, flattened render items are collected alongside entries. */
   items?: SessionRowOrderItem[] | null;
-  /** Depth of the first row; every child adds one. */
-  startDepth?: number;
 };
 
 const expansionKeyFor = (
@@ -56,7 +54,6 @@ export const appendSessionNodeRowEntries = (
   options: AppendSessionNodeRowsOptions,
 ): void => {
   const items = options.items ?? null;
-  const startDepth = options.startDepth ?? 0;
   const visit = (node: SessionNode, inheritedDirectory: string | null | undefined, depth: number): void => {
     const scopeKey = options.projectId
       ?? normalizePath(node.session.directory ?? null)
@@ -73,7 +70,7 @@ export const appendSessionNodeRowEntries = (
     const childDirectory = node.session.directory ?? inheritedDirectory;
     node.children.forEach((child) => visit(child, childDirectory, depth + 1));
   };
-  nodes.forEach((node) => visit(node, options.fallbackDirectory, startDepth));
+  nodes.forEach((node) => visit(node, options.fallbackDirectory, 0));
 };
 
 export type SessionRowOrderFolderEntry = {

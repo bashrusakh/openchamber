@@ -1080,7 +1080,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                 includes scrollMargin (ancestor-scroll offset), so subtract it. */}
             {sessionVirtualizer.getVirtualItems().map((item) => {
               const flatItem = virtualizationMode === 'flat' ? rowModel.items[item.index] : null;
-              const node = flatItem?.node ?? visibleSessions[item.index];
+              const node = virtualizationMode === 'flat' ? flatItem?.node : visibleSessions[item.index];
               if (!node) return null;
               return (
                 <div
