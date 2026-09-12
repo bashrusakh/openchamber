@@ -345,10 +345,24 @@ export const createGitExecutionService = (dependencies = {}) => {
     if (name === 'isGitRepository' || name === 'getStatus') {
       continue;
     }
+    if (name === 'validateWorktreeCreate' || name === 'createWorktree') {
+      // These operations can reach the network, so callers need the same
+      // cancellation and queue-deadline controls as every other admission.
+      // The caller's execution options stay on the coordinator side; runOperation
+      // supplies the raw service's own options object (scheduleBackground).
+      wrapped[name] = (directory, input, executionOptions = {}) => runOperation(
+        name,
+        directory,
+        [directory, input],
+        {
+          ...executionOptions,
+          network: worktreeMayUseNetwork(input),
+        },
+      );
+      continue;
+    }
     wrapped[name] = (...args) => runOperation(name, operationDirectory(name, args), args, {
-      network: name === 'validateWorktreeCreate' || name === 'createWorktree'
-        ? worktreeMayUseNetwork(args[1])
-        : undefined,
+      network: undefined,
     });
   }
 
