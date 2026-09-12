@@ -27,7 +27,7 @@ const STATUS_OVERLAY_RESERVED_HEIGHT = 40;
  * queue) land in this band, and a follow glide that trails the live edge
  * should still leave the last line clear of the glass.
  */
-const FLOATING_COMPOSER_GAP_PX = 64;
+const FLOATING_COMPOSER_GAP_PX = 80;
 /** Footer reserve before the floating composer slot has been measured. */
 const FLOATING_COMPOSER_DEFAULT_HEIGHT = 128;
 // A freshly opened timeline is shown once its content height has held still
@@ -388,7 +388,6 @@ const ChatViewport = React.memo(({
             )}
 
             <SessionErrorNotice sessionId={currentSessionId} directory={directory} />
-            <SessionRecapNote sessionId={currentSessionId} directory={directory} isMobile={isMobile} />
 
             {/* Tail spacer. With a floating composer it reserves the band the
                 composer covers, so the end of the transcript stays readable
@@ -1145,6 +1144,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
         isFollowingProgrammatically,
         showScrollButton,
         userOwnsScroll,
+        viewportAtEnd,
     } = useChatTimelineScroll({
         currentSessionId,
         currentSessionKey,
@@ -1676,6 +1676,31 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
                                 </div>
                             </div>
                         </div>
+                        {/* The recap hint shares the anchor but keys its fade
+                            on the measured distance to the end, not on the
+                            user-owns-scroll intent flag or the list's at-end
+                            transitions: a session switch or a sideways swipe
+                            that nudges the viewport must not strand it either
+                            way. It stays out of the measured status node — it
+                            lives inside the fixed composer gap, so its arrival
+                            must not move the end. */}
+                        {currentSessionId ? (
+                            <div
+                                className={cn(
+                                    'oc-recap-hint pointer-events-none absolute bottom-full inset-x-0 mb-2 transition-opacity duration-100',
+                                    !viewportAtEnd && 'opacity-0',
+                                )}
+                                style={{ transform: 'translateY(calc(-1 * var(--chat-floating-panel-clearance, 0px)))' }}
+                            >
+                                <div className="chat-input-column">
+                                    <SessionRecapNote
+                                        sessionId={currentSessionId}
+                                        directory={effectiveSessionDirectory}
+                                        isMobile={isMobile}
+                                    />
+                                </div>
+                            </div>
+                        ) : null}
                     </>
                 )}
                 {promptReadOnly ? (
