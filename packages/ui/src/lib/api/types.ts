@@ -963,8 +963,6 @@ export type GitHubPullRequestsListResult = {
   prs?: GitHubPullRequestSummary[];
   page?: number;
   hasMore?: boolean;
-  /** Distinguishable server-side failure, e.g. `'search timed out'` for a search that hit the per-request bound. */
-  error?: string;
 };
 
 export type GitHubPullRequestContextResult = {
@@ -1078,8 +1076,6 @@ export type GitHubIssuesListResult = {
   issues?: GitHubIssueSummary[];
   page?: number;
   hasMore?: boolean;
-  /** Distinguishable server-side failure, e.g. `'search timed out'` for a search that hit the per-request bound. */
-  error?: string;
 };
 
 export type GitHubRepoUpstreamResult = {

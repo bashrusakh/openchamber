@@ -1,8 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { getGitHubApiErrorCode } from '@openchamber/ui/lib/api/github-errors';
 import type { RuntimeUrlQuery, RuntimeUrlResolver } from '@openchamber/ui/lib/runtime-url';
 
 const runtimeFetchMock = vi.fn();
+
+const captureError = async (promise: Promise<unknown>): Promise<Error> => {
+  try {
+    await promise;
+  } catch (thrown) {
+    return thrown instanceof Error ? thrown : new Error(String(thrown));
+  }
+  throw new Error('Expected the call to reject');
+};
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -56,23 +66,74 @@ describe('createWebGitHubAPI list calls', () => {
     expect(init?.signal).toBe(controller.signal);
   });
 
-  it('surfaces the server search-timeout error field from prsList', async () => {
+  it('carries the search_timeout code and message from a 504 prsList response', async () => {
     const { createWebGitHubAPI } = await import('./github');
     const api = createWebGitHubAPI({ urls });
-    runtimeFetchMock.mockResolvedValueOnce(Response.json({ connected: true, prs: [], error: 'search timed out' }));
+    runtimeFetchMock.mockResolvedValueOnce(
+      Response.json({ error: 'Search timed out', code: 'search_timeout' }, { status: 504 }),
+    );
 
-    const result = await api.prsList('/workspace', { page: 1, query: 'bug' });
-
-    expect(result.error).toBe('search timed out');
+    await expect(api.prsList('/workspace', { page: 1, query: 'bug' })).rejects.toMatchObject({
+      message: 'Search timed out',
+      code: 'search_timeout',
+    });
   });
 
-  it('surfaces the server search-timeout error field from issuesList', async () => {
+  it('carries the search_timeout code and message from a 504 issuesList response', async () => {
     const { createWebGitHubAPI } = await import('./github');
     const api = createWebGitHubAPI({ urls });
-    runtimeFetchMock.mockResolvedValueOnce(Response.json({ connected: true, issues: [], error: 'search timed out' }));
+    runtimeFetchMock.mockResolvedValueOnce(
+      Response.json({ error: 'Search timed out', code: 'search_timeout' }, { status: 504 }),
+    );
 
-    const result = await api.issuesList('/workspace', { page: 1, query: 'bug' });
+    await expect(api.issuesList('/workspace', { page: 1, query: 'bug' })).rejects.toMatchObject({
+      message: 'Search timed out',
+      code: 'search_timeout',
+    });
+  });
 
-    expect(result.error).toBe('search timed out');
+  it('carries the not_found code from a 404 issuesList response', async () => {
+    const { createWebGitHubAPI } = await import('./github');
+    const api = createWebGitHubAPI({ urls });
+    runtimeFetchMock.mockResolvedValueOnce(
+      Response.json({ error: 'Issue not found', code: 'not_found' }, { status: 404 }),
+    );
+
+    await expect(api.issuesList('/workspace', { page: 1, query: '999' })).rejects.toMatchObject({
+      message: 'Issue not found',
+      code: 'not_found',
+    });
+  });
+
+  it('carries the repo_unavailable code from a 422 prsList response', async () => {
+    const { createWebGitHubAPI } = await import('./github');
+    const api = createWebGitHubAPI({ urls });
+    runtimeFetchMock.mockResolvedValueOnce(
+      Response.json({ error: 'Repository is not available for this project', code: 'repo_unavailable' }, { status: 422 }),
+    );
+
+    await expect(api.prsList('/workspace', { page: 1, query: 'https://github.com/other/fork/pull/9' })).rejects.toMatchObject({
+      message: 'Repository is not available for this project',
+      code: 'repo_unavailable',
+    });
+  });
+
+  it('keeps an unrelated failure free of GitHub list codes', async () => {
+    const { createWebGitHubAPI } = await import('./github');
+    const api = createWebGitHubAPI({ urls });
+    runtimeFetchMock.mockResolvedValueOnce(Response.json({ error: 'rate limited' }, { status: 500 }));
+
+    const error = await captureError(api.issuesList('/workspace', { page: 1, query: 'bug' }));
+
+    expect(error.message).toBe('rate limited');
+    expect(getGitHubApiErrorCode(error)).toBeNull();
+  });
+
+  it('returns a successful list body unchanged', async () => {
+    const { createWebGitHubAPI } = await import('./github');
+    const api = createWebGitHubAPI({ urls });
+    runtimeFetchMock.mockResolvedValueOnce(Response.json({ connected: true, prs: [], hasMore: false }));
+
+    await expect(api.prsList('/workspace')).resolves.toEqual({ connected: true, prs: [], hasMore: false });
   });
 });

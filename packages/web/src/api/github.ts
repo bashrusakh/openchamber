@@ -19,6 +19,8 @@ import type {
   GitHubDeviceFlowStart,
   GitHubUserSummary,
 } from '@openchamber/ui/lib/api/types';
+import type { GitHubApiErrorCode } from '@openchamber/ui/lib/api/github-errors';
+import { parseGitHubApiErrorCode } from '@openchamber/ui/lib/api/github-errors';
 import { runtimeFetch } from '@openchamber/ui/lib/runtime-fetch';
 import type { RuntimeUrlResolver } from '@openchamber/ui/lib/runtime-url';
 
@@ -29,6 +31,19 @@ interface WebGitHubAPIOptions {
 const jsonOrNull = async <T>(response: Response): Promise<T | null> => {
   return (await response.json().catch(() => null)) as T | null;
 };
+
+type GitHubListPayload<T> = T & { error?: string; code?: unknown };
+
+// List failures carry a server code so the UI can distinguish a timed-out
+// search, a missing item, and an unavailable repo from a generic error.
+function throwListError(payload: { error?: string; code?: unknown } | null, response: Response, fallback: string): never {
+  const error: Error & { code?: GitHubApiErrorCode } = new Error(payload?.error || response.statusText || fallback);
+  const code = payload ? parseGitHubApiErrorCode(payload.code) : null;
+  if (code) {
+    error.code = code;
+  }
+  throw error;
+}
 
 export const createWebGitHubAPI = ({ urls }: WebGitHubAPIOptions): GitHubAPI => ({
   async authStatus(): Promise<GitHubAuthStatus> {
@@ -217,9 +232,9 @@ export const createWebGitHubAPI = ({ urls }: WebGitHubAPIOptions): GitHubAPI => 
       `/api/github/pulls/list?${params.toString()}`,
       { method: 'GET', headers: { Accept: 'application/json' }, signal: options?.signal }
     );
-    const body = await jsonOrNull<GitHubPullRequestsListResult & { error?: string }>(response);
+    const body = await jsonOrNull<GitHubListPayload<GitHubPullRequestsListResult>>(response);
     if (!response.ok || !body) {
-      throw new Error(body?.error || response.statusText || 'Failed to load pull requests');
+      throwListError(body, response, 'Failed to load pull requests');
     }
     return body;
   },
@@ -261,9 +276,9 @@ export const createWebGitHubAPI = ({ urls }: WebGitHubAPIOptions): GitHubAPI => 
       `/api/github/issues/list?${params.toString()}`,
       { method: 'GET', headers: { Accept: 'application/json' }, signal: options?.signal }
     );
-    const payload = await jsonOrNull<GitHubIssuesListResult & { error?: string }>(response);
+    const payload = await jsonOrNull<GitHubListPayload<GitHubIssuesListResult>>(response);
     if (!response.ok || !payload) {
-      throw new Error(payload?.error || response.statusText || 'Failed to load issues');
+      throwListError(payload, response, 'Failed to load issues');
     }
     return payload;
   },
