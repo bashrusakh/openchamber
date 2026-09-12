@@ -746,6 +746,23 @@ export interface GitBranchResult {
   branches: Record<string, GitBranchDetails>;
 }
 
+export async function getGitUnpushedBranchCounts(directory: string, requestedBranches: string[]): Promise<{ counts: Record<string, number> }> {
+  const requested = [...new Set(requestedBranches)].filter(Boolean).slice(0, 5);
+  if (requested.length === 0) return { counts: {} };
+  const local = new Set((await getGitBranchesRaw(directory)).all.filter((branch) => !branch.startsWith('remotes/')));
+  const counts: Record<string, number> = {};
+  await Promise.all(requested.map(async (branch) => {
+    if (!local.has(branch)) return;
+    const upstreamResult = await execGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', `${branch}@{upstream}`], directory);
+    const upstream = upstreamResult.exitCode === 0 ? upstreamResult.stdout.trim() : '';
+    if (!upstream) return;
+    const countResult = await execGit(['rev-list', '--count', `${upstream}..${branch}`], directory);
+    const count = countResult.exitCode === 0 ? Number.parseInt(countResult.stdout.trim(), 10) : 0;
+    if (Number.isFinite(count) && count > 0) counts[branch] = count;
+  }));
+  return { counts };
+}
+
 /**
  * Get all branches for a directory
  */
@@ -918,6 +935,7 @@ export interface GitWorktreeInfo {
   path: string;
   directoryCreated?: true;
   bootstrapStatus?: WorktreeBootstrapStatus;
+  sourceFetchFailed?: true;
 }
 
 type WorktreeListEntry = {
@@ -2067,6 +2085,7 @@ async function attachGitWorktreeToCandidate(
 
     const parsedRemoteStartRef = await resolveRemoteBranchRef(context.primaryWorktree, startRef);
     if (parsedRemoteStartRef) {
+      worktreeAddArgs.splice(2, 0, '--no-track');
       inferredUpstream = {
         remote: parsedRemoteStartRef.remote,
         branch: parsedRemoteStartRef.branch,
@@ -2074,15 +2093,8 @@ async function attachGitWorktreeToCandidate(
     }
   }
 
-  if (ensureRemoteName && ensureRemoteUrl) {
+  if (mode === 'existing' && ensureRemoteName && ensureRemoteUrl) {
     await ensureRemoteWithUrl(context.primaryWorktree, ensureRemoteName, ensureRemoteUrl);
-  }
-
-  if (mode === 'new') {
-    const parsedRemoteStartRef = await resolveRemoteBranchRef(context.primaryWorktree, startRef);
-    if (parsedRemoteStartRef) {
-      await fetchRemoteBranchRef(context.primaryWorktree, parsedRemoteStartRef.remote, parsedRemoteStartRef.branch);
-    }
   }
 
   await runGitCommandOrThrow(context.primaryWorktree, worktreeAddArgs, 'Failed to create git worktree');
@@ -2129,6 +2141,59 @@ async function attachGitWorktreeToCandidate(
   };
 }
 
+const prepareWorktreeCreateSource = async (
+  context: Awaited<ReturnType<typeof resolveWorktreeProjectContext>>,
+  input: CreateGitWorktreePayload,
+): Promise<{ input: CreateGitWorktreePayload; sourceFetchFailed: boolean }> => {
+  if (input.mode === 'existing') {
+    return { input, sourceFetchFailed: false };
+  }
+
+  const ensureRemoteName = String(input.ensureRemoteName || '').trim();
+  const ensureRemoteUrl = String(input.ensureRemoteUrl || '').trim();
+  if (ensureRemoteName && ensureRemoteUrl) {
+    await ensureRemoteWithUrl(context.primaryWorktree, ensureRemoteName, ensureRemoteUrl);
+  }
+
+  const startRef = normalizeStartRef(input.startRef);
+  const remoteStartRef = await resolveRemoteBranchRef(context.primaryWorktree, startRef);
+  if (!remoteStartRef) {
+    return { input, sourceFetchFailed: false };
+  }
+
+  const status = await getGitStatus(context.primaryWorktree, { mode: 'light' }).catch(() => null);
+  const trackingRef = status?.tracking
+    ? await resolveRemoteBranchRef(context.primaryWorktree, status.tracking)
+    : null;
+  const canFallbackToLocal = Boolean(
+    status?.current
+    && status.ahead === 0
+    && trackingRef?.fullRef === remoteStartRef.fullRef
+  );
+
+  try {
+    await fetchRemoteBranchRef(context.primaryWorktree, remoteStartRef.remote, remoteStartRef.branch);
+    return { input, sourceFetchFailed: false };
+  } catch (error) {
+    if (canFallbackToLocal && status?.current) {
+      return {
+        input: { ...input, startRef: status.current },
+        sourceFetchFailed: true,
+      };
+    }
+
+    const refExists = await runGitCommand(
+      context.primaryWorktree,
+      ['show-ref', '--verify', '--quiet', remoteStartRef.fullRef],
+    );
+    if (!refExists.success) {
+      throw error;
+    }
+    console.warn(`[GitService] failed to refresh ${remoteStartRef.remote}/${remoteStartRef.branch}, proceeding with the existing remote-tracking ref`);
+    return { input, sourceFetchFailed: false };
+  }
+};
+
 export async function createWorktree(
   directory: string,
   input: CreateGitWorktreePayload = {},
@@ -2140,11 +2205,13 @@ export async function createWorktree(
   if (input?.returnAfterDirectoryCreated === true) {
     await assertWorktreeCreatePreflight(directory, input);
   }
+  const prepared = await prepareWorktreeCreateSource(context, input);
+  const preparedInput = prepared.input;
 
   await fs.promises.mkdir(context.worktreeRoot, { recursive: true });
 
-  const preferredName = String(input?.worktreeName || input?.name || '').trim();
-  const preferredBranchName = cleanBranchName(String(input?.branchName || '').trim());
+  const preferredName = String(preparedInput.worktreeName || preparedInput.name || '').trim();
+  const preferredBranchName = cleanBranchName(String(preparedInput.branchName || '').trim());
 
   const candidate = await resolveCandidateDirectory(
     context.worktreeRoot,
@@ -2153,7 +2220,7 @@ export async function createWorktree(
     context.primaryWorktree
   );
 
-  if (input?.returnAfterDirectoryCreated === true) {
+  if (preparedInput.returnAfterDirectoryCreated === true) {
     await fs.promises.mkdir(candidate.directory, { recursive: false });
 
     const bootstrapStatus = setWorktreeBootstrapState(
@@ -2167,10 +2234,10 @@ export async function createWorktree(
       updatedAt: Date.now(),
     };
     const localBranch = mode === 'existing'
-      ? cleanBranchName(String(input?.branchName || input?.existingBranch || candidate.branch || '').trim())
+      ? cleanBranchName(String(preparedInput.branchName || preparedInput.existingBranch || candidate.branch || '').trim())
       : candidate.branch;
 
-    const attach = () => attachGitWorktreeToCandidate(context, candidate, input, options);
+    const attach = () => attachGitWorktreeToCandidate(context, candidate, preparedInput, options);
     const task = (options.scheduleBackground
       ? Promise.resolve(options.scheduleBackground({
         operation: 'worktreeAttachment',
@@ -2184,7 +2251,7 @@ export async function createWorktree(
     });
     trackWorktreeBootstrapTask(candidate.directory, task);
 
-    return {
+    const result: GitWorktreeInfo = {
       head: '',
       name: candidate.name,
       branch: localBranch,
@@ -2192,9 +2259,14 @@ export async function createWorktree(
       directoryCreated: true,
       bootstrapStatus,
     };
+    if (prepared.sourceFetchFailed) {
+      result.sourceFetchFailed = true;
+    }
+    return result;
   }
 
-  return attachGitWorktreeToCandidate(context, candidate, input, options);
+  const result = await attachGitWorktreeToCandidate(context, candidate, preparedInput, options);
+  return prepared.sourceFetchFailed ? { ...result, sourceFetchFailed: true } : result;
 }
 
 export async function getWorktreeBootstrapStatus(directory: string): Promise<WorktreeBootstrapStatus> {

@@ -20,6 +20,7 @@ import { useI18n } from '@/lib/i18n';
 import type { ProjectSortOrder } from '@/stores/useSessionDisplayStore';
 import { streamPerfCount } from '@/stores/utils/streamDebug';
 import { Icon } from '@/components/icon/Icon';
+import { DirectoryActionIndicator } from '../sessions/DirectoryActionIndicator';
 
 type SessionProjectScrollerState = Pick<SessionGroupSectionProps,
   | 'editingId'
@@ -196,6 +197,27 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
     model.singleProjectId,
   );
   const hasProjectScroller = model.projectSections.length > 0 && renderedSections.length > 0;
+  const [isRecentHeaderStuck, setIsRecentHeaderStuck] = React.useState(false);
+  React.useLayoutEffect(() => {
+    const root = scrollContainerRef.current;
+    const recentStart = root?.querySelector<HTMLElement>('[data-sidebar-activity-start="active-now"]');
+    if (!enableStickyFade || !hasProjectScroller || !root || !recentStart) {
+      setIsRecentHeaderStuck(false);
+      return;
+    }
+
+    // Observe the section boundary, not its sticky header. Scrolling within a
+    // section must not rerender the list or scan its session rows.
+    setIsRecentHeaderStuck(recentStart.getBoundingClientRect().top < root.getBoundingClientRect().top);
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const rootTop = entry.rootBounds?.top ?? root.getBoundingClientRect().top;
+      setIsRecentHeaderStuck(!entry.isIntersecting && entry.boundingClientRect.top < rootTop);
+    }, { root, threshold: 0 });
+    observer.observe(recentStart);
+    return () => observer.disconnect();
+  }, [enableStickyFade, hasProjectScroller, model.topContent]);
   React.useLayoutEffect(() => {
     if (enableStickyFade && hasProjectScroller && scrollContainerRef.current) {
       syncTopFade(scrollContainerRef.current);
@@ -212,7 +234,7 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
   // otherwise leaves a one-frame gap where the title blinks out with no crisp
   // replacement. Seed the overlay with the topmost rendered project so it is
   // ready in the same frame; the observer then corrects it. When shared sessions
-  // lead the list, the Recent fallback below owns the top instead of a project.
+  // lead the list, the activity fallback below owns the top instead of a project.
   const leadingProject =
     stuckProject ?? (model.hasSharedSessions ? null : renderedSections[0]?.project ?? null);
   const leadingProjectLabel = leadingProject ? getProjectLabel(leadingProject, view.homeDirectory) : null;
@@ -313,6 +335,7 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
                   disabled={model.singleProjectMode || view.projectSortOrder !== 'manual'}
                   projectLabel={projectLabel}
                   projectDescription={projectDescription}
+                  projectDirectory={project.normalizedPath}
                   projectIcon={project.icon}
                   projectColor={project.color}
                   projectIconImage={project.iconImage}
@@ -409,19 +432,22 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
           aria-hidden="true"
         >
           {leadingProject && leadingProjectLabel ? (
-            <ProjectHeaderIdentity
-               id={leadingProject.id}
-              projectLabel={leadingProjectLabel}
-              projectIcon={leadingProject.icon}
-              projectColor={leadingProject.color}
-              projectIconImage={leadingProject.iconImage}
-              projectIconBackground={leadingProject.iconBackground}
-            />
+            <>
+              <ProjectHeaderIdentity
+                id={leadingProject.id}
+                projectLabel={leadingProjectLabel}
+                projectIcon={leadingProject.icon}
+                projectColor={leadingProject.color}
+                projectIconImage={leadingProject.iconImage}
+                projectIconBackground={leadingProject.iconBackground}
+              />
+              <DirectoryActionIndicator directory={leadingProject.normalizedPath} className="ml-auto" />
+            </>
           ) : (
             <>
-              <Icon name="history" className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/80" />
-              <span className="truncate text-[14px] font-semibold lowercase text-foreground">
-                {t('sessions.sidebar.activity.recentTitle')}
+              <Icon name={isRecentHeaderStuck ? 'history' : 'chat-4'} className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/80" />
+              <span className="truncate typography-ui-label font-semibold lowercase text-foreground">
+                {isRecentHeaderStuck ? t('sessions.sidebar.activity.recentTitle') : t('sessions.sidebar.activity.chatsTitle')}
               </span>
             </>
           )}

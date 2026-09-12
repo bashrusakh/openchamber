@@ -14,6 +14,7 @@ import React from 'react';
 import { Icon } from '@/components/icon/Icon';
 import type { IconName } from '@/components/icon/icons';
 import { useI18n } from '@/lib/i18n';
+import { isIMECompositionEvent } from '@/lib/ime';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import {
     EMPTY_INLINE_COMMENT_DRAFTS,
@@ -165,6 +166,10 @@ const DraftPreviewEntry: React.FC<{
                                 onChange={(event) => setEditText(event.target.value)}
                                 onBlur={commitEdit}
                                 onKeyDown={(event) => {
+                                    // An IME candidate is confirmed with Enter and
+                                    // abandoned with Escape; neither keystroke should
+                                    // commit or revert the edit.
+                                    if (isIMECompositionEvent(event)) return;
                                     if (event.key === 'Enter' && !event.shiftKey) {
                                         event.preventDefault();
                                         commitEdit();
@@ -351,11 +356,8 @@ export function ComposerContextChips({ draftTarget, colors }: ComposerContextChi
                     <button
                         key={group.key}
                         type="button"
-                        className="inline-flex max-w-full items-center gap-1.5 rounded-xl border px-2.5 py-1 text-left"
-                        style={{
-                            backgroundColor: colors?.surface?.elevated,
-                            borderColor: colors?.interactive?.border,
-                        }}
+                        className="oc-glass-popover inline-flex max-w-full items-center gap-1.5 rounded-xl border px-2.5 py-1 text-left"
+                        style={{ borderColor: colors?.interactive?.border }}
                         onMouseEnter={() => {
                             cancelClose();
                             setOpenGroupKey(group.key);

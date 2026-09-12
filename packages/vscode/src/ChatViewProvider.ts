@@ -9,6 +9,7 @@ import { openSseProxy } from './sseProxy';
 import { resolveWebviewDevServerUrl } from './webviewDevServer';
 import { normalizeWindowsDriveLetter } from './pathUtils';
 import { resolveWorkspaceFolders, type WorkspaceFolderCandidate } from './workspaceResolver';
+import { SIDEBAR_SURFACE_ID } from './InlineCommentThreads';
 
 type ActiveEditorFilePayload = {
   filePath: string;
@@ -145,8 +146,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
 
     webviewView.webview.onDidReceiveMessage(async (message: (BridgeRequest & { _msgId?: string }) | { type: 'bridge:ack'; _msgId: string }) => {
+      if (message.type === 'webview:ready') {
+        for (const [streamId, stream] of this._sseStreams) {
+          if (stream.view !== webviewView) continue;
+          stream.controller.abort();
+          this._sseStreams.delete(streamId);
+        }
+        if (this._view === webviewView) {
+          this._clearPendingMessages();
+          this._sendCachedState();
+        }
+        return;
+      }
+
       if (message.type === 'bridge:ack' && typeof message._msgId === 'string') {
         this._confirmMessage(message._msgId);
+        return;
+      }
+
+      // Editor comment threads mirror the composer's drafts, so the webview
+      // reports every change. Handled before the id check because this is a
+      // one-way notification, not a bridge request awaiting a response.
+      if (message.type === 'inlineComments:sync') {
+        // Tagged with the sidebar's identity: a snapshot only speaks for the
+        // store that produced it, and each session panel has its own.
+        void vscode.commands.executeCommand('openchamber.internal.inlineCommentsSync', {
+          snapshot: message.payload,
+          surfaceId: SIDEBAR_SURFACE_ID,
+        });
         return;
       }
 
@@ -246,6 +273,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       type: 'command',
       command: 'addContextSelection',
       payload: selection,
+    });
+  }
+
+  public addLineComment(payload: { draftId?: string; filePath: string; relativePath: string; source: 'diff' | 'file'; side?: 'original' | 'modified'; startLine: number; endLine: number; code: string; language: string; comment: string }) {
+    if (!this._view) return;
+    // Bring the chat into view like the other capture flows do, so the chip the
+    // comment becomes is visible rather than waiting behind a collapsed panel.
+    this._view.show(true);
+    this._view.webview.postMessage({
+      type: 'command',
+      command: 'addLineComment',
+      payload,
+    });
+  }
+
+  /** Drops a draft the user removed from its editor thread. */
+  public removeLineComment(draftId: string) {
+    if (!this._view) return;
+    this._view.webview.postMessage({
+      type: 'command',
+      command: 'removeLineComment',
+      payload: { draftId },
     });
   }
 
