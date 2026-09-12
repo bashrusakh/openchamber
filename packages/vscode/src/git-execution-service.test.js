@@ -244,6 +244,53 @@ describe('VS Code Git execution service discovery fallback', () => {
     ]);
   });
 
+  it('classifies the ensure pair and remote-like existing branches as network work', async () => {
+    const admissions = [];
+    const executionRuntime = {
+      runServiceOperation: async (operation, _directory, task, options = {}) => {
+        admissions.push({ operation, network: options.network === true });
+        return task({
+          commonId: '/repo/.git',
+          worktreeId: '/repo',
+          kind: 'common-write',
+          targetWorktree: false,
+          network: options.network === true,
+          active: true,
+        });
+      },
+    };
+    const service = createGitExecutionService({
+      core: {
+        ...core,
+        validateWorktreeCreate: mock(async () => 'validated'),
+        createWorktree: mock(async () => 'created'),
+      },
+      runtime: executionRuntime,
+    });
+    const ensurePairInput = {
+      mode: 'existing',
+      existingBranch: 'local-branch',
+      ensureRemoteName: 'pr-alice',
+      ensureRemoteUrl: 'https://github.com/alice/openchamber.git',
+    };
+    const remoteLikeInput = {
+      mode: 'existing',
+      existingBranch: 'remotes/pr-alice/feature/login',
+    };
+
+    await expect(service.validateWorktreeCreate('/repo', ensurePairInput)).resolves.toBe('validated');
+    await expect(service.createWorktree('/repo', ensurePairInput)).resolves.toBe('created');
+    await expect(service.validateWorktreeCreate('/repo', remoteLikeInput)).resolves.toBe('validated');
+    await expect(service.createWorktree('/repo', remoteLikeInput)).resolves.toBe('created');
+
+    expect(admissions).toEqual([
+      { operation: 'validateWorktreeCreate', network: true },
+      { operation: 'createWorktree', network: true },
+      { operation: 'validateWorktreeCreate', network: true },
+      { operation: 'createWorktree', network: true },
+    ]);
+  });
+
   it('forwards range read signals and queue deadlines through the service boundary', async () => {
     const controller = new AbortController();
     const options = { signal: controller.signal, queueTimeoutMs: 25 };
