@@ -75,6 +75,7 @@ mock.module('@/components/ui/command', () => ({
 mock.module('@/components/ui/sortable-tabs-strip', () => ({ SortableTabsStrip: () => null }));
 mock.module('@/components/ui/MobileOverlayPanel', () => ({ MobileOverlayPanel: passthrough }));
 mock.module('@/components/icon/Icon', () => ({ Icon: () => null }));
+mock.module('@/components/ui/ProviderLogo', () => ({ ProviderLogo: () => null }));
 mock.module('@/components/ui/dropdown-trigger', () => ({ dropdownTriggerVariants: () => '' }));
 mock.module('@/lib/utils', () => ({ cn: (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' ') }));
 
