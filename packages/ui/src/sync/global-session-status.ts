@@ -40,9 +40,9 @@ type GlobalSessionStatusState = {
    *
    * A transport-wide disconnect or transport switch populates this set with
    * every currently known directory (from `statusById` entries). Each
-   * directory's freshness is then restored independently when its own next
-   * successful authoritative snapshot arrives — a successful snapshot for
-   * one directory does NOT implicitly freshen another.
+   * directory's freshness is then restored independently by its own next
+   * successful status fetch (see `markDirectoryStatusFresh`) — a successful
+   * fetch for one directory does NOT implicitly freshen another.
    *
    * Uses the same normalized directory keys as `statusById` entries.
    */
@@ -64,9 +64,10 @@ useGlobalSessionStatusStore.subscribe(() => countSyncPerformance('globalStatusPu
 /**
  * Replaces the status map wholesale and derives active membership from it.
  * This is the ONE sanctioned way to swap statusById from outside the event
- * reducers (runtime switch, tests) — previously a setState monkeypatch
- * derived membership for arbitrary callers, which silently trusted any
- * caller passing both fields to keep them consistent.
+ * reducers (tests) — previously a setState monkeypatch derived membership for
+ * arbitrary callers, which silently trusted any caller passing both fields to
+ * keep them consistent. A runtime replacement uses `resetGlobalSessionStatus`,
+ * which also blocks stale events and clears freshness flags.
  */
 export const replaceGlobalSessionStatusById = (statusById: Map<string, GlobalSessionStatusEntry>): void => {
   const current = useGlobalSessionStatusStore.getState();
@@ -333,15 +334,37 @@ export const markDirectoryStatusUnavailable = (rawDirectory: string): void => {
 };
 
 /**
+ * A successful `/session/status?directory=X` fetch is directory-reachability
+ * evidence: the directory is answering again, whatever the snapshot's mode.
+ * This clears only that directory's unavailable flag and nothing else.
+ *
+ * It deliberately does NOT touch `statusById`/`activeSessionIds` — a monotonic
+ * fetch has no authority to lower busy/retry to idle, so clearing freshness
+ * must not imply settlement — and it never re-enables `acceptEventUpdates`,
+ * which stays reserved for a complete authoritative snapshot.
+ *
+ * Idempotent: a directory that is already fresh leaves the state untouched.
+ */
+export const markDirectoryStatusFresh = (rawDirectory: string): void => {
+  const directory = normalizeDirectory(rawDirectory);
+  useGlobalSessionStatusStore.setState((state) => {
+    if (!state.unavailableDirectories.has(directory)) return state;
+    const next = new Set(state.unavailableDirectories);
+    next.delete(directory);
+    return { unavailableDirectories: next };
+  });
+};
+
+/**
  * Mark every currently known directory as temporarily unavailable after a
  * transport-wide disconnect or transport switch. This is distinct from a
  * per-directory fetch failure: a transport disconnect affects all
  * directories deterministically.
  *
  * Populates `unavailableDirectories` with every directory that has an entry in
- * `statusById`, so each directory's freshness is restored independently when
- * its own next successful authoritative snapshot arrives — a successful
- * snapshot for one directory does NOT implicitly freshen another.
+ * `statusById`, so each directory's freshness is restored independently by its
+ * own next successful status fetch — a successful fetch for one directory does
+ * NOT implicitly freshen another.
  *
  * `knownDirectories` may be passed to include directories that have no active
  * `statusById` entry (e.g. directories with only idle sessions). This ensures

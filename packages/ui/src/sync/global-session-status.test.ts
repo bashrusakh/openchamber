@@ -6,6 +6,7 @@ import {
   applyGlobalSessionStatusSnapshot,
   areGlobalSessionStatusEventsEnabled,
   isSessionStatusFresh,
+  markDirectoryStatusFresh,
   markDirectoryStatusUnavailable,
   markTransportStatusUnavailable,
   resetGlobalSessionStatus,
@@ -269,6 +270,65 @@ describe("directory-scoped unavailability preserves status data", () => {
     expect(useGlobalSessionStatusStore.getState().unavailableDirectories.has("/repo")).toBe(true)
     // A different directory is NOT marked unavailable by a /repo failure.
     expect(useGlobalSessionStatusStore.getState().unavailableDirectories.has("/other")).toBe(false)
+  })
+
+  test("markDirectoryStatusFresh clears only the given directory and preserves status data", () => {
+    // SAFETY: This fixture provides the event fields the global status reducer reads.
+    applyGlobalSessionStatusEvent("/repo-a", {
+      type: "session.status",
+      properties: { sessionID: "session-a", status: { type: "busy" } },
+    } as Event)
+    // SAFETY: This fixture provides the event fields the global status reducer reads.
+    applyGlobalSessionStatusEvent("/repo-b", {
+      type: "session.status",
+      properties: { sessionID: "session-b", status: { type: "busy" } },
+    } as Event)
+    markDirectoryStatusUnavailable("/repo-a")
+    markDirectoryStatusUnavailable("/repo-b")
+
+    markDirectoryStatusFresh("/repo-a")
+
+    expect(useGlobalSessionStatusStore.getState().unavailableDirectories.has("/repo-a")).toBe(false)
+    // /repo-b stays unavailable — one directory's success cannot freshen another.
+    expect(useGlobalSessionStatusStore.getState().unavailableDirectories.has("/repo-b")).toBe(true)
+    // Freshness never mutates the status entries.
+    expect(useGlobalSessionStatusStore.getState().statusById.get("session-a")?.status.type).toBe("busy")
+    expect(useGlobalSessionStatusStore.getState().statusById.get("session-b")?.status.type).toBe("busy")
+  })
+
+  test("markDirectoryStatusFresh is idempotent, touches no status data, and never re-enables blocked events", () => {
+    // SAFETY: This fixture provides the event fields the global status reducer reads.
+    applyGlobalSessionStatusEvent("/repo", {
+      type: "session.status",
+      properties: { sessionID: "session-a", status: { type: "busy" } },
+    } as Event)
+    markDirectoryStatusUnavailable("/repo")
+    const before = useGlobalSessionStatusStore.getState()
+
+    markDirectoryStatusFresh("/repo")
+
+    // Status owners keep their identity; only the directory set changed.
+    expect(useGlobalSessionStatusStore.getState().statusById).toBe(before.statusById)
+    expect(useGlobalSessionStatusStore.getState().activeSessionIds).toBe(before.activeSessionIds)
+
+    // Already fresh: a repeat call publishes nothing.
+    const fresh = useGlobalSessionStatusStore.getState()
+    markDirectoryStatusFresh("/repo")
+    expect(useGlobalSessionStatusStore.getState()).toBe(fresh)
+
+    // Freshness is not an event gate: it never re-enables blocked events.
+    resetGlobalSessionStatus({ blockEventUpdates: true })
+    markDirectoryStatusUnavailable("/repo")
+    markDirectoryStatusFresh("/repo")
+    expect(useGlobalSessionStatusStore.getState().unavailableDirectories.has("/repo")).toBe(false)
+    expect(useGlobalSessionStatusStore.getState().acceptEventUpdates).toBe(false)
+  })
+
+  test("markDirectoryStatusFresh normalizes directory keys like the unavailable flag", () => {
+    markDirectoryStatusUnavailable("/repo/")
+    markDirectoryStatusFresh("/repo")
+
+    expect(useGlobalSessionStatusStore.getState().unavailableDirectories.size).toBe(0)
   })
 
   test("markTransportStatusUnavailable adds every known directory to unavailableDirectories", () => {

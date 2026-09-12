@@ -119,6 +119,63 @@ describe("adoptAuthoritativeSessionDirectory", () => {
     expect(useSessionUIStore.getState().currentSessionDirectory).toBe(before)
   })
 
+  test("adopts after a successful status resync while the bootstrap is still current", async () => {
+    useSessionUIStore.getState().setCurrentSession(SESSION_ID)
+    useSessionUIStore.setState({ currentSessionDirectory: PARENT })
+    indexSessionIn(manager, WORKTREE)
+
+    let resyncRan = false
+    const cleanup = manager.configure({
+      onBootstrap: async (context) => {
+        await adoptAuthoritativeSessionDirectoryAfterResync(context, async () => {
+          resyncRan = true
+          return { [SESSION_ID]: { type: "busy" } }
+        })
+      },
+    })
+
+    try {
+      manager.requestBootstrap({ directory: WORKTREE, priority: "selected", reason: "selected-session" })
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(resyncRan).toBe(true)
+      expect(useSessionUIStore.getState().currentSessionDirectory).toBe(WORKTREE)
+    } finally {
+      cleanup()
+      manager.disposeAll()
+    }
+  })
+
+  test("adopts even when the status resync reports no snapshot", async () => {
+    useSessionUIStore.getState().setCurrentSession(SESSION_ID)
+    useSessionUIStore.setState({ currentSessionDirectory: PARENT })
+    indexSessionIn(manager, WORKTREE)
+
+    let resyncRan = false
+    const cleanup = manager.configure({
+      onBootstrap: async (context) => {
+        await adoptAuthoritativeSessionDirectoryAfterResync(context, async () => {
+          resyncRan = true
+          return null
+        })
+      },
+    })
+
+    try {
+      manager.requestBootstrap({ directory: WORKTREE, priority: "selected", reason: "selected-session" })
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // A failed status fetch must not lose the directory adoption.
+      expect(resyncRan).toBe(true)
+      expect(useSessionUIStore.getState().currentSessionDirectory).toBe(WORKTREE)
+    } finally {
+      cleanup()
+      manager.disposeAll()
+    }
+  })
+
   test("does not adopt after the bootstrap becomes stale during status resync", async () => {
     useSessionUIStore.getState().setCurrentSession(SESSION_ID)
     useSessionUIStore.setState({ currentSessionDirectory: PARENT })

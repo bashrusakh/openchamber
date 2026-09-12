@@ -66,6 +66,7 @@ import {
   applyGlobalSessionStatusEvents,
   applyGlobalSessionStatusSnapshot,
   areGlobalSessionStatusEventsEnabled,
+  markDirectoryStatusFresh,
   markDirectoryStatusUnavailable,
   markTransportStatusUnavailable,
   useGlobalSessionStatusStore,
@@ -280,19 +281,22 @@ export function useGlobalSessionStatus(sessionId: string): SessionStatus | undef
 }
 
 /**
- * Read whether a specific session's status data is currently fresh (not
- * unavailable). Freshness is determined from the session's own directory:
- * a failed fetch for `/repo-a` does not make `/repo-b`'s status stale.
- * A transport-wide disconnect or transport switch marks all known directories
- * unavailable; a per-directory fetch failure marks only that directory.
+ * Read whether a directory's status data is currently fresh (not unavailable).
+ * Freshness is determined from the session's own directory: a failed fetch for
+ * `/repo-a` does not make `/repo-b`'s status stale. A transport-wide disconnect
+ * or transport switch marks all known directories unavailable; a per-directory
+ * fetch failure marks only that directory.
  *
  * The `directory` parameter is required because `statusById` intentionally
  * stores only busy/retry entries — absence means "last known was idle", NOT
  * "definitely idle right now while the directory is unavailable". A session
  * with no active-status entry whose directory is unavailable must NOT be
  * treated as fresh for control decisions.
+ *
+ * Internal to this module: presentation/control consumers use the derived
+ * hooks below.
  */
-export function useSessionStatusFresh(sessionId: string, directory: string): boolean {
+function useSessionStatusFresh(directory: string): boolean {
   const normalizedDirectory = normalizeProjectPath(directory) ?? directory
   return useGlobalSessionStatusStore(
     useCallback((state) => {
@@ -340,7 +344,7 @@ export function useSessionDisplayStatus(sessionId: string, directory?: string): 
   // Always call the hook unconditionally (rules-of-hooks). When dir is empty,
   // the selector returns true (fresh) since an empty directory can't be in the
   // unavailable set.
-  const fresh = useSessionStatusFresh(sessionId, dir);
+  const fresh = useSessionStatusFresh(dir);
   if (!fresh && status && (status.type === 'busy' || status.type === 'retry')) {
     return { type: 'reconnecting', rawStatus: status };
   }
@@ -367,7 +371,7 @@ export function useSessionDisplayStatus(sessionId: string, directory?: string): 
  */
 export function useSessionKnownInactive(sessionId: string, directory: string): boolean {
   const status = useGlobalSessionStatus(sessionId);
-  const fresh = useSessionStatusFresh(sessionId, directory);
+  const fresh = useSessionStatusFresh(directory);
   if (!fresh) return false;
   // `status.type === 'error'` is defensive: the SDK's SessionStatus type is
   // currently idle/busy/retry, but a future or alternate status authority could
@@ -894,9 +898,10 @@ export function reconcileDirectorySessionStatusSnapshot(
  *   as "reconnecting" rather than as confirmed activity or as idle.
  *
  * Freshness is directory-scoped: a failed fetch for `/repo-a` does not mark
- * `/repo-b` unavailable. The next successful authoritative snapshot for this
- * directory clears the flag with fresh data. A real OpenCode runtime
- * replacement (issue #2421) uses `resetGlobalSessionStatus({ blockEventUpdates: true })`
+ * `/repo-b` unavailable. The next successful status fetch for this directory —
+ * monotonic or authoritative — clears the flag with fresh data. A real
+ * OpenCode runtime replacement (issue #2421) uses
+ * `resetGlobalSessionStatus({ blockEventUpdates: true })`
  * (via `resetAppForRuntimeEndpointChange`) instead, which destroys stale data
  * and blocks old events.
  */
@@ -930,6 +935,12 @@ async function resyncDirectorySessionStatuses(
     return null
   }
   reconcileDirectorySessionStatusSnapshot(directory, store, nextStatuses, candidateSessionIds, mode)
+  // A successful fetch is directory-reachability evidence in either mode, so
+  // freshness clears even though the monotonic pass has no authority to lower
+  // busy/retry to idle. Freshness never re-enables blocked event updates and
+  // never touches status data; an authoritative snapshot already cleared the
+  // flag atomically above.
+  markDirectoryStatusFresh(directory)
   if (mode === "authoritative") {
     store.setState({ sessionStatusReady: true })
     // An authoritative snapshot that settles sessions previously observed
