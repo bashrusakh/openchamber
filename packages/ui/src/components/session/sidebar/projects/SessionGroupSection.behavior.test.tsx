@@ -103,6 +103,7 @@ const createProps = (): SessionGroupSectionProps => ({
   groupKey: 'project:main',
   projectId: 'project',
   hideGroupLabel: true,
+  rowOrderBase: 1000,
   hasSessionSearchQuery: false,
   normalizedSessionSearchQuery: '',
   groupSearchDataByGroup: new WeakMap(),

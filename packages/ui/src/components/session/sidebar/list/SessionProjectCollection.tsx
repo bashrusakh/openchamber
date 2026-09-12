@@ -31,6 +31,7 @@ import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
 import type { DeleteSessionConfirmState } from '../sessions/useSessionActions';
 import { useExpandedParents } from '../sessions/useExpandedParents';
 import { SessionGroupSection } from '../projects/SessionGroupSection';
+import { SessionRowOrderProvider } from '../sessions/sessionRowOrder';
 import { CHAT_DRAFT_PROJECT_ID, getChatsRootForHome, getChatsRootFromDirectory } from '@/lib/chatDirectories';
 import { isCapacitorApp } from '@/lib/platform';
 
@@ -437,6 +438,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
       groupKey="managed-chats"
       projectId={null}
       hideGroupLabel
+      rowOrderBase={0}
       sessionBatchSize={20}
       scrollContainerRef={undefined}
       openSidebarMenuKey={openSidebarMenuKey}
@@ -609,7 +611,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
     scrollerActions.renderProjectStatusIndicator,
     setSingleProjectId,
   ]);
-  return <>
+  return <SessionRowOrderProvider>
     <SidebarTerminalActivity />
     <ProjectSessionSelectionEffect
       projectSections={projectSections}
@@ -633,7 +635,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
       isInlineEditing={editingId !== null}
       startFolderRename={startFolderRename}
     />
-  </>;
+  </SessionRowOrderProvider>;
 };
 
 // The sidebar memoizes topology/view/actions, so the default shallow

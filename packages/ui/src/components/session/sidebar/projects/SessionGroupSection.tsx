@@ -44,6 +44,8 @@ import { CollapsedSessionActivityIndicator } from '../sessions/collapsedActivity
 import { useCollapsedSessionActivityState } from '../sessions/collapsedActivityState';
 import { SessionTreeItem, type SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import { FolderDeleteConfirmDialog } from '../shell/ConfirmDialogs';
+import { useRegisterSessionRowOrder } from '../sessions/sessionRowOrder';
+import { buildSessionGroupRowOrderEntries } from '../sessions/sessionRowOrderUtils';
 
 type DeleteFolderConfirm = {
   scopeKey: string;
@@ -58,6 +60,12 @@ export type SessionGroupSectionProps = {
   groupKey: string;
   projectId?: string | null;
   hideGroupLabel?: boolean;
+  /**
+   * Base of this group's segment in the sidebar's logical row order. Callers
+   * assign disjoint ranges in document order (Recent/Chats < project
+   * sections) so selection can flatten every rendered list deterministically.
+   */
+  rowOrderBase: number;
   hasSessionSearchQuery: boolean;
   normalizedSessionSearchQuery: string;
   groupSearchDataByGroup: WeakMap<SessionGroup, GroupSearchData>;
@@ -224,7 +232,8 @@ const areGroupPropsEqual = (prev: SessionGroupSectionProps, next: SessionGroupSe
   // to reference equality (the cheap path) and only re-render when the
   // parent actually swapped something.
   return (
-    prev.hasSessionSearchQuery === next.hasSessionSearchQuery
+    prev.rowOrderBase === next.rowOrderBase
+    && prev.hasSessionSearchQuery === next.hasSessionSearchQuery
     && prev.normalizedSessionSearchQuery === next.normalizedSessionSearchQuery
     && prev.hideDirectoryControls === next.hideDirectoryControls
     && prev.showMoreGroupSessions === next.showMoreGroupSessions
@@ -262,6 +271,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     groupKey,
     projectId,
     hideGroupLabel,
+    rowOrderBase,
     hasSessionSearchQuery,
     normalizedSessionSearchQuery,
     groupSearchDataByGroup,
@@ -547,11 +557,15 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   }), [subtreeContainsEditing, menuOpenSessionId, resolveNodeStructureKey]);
 
   const totalSessions = ungroupedSessions.length;
-  const visibleSessions = group.isArchivedBucket
-    ? ungroupedSessions
-    : hasSessionSearchQuery
+  // Stable identity matters for the row-order segment: the registration
+  // effect re-runs on reference changes, and an unsliced new array on every
+  // group render would rebuild the whole segment for no content change.
+  const visibleSessions = React.useMemo(
+    () => (group.isArchivedBucket || hasSessionSearchQuery
       ? ungroupedSessions
-      : ungroupedSessions.slice(0, nonArchivedVisibleCount);
+      : ungroupedSessions.slice(0, nonArchivedVisibleCount)),
+    [group.isArchivedBucket, hasSessionSearchQuery, nonArchivedVisibleCount, ungroupedSessions],
+  );
   const remainingCount = totalSessions - visibleSessions.length;
   const canShowLess = !group.isArchivedBucket && !hasSessionSearchQuery && totalSessions > maxVisible && remainingCount === 0;
 
@@ -730,6 +744,33 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     }
     return result;
   }, [allFoldersForGroup, collectGroupSessions, group.isArchivedBucket]);
+
+  // Hooks below MUST stay above the search-empty early-return so they fire in
+  // the same order every render — rules-of-hooks.
+  const rowOrderEntries = React.useMemo(() => buildSessionGroupRowOrderEntries({
+    isCollapsed,
+    hasSessionSearchQuery,
+    collapsedFolderIds,
+    expandedParents: effectiveExpandedParents,
+    archivedBucket: group.isArchivedBucket === true,
+    projectId,
+    groupDirectory: group.directory,
+    rootFolders,
+    childFoldersByParentId,
+    visibleSessions,
+  }), [
+    childFoldersByParentId,
+    collapsedFolderIds,
+    effectiveExpandedParents,
+    group.directory,
+    group.isArchivedBucket,
+    hasSessionSearchQuery,
+    isCollapsed,
+    projectId,
+    rootFolders,
+    visibleSessions,
+  ]);
+  useRegisterSessionRowOrder(rowOrderBase, rowOrderEntries);
 
   if (hasSessionSearchQuery && !groupMatchesSearch && rootFolders.length === 0 && ungroupedSessions.length === 0) {
     return null;

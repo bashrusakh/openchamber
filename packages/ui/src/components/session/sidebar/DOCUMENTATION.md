@@ -77,6 +77,17 @@ ID search does not include archived sessions. `ArchiveView` applies the same
 exact-ID rule to its own archived list. Other queries keep each view's existing
 matching and ordering. Search does not fetch sessions or broaden list membership.
 
+## Selection order
+
+Selection order and bulk scope come from the render model, not the DOM. Each
+rendered list registers its rows with `sessions/sessionRowOrder.tsx` in the
+order it renders them — managed Chats and Recent sections below the project
+sections — and shift-range selection, Ctrl/Cmd+A, and the bulk archive/delete
+scope read that registry. Rows that virtualization keeps unmounted are
+included because the entries come from the model, registration runs in layout
+effects so the registry matches the committed tree before any click, and
+registering never triggers a render.
+
 ## Loading rules
 
 - Always publish every known project root and worktree directory. Collapse/visibility changes priority only; they do not opt a directory out of authoritative refresh.
