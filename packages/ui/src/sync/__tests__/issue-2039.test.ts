@@ -106,6 +106,26 @@ mock.module("@/stores/useConfigStore", () => ({
       currentModelId: "model",
       currentVariantSelection: { override: configVariantOverride, inherited: "high" },
       agents: [],
+      providers: [
+        {
+          id: "provider",
+          models: [{ id: "model" }],
+        },
+      ],
+      settingsDefaultAgent: undefined,
+      settingsDefaultModel: undefined,
+      settingsDefaultVariant: undefined,
+      currentVariant: undefined,
+      getVisibleAgents: () => [{ name: "build" }],
+      getModelMetadata: (providerID: string, modelID: string) =>
+        [
+          {
+            id: "provider",
+            models: [{ id: "model" }],
+          },
+        ]
+          .find((provider) => provider.id === providerID)
+          ?.models.find((model) => model.id === modelID),
       activateDirectory: mock(async () => undefined),
       applyDefaultModelAgentSelection: mock(() => undefined),
     }),
@@ -330,6 +350,22 @@ mock.module("@/lib/sharedTrustConfirmation", () => ({
 
 mock.module("@/lib/worktrees/worktreeBootstrap", () => ({
   waitForWorktreeBootstrap: async () => undefined,
+  clearWorktreeBootstrapState: () => undefined,
+  markWorktreeBootstrapPending: () => undefined,
+  setWorktreeBootstrapState: () => undefined,
+  startWorktreeBootstrapWatcher: () => undefined,
+}))
+
+mock.module("@/lib/gitApi", () => ({
+  checkIsGitRepository: async () => true,
+  deleteRemoteBranch: async () => undefined,
+  git: {},
+  previewGitWorktree: async () => null,
+}))
+mock.module("@/lib/worktrees/worktreeStatus", () => ({
+  getRootBranch: async () => "main",
+  invalidateResolvedProjectRootCache: () => undefined,
+  resolveProjectRoot: async (directory: string) => directory,
 }))
 
 mock.module("@/lib/worktrees/worktreeCreate", () => ({
