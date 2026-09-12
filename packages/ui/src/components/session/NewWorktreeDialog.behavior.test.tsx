@@ -22,7 +22,7 @@ let selectGitHubItem: ((selection: GitHubSelection) => void) | null = null;
 const projectStoreState = { getActiveProject: () => project };
 const githubAuthState = { status: { connected: true }, hasChecked: true };
 const linearAuthState = { status: null, hasChecked: true };
-const uiState = { isMobile: false };
+const uiState = { isMobile: false, favoriteModels: [], recentModels: [], hiddenModels: [] };
 const gitState = { fetchBranches: async () => undefined };
 
 const selectProjectState = <T,>(selector: (state: typeof projectStoreState) => T): T => selector(projectStoreState);
