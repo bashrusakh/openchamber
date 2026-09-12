@@ -356,6 +356,16 @@ export const markDirectoryStatusFresh = (rawDirectory: string): void => {
 };
 
 /**
+ * Whether a directory's status data is currently marked unavailable. The key
+ * is normalized like the mark helpers, so callers can pass the same directory
+ * spellings they use for fetches and marks.
+ */
+export const isDirectoryStatusUnavailable = (rawDirectory: string): boolean => {
+  const directory = normalizeDirectory(rawDirectory);
+  return useGlobalSessionStatusStore.getState().unavailableDirectories.has(directory);
+};
+
+/**
  * Mark every currently known directory as temporarily unavailable after a
  * transport-wide disconnect or transport switch. This is distinct from a
  * per-directory fetch failure: a transport disconnect affects all

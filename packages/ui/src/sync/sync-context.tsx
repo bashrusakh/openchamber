@@ -66,6 +66,7 @@ import {
   applyGlobalSessionStatusEvents,
   applyGlobalSessionStatusSnapshot,
   areGlobalSessionStatusEventsEnabled,
+  isDirectoryStatusUnavailable,
   markDirectoryStatusFresh,
   markDirectoryStatusUnavailable,
   markTransportStatusUnavailable,
@@ -421,7 +422,7 @@ const BOOT_DEBOUNCE_MS = 1500
 const RECONNECT_MESSAGE_LIMIT = 30
 const SESSION_MATERIALIZATION_MESSAGE_LIMIT = 30
 const ACTIVE_SESSION_WATCHDOG_INTERVAL_MS = 5_000
-const ACTIVE_SESSION_STATUS_POLL_INTERVAL_MS = 5_000
+export const ACTIVE_SESSION_STATUS_POLL_INTERVAL_MS = 5_000
 const ACTIVE_SESSION_STALE_EVENT_MS = 20_000
 const ACTIVE_SESSION_FULL_RESYNC_COOLDOWN_MS = 15_000
 const CHILD_SESSION_DISCOVERY_INTERVAL_MS = 15_000
@@ -954,6 +955,49 @@ async function resyncDirectorySessionStatuses(
     }
   }
   return nextStatuses
+}
+
+/**
+ * Bounded self-recovery for a directory whose status data is marked
+ * unavailable while it has no active candidates. A failed status fetch is not
+ * proof of idleness: the session may already have settled, and the flag would
+ * otherwise persist — keeping `useSessionKnownInactive` false and
+ * move-to-worktree disabled for every session in the directory — until a
+ * reconnect or reload.
+ *
+ * The recovery is status-only (`triggerDirectoryResync` owns session/message
+ * refetching) and authoritative: the candidate set comes from the authoritative
+ * helper so a missed busy status seeds both the child store and the global
+ * index, while an empty candidate list still clears the flag by omission.
+ *
+ * Rate-limited by the caller's poll cadence map and the shared per-directory
+ * in-flight guard, so a runtime that stays down is retried once per window,
+ * not in a storm.
+ */
+export async function recoverUnavailableDirectoryStatus(
+  directory: string,
+  store: StoreApi<DirectoryStore>,
+  lastStatusPollAtByDirectory: Map<string, number>,
+  now: number,
+): Promise<void> {
+  if (!isDirectoryStatusUnavailable(directory)) return
+  if (statusPollingDirectories.has(directory)) return
+  const lastStatusPollAt = lastStatusPollAtByDirectory.get(directory) ?? 0
+  if (now - lastStatusPollAt < ACTIVE_SESSION_STATUS_POLL_INTERVAL_MS) return
+
+  lastStatusPollAtByDirectory.set(directory, now)
+  statusPollingDirectories.add(directory)
+  try {
+    await runBackgroundNetworkTask(() =>
+      resyncDirectorySessionStatuses(
+        directory,
+        store,
+        getAuthoritativeSessionCandidateIds(directory, store.getState()),
+        "authoritative",
+      ))
+  } finally {
+    statusPollingDirectories.delete(directory)
+  }
 }
 
 /**
@@ -2960,6 +3004,19 @@ export function SyncProvider(props: {
             const state = store.getState()
             const candidateSessionIds = getActiveSessionCandidateIds(directory, state)
             if (candidateSessionIds.length === 0) {
+              // A flagged directory keeps a bounded status-only recovery fetch
+              // on the normal cadence; the flag, not the candidate list, is
+              // what needs a fetch here. An unflagged idle directory keeps the
+              // existing skip and clears its poll bookkeeping.
+              if (isDirectoryStatusUnavailable(directory)) {
+                void recoverUnavailableDirectoryStatus(
+                  directory,
+                  store,
+                  lastStatusPollAtByDirectoryRef.current,
+                  now,
+                ).catch(() => undefined)
+                continue
+              }
               lastStatusPollAtByDirectoryRef.current.delete(directory)
               lastFullResyncAtByDirectoryRef.current.delete(directory)
               continue
