@@ -88,6 +88,18 @@ included because the entries come from the model, registration runs in layout
 effects so the registry matches the committed tree before any click, and
 registering never triggers a render.
 
+## Row virtualization
+
+`SessionGroupSection` owns the sidebar's only virtualizer
+(`@tanstack/react-virtual`). `shouldVirtualizeSessionGroup`
+(`sessions/sessionNodeItemUtils.ts`) virtualizes a group at 50+ rows when it is
+an archived bucket, and for active groups only while a search lists every match
+(the non-search flow keeps normal flow for its incremental Show more control).
+Nested sessions render inline inside their virtual row, and while searching
+every parent is treated as expanded so the overscan window covers their height.
+Folders stay above the virtualized ungrouped list, and the entries selection
+reads still come from the whole model.
+
 ## Loading rules
 
 - Always publish every known project root and worktree directory. Collapse/visibility changes priority only; they do not opt a directory out of authoritative refresh.

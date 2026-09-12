@@ -4,12 +4,9 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useShallow } from 'zustand/react/shallow';
 import type { Session } from '@opencode-ai/sdk/v2';
 
-// Archived buckets routinely grow into the hundreds/thousands; virtualize
-// when we cross this row count so the DOM stays bounded.
-const ARCHIVED_VIRTUALIZE_THRESHOLD = 50;
-// Compact rows in the archived bucket without nested subagents render
-// around 24-32px; virtua measures mounted rows and uses this as the initial hint.
-const ARCHIVED_ROW_ESTIMATE_PX = 28;
+// Compact rows without nested subagents render around 24-32px; the
+// virtualizer measures mounted rows and uses this as the initial hint.
+const ROW_ESTIMATE_PX = 28;
 const EMPTY_FOLDERS: readonly never[] = [];
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
@@ -32,6 +29,7 @@ import {
   resolveMenuOpenSessionId,
   selectFolderIdsForProjection,
   selectFolderRootNodes,
+  shouldVirtualizeSessionGroup,
 } from '../sessions/sessionNodeItemUtils';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 
@@ -96,7 +94,7 @@ export type SessionGroupSectionProps = {
    * Optional scroll container ref threaded from the outer ScrollableOverlay.
    * When provided, the virtualization effect can resolve the scrolling
    * ancestor synchronously and skip the getComputedStyle walk on every
-   * render of an expanded archived bucket.
+   * render of a virtualized group.
    */
   scrollContainerRef?: React.RefObject<HTMLElement | null>;
   folderRename: { scopeKey: string; folderId: string; draft: string } | null;
@@ -569,50 +567,56 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   const remainingCount = totalSessions - visibleSessions.length;
   const canShowLess = !group.isArchivedBucket && !hasSessionSearchQuery && totalSessions > maxVisible && remainingCount === 0;
 
-  // Virtualize archived buckets, which can grow into the thousands. Active
-  // groups retain normal flow because their incremental Show more control and
-  // the shared ancestor scroller cannot expose an unmounted virtual tail.
-  // Hooks below MUST stay above the search-empty early-return so they fire in
-  // the same order every render — rules-of-hooks.
-  const shouldVirtualize = group.isArchivedBucket === true
-    && !hasSessionSearchQuery
-    && visibleSessions.length >= ARCHIVED_VIRTUALIZE_THRESHOLD;
+  // One virtualizer serves both buckets: archived lists whenever they are
+  // large, active lists only while a search shows every match at once. Small
+  // lists and non-search active groups stay in normal flow so the incremental
+  // Show more control keeps working. Hooks below MUST stay above the
+  // search-empty early-return so they fire in the same order every render —
+  // rules-of-hooks.
+  const shouldVirtualize = shouldVirtualizeSessionGroup({
+    isArchivedBucket: group.isArchivedBucket === true,
+    hasSessionSearchQuery,
+    visibleSessionCount: visibleSessions.length,
+  });
 
-  // Check if any parent node is expanded - expanded parents render their
-  // children inline, making them much taller than the fixed estimate.
-  // When expanded parents exist, increase bufferSize to cover the extra height.
+  // Expanded parents render their children inline, making them much taller
+  // than the fixed estimate, so widen the window that stays mounted. While a
+  // search is active every parent renders expanded regardless of the
+  // persisted expansion set.
   const bucketTag = group.isArchivedBucket ? 'archived' : 'active';
   const hasExpandedParent = shouldVirtualize && visibleSessions.some((node) => {
     if (node.children.length === 0) return false;
+    if (hasSessionSearchQuery) return true;
     const expansionKey = `project:${bucketTag}:${node.session.id}`;
     return effectiveExpandedParents.has(expansionKey);
   });
 
-  const archivedVirtualContainerRef = React.useRef<HTMLDivElement | null>(null);
-  const [archivedScrollEl, setArchivedScrollEl] = React.useState<HTMLElement | null>(null);
+  const virtualContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const [virtualScrollEl, setVirtualScrollEl] = React.useState<HTMLElement | null>(null);
   // Offset of the virtual container from the scroll element's content origin.
   // virtua reads startMargin from Virtualizer options and uses it
   // to translate scrollTop into container-relative coordinates. Without this,
   // when the scroll element is an ancestor (the sidebar's ScrollableOverlay),
   // the virtualizer assumes the container starts at the top of the scroll
   // element and renders rows in the wrong subset / position.
-  const [archivedScrollMargin, setArchivedScrollMargin] = React.useState(0);
+  const [virtualScrollMargin, setVirtualScrollMargin] = React.useState(0);
 
   // Resolve the scrolling ancestor. When the parent has threaded a
   // `scrollContainerRef` (Layer 1.4), use it directly to skip the
-  // `getComputedStyle` walk on every render of an expanded archived
-  // bucket — the walk is one of the more expensive operations in the
-  // hot path because it forces a style recalc on every parent up the
-  // tree. Fall back to the legacy walk only when the ref is missing.
+  // `getComputedStyle` walk on every render of a virtualized group — the walk
+  // is one of the more expensive operations in the hot path because it forces
+  // a style recalc on every parent up the tree. Fall back to the legacy walk
+  // only when the ref is missing.
   //
-  // We also still re-run when the archive flips between expanded/collapsed,
-  // and on a ResizeObserver-driven layout change of the container, so a
-  // dep-gated effect that only fires when shouldVirtualizeArchived flips
-  // would miss the eventual mount and leave the scroll element null.
+  // We also still re-run when the group flips between virtualized and
+  // normal-flow rendering, and on a ResizeObserver-driven layout change of
+  // the container, so a dep-gated effect that only fires when
+  // `shouldVirtualize` flips would miss the eventual mount and leave the
+  // scroll element null.
   const [, setLayoutVersion] = React.useState(0);
   React.useEffect(() => {
     if (!shouldVirtualize) return;
-    const container = archivedVirtualContainerRef.current;
+    const container = virtualContainerRef.current;
     if (!container) return;
     if (!globalThis.ResizeObserver) return;
     const ro = new ResizeObserver(() => setLayoutVersion((v) => v + 1));
@@ -623,22 +627,22 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useLayoutEffect(() => {
     if (!shouldVirtualize) {
-      if (archivedScrollEl !== null) setArchivedScrollEl(null);
-      if (archivedScrollMargin !== 0) setArchivedScrollMargin(0);
+      if (virtualScrollEl !== null) setVirtualScrollEl(null);
+      if (virtualScrollMargin !== 0) setVirtualScrollMargin(0);
       return;
     }
-    const container = archivedVirtualContainerRef.current;
+    const container = virtualContainerRef.current;
     if (!container) {
-      // Bucket still collapsed — body not mounted. We'll re-run on the
-      // render that mounts it.
+      // Group body not mounted yet — we'll re-run on the render that mounts
+      // it.
       return;
     }
-    let scrollEl: HTMLElement | null = archivedScrollEl;
+    let scrollEl: HTMLElement | null = virtualScrollEl;
     const providedScrollEl = scrollContainerRef?.current ?? null;
     if (providedScrollEl && providedScrollEl.contains(container)) {
       scrollEl = providedScrollEl;
-      if (scrollEl !== archivedScrollEl) {
-        setArchivedScrollEl(scrollEl);
+      if (scrollEl !== virtualScrollEl) {
+        setVirtualScrollEl(scrollEl);
         return;
       }
     } else if (!scrollEl || !scrollEl.contains(container)) {
@@ -653,8 +657,8 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
         }
         el = el.parentElement;
       }
-      if (scrollEl !== archivedScrollEl) {
-        setArchivedScrollEl(scrollEl);
+      if (scrollEl !== virtualScrollEl) {
+        setVirtualScrollEl(scrollEl);
         return;
       }
     }
@@ -662,7 +666,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     const offset = container.getBoundingClientRect().top
       - scrollEl.getBoundingClientRect().top
       + scrollEl.scrollTop;
-    setArchivedScrollMargin((prev) => (Math.abs(prev - offset) < 1 ? prev : offset));
+    setVirtualScrollMargin((prev) => (Math.abs(prev - offset) < 1 ? prev : offset));
   });
 
   // The scroll element is an ANCESTOR of this section (the sidebar's
@@ -676,17 +680,17 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   // visual no-op) instead of a stale 0 that reset the sidebar to the top.
   // The core only learns the offset from scroll events after that, so this
   // initial seeding is what makes the first render window correct too.
-  const virtualizerReady = shouldVirtualize && archivedScrollEl !== null;
+  const virtualizerReady = shouldVirtualize && virtualScrollEl !== null;
   const sessionVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
     count: visibleSessions.length,
     enabled: virtualizerReady,
-    getScrollElement: () => archivedScrollEl,
-    initialOffset: () => archivedScrollEl?.scrollTop ?? 0,
-    estimateSize: () => ARCHIVED_ROW_ESTIMATE_PX,
+    getScrollElement: () => virtualScrollEl,
+    initialOffset: () => virtualScrollEl?.scrollTop ?? 0,
+    estimateSize: () => ROW_ESTIMATE_PX,
     // Expanded parents render children inline and dwarf the row estimate;
     // widen the window so their extra height stays covered.
     overscan: hasExpandedParent ? 20 : 8,
-    scrollMargin: archivedScrollMargin,
+    scrollMargin: virtualScrollMargin,
     getItemKey: (index) => visibleSessions[index]?.session.id ?? index,
   });
 
@@ -1031,7 +1035,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     >
       {renderFolderItems()}
       {shouldVirtualize ? (
-        <div ref={archivedVirtualContainerRef}>
+        <div ref={virtualContainerRef}>
           {!virtualizerReady ? (
             // At most one pre-paint frame: this wrapper must exist for the
             // layout effect to resolve the ancestor scroll element, which
@@ -1068,7 +1072,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                     top: 0,
                     left: 0,
                     width: '100%',
-                    transform: `translateY(${item.start - archivedScrollMargin}px)`,
+                    transform: `translateY(${item.start - virtualScrollMargin}px)`,
                   }}
                 >
                   {renderSessionNode(node)}

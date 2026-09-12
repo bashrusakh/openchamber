@@ -53,13 +53,12 @@ import { installHookTestDom } from './test-utils/testDom';
  * Scale baselines print `[session-search-perf]` JSON lines with the filter
  * invocation count/time and the matched-node counts per scenario.
  *
- * Measurement limitation for the archived bucket: `SessionGroupSection`
- * (`shouldVirtualize`, SessionGroupSection.tsx) only virtualizes an archived
- * bucket while `hasSessionSearchQuery` is false, so a broad query mounts every
- * matched archived row. The rows themselves cannot be counted here, but the
- * data assertion below pins the exact node count the component receives
- * (`filteredNodes.length` = every matched archived session) so a future fix can
- * compare it against a mounted-row bound once the component is testable.
+ * Measurement limitation: the row data path is real, but `SessionGroupSection`
+ * cannot be mounted here, so this file cannot count mounted rows. It pins the
+ * exact node count the component receives (`filteredNodes.length` = every
+ * matched session). Since Step 4 the component virtualizes 50+ row search
+ * results in both buckets, so that model count is no longer the mounted-row
+ * count.
  */
 
 const PROJECT_ROOT = '/repo/perf';
@@ -296,9 +295,9 @@ describe('session search data path at scale', () => {
       const searched = measureScenario(`archived-${count}-broad`, 0, count, 'release');
       // Two groups carry the search data: the project root and the archived bucket.
       expect(searched.filterCalls).toBe(2);
-      // Every archived row is search-matched, and the component's archived
-      // bucket stops virtualizing while search is active, so this is also the
-      // number of archived rows the production component mounts for the query.
+      // Every archived row is search-matched. The component virtualizes 50+
+      // row search results, so this is the model count it receives, not the
+      // mounted-row count (which this harness cannot measure).
       expect(searched.matchedArchived).toBe(count);
       expect(searched.matchedRoot).toBe(0);
       expect(searched.searchMatchCount).toBe(count);

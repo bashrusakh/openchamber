@@ -6,12 +6,22 @@ import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 import { useUIStore } from '@/stores/useUIStore';
 import type { SessionFolder } from '@/stores/useSessionFoldersStore';
 import type { Session } from '@opencode-ai/sdk/v2';
+import type { GroupSearchData, SessionGroup } from '../types';
 import type { SessionGroupSectionProps } from './SessionGroupSection';
 import { installHookTestDom } from '../test-utils/testDom';
+import {
+  SessionRowOrderProvider,
+  useSessionRowOrderRegistry,
+  type SessionRowOrderRegistry,
+} from '../sessions/sessionRowOrder';
 
 type FolderCallbacks = {
   onRename: (name: string) => void;
   onDelete: () => void;
+};
+
+type RegistryCapture = {
+  registry: SessionRowOrderRegistry | null;
 };
 
 type RowPropsCapture = Pick<SessionGroupSectionProps,
@@ -203,6 +213,69 @@ describe('SessionGroupSection public behavior', () => {
     } finally {
       await act(async () => root.unmount());
       rowPropsCapture = null;
+      dom.restore();
+    }
+  });
+
+  test('a large searched list keeps every model row registered in order for both buckets', async () => {
+    const dom = installHookTestDom();
+    const root = createRoot(dom.container);
+    const originalFolders = useSessionFoldersStore.getState();
+    useSessionFoldersStore.setState({ foldersMap: {} });
+    const capture: RegistryCapture = { registry: null };
+    const RegistryCaptureProbe = () => {
+      capture.registry = useSessionRowOrderRegistry();
+      return null;
+    };
+    const searchedGroup = (isArchivedBucket: boolean): SessionGroup => ({
+      ...group,
+      isArchivedBucket,
+      // SAFETY: SessionGroupSection only reads the fixture session ids in this test.
+      sessions: Array.from({ length: 60 }, (_, index) => ({
+        session: { id: `session-${String(index).padStart(2, '0')}` } as Session,
+        children: [],
+        worktree: null,
+      })),
+    });
+    const searchDataByGroup = (target: SessionGroup): WeakMap<SessionGroup, GroupSearchData> => new WeakMap([[
+      target,
+      {
+        filteredNodes: target.sessions,
+        matchedSessionCount: target.sessions.length,
+        folderNameMatchCount: 0,
+        groupMatches: true,
+        hasMatch: true,
+      },
+    ]]);
+    const renderSearched = async (target: SessionGroup): Promise<void> => {
+      await act(async () => root.render(
+        <I18nProvider>
+          <SessionRowOrderProvider>
+            <RegistryCaptureProbe />
+            <SessionGroupSection
+              {...createProps()}
+              group={target}
+              hasSessionSearchQuery
+              normalizedSessionSearchQuery="session"
+              groupSearchDataByGroup={searchDataByGroup(target)}
+            />
+          </SessionRowOrderProvider>
+        </I18nProvider>,
+      ));
+    };
+    const expectedIds = Array.from({ length: 60 }, (_, index) => `session-${String(index).padStart(2, '0')}`);
+
+    try {
+      // Both groups cross the virtualize threshold while searching; the
+      // registry must still carry the full model order for offscreen rows.
+      await renderSearched(searchedGroup(false));
+      expect(capture.registry?.getOrderedIds()).toEqual(expectedIds);
+
+      await renderSearched(searchedGroup(true));
+      expect(capture.registry?.getOrderedIds()).toEqual(expectedIds);
+    } finally {
+      await act(async () => root.unmount());
+      useSessionFoldersStore.setState(originalFolders, true);
       dom.restore();
     }
   });

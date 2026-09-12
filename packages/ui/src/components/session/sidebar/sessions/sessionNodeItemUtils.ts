@@ -274,6 +274,29 @@ export const selectFolderIdsForProjection = (
   return new Set(entries.filter((entry) => keptIds.has(entry.id)).map((entry) => entry.id));
 };
 
+/**
+ * Row count at which a session group switches to the shared virtualizer.
+ * Archived buckets routinely grow into the hundreds/thousands; active groups
+ * virtualize only while a search lists every match (their non-search flow
+ * keeps the incremental Show more control in normal flow).
+ */
+export const SESSION_GROUP_VIRTUALIZE_THRESHOLD = 50;
+
+/**
+ * The one virtualization decision for both buckets. Search makes every match
+ * visible at once, so an archived bucket virtualizes regardless of search and
+ * an active group virtualizes only while searching. Small lists stay in
+ * normal flow either way.
+ */
+export const shouldVirtualizeSessionGroup = (input: {
+  isArchivedBucket: boolean;
+  hasSessionSearchQuery: boolean;
+  visibleSessionCount: number;
+}): boolean => (
+  input.visibleSessionCount >= SESSION_GROUP_VIRTUALIZE_THRESHOLD
+  && (input.isArchivedBucket || input.hasSessionSearchQuery)
+);
+
 const sessionObjectVersions = new WeakMap<object, number>();
 let nextSessionObjectVersion = 1;
 
