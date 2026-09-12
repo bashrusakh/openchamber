@@ -67,7 +67,6 @@ import {
   applyGlobalSessionStatusSnapshot,
   areGlobalSessionStatusEventsEnabled,
   isDirectoryStatusUnavailable,
-  markDirectoryStatusFresh,
   markDirectoryStatusUnavailable,
   markTransportStatusUnavailable,
   useGlobalSessionStatusStore,
@@ -899,9 +898,9 @@ export function reconcileDirectorySessionStatusSnapshot(
  *   as "reconnecting" rather than as confirmed activity or as idle.
  *
  * Freshness is directory-scoped: a failed fetch for `/repo-a` does not mark
- * `/repo-b` unavailable. The next successful status fetch for this directory —
- * monotonic or authoritative — clears the flag with fresh data. A real
- * OpenCode runtime replacement (issue #2421) uses
+ * `/repo-b` unavailable. The next successful authoritative snapshot for this
+ * directory clears the flag with fresh data, inside the same state update that
+ * applies the snapshot. A real OpenCode runtime replacement (issue #2421) uses
  * `resetGlobalSessionStatus({ blockEventUpdates: true })`
  * (via `resetAppForRuntimeEndpointChange`) instead, which destroys stale data
  * and blocks old events.
@@ -936,12 +935,10 @@ async function resyncDirectorySessionStatuses(
     return null
   }
   reconcileDirectorySessionStatusSnapshot(directory, store, nextStatuses, candidateSessionIds, mode)
-  // A successful fetch is directory-reachability evidence in either mode, so
-  // freshness clears even though the monotonic pass has no authority to lower
-  // busy/retry to idle. Freshness never re-enables blocked event updates and
-  // never touches status data; an authoritative snapshot already cleared the
-  // flag atomically above.
-  markDirectoryStatusFresh(directory)
+  // Freshness is cleared only by the authoritative reconcile above, atomically
+  // with applying its snapshot. A monotonic success has no authority to lower
+  // busy/retry, so clearing the flag here would present preserved busy as
+  // confirmed activity until a second, authoritative fetch corrected it.
   if (mode === "authoritative") {
     store.setState({ sessionStatusReady: true })
     // An authoritative snapshot that settles sessions previously observed
@@ -955,6 +952,18 @@ async function resyncDirectorySessionStatuses(
     }
   }
   return nextStatuses
+}
+
+/**
+ * The status fetch mode a directory must use right now. A directory marked
+ * unavailable is fetched authoritatively: only an authoritative reconcile may
+ * clear the flag, and it clears it inside the same state update that applies
+ * the snapshot, so preserved busy/retry can never be presented as confirmed
+ * activity between a fetch and an escalation. Fresh directories keep the cheap
+ * monotonic pass, which never lowers busy/retry on its own.
+ */
+function statusFetchModeForDirectory(directory: string): StatusSnapshotMode {
+  return isDirectoryStatusUnavailable(directory) ? "authoritative" : "monotonic"
 }
 
 /**
@@ -993,7 +1002,7 @@ export async function recoverUnavailableDirectoryStatus(
         directory,
         store,
         getAuthoritativeSessionCandidateIds(directory, store.getState()),
-        "authoritative",
+        statusFetchModeForDirectory(directory),
       ))
   } finally {
     statusPollingDirectories.delete(directory)
@@ -1010,9 +1019,11 @@ export async function recoverUnavailableDirectoryStatus(
  * status is read again when the timer fires: a normal turn whose `session.idle`
  * arrives inside that window settles on its own and issues no request at all.
  * Only a session the store still believes busy costs one status fetch, which
- * mirrors the watchdog escalation — the monotonic pass confirms/raises busy but
- * never lowers it, and when the snapshot reports the session idle while the
- * store still believes it busy, an authoritative resync settles the status.
+ * mirrors the watchdog escalation. A directory whose status data is unavailable
+ * is fetched authoritatively so the flag clears atomically with the snapshot;
+ * otherwise the monotonic pass confirms/raises busy but never lowers it, and
+ * when the snapshot reports the session idle while the store still believes it
+ * busy, an authoritative resync settles the status.
  *
  * Bounded: one scheduled check per session, one in-flight status fetch per
  * directory (shared with the watchdog poll), best-effort — the watchdog poll
@@ -1039,10 +1050,14 @@ export function maybePollStatusAfterMessageCompletion(
     statusPollingDirectories.add(directory)
     void (async () => {
       try {
+        const mode = statusFetchModeForDirectory(directory)
         const statuses = await runBackgroundNetworkTask(() =>
-          resyncDirectorySessionStatuses(directory, store, [sessionID], "monotonic"))
+          resyncDirectorySessionStatuses(directory, store, [sessionID], mode))
         if (!statuses) return
-        if (needsSnapshotAfterStatusPoll(store.getState(), sessionID, statuses[sessionID])) {
+        // An authoritative pass already reconciled the store against the
+        // snapshot; only the monotonic pass needs the contradiction escalation.
+        if (mode === "monotonic"
+          && needsSnapshotAfterStatusPoll(store.getState(), sessionID, statuses[sessionID])) {
           await runBackgroundNetworkTask(() =>
             resyncDirectorySessionStatuses(directory, store, [sessionID], "authoritative"))
         }
@@ -2979,9 +2994,14 @@ export function SyncProvider(props: {
       if (polling.has(directory)) return
       polling.add(directory)
       try {
+        const mode = statusFetchModeForDirectory(directory)
         const before = store.getState()
-        const statuses = await runBackgroundNetworkTask(() => resyncDirectorySessionStatuses(directory, store, candidateSessionIds, "monotonic"))
+        const statuses = await runBackgroundNetworkTask(() =>
+          resyncDirectorySessionStatuses(directory, store, candidateSessionIds, mode))
         if (!statuses) return
+        // The authoritative pass already reconciled contradictions; only the
+        // monotonic pass escalates a store/snapshot mismatch.
+        if (mode === "authoritative") return
         const needsSnapshot = candidateSessionIds.some((sessionId) => (
           needsSnapshotAfterStatusPoll(before, sessionId, statuses[sessionId])
         ))

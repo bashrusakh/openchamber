@@ -6,10 +6,13 @@
  * cost a single extra request.
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test"
+import React, { act } from "react"
+import { createRoot } from "react-dom/client"
 import { create, type StoreApi } from "zustand"
 import type { Event, Message, Part, SessionStatus } from "@opencode-ai/sdk/v2/client"
 import { INITIAL_STATE } from "../types"
 import type { DirectoryStore } from "../child-store"
+import { installHookTestDom } from "../../components/session/sidebar/test-utils/testDom"
 
 type StatusSnapshot = Record<string, SessionStatus | undefined>
 
@@ -46,6 +49,7 @@ import {
   maybePollStatusAfterMessageCompletion,
   MESSAGE_COMPLETION_STATUS_POLL_DELAY_MS,
   recoverInterruptedTurnAfterMessageLoad,
+  useSessionDisplayStatus,
 } from "../sync-context"
 
 const createStore = (status?: SessionStatus): StoreApi<DirectoryStore> => {
@@ -237,11 +241,12 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     })
   }
 
-  // Issue #2421 / PR #2485 follow-up: freshness must be restored by the
-  // directory's own successful MONOTONIC fetch. The watchdog and this poll are
-  // the ordinary recovery path after a transient failure; without the clear,
-  // one failed fetch made a verifiably working session render reconnecting and
-  // blocked control paths until a reconnect or authoritative snapshot.
+  // Issue #2421 / PR #2485 follow-up: a directory marked unavailable must be
+  // fetched AUTHORITATIVELY, because only an authoritative reconcile may clear
+  // the flag and it clears it atomically with applying the snapshot. A
+  // monotonic success must never clear freshness: it cannot lower busy/retry,
+  // so the preserved entry would render as a confirmed spinner until a second
+  // fetch corrected it.
   test("a failed monotonic fetch marks the directory unavailable and preserves last-known busy", async () => {
     const store = createStore({ type: "busy" })
     applyGlobalSessionStatusEvent("/test/project", busyStatusEvent("ses_1"))
@@ -257,7 +262,7 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     expect(store.getState().session_status?.ses_1?.type).toBe("busy")
   })
 
-  test("a successful monotonic fetch that confirms busy freshens the directory again", async () => {
+  test("a successful recovery fetch while unavailable is authoritative and confirms busy", async () => {
     const store = createStore({ type: "busy" })
     applyGlobalSessionStatusEvent("/test/project", busyStatusEvent("ses_1"))
 
@@ -270,14 +275,14 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     maybePollStatusAfterMessageCompletion("/test/project", store, "ses_1")
     await waitForPollSettled()
 
-    // Fresh + preserved busy = confirmed busy presentation, not reconnecting.
+    // Fresh + busy confirmed by the authoritative apply, not a monotonic clear.
     expect(isSessionStatusFresh("ses_1", "/test/project")).toBe(true)
     expect(useGlobalSessionStatusStore.getState().unavailableDirectories.has("/test/project")).toBe(false)
     expect(useGlobalSessionStatusStore.getState().statusById.get("ses_1")?.status.type).toBe("busy")
     expect(store.getState().session_status?.ses_1?.type).toBe("busy")
   })
 
-  test("a successful monotonic omission still escalates to authoritative settlement", async () => {
+  test("an authoritative recovery omission settles the session without a second fetch", async () => {
     const store = createStore({ type: "busy" })
     applyGlobalSessionStatusEvent("/test/project", busyStatusEvent("ses_1"))
 
@@ -286,14 +291,13 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     await waitForPollSettled()
     expect(useGlobalSessionStatusStore.getState().unavailableDirectories.has("/test/project")).toBe(true)
 
-    // The session is gone from the snapshot: the monotonic pass must not lower
-    // it by omission, so the watchdog escalates to the authoritative resync.
+    // The session is gone from the snapshot: the recovery fetch already ran
+    // authoritatively, so it settles by omission with no escalation fetch.
     respondWithSnapshot = () => Promise.resolve({})
     maybePollStatusAfterMessageCompletion("/test/project", store, "ses_1")
     await waitForPollSettled()
 
     expect(statusSnapshotCalls).toEqual([
-      "/test/project",
       "/test/project",
       "/test/project",
     ])
@@ -302,7 +306,7 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     expect(isSessionStatusFresh("ses_1", "/test/project")).toBe(true)
   })
 
-  test("freshness recovery is idempotent once a successful fetch clears the flag", async () => {
+  test("recovery is idempotent once the authoritative fetch clears the flag", async () => {
     const store = createStore({ type: "busy" })
     applyGlobalSessionStatusEvent("/test/project", busyStatusEvent("ses_1"))
 
@@ -317,7 +321,7 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     const recovered = useGlobalSessionStatusStore.getState().unavailableDirectories
     expect(recovered.has("/test/project")).toBe(false)
 
-    // A repeat success publishes no freshness change and leaves status intact.
+    // A repeat success is monotonic and publishes no freshness change.
     maybePollStatusAfterMessageCompletion("/test/project", store, "ses_1")
     await waitForPollSettled()
     expect(useGlobalSessionStatusStore.getState().unavailableDirectories).toBe(recovered)
@@ -348,5 +352,97 @@ describe("maybePollStatusAfterMessageCompletion (issue OPE-193)", () => {
     expect(isSessionStatusFresh("ses_1", "/repo-b")).toBe(true)
     expect(storeA.getState().session_status?.ses_1?.type).toBe("busy")
     expect(storeB.getState().session_status?.ses_1?.type).toBe("busy")
+  })
+
+  // Barrier: while the authoritative recovery response is in flight the
+  // display must stay reconnecting, and the settled result must never pass
+  // through a confirmed-busy frame produced by clearing freshness without an
+  // authoritative reconcile.
+  test("a pending authoritative recovery keeps preserved busy as reconnecting", async () => {
+    const store = createStore({ type: "busy" })
+    applyGlobalSessionStatusEvent("/test/project", busyStatusEvent("ses_1"))
+    respondWithSnapshot = () => Promise.resolve(null)
+    maybePollStatusAfterMessageCompletion("/test/project", store, "ses_1")
+    await waitForPollSettled()
+    expect(useGlobalSessionStatusStore.getState().unavailableDirectories.has("/test/project")).toBe(true)
+
+    let resolveSnapshot!: (snapshot: StatusSnapshot) => void
+    respondWithSnapshot = () => new Promise((resolve) => { resolveSnapshot = resolve })
+
+    const dom = installHookTestDom()
+    const root = createRoot(dom.container)
+    let display: ReturnType<typeof useSessionDisplayStatus> | undefined
+    const Probe = () => {
+      display = useSessionDisplayStatus("ses_1", "/test/project")
+      return null
+    }
+
+    try {
+      await act(async () => { root.render(React.createElement(Probe)) })
+      expect(display?.type).toBe("reconnecting")
+
+      maybePollStatusAfterMessageCompletion("/test/project", store, "ses_1")
+      await act(async () => { await waitForPollSettled() })
+      expect(statusSnapshotCalls).toHaveLength(2)
+      // The recovery result is still pending: never a confirmed spinner.
+      expect(display?.type).toBe("reconnecting")
+
+      await act(async () => {
+        resolveSnapshot({})
+        await sleep(50)
+      })
+
+      expect(display?.type).toBe("idle")
+      expect(isSessionStatusFresh("ses_1", "/test/project")).toBe(true)
+      expect(useGlobalSessionStatusStore.getState().statusById.has("ses_1")).toBe(false)
+      expect(store.getState().session_status?.ses_1?.type).toBe("idle")
+    } finally {
+      await act(async () => { root.unmount() })
+      dom.restore()
+    }
+  })
+
+  test("an authoritative recovery confirming busy settles as a confirmed busy", async () => {
+    const store = createStore({ type: "busy" })
+    applyGlobalSessionStatusEvent("/test/project", busyStatusEvent("ses_1"))
+    respondWithSnapshot = () => Promise.resolve(null)
+    maybePollStatusAfterMessageCompletion("/test/project", store, "ses_1")
+    await waitForPollSettled()
+    expect(useGlobalSessionStatusStore.getState().unavailableDirectories.has("/test/project")).toBe(true)
+
+    let resolveSnapshot!: (snapshot: StatusSnapshot) => void
+    respondWithSnapshot = () => new Promise((resolve) => { resolveSnapshot = resolve })
+
+    const dom = installHookTestDom()
+    const root = createRoot(dom.container)
+    let display: ReturnType<typeof useSessionDisplayStatus> | undefined
+    const Probe = () => {
+      display = useSessionDisplayStatus("ses_1", "/test/project")
+      return null
+    }
+
+    try {
+      await act(async () => { root.render(React.createElement(Probe)) })
+      expect(display?.type).toBe("reconnecting")
+
+      maybePollStatusAfterMessageCompletion("/test/project", store, "ses_1")
+      await act(async () => { await waitForPollSettled() })
+      expect(display?.type).toBe("reconnecting")
+
+      await act(async () => {
+        resolveSnapshot({ ses_1: { type: "busy" } })
+        await sleep(50)
+      })
+
+      // B1 stays fixed: the authoritative confirmation ends reconnecting as a
+      // real, confirmed busy rather than leaving it stuck.
+      expect(display?.type).toBe("busy")
+      expect(isSessionStatusFresh("ses_1", "/test/project")).toBe(true)
+      expect(useGlobalSessionStatusStore.getState().statusById.get("ses_1")?.status.type).toBe("busy")
+      expect(store.getState().session_status?.ses_1?.type).toBe("busy")
+    } finally {
+      await act(async () => { root.unmount() })
+      dom.restore()
+    }
   })
 })

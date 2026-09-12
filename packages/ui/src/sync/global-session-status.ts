@@ -41,8 +41,10 @@ type GlobalSessionStatusState = {
    * A transport-wide disconnect or transport switch populates this set with
    * every currently known directory (from `statusById` entries). Each
    * directory's freshness is then restored independently by its own next
-   * successful status fetch (see `markDirectoryStatusFresh`) — a successful
-   * fetch for one directory does NOT implicitly freshen another.
+   * successful AUTHORITATIVE snapshot — only that path may clear the flag, and
+   * it clears it atomically with applying the snapshot, so a monotonic pass
+   * can never present preserved busy/retry as confirmed work. A successful
+   * snapshot for one directory does NOT implicitly freshen another.
    *
    * Uses the same normalized directory keys as `statusById` entries.
    */
@@ -334,31 +336,10 @@ export const markDirectoryStatusUnavailable = (rawDirectory: string): void => {
 };
 
 /**
- * A successful `/session/status?directory=X` fetch is directory-reachability
- * evidence: the directory is answering again, whatever the snapshot's mode.
- * This clears only that directory's unavailable flag and nothing else.
- *
- * It deliberately does NOT touch `statusById`/`activeSessionIds` — a monotonic
- * fetch has no authority to lower busy/retry to idle, so clearing freshness
- * must not imply settlement — and it never re-enables `acceptEventUpdates`,
- * which stays reserved for a complete authoritative snapshot.
- *
- * Idempotent: a directory that is already fresh leaves the state untouched.
- */
-export const markDirectoryStatusFresh = (rawDirectory: string): void => {
-  const directory = normalizeDirectory(rawDirectory);
-  useGlobalSessionStatusStore.setState((state) => {
-    if (!state.unavailableDirectories.has(directory)) return state;
-    const next = new Set(state.unavailableDirectories);
-    next.delete(directory);
-    return { unavailableDirectories: next };
-  });
-};
-
-/**
  * Whether a directory's status data is currently marked unavailable. The key
  * is normalized like the mark helpers, so callers can pass the same directory
- * spellings they use for fetches and marks.
+ * spellings they use for fetches and marks. Callers use this to require an
+ * authoritative fetch: only an authoritative reconcile may clear the flag.
  */
 export const isDirectoryStatusUnavailable = (rawDirectory: string): boolean => {
   const directory = normalizeDirectory(rawDirectory);
@@ -373,8 +354,8 @@ export const isDirectoryStatusUnavailable = (rawDirectory: string): boolean => {
  *
  * Populates `unavailableDirectories` with every directory that has an entry in
  * `statusById`, so each directory's freshness is restored independently by its
- * own next successful status fetch — a successful fetch for one directory does
- * NOT implicitly freshen another.
+ * own next successful authoritative snapshot — a successful snapshot for one
+ * directory does NOT implicitly freshen another.
  *
  * `knownDirectories` may be passed to include directories that have no active
  * `statusById` entry (e.g. directories with only idle sessions). This ensures
