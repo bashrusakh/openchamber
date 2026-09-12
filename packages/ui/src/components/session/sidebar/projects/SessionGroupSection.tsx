@@ -101,10 +101,7 @@ export type SessionGroupSectionProps = {
   | 'setOpenSidebarMenuKey'
   | 'allowReselect'
   | 'onSessionSelected'
-  | 'isSessionSearchOpen'
-  | 'sessionSearchQuery'
-  | 'setSessionSearchQuery'
-  | 'setIsSessionSearchOpen'
+  | 'resetSessionSearch'
   | 'deleteSessionConfirm'
   | 'setDeleteSessionConfirm'
   | 'startFolderRename'
@@ -247,10 +244,7 @@ const areGroupPropsEqual = (prev: SessionGroupSectionProps, next: SessionGroupSe
     && prev.setOpenSidebarMenuKey === next.setOpenSidebarMenuKey
     && prev.allowReselect === next.allowReselect
     && prev.onSessionSelected === next.onSessionSelected
-    && prev.isSessionSearchOpen === next.isSessionSearchOpen
-    && prev.sessionSearchQuery === next.sessionSearchQuery
-    && prev.setSessionSearchQuery === next.setSessionSearchQuery
-    && prev.setIsSessionSearchOpen === next.setIsSessionSearchOpen
+    && prev.resetSessionSearch === next.resetSessionSearch
     && prev.deleteSessionConfirm === next.deleteSessionConfirm
     && prev.setDeleteSessionConfirm === next.setDeleteSessionConfirm
     && prev.startFolderRename === next.startFolderRename
@@ -850,10 +844,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                setOpenSidebarMenuKey={props.setOpenSidebarMenuKey}
                allowReselect={props.allowReselect}
                onSessionSelected={props.onSessionSelected}
-               isSessionSearchOpen={props.isSessionSearchOpen}
-               sessionSearchQuery={props.sessionSearchQuery}
-               setSessionSearchQuery={props.setSessionSearchQuery}
-               setIsSessionSearchOpen={props.setIsSessionSearchOpen}
+               resetSessionSearch={props.resetSessionSearch}
                deleteSessionConfirm={props.deleteSessionConfirm}
               setDeleteSessionConfirm={props.setDeleteSessionConfirm}
               startFolderRename={props.startFolderRename}
@@ -970,10 +961,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
      setOpenSidebarMenuKey={props.setOpenSidebarMenuKey}
      allowReselect={props.allowReselect}
      onSessionSelected={props.onSessionSelected}
-     isSessionSearchOpen={props.isSessionSearchOpen}
-     sessionSearchQuery={props.sessionSearchQuery}
-     setSessionSearchQuery={props.setSessionSearchQuery}
-     setIsSessionSearchOpen={props.setIsSessionSearchOpen}
+     resetSessionSearch={props.resetSessionSearch}
      deleteSessionConfirm={props.deleteSessionConfirm}
      setDeleteSessionConfirm={props.setDeleteSessionConfirm}
      startFolderRename={props.startFolderRename}

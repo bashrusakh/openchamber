@@ -43,10 +43,7 @@ export type SessionTreeItemProps = SessionTreeItemRenderProps & Pick<SessionNode
 > & {
   allowReselect: boolean;
   onSessionSelected?: (sessionId: string) => void;
-  isSessionSearchOpen: boolean;
-  sessionSearchQuery: string;
-  setSessionSearchQuery: (value: string) => void;
-  setIsSessionSearchOpen: (open: boolean) => void;
+  resetSessionSearch: () => void;
   deleteSessionConfirm: DeleteSessionConfirmState;
   setDeleteSessionConfirm: (value: DeleteSessionConfirmState) => void;
   startFolderRename: (scopeKey: string, folder: { id: string; name: string }) => void;
@@ -80,10 +77,7 @@ export function SessionTreeItem({
   setOpenSidebarMenuKey,
   allowReselect,
   onSessionSelected,
-  isSessionSearchOpen,
-  sessionSearchQuery,
-  setSessionSearchQuery,
-  setIsSessionSearchOpen,
+  resetSessionSearch,
   deleteSessionConfirm,
   setDeleteSessionConfirm,
   startFolderRename,
@@ -125,10 +119,7 @@ export function SessionTreeItem({
     mobileVariant,
     allowReselect,
     onSessionSelected,
-    isSessionSearchOpen,
-    sessionSearchQuery,
-    setSessionSearchQuery,
-    setIsSessionSearchOpen,
+    resetSessionSearch,
     descendantIds,
     showDeletionDialog,
     setDeleteSessionConfirm,
@@ -207,10 +198,7 @@ export function SessionTreeItem({
            setOpenSidebarMenuKey={setOpenSidebarMenuKey}
            allowReselect={allowReselect}
            onSessionSelected={onSessionSelected}
-           isSessionSearchOpen={isSessionSearchOpen}
-           sessionSearchQuery={sessionSearchQuery}
-           setSessionSearchQuery={setSessionSearchQuery}
-           setIsSessionSearchOpen={setIsSessionSearchOpen}
+           resetSessionSearch={resetSessionSearch}
            deleteSessionConfirm={deleteSessionConfirm}
            setDeleteSessionConfirm={setDeleteSessionConfirm}
             startFolderRename={startFolderRename}

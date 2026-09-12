@@ -86,6 +86,15 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
   const [searchMatchCount, setSearchMatchCount] = React.useState(0);
   const sessionSearchContainerRef = React.useRef<HTMLDivElement | null>(null);
   const sessionSearchInputRef = React.useRef<HTMLInputElement | null>(null);
+  // The list subtree asks to reset search through this one stable intent
+  // callback instead of receiving the raw query and setters, so typing a
+  // character cannot invalidate the memoized list below the header. Functional
+  // updates keep the callback dependency-free while still avoiding a state
+  // change (and a re-render) when search is already cleared and closed.
+  const resetSessionSearch = React.useCallback(() => {
+    setSessionSearchQuery((current) => (current.length === 0 ? current : ''));
+    setIsSessionSearchOpen((current) => (current ? false : current));
+  }, []);
   const [editingProjectDialogId, setEditingProjectDialogId] = React.useState<string | null>(null);
   const safeStorage = React.useMemo(() => getDeferredSafeStorage(), []);
   const [projectRepoStatus, setProjectRepoStatus] = React.useState<Map<string, boolean | null>>(new Map());
@@ -678,10 +687,7 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
           rowActions: {
             allowReselect,
             onSessionSelected,
-            isSessionSearchOpen,
-            sessionSearchQuery,
-            setSessionSearchQuery,
-            setIsSessionSearchOpen,
+            resetSessionSearch,
           },
           alwaysShowActions: alwaysShowSidebarActions,
           notifyOnSubtasks,

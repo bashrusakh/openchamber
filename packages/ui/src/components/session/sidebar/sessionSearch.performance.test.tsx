@@ -36,16 +36,19 @@ import { installHookTestDom } from './test-utils/testDom';
  *   function` under Bun. This file therefore uses no module mocking and
  *   measures the closest importable real boundary instead.
  *
- * Pre-fix signal:
- * - `useSessionActions`' `handleSessionSelect` closes over the raw
- *   `sessionSearchQuery`, so typing one character before the 120ms debounce
- *   gives every mounted row a fresh `handleSessionSelect`. `SessionNodeItem`'s
- *   memo comparator (`callbacksEqual`) compares exactly this callback, so the
- *   identity churn is the primitive that forces every row to re-render.
- *   `SessionGroupSection`'s comparator also compares the raw
- *   `sessionSearchQuery` directly (SessionGroupSection.tsx `areGroupPropsEqual`),
- *   so the whole group re-renders as well. Both are component-level fanouts this
- *   harness cannot mount; it proves the row-callback half and the data-path half.
+ * Regression contract:
+ * - `useSessionActions`' `handleSessionSelect` must keep its identity while
+ *   the raw query changes. `SessionNodeItem`'s memo comparator
+ *   (`callbacksEqual`) compares exactly this callback, so identity churn on a
+ *   raw pre-debounce keystroke would force every mounted row to re-render.
+ *   The sidebar now passes a single dependency-free `resetSessionSearch`
+ *   intent instead of the raw query and setters, and the assertion below
+ *   guards that wiring.
+ * - `SessionGroupSection`'s comparator must not compare raw
+ *   `sessionSearchQuery`; it only sees `hasSessionSearchQuery` /
+ *   `normalizedSessionSearchQuery`, which change after the debounce. That is
+ *   the component-level half this harness cannot mount; it proves the
+ *   row-callback half and the data-path half.
  *
  * Scale baselines print `[session-search-perf]` JSON lines with the filter
  * invocation count/time and the matched-node counts per scenario.
@@ -116,26 +119,21 @@ type WiredSearchState = {
 
 type WiredSearchArgs = {
   sessions: SearchedSessions;
-  /** Raw query exactly as `SessionSidebar` keeps it and `rowActions` receives it. */
-  rawQuery: string;
   /** Debounced + normalized query exactly as the sections hook receives it. */
   normalizedSessionSearchQuery: string;
-  isSessionSearchOpen: boolean;
-  setSessionSearchQuery: (value: string) => void;
-  setIsSessionSearchOpen: (open: boolean) => void;
+  /** The one stable intent the list subtree receives from the sidebar owner. */
+  resetSessionSearch: () => void;
   filterCost: FilterCost;
 };
 
 // One real wiring definition for both the live harness and the static scale
 // harness: it mirrors how `SessionSidebar` feeds the debounced query into
-// `SessionProjectCollection` while the raw query still rides in `rowActions`.
+// `SessionProjectCollection` and passes row actions only the stable
+// `resetSessionSearch` intent.
 const useWiredSearchState = ({
   sessions,
-  rawQuery,
   normalizedSessionSearchQuery,
-  isSessionSearchOpen,
-  setSessionSearchQuery,
-  setIsSessionSearchOpen,
+  resetSessionSearch,
   filterCost,
 }: WiredSearchArgs): WiredSearchState => {
   const ownership = React.useMemo(
@@ -180,10 +178,7 @@ const useWiredSearchState = ({
   const actions = useSessionActions({
     mobileVariant: false,
     allowReselect: false,
-    isSessionSearchOpen,
-    sessionSearchQuery: rawQuery,
-    setSessionSearchQuery,
-    setIsSessionSearchOpen,
+    resetSessionSearch,
     descendantIds: EMPTY_IDS,
     showDeletionDialog: false,
     setDeleteSessionConfirm: noopDeleteConfirm,
@@ -203,11 +198,8 @@ const renderSectionsSnapshot = (sessions: SearchedSessions, query: string, filte
   const Harness = () => {
     const { sections } = useWiredSearchState({
       sessions,
-      rawQuery: query,
       normalizedSessionSearchQuery: query,
-      isSessionSearchOpen: query.length > 0,
-      setSessionSearchQuery: noopString,
-      setIsSessionSearchOpen: noop,
+      resetSessionSearch: noop,
       filterCost,
     });
     captured = sections;
@@ -331,16 +323,18 @@ type LiveCapture = {
 
 const LiveHarness = ({ sessions, capture }: { sessions: SearchedSessions; capture: LiveCapture }) => {
   const [rawQuery, setRawQuery] = React.useState('');
-  const [isSessionSearchOpen, setIsSessionSearchOpen] = React.useState(true);
+  const [, setIsSessionSearchOpen] = React.useState(true);
   const debouncedQuery = useDebouncedValue(rawQuery, 120);
   const normalizedQuery = React.useMemo(() => debouncedQuery.trim().toLowerCase(), [debouncedQuery]);
+  // Same dependency-free intent callback SessionSidebar passes into rowActions.
+  const resetSessionSearch = React.useCallback(() => {
+    setRawQuery((current) => (current.length === 0 ? current : ''));
+    setIsSessionSearchOpen((current) => (current ? false : current));
+  }, []);
   const { actions, sections } = useWiredSearchState({
     sessions,
-    rawQuery,
     normalizedSessionSearchQuery: normalizedQuery,
-    isSessionSearchOpen,
-    setSessionSearchQuery: setRawQuery,
-    setIsSessionSearchOpen,
+    resetSessionSearch,
     filterCost: capture.filterCost,
   });
   capture.state = { actions, sections };
