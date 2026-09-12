@@ -636,4 +636,10 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
   </>;
 };
 
-export const SessionProjectCollection: React.FC<SessionProjectCollectionProps> = (props) => props.view.isVisible ? <VisibleSessionProjects {...props} /> : null;
+// The sidebar memoizes topology/view/actions, so the default shallow
+// comparator is the intended boundary: a prop change that can alter the tree
+// re-renders it, while an unrelated sidebar render (a raw search keystroke
+// before the debounce) bails out.
+export const SessionProjectCollection = React.memo(function SessionProjectCollection(props: SessionProjectCollectionProps) {
+  return props.view.isVisible ? <VisibleSessionProjects {...props} /> : null;
+});
