@@ -96,4 +96,42 @@ describe('deriveSessionRowSelectionScope', () => {
   test('returns null when nothing selected has a scope', () => {
     expect(deriveSessionRowSelectionScope(entries, new Set(['a', 'missing']))).toBeNull();
   });
+
+  test('uses the selected-id insertion order, not render order', () => {
+    const rendered: SessionRowOrderEntry[] = [
+      { id: 'renders-first', scopeKey: 'project-first', archived: false },
+      { id: 'selected-first', scopeKey: 'project-second', archived: false },
+    ];
+
+    expect(deriveSessionRowSelectionScope(rendered, new Set(['selected-first', 'renders-first']))).toBe('project-second');
+    expect(deriveSessionRowSelectionScope(rendered, new Set(['renders-first', 'selected-first']))).toBe('project-first');
+  });
+
+  test('skips an id whose first entry has no scope even when a later duplicate has one', () => {
+    const duplicated: SessionRowOrderEntry[] = [
+      { id: 'dup', scopeKey: null, archived: false },
+      { id: 'dup', scopeKey: 'project-later', archived: false },
+      { id: 'other', scopeKey: 'project-other', archived: false },
+    ];
+
+    expect(deriveSessionRowSelectionScope(duplicated, new Set(['dup', 'other']))).toBe('project-other');
+  });
+
+  test('uses the first entry in render order for a duplicated id', () => {
+    const duplicated: SessionRowOrderEntry[] = [
+      { id: 'dup', scopeKey: 'project-first', archived: false },
+      { id: 'dup', scopeKey: 'project-later', archived: false },
+    ];
+
+    expect(deriveSessionRowSelectionScope(duplicated, new Set(['dup']))).toBe('project-first');
+  });
+
+  test('treats an empty scope like no scope', () => {
+    const emptyScope: SessionRowOrderEntry[] = [
+      { id: 'empty', scopeKey: '', archived: false },
+      { id: 'scoped', scopeKey: 'project-a', archived: false },
+    ];
+
+    expect(deriveSessionRowSelectionScope(emptyScope, new Set(['empty', 'scoped']))).toBe('project-a');
+  });
 });

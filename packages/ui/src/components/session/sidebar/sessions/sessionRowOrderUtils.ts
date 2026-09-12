@@ -201,13 +201,24 @@ export const deriveSessionRowSelectionArchived = (
   return sawArchived && !sawActive;
 };
 
-/** First selected entry's scope in render order, matching the previous DOM scan. */
+/**
+ * First selected id, in the selection Set's insertion order, whose first
+ * render-order entry has a non-empty scope — matching the previous DOM scan
+ * (probe the first matching row per selected id, skip empty scopes). A
+ * duplicated id's later entries are never considered once its first entry is
+ * known.
+ */
 export const deriveSessionRowSelectionScope = (
   entries: readonly SessionRowOrderEntry[],
   selectedIds: ReadonlySet<string>,
 ): string | null => {
+  const firstEntryById = new Map<string, SessionRowOrderEntry>();
   for (const entry of entries) {
-    if (selectedIds.has(entry.id) && entry.scopeKey) return entry.scopeKey;
+    if (!firstEntryById.has(entry.id)) firstEntryById.set(entry.id, entry);
+  }
+  for (const id of selectedIds) {
+    const scope = firstEntryById.get(id)?.scopeKey;
+    if (scope && scope.length > 0) return scope;
   }
   return null;
 };
