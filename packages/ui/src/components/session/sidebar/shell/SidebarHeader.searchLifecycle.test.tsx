@@ -190,22 +190,44 @@ describe('SidebarHeader search lifecycle', () => {
     expect(document.querySelector('input')).toBeNull();
   });
 
-  test('Escape before the debounce settles closes and preserves the raw query for reopen', async () => {
-    // Implemented timing nuance: the handler decides on `hasSessionSearchQuery`
-    // (debounced). A keystroke followed by Escape inside 120ms therefore takes
-    // the close branch without clearing the raw query; reopening shows it.
+  test('Escape clears typed text before the debounce settles and keeps search open', async () => {
+    await renderHeader();
+    await typeQuery('release');
+    // The debounced hasSessionSearchQuery flag is still false here; the raw
+    // input value decides, so the first Escape clears instead of closing.
+    await pressEscape();
+
+    expect(controls.query).toBe('');
+    expect(controls.open).toBe(true);
+    expect(requireInput().value).toBe('');
+
+    await flushDebounce();
+    expect(controls.open).toBe(true);
+  });
+
+  test('Escape on an empty input closes search', async () => {
+    await renderHeader();
+    expect(requireInput().value).toBe('');
+
+    await pressEscape();
+    expect(controls.open).toBe(false);
+    expect(document.querySelector('input')).toBeNull();
+  });
+
+  test('a query cleared with Escape does not reappear on reopen', async () => {
     await renderHeader();
     await typeQuery('release');
 
     await pressEscape();
+    expect(controls.query).toBe('');
+    await pressEscape();
     expect(controls.open).toBe(false);
-    expect(controls.query).toBe('release');
 
     await act(async () => {
       requireSearchToggle().click();
     });
     expect(controls.open).toBe(true);
-    expect(requireInput().value).toBe('release');
+    expect(requireInput().value).toBe('');
   });
 
   test('the clear button clears the query and keeps the search open', async () => {
