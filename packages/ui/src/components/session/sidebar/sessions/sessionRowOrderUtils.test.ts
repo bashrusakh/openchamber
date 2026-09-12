@@ -4,7 +4,7 @@ import type { SessionNode } from '../types';
 import {
   appendSessionNodeRowEntries,
   buildActivityRowOrderEntries,
-  buildSessionGroupRowOrderEntries,
+  buildSessionGroupRowModel,
   toSessionRowOrderIds,
   type SessionRowOrderEntry,
   type SessionRowOrderFolderEntry,
@@ -151,7 +151,7 @@ describe('appendSessionNodeRowEntries', () => {
   });
 });
 
-describe('buildSessionGroupRowOrderEntries', () => {
+describe('buildSessionGroupRowModel', () => {
   const folderA: SessionRowOrderFolderEntry = {
     folder: { id: 'folder-a' },
     scopeDirectory: '/repo',
@@ -169,8 +169,8 @@ describe('buildSessionGroupRowOrderEntries', () => {
   };
   const childFoldersByParentId = new Map([['folder-a', [folderAChild]]]);
 
-  const build = (overrides: Partial<Parameters<typeof buildSessionGroupRowOrderEntries>[0]> = {}) =>
-    buildSessionGroupRowOrderEntries({
+  const build = (overrides: Partial<Parameters<typeof buildSessionGroupRowModel>[0]> = {}) =>
+    buildSessionGroupRowModel({
       isCollapsed: false,
       hasSessionSearchQuery: false,
       collapsedFolderIds: new Set(),
@@ -183,17 +183,20 @@ describe('buildSessionGroupRowOrderEntries', () => {
       visibleSessions: [node('ungrouped')],
       ...overrides,
     });
+  const itemIds = (model: ReturnType<typeof buildSessionGroupRowModel>): string[] =>
+    model.items.map((item) => item.node.session.id);
 
   test('renders folder nodes before their child folders, then the ungrouped sessions', () => {
-    expect(ids(build())).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
+    expect(ids(build().entries)).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
   });
 
   test('a collapsed group registers nothing', () => {
-    expect(build({ isCollapsed: true })).toEqual([]);
+    expect(build({ isCollapsed: true }).entries).toEqual([]);
+    expect(build({ isCollapsed: true }).items).toEqual([]);
   });
 
   test('a collapsed folder hides its own nodes and its whole child-folder subtree', () => {
-    expect(ids(build({ collapsedFolderIds: new Set(['folder-a']) }))).toEqual(['b1', 'ungrouped']);
+    expect(ids(build({ collapsedFolderIds: new Set(['folder-a']) }).entries)).toEqual(['b1', 'ungrouped']);
   });
 
   test('an active search overrides folder collapse and node expansion', () => {
@@ -201,7 +204,7 @@ describe('buildSessionGroupRowOrderEntries', () => {
       hasSessionSearchQuery: true,
       collapsedFolderIds: new Set(['folder-a']),
       expandedParents: new Set(),
-    }))).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
+    }).entries)).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
   });
 
   test('walks expanded ungrouped parents depth-first', () => {
@@ -211,11 +214,11 @@ describe('buildSessionGroupRowOrderEntries', () => {
     expect(ids(build({
       visibleSessions: [parent, node('ungrouped-last')],
       expandedParents: new Set(['project:active:ungrouped-parent', 'project:active:ungrouped-grandchild']),
-    }))).toEqual(['a1', 'a1-child', 'b1', 'ungrouped-parent', 'ungrouped-grandchild', 'ungrouped-last']);
+    }).entries)).toEqual(['a1', 'a1-child', 'b1', 'ungrouped-parent', 'ungrouped-grandchild', 'ungrouped-last']);
   });
 
   test('marks every entry of an archived bucket as archived', () => {
-    const entries = build({ archivedBucket: true, projectId: null, groupDirectory: null });
+    const { entries } = build({ archivedBucket: true, projectId: null, groupDirectory: null });
 
     expect(entries.map((entry) => entry.archived)).toEqual([true, true, true, true]);
     expect(entries[0]?.scopeKey).toBe('/repo');
@@ -228,13 +231,75 @@ describe('buildSessionGroupRowOrderEntries', () => {
       nodes: [node('ungrouped')],
     };
 
-    expect(ids(build({ rootFolders: [duplicate] }))).toEqual(['ungrouped', 'ungrouped']);
+    expect(ids(build({ rootFolders: [duplicate] }).entries)).toEqual(['ungrouped', 'ungrouped']);
   });
 
   test('uses the folder worktree directory as the scope fallback', () => {
-    const entries = build({ projectId: null, hasSessionSearchQuery: true });
+    const { entries } = build({ projectId: null, hasSessionSearchQuery: true });
 
     expect(entries[1]).toEqual({ id: 'a1-child', scopeKey: '/repo/worktree', archived: false });
+  });
+
+  test('collects entries and items with the same ids in order when the group has no folders', () => {
+    const model = build({
+      rootFolders: [],
+      childFoldersByParentId: new Map(),
+      visibleSessions: [node('first'), node('second')],
+    });
+
+    expect(ids(model.entries)).toEqual(['first', 'second']);
+    expect(itemIds(model)).toEqual(ids(model.entries));
+  });
+
+  test('tracks the SessionTreeItem depth for nested chains under search', () => {
+    const grandchild = node('grandchild');
+    const child = node('child', [grandchild]);
+    const root = node('root', [child]);
+    const model = build({
+      rootFolders: [],
+      childFoldersByParentId: new Map(),
+      visibleSessions: [root],
+      hasSessionSearchQuery: true,
+    });
+
+    expect(model.items.map((item) => [item.node.session.id, item.depth])).toEqual([
+      ['root', 0],
+      ['child', 1],
+      ['grandchild', 2],
+    ]);
+  });
+
+  test('tracks depth through manual expansion without a search', () => {
+    const child = node('child');
+    const root = node('root', [child]);
+    const model = build({
+      rootFolders: [],
+      childFoldersByParentId: new Map(),
+      visibleSessions: [root],
+      expandedParents: new Set(['project:active:root']),
+    });
+
+    expect(model.items.map((item) => [item.node.session.id, item.depth])).toEqual([
+      ['root', 0],
+      ['child', 1],
+    ]);
+  });
+
+  test('flattens only the ungrouped region; folder rows keep normal flow', () => {
+    const model = build();
+
+    expect(ids(model.entries)).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
+    expect(itemIds(model)).toEqual(['ungrouped']);
+  });
+
+  test('keeps duplicate ids in the flattened items', () => {
+    const model = build({
+      rootFolders: [],
+      childFoldersByParentId: new Map(),
+      visibleSessions: [node('same'), node('same')],
+    });
+
+    expect(itemIds(model)).toEqual(['same', 'same']);
   });
 });
 

@@ -14,6 +14,7 @@ import {
   selectQuestionBadgeSessionScopes,
   selectRowBadgeVisibilityClass,
   selectSessionGroupScrollElement,
+  selectSessionGroupVirtualizationMode,
   shouldVirtualizeSessionGroup,
 } from './sessionNodeItemUtils';
 import type { SessionNode } from '../types';
@@ -242,6 +243,42 @@ describe('shouldVirtualizeSessionGroup', () => {
         expect(decide({ isArchivedBucket, hasSessionSearchQuery, visibleSessionCount: underThreshold })).toBe(false);
       }
     }
+  });
+});
+
+describe('selectSessionGroupVirtualizationMode', () => {
+  const select = (input: {
+    isArchivedBucket: boolean;
+    hasSessionSearchQuery: boolean;
+    rootCount: number;
+    flatRowCount: number;
+    threshold?: number;
+  }) => selectSessionGroupVirtualizationMode(input);
+
+  test('a searched group with one root and many nested rows flattens', () => {
+    expect(select({ isArchivedBucket: false, hasSessionSearchQuery: true, rootCount: 1, flatRowCount: 600 })).toBe('flat');
+  });
+
+  test('search stays in normal flow below the threshold and flattens at it', () => {
+    expect(select({ isArchivedBucket: false, hasSessionSearchQuery: true, rootCount: 49, flatRowCount: 49 })).toBe('none');
+    expect(select({ isArchivedBucket: false, hasSessionSearchQuery: true, rootCount: 1, flatRowCount: 49 })).toBe('none');
+    expect(select({ isArchivedBucket: false, hasSessionSearchQuery: true, rootCount: 50, flatRowCount: 50 })).toBe('flat');
+    expect(select({ isArchivedBucket: false, hasSessionSearchQuery: true, rootCount: 1, flatRowCount: 50 })).toBe('flat');
+  });
+
+  test('archived buckets virtualize whole roots without search and flatten during it', () => {
+    expect(select({ isArchivedBucket: true, hasSessionSearchQuery: false, rootCount: 49, flatRowCount: 49 })).toBe('none');
+    expect(select({ isArchivedBucket: true, hasSessionSearchQuery: false, rootCount: 50, flatRowCount: 50 })).toBe('roots');
+    expect(select({ isArchivedBucket: true, hasSessionSearchQuery: true, rootCount: 2, flatRowCount: 50 })).toBe('flat');
+  });
+
+  test('non-search active groups never virtualize, however many roots', () => {
+    expect(select({ isArchivedBucket: false, hasSessionSearchQuery: false, rootCount: 500, flatRowCount: 500 })).toBe('none');
+  });
+
+  test('honours an explicit threshold override', () => {
+    expect(select({ isArchivedBucket: false, hasSessionSearchQuery: true, rootCount: 1, flatRowCount: 10, threshold: 10 })).toBe('flat');
+    expect(select({ isArchivedBucket: true, hasSessionSearchQuery: false, rootCount: 10, flatRowCount: 10, threshold: 10 })).toBe('roots');
   });
 });
 

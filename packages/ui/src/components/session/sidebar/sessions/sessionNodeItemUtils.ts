@@ -297,6 +297,29 @@ export const shouldVirtualizeSessionGroup = (input: {
   && (input.isArchivedBucket || input.hasSessionSearchQuery)
 );
 
+export type SessionGroupVirtualizationMode = 'none' | 'roots' | 'flat';
+
+/**
+ * Pick the group's virtualization mode at the shared row threshold:
+ * - `flat` when a search retains 50+ rows, so every row of a matched parent's
+ *   subtree becomes its own virtual item;
+ * - `roots` when an archived bucket has 50+ root subtrees (no search);
+ * - `none` otherwise — small lists and the non-search active flow, which
+ *   keeps its incremental Show more control in normal flow.
+ */
+export const selectSessionGroupVirtualizationMode = (input: {
+  isArchivedBucket: boolean;
+  hasSessionSearchQuery: boolean;
+  rootCount: number;
+  flatRowCount: number;
+  threshold?: number;
+}): SessionGroupVirtualizationMode => {
+  const threshold = input.threshold ?? SESSION_GROUP_VIRTUALIZE_THRESHOLD;
+  if (input.hasSessionSearchQuery && input.flatRowCount >= threshold) return 'flat';
+  if (input.isArchivedBucket && input.rootCount >= threshold) return 'roots';
+  return 'none';
+};
+
 /**
  * The scroll element a group virtualizer should use: the locally resolved one
  * wins once set (it may come from the ancestor walk when no ref is threaded),

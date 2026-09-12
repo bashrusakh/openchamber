@@ -48,6 +48,12 @@ export type SessionTreeItemProps = SessionTreeItemRenderProps & Pick<SessionNode
   setDeleteSessionConfirm: (value: DeleteSessionConfirmState) => void;
   startFolderRename: (scopeKey: string, folder: { id: string; name: string }) => void;
   setCopiedSessionId: (sessionId: string | null) => void;
+  /**
+   * When false, only this row renders; flattened search rows own their
+   * children as separate virtual items. Descendant bookkeeping
+   * (`descendantIds`, subtree actions) still reads `node.children`.
+   */
+  renderChildren?: boolean;
 };
 
 const EMPTY_SUBTREE_CONTAINS_EDITING: Set<string> = new Set();
@@ -86,6 +92,7 @@ export function SessionTreeItem({
   startSessionWorktreeMenuLoad,
   mobileVariant,
   alwaysShowActions,
+  renderChildren = true,
 }: SessionTreeItemProps): React.ReactNode {
   const createFolder = useSessionFoldersStore((state) => state.createFolder);
   const toggleFolderCollapse = useSessionFoldersStore((state) => state.toggleFolderCollapse);
@@ -179,7 +186,7 @@ export function SessionTreeItem({
       nodeStructureKey={renderExtras?.nodeStructureKey ?? ''}
       relativeTimeTick={renderExtras?.relativeTimeTick}
     >
-      {node.children.map((child) => (
+      {renderChildren ? node.children.map((child) => (
         <SessionTreeItem
           key={child.session.id}
            node={child}
@@ -210,7 +217,7 @@ export function SessionTreeItem({
           {...childContext}
           renderExtras={childRenderExtrasFor?.(child)}
         />
-      ))}
+      )) : null}
     </SessionNodeItem>
     {deleteSessionConfirm?.session.id === node.session.id ? <SessionDeleteConfirmDialog
       value={deleteSessionConfirm}
