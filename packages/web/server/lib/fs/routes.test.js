@@ -1812,8 +1812,15 @@ describe('fs stat directory error handling', () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'openchamber-fs-import-'));
     try {
       await mkdir(path.join(directory, 'fs'));
+      await mkdir(path.join(directory, 'git'));
       await copyFile(new URL('./routes.js', import.meta.url), path.join(directory, 'fs/routes.mjs'));
       await copyFile(new URL('../path-realpath-cache.js', import.meta.url), path.join(directory, 'path-realpath-cache.js'));
+      // The gitignore filter and its execution-scope/coordinator chain are
+      // local modules; the packaged desktop ships them beside the routes file.
+      await copyFile(new URL('./gitignore.js', import.meta.url), path.join(directory, 'fs/gitignore.js'));
+      await copyFile(new URL('../git/execution-scope.js', import.meta.url), path.join(directory, 'git/execution-scope.js'));
+      await copyFile(new URL('../git/execution-coordinator.js', import.meta.url), path.join(directory, 'git/execution-coordinator.js'));
+      await copyFile(new URL('../git/execution-errors.js', import.meta.url), path.join(directory, 'git/execution-errors.js'));
       expect(() => execFileSync('node', [
         '--input-type=module',
         '--eval',

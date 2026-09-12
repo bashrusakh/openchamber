@@ -35,10 +35,12 @@ const operationKinds = Object.freeze({
   listStashes: operation.read,
   countStashFiles: operation.read,
   getBranches: operation.read,
+  getUnpushedBranchCounts: operation.read,
   getWorktrees: operation.read,
   previewWorktreeCreate: operation.commonWrite,
   getLog: operation.read,
   getCommitFiles: operation.read,
+  getCommitDiff: operation.read,
   getCommitFileDiff: operation.read,
   getRemotes: operation.read,
   isLinkedWorktree: operation.read,
@@ -94,7 +96,12 @@ const operationKinds = Object.freeze({
   populateWorktreeWithLockRecovery: operation.worktreeWrite,
 });
 
-const networkOperations = new Set(['push', 'pull', 'fetch', 'deleteRemoteBranch', 'getBranches']);
+// integrateWorktreeCommits fast-forwards the target branch through
+// `maybeFastForwardIntegrateUpstream`, which runs `git fetch` whenever the
+// target tracks an upstream. The fetch is conditional, but admission is not:
+// every path that can touch the network must hold network capacity before the
+// integrate flow starts.
+const networkOperations = new Set(['push', 'pull', 'fetch', 'deleteRemoteBranch', 'getBranches', 'integrateWorktreeCommits']);
 const repositoryInputOperations = new Set([
   'computeIntegratePlan',
   'integrateWorktreeCommits',
@@ -401,6 +408,7 @@ export const {
   stashDrop,
   stashPop,
   getBranches,
+  getUnpushedBranchCounts,
   getWorktrees,
   validateWorktreeCreate,
   previewWorktreeCreate,
@@ -409,6 +417,7 @@ export const {
   removeWorktree,
   getLog,
   getCommitFiles,
+  getCommitDiff,
   getCommitFileDiff,
   getRemotes,
   removeRemote,

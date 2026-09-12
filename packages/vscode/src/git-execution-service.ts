@@ -165,6 +165,9 @@ export const createGitExecutionService = ({
   const getGitBranches: typeof core.getGitBranches = (directory) => (
     runCore('getGitBranches', directory, () => coreImpl.getGitBranches(directory))
   );
+  const getGitUnpushedBranchCounts: typeof core.getGitUnpushedBranchCounts = (directory, branchNames) => (
+    runCore('getGitUnpushedBranchCounts', directory, () => coreImpl.getGitUnpushedBranchCounts(directory, branchNames))
+  );
   const checkoutBranch: typeof core.checkoutBranch = (directory, branch) => (
     runCore('checkoutBranch', directory, () => coreImpl.checkoutBranch(directory, branch))
   );
@@ -344,6 +347,7 @@ export const createGitExecutionService = ({
     isLinkedWorktree,
     getGitStatus,
     getGitBranches,
+    getGitUnpushedBranchCounts,
     checkoutBranch,
     createBranch,
     deleteGitBranch,
@@ -401,6 +405,7 @@ export const {
   isLinkedWorktree,
   getGitStatus,
   getGitBranches,
+  getGitUnpushedBranchCounts,
   checkoutBranch,
   createBranch,
   deleteGitBranch,

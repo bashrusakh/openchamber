@@ -146,6 +146,14 @@ admission, rather than relying on a local-branch probe that could become stale
 before checkout and allow fetches or shared-ref updates to bypass coordination.
 Slash-named branches whose first component is not a configured remote remain
 worktree writes.
+`getCommitDiff` and `getUnpushedBranchCounts` are coordinated reads. The
+integrate flow (`integrateWorktreeCommits`) reserves network capacity for its
+whole run because its fast-forward step may `git fetch` the target's upstream;
+`computeIntegratePlan`, `abortIntegrate`, and `continueIntegrate` read and write
+local refs only. Worktree topology observation intentionally stays outside
+admission: `observeWorktreeTopology` is a best-effort probe that never throws
+and runs fire-and-forget beside status and worktree responses, and
+`subscribeWorktreeTopologyChanges` only maintains an in-memory listener set.
 
 The VS Code extension bundles the same source primitives and keeps its built-in
 Git API and raw Git process adapters runtime-specific.
@@ -222,11 +230,18 @@ Git API and raw Git process adapters runtime-specific.
 ### Adding a New Git Operation
 1. Add the function to `packages/web/server/lib/git/service.js`.
 2. Export the function if it's part of the public API.
-3. Use `createGit(directory)` to get a simple-git instance with the correct environment. `directory` is required (`baseDir`); never omit it so commands cannot inherit `process.cwd()`.
-4. Use `runGitCommand(cwd, args)` for direct git command execution with better error handling.
-5. Use `runGitCommandOrThrow(cwd, args, fallbackMessage)` for commands that must succeed.
-6. Return consistent error messages; use `parseGitErrorText(error)` to extract meaningful git errors.
-7. Update this file with the new function in the appropriate API section.
+3. Add it to `operationKinds` in `execution-service.js` and the explicit export
+   lists in `execution-service.js` and `index.js`; `runOperation` throws on an
+   unclassified name. Add its name to `networkOperations` when any path can
+   fetch, push, or query a remote. Only a function that must never throw and
+   whose Git use is best-effort observation (for example the worktree topology
+   observer) may stay outside the wrapper, and then the exception belongs in
+   this document.
+4. Use `createGit(directory)` to get a simple-git instance with the correct environment. `directory` is required (`baseDir`); never omit it so commands cannot inherit `process.cwd()`.
+5. Use `runGitCommand(cwd, args)` for direct git command execution with better error handling.
+6. Use `runGitCommandOrThrow(cwd, args, fallbackMessage)` for commands that must succeed.
+7. Return consistent error messages; use `parseGitErrorText(error)` to extract meaningful git errors.
+8. Update this file with the new function in the appropriate API section.
 
 ### SSH Key Handling
 - SSH keys are escaped and validated via `escapeSshKeyPath` to prevent command injection.

@@ -86,6 +86,40 @@ describe('VS Code Git execution service discovery fallback', () => {
       .toBe(GIT_OPERATION_PROFILE.WORKTREE_WRITE);
     expect(getGitServiceOperationClassification('getGitBranches').network)
       .toBe(GIT_NETWORK_USAGE.NONE);
+    expect(getGitServiceOperationClassification('getGitUnpushedBranchCounts'))
+      .toEqual({ profile: GIT_OPERATION_PROFILE.READ, network: GIT_NETWORK_USAGE.NONE });
+  });
+
+  it('routes unpushed branch counts through the read service profile', async () => {
+    const counts = { main: 2 };
+    const getGitUnpushedBranchCounts = mock(async () => counts);
+    const admissions = [];
+    const executionRuntime = {
+      runServiceOperation: async (operation, directory, task, options = {}) => {
+        admissions.push({ operation, directory, options });
+        return task({
+          commonId: '/repo/.git',
+          worktreeId: '/repo',
+          kind: GIT_OPERATION_KIND.READ,
+          targetWorktree: true,
+          network: false,
+          active: true,
+        });
+      },
+    };
+    const service = createGitExecutionService({
+      core: { ...core, getGitUnpushedBranchCounts },
+      runtime: executionRuntime,
+    });
+
+    await expect(service.getGitUnpushedBranchCounts('/repo', ['main', 'main', 'feature']))
+      .resolves.toBe(counts);
+    expect(getGitUnpushedBranchCounts).toHaveBeenCalledWith('/repo', ['main', 'main', 'feature']);
+    expect(admissions).toEqual([{
+      operation: 'getGitUnpushedBranchCounts',
+      directory: '/repo',
+      options: {},
+    }]);
   });
 
   it('does not let a competing topology operation overlap fast attachment', async () => {

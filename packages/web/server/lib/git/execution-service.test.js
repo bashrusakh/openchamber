@@ -692,4 +692,68 @@ describe('Git execution service', () => {
       GIT_OPERATION_KIND.COMMON_WRITE,
     ]);
   });
+
+  it('coordinates commit diffs and unpushed counts as reads', async () => {
+    const calls = [];
+    const raw = {
+      getCommitDiff: async (directory, options) => {
+        calls.push({ type: 'commit-diff', directory, options });
+        return 'patch';
+      },
+      getUnpushedBranchCounts: async (directory, branches) => {
+        calls.push({ type: 'unpushed-counts', directory, branches });
+        return { counts: { main: 2 } };
+      },
+    };
+    const service = createGitExecutionService({
+      raw,
+      coordinator: {
+        run: async (options, task) => {
+          calls.push({ type: 'admission', label: options.label, kind: options.kind, network: options.network });
+          return task({ active: true });
+        },
+      },
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+
+    await expect(service.getCommitDiff('/repo', { hash: 'a'.repeat(40) })).resolves.toBe('patch');
+    await expect(service.getUnpushedBranchCounts('/repo', ['main'])).resolves.toEqual({ counts: { main: 2 } });
+
+    expect(calls).toEqual([
+      { type: 'admission', label: 'getCommitDiff', kind: GIT_OPERATION_KIND.READ, network: false },
+      { type: 'commit-diff', directory: '/repo', options: { hash: 'a'.repeat(40) } },
+      { type: 'admission', label: 'getUnpushedBranchCounts', kind: GIT_OPERATION_KIND.READ, network: false },
+      { type: 'unpushed-counts', directory: '/repo', branches: ['main'] },
+    ]);
+  });
+
+  it('admits the integrate flow to network capacity before any fetch', async () => {
+    const admissions = [];
+    const plan = {
+      repoRoot: '/repo',
+      sourceBranch: 'feature',
+      targetBranch: 'main',
+      commits: ['a'.repeat(40)],
+    };
+    const service = createGitExecutionService({
+      raw: {
+        integrateWorktreeCommits: async () => ({ kind: 'noop', reason: 'No commits to move' }),
+      },
+      coordinator: {
+        run: async (options, task) => {
+          admissions.push({ label: options.label, kind: options.kind, network: options.network });
+          return task({ active: true });
+        },
+      },
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+
+    await expect(service.integrateWorktreeCommits(plan)).resolves.toEqual({
+      kind: 'noop',
+      reason: 'No commits to move',
+    });
+    expect(admissions).toEqual([
+      { label: 'integrateWorktreeCommits', kind: GIT_OPERATION_KIND.TOPOLOGY_WRITE, network: true },
+    ]);
+  });
 });
