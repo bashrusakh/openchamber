@@ -107,6 +107,7 @@ mock.module('@/stores/useGitStore', () => ({
   useGitStore: selectGitState,
 }));
 mock.module('@/lib/worktrees/worktreeManager', () => ({
+  removeProjectWorktree: async () => undefined,
   validateWorktreeCreate: async () => ({ ok: true, errors: [] }),
 }));
 mock.module('@/lib/worktrees/worktreeCreate', () => ({ createWorktreeWithDefaults: async () => null }));
@@ -119,7 +120,7 @@ mock.module('@/lib/sharedTrustConfirmation', () => ({
   resolveWorktreeSetupCommands: async () => [],
 }));
 mock.module('@/lib/worktrees/worktreeStatus', () => ({ getRootBranch: async () => 'main' }));
-mock.module('@/lib/git/branchNameGenerator', () => ({ generateBranchSlug: () => 'draft-name' }));
+mock.module('@/lib/git/branchNameGenerator', () => ({ generateBranchName: () => 'draft-name', generateBranchSlug: () => 'draft-name' }));
 
 mock.module('./GitHubIntegrationDialog', () => ({
   GitHubIntegrationDialog: ({ onSelect }: { onSelect: (selection: GitHubSelection) => void }) => {
