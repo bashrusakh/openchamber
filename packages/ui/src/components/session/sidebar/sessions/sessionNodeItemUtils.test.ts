@@ -9,13 +9,11 @@ import {
   canShowSessionWorktreeMenu,
   getSessionWorktreeMenuDisabled,
   nodeHasPinnedMembershipChange,
-  SESSION_GROUP_VIRTUALIZE_THRESHOLD,
   selectFolderRootNodes,
   selectQuestionBadgeSessionScopes,
   selectRowBadgeVisibilityClass,
   selectSessionGroupScrollElement,
   selectSessionGroupVirtualizationMode,
-  shouldVirtualizeSessionGroup,
 } from './sessionNodeItemUtils';
 import type { SessionNode } from '../types';
 
@@ -208,41 +206,6 @@ describe('selectRowBadgeVisibilityClass', () => {
       menuOpen: true,
       hideOnHoverClass,
     })).toBe('');
-  });
-});
-
-describe('shouldVirtualizeSessionGroup', () => {
-  const decide = (input: {
-    isArchivedBucket: boolean;
-    hasSessionSearchQuery: boolean;
-    visibleSessionCount: number;
-  }): boolean => shouldVirtualizeSessionGroup(input);
-  const underThreshold = SESSION_GROUP_VIRTUALIZE_THRESHOLD - 1;
-  const atThreshold = SESSION_GROUP_VIRTUALIZE_THRESHOLD;
-
-  test('archived buckets virtualize at the threshold with or without search', () => {
-    expect(decide({ isArchivedBucket: true, hasSessionSearchQuery: false, visibleSessionCount: underThreshold })).toBe(false);
-    expect(decide({ isArchivedBucket: true, hasSessionSearchQuery: false, visibleSessionCount: atThreshold })).toBe(true);
-    expect(decide({ isArchivedBucket: true, hasSessionSearchQuery: true, visibleSessionCount: underThreshold })).toBe(false);
-    expect(decide({ isArchivedBucket: true, hasSessionSearchQuery: true, visibleSessionCount: atThreshold })).toBe(true);
-  });
-
-  test('active groups virtualize at the threshold only while searching', () => {
-    expect(decide({ isArchivedBucket: false, hasSessionSearchQuery: true, visibleSessionCount: underThreshold })).toBe(false);
-    expect(decide({ isArchivedBucket: false, hasSessionSearchQuery: true, visibleSessionCount: atThreshold })).toBe(true);
-    expect(decide({ isArchivedBucket: false, hasSessionSearchQuery: false, visibleSessionCount: underThreshold })).toBe(false);
-    expect(decide({ isArchivedBucket: false, hasSessionSearchQuery: false, visibleSessionCount: atThreshold })).toBe(false);
-    expect(decide({ isArchivedBucket: false, hasSessionSearchQuery: false, visibleSessionCount: atThreshold * 100 })).toBe(false);
-  });
-
-  test('never virtualizes small lists in any mode', () => {
-    for (const isArchivedBucket of [false, true]) {
-      for (const hasSessionSearchQuery of [false, true]) {
-        expect(decide({ isArchivedBucket, hasSessionSearchQuery, visibleSessionCount: 0 })).toBe(false);
-        expect(decide({ isArchivedBucket, hasSessionSearchQuery, visibleSessionCount: 1 })).toBe(false);
-        expect(decide({ isArchivedBucket, hasSessionSearchQuery, visibleSessionCount: underThreshold })).toBe(false);
-      }
-    }
   });
 });
 

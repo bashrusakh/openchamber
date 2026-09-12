@@ -91,14 +91,21 @@ click, and registering never triggers a render.
 ## Row virtualization
 
 `SessionGroupSection` owns the sidebar's only virtualizer
-(`@tanstack/react-virtual`). `shouldVirtualizeSessionGroup`
-(`sessions/sessionNodeItemUtils.ts`) virtualizes a group at 50+ rows when it is
-an archived bucket, and for active groups only while a search lists every match
-(the non-search flow keeps normal flow for its incremental Show more control).
-Nested sessions render inline inside their virtual row, and while searching
-every parent is treated as expanded so the overscan window covers their height.
-Folders stay above the virtualized ungrouped list, and the entries selection
-reads still come from the whole model.
+(`@tanstack/react-virtual`). `selectSessionGroupVirtualizationMode`
+(`sessions/sessionNodeItemUtils.ts`) picks the mode at the shared 50-row
+threshold: a searched group with 50+ retained rows virtualizes each row
+individually (`flat`), so a directly matched parent's hundreds of descendants
+stay bounded too; otherwise an unsearched archived bucket with 50+ roots
+virtualizes whole root subtrees with their expanded children inline (`roots`);
+everything else keeps normal flow (the non-search active flow needs it for the
+incremental Show more control).
+Flat rows carry their DFS depth and render without children, so content,
+order, and indentation match the tree. The pre-ready fallback renders plain
+rows for roots mode and at most one threshold batch for flat mode; the layout
+effect switches to the virtual window before paint. Folders still render above
+the virtual list in normal flow — folder contents are not flattened in this
+step, and the flat model covers the ungrouped region. The selection registry
+still carries every model row.
 
 ## Loading rules
 

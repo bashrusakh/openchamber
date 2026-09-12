@@ -96,7 +96,7 @@ type SessionGroupRowOrderInput = {
   visibleSessions: readonly SessionNode[];
 };
 
-export type SessionGroupRowModel = {
+type SessionGroupRowModel = {
   /** Every rendered row in document order; selection reads these. */
   entries: SessionRowOrderEntry[];
   /**
@@ -150,11 +150,6 @@ export const buildSessionGroupRowModel = (
   });
   return { entries, items };
 };
-
-/** Entries-only view of the group row model. */
-export const buildSessionGroupRowOrderEntries = (
-  input: SessionGroupRowOrderInput,
-): SessionRowOrderEntry[] => buildSessionGroupRowModel(input).entries;
 
 type SessionRowOrderActivityItem = {
   node: SessionNode;

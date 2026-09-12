@@ -21,6 +21,7 @@ import type { GroupSearchData, SessionGroup, SessionNode } from '../types';
 import { isBranchDifferentFromLabel, normalizePath, renderHighlightedText } from '../utils';
 import { compareSessionsByLifecycleOrder, EMPTY_SESSION_ORDER_RANKS } from '@/sync/session-ordering';
 import {
+  SESSION_GROUP_VIRTUALIZE_THRESHOLD,
   collectSubtreeContainingId,
   computeNodeStructureKey,
   nodeHasPinnedMembershipChange,
@@ -30,7 +31,7 @@ import {
   selectFolderIdsForProjection,
   selectFolderRootNodes,
   selectSessionGroupScrollElement,
-  shouldVirtualizeSessionGroup,
+  selectSessionGroupVirtualizationMode,
 } from '../sessions/sessionNodeItemUtils';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 
@@ -44,7 +45,7 @@ import { useCollapsedSessionActivityState } from '../sessions/collapsedActivityS
 import { SessionTreeItem, type SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import { FolderDeleteConfirmDialog } from '../shell/ConfirmDialogs';
 import { useRegisterSessionRowOrder } from '../sessions/sessionRowOrder';
-import { buildSessionGroupRowOrderEntries } from '../sessions/sessionRowOrderUtils';
+import { buildSessionGroupRowModel, type SessionRowOrderItem } from '../sessions/sessionRowOrderUtils';
 
 type DeleteFolderConfirm = {
   scopeKey: string;
@@ -568,24 +569,53 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   const remainingCount = totalSessions - visibleSessions.length;
   const canShowLess = !group.isArchivedBucket && !hasSessionSearchQuery && totalSessions > maxVisible && remainingCount === 0;
 
-  // One virtualizer serves both buckets: archived lists whenever they are
-  // large, active lists only while a search shows every match at once. Small
-  // lists and non-search active groups stay in normal flow so the incremental
-  // Show more control keeps working. Hooks below MUST stay above the
-  // search-empty early-return so they fire in the same order every render —
-  // rules-of-hooks.
-  const shouldVirtualize = shouldVirtualizeSessionGroup({
+  // Hooks below MUST stay above the search-empty early-return so they fire in
+  // the same order every render — rules-of-hooks.
+  const rowModel = React.useMemo(() => buildSessionGroupRowModel({
+    isCollapsed,
+    hasSessionSearchQuery,
+    collapsedFolderIds,
+    expandedParents: effectiveExpandedParents,
+    archivedBucket: group.isArchivedBucket === true,
+    projectId,
+    groupDirectory: group.directory,
+    rootFolders,
+    childFoldersByParentId,
+    visibleSessions,
+  }), [
+    childFoldersByParentId,
+    collapsedFolderIds,
+    effectiveExpandedParents,
+    group.directory,
+    group.isArchivedBucket,
+    hasSessionSearchQuery,
+    isCollapsed,
+    projectId,
+    rootFolders,
+    visibleSessions,
+  ]);
+  useRegisterSessionRowOrder(rowOrderBase, rowModel.entries);
+
+  // One virtualizer serves three shapes at the shared threshold: a searched
+  // list virtualizes row by row (`flat`) so a matched parent's whole subtree
+  // stays bounded; an unsearched archived bucket virtualizes whole root
+  // subtrees (`roots`); everything else stays in normal flow (small lists and
+  // the non-search active Show more flow).
+  const virtualizationMode = selectSessionGroupVirtualizationMode({
     isArchivedBucket: group.isArchivedBucket === true,
     hasSessionSearchQuery,
-    visibleSessionCount: visibleSessions.length,
+    rootCount: visibleSessions.length,
+    flatRowCount: rowModel.items.length,
   });
+  const shouldVirtualize = virtualizationMode !== 'none';
 
   // Expanded parents render their children inline, making them much taller
-  // than the fixed estimate, so widen the window that stays mounted. While a
+  // than the fixed estimate, so widen the window that stays mounted. Only the
+  // roots mode has inline children; flat items are single rows. While a
   // search is active every parent renders expanded regardless of the
   // persisted expansion set.
   const bucketTag = group.isArchivedBucket ? 'archived' : 'active';
-  const hasExpandedParent = shouldVirtualize && visibleSessions.some((node) => {
+  const hasExpandedParent = virtualizationMode === 'roots' && visibleSessions.some((node) => {
     if (node.children.length === 0) return false;
     if (hasSessionSearchQuery) return true;
     const expansionKey = `project:${bucketTag}:${node.session.id}`;
@@ -690,17 +720,20 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     resolvedScrollElement: virtualScrollEl,
   });
   const virtualizerReady = shouldVirtualize && effectiveScrollElement !== null;
+  const virtualItemCount = virtualizationMode === 'flat' ? rowModel.items.length : visibleSessions.length;
   const sessionVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
-    count: visibleSessions.length,
+    count: virtualItemCount,
     enabled: virtualizerReady,
     getScrollElement: () => effectiveScrollElement,
     initialOffset: () => effectiveScrollElement?.scrollTop ?? 0,
     estimateSize: () => ROW_ESTIMATE_PX,
-    // Expanded parents render children inline and dwarf the row estimate;
-    // widen the window so their extra height stays covered.
+    // Roots mode can inline expanded parent subtrees, which dwarf the row
+    // estimate; flat items are single rows. Widen the window only for roots.
     overscan: hasExpandedParent ? 20 : 8,
     scrollMargin: virtualScrollMargin,
-    getItemKey: (index) => visibleSessions[index]?.session.id ?? index,
+    getItemKey: (index) => (virtualizationMode === 'flat'
+      ? rowModel.items[index]?.node.session.id ?? index
+      : visibleSessions[index]?.session.id ?? index),
   });
 
   // Hooks below MUST stay above the search-empty early-return so they
@@ -757,33 +790,6 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     }
     return result;
   }, [allFoldersForGroup, collectGroupSessions, group.isArchivedBucket]);
-
-  // Hooks below MUST stay above the search-empty early-return so they fire in
-  // the same order every render — rules-of-hooks.
-  const rowOrderEntries = React.useMemo(() => buildSessionGroupRowOrderEntries({
-    isCollapsed,
-    hasSessionSearchQuery,
-    collapsedFolderIds,
-    expandedParents: effectiveExpandedParents,
-    archivedBucket: group.isArchivedBucket === true,
-    projectId,
-    groupDirectory: group.directory,
-    rootFolders,
-    childFoldersByParentId,
-    visibleSessions,
-  }), [
-    childFoldersByParentId,
-    collapsedFolderIds,
-    effectiveExpandedParents,
-    group.directory,
-    group.isArchivedBucket,
-    hasSessionSearchQuery,
-    isCollapsed,
-    projectId,
-    rootFolders,
-    visibleSessions,
-  ]);
-  useRegisterSessionRowOrder(rowOrderBase, rowOrderEntries);
 
   if (hasSessionSearchQuery && !groupMatchesSearch && rootFolders.length === 0 && ungroupedSessions.length === 0) {
     return null;
@@ -991,7 +997,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     </span>
   ) : null;
 
-  const renderSessionNode = (node: SessionNode): React.ReactNode => <SessionTreeItem
+  const renderSessionRow = (node: SessionNode, depth?: number, renderChildren?: boolean): React.ReactNode => <SessionTreeItem
     key={node.session.id}
     node={node}
     pinnedSessionIds={pinnedSessionIds}
@@ -1005,6 +1011,8 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     openSidebarMenuKey={openSidebarMenuKey}
     mobileVariant={mobileVariant}
     alwaysShowActions={alwaysShowActions}
+    depth={depth}
+    renderChildren={renderChildren}
     groupDirectory={group.directory}
     projectId={projectId}
     archivedBucket={group.isArchivedBucket === true}
@@ -1022,6 +1030,11 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
      setCopiedSessionId={props.setCopiedSessionId}
      startSessionWorktreeMenuLoad={props.startSessionWorktreeMenuLoad}
    />;
+
+  const renderSessionNode = (node: SessionNode): React.ReactNode => renderSessionRow(node);
+  // Flat search rows render one session each: children are separate virtual
+  // items, and `depth` preserves the tree indentation.
+  const renderFlatRow = (item: SessionRowOrderItem): React.ReactNode => renderSessionRow(item.node, item.depth, false);
 
   const body = (
     <SessionFolderDndScope
@@ -1049,10 +1062,15 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
             // No scroll element yet: the initial mount before the parent ref
             // is committed, or a section without a provided ref (e.g. the
             // chats section) until the ancestor walk resolves one. This
-            // wrapper must exist for that resolution; rendering the plain
-            // rows meanwhile keeps the container's height real so the
-            // scroller never collapses/clamps during the flip.
-            visibleSessions.map(renderSessionNode)
+            // wrapper must exist for that resolution; rendering plain rows
+            // meanwhile keeps the container's height real so the scroller
+            // never collapses/clamps during the flip. Flat mode caps those
+            // plain rows at the threshold so the first commit of a broad
+            // search cannot mount thousands of rows; the layout effect flips
+            // to the virtual window before paint.
+            virtualizationMode === 'flat'
+              ? rowModel.items.slice(0, SESSION_GROUP_VIRTUALIZE_THRESHOLD).map(renderFlatRow)
+              : visibleSessions.map(renderSessionNode)
           ) : (
           <div style={{ height: sessionVirtualizer.getTotalSize(), position: 'relative' }}>
             {/* Absolutely positioned rows (canonical tanstack layout): with
@@ -1061,7 +1079,8 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                 below the group. Per-item offsets cannot drift. item.start
                 includes scrollMargin (ancestor-scroll offset), so subtract it. */}
             {sessionVirtualizer.getVirtualItems().map((item) => {
-              const node = visibleSessions[item.index];
+              const flatItem = virtualizationMode === 'flat' ? rowModel.items[item.index] : null;
+              const node = flatItem?.node ?? visibleSessions[item.index];
               if (!node) return null;
               return (
                 <div
@@ -1085,7 +1104,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                     transform: `translateY(${item.start - virtualScrollMargin}px)`,
                   }}
                 >
-                  {renderSessionNode(node)}
+                  {flatItem ? renderFlatRow(flatItem) : renderSessionNode(node)}
                 </div>
               );
             })}

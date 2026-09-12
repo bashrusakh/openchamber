@@ -282,22 +282,7 @@ export const selectFolderIdsForProjection = (
  */
 export const SESSION_GROUP_VIRTUALIZE_THRESHOLD = 50;
 
-/**
- * The one virtualization decision for both buckets. Search makes every match
- * visible at once, so an archived bucket virtualizes regardless of search and
- * an active group virtualizes only while searching. Small lists stay in
- * normal flow either way.
- */
-export const shouldVirtualizeSessionGroup = (input: {
-  isArchivedBucket: boolean;
-  hasSessionSearchQuery: boolean;
-  visibleSessionCount: number;
-}): boolean => (
-  input.visibleSessionCount >= SESSION_GROUP_VIRTUALIZE_THRESHOLD
-  && (input.isArchivedBucket || input.hasSessionSearchQuery)
-);
-
-export type SessionGroupVirtualizationMode = 'none' | 'roots' | 'flat';
+type SessionGroupVirtualizationMode = 'none' | 'roots' | 'flat';
 
 /**
  * Pick the group's virtualization mode at the shared row threshold:
