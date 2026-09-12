@@ -1922,6 +1922,8 @@ describe('fs stat directory error handling', () => {
       await copyFile(new URL('./byte-range.js', import.meta.url), path.join(directory, 'fs/byte-range.js'));
       await copyFile(new URL('./gitignore.js', import.meta.url), path.join(directory, 'fs/gitignore.js'));
       await copyFile(new URL('../path-realpath-cache.js', import.meta.url), path.join(directory, 'path-realpath-cache.js'));
+      // The gitignore filter and its execution-scope/coordinator chain are
+      // local modules; the packaged desktop ships them beside the routes file.
       await copyFile(new URL('../git/execution-scope.js', import.meta.url), path.join(directory, 'git/execution-scope.js'));
       await copyFile(new URL('../git/execution-coordinator.js', import.meta.url), path.join(directory, 'git/execution-coordinator.js'));
       await copyFile(new URL('../git/execution-errors.js', import.meta.url), path.join(directory, 'git/execution-errors.js'));
