@@ -449,6 +449,55 @@ describe('Git execution service', () => {
     ]);
   });
 
+  it('forwards worktree execution options to admission without leaking them into raw arguments', async () => {
+    const controller = new AbortController();
+    const admissions = [];
+    const rawCalls = [];
+    const service = createGitExecutionService({
+      raw: {
+        validateWorktreeCreate: async (...args) => {
+          rawCalls.push(args);
+          return 'validated';
+        },
+        createWorktree: async (...args) => {
+          rawCalls.push(args);
+          return 'created';
+        },
+      },
+      coordinator: {
+        run: async (options, task) => {
+          admissions.push(options);
+          return task({ active: true });
+        },
+      },
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+    const input = { existingBranch: 'remotes/pr-alice/feature/login' };
+    const options = { signal: controller.signal, queueTimeoutMs: 25 };
+
+    await expect(service.validateWorktreeCreate('/repo', input, options)).resolves.toBe('validated');
+    await expect(service.createWorktree('/repo', input, options)).resolves.toBe('created');
+
+    expect(admissions).toEqual([
+      expect.objectContaining({
+        label: 'validateWorktreeCreate',
+        network: true,
+        signal: controller.signal,
+        queueTimeoutMs: 25,
+      }),
+      expect.objectContaining({
+        label: 'createWorktree',
+        network: true,
+        signal: controller.signal,
+        queueTimeoutMs: 25,
+      }),
+    ]);
+    expect(rawCalls).toEqual([
+      ['/repo', input],
+      ['/repo', input, { scheduleBackground: expect.any(Function) }],
+    ]);
+  });
+
   it('keeps configured remote slash checkout network-coordinated across a local-branch race', async () => {
     const coordinator = createGitExecutionCoordinator({
       globalConcurrency: 1,

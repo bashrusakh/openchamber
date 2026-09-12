@@ -146,6 +146,10 @@ admission, rather than relying on a local-branch probe that could become stale
 before checkout and allow fetches or shared-ref updates to bypass coordination.
 Slash-named branches whose first component is not a configured remote remain
 worktree writes.
+`validateWorktreeCreate` and `createWorktree` accept caller execution options
+(`signal`, `queueTimeoutMs`) on their admission. Abandoning a queued waiter
+cancels it before any worktree work starts; abandoning a running waiter rejects
+that caller while the already admitted mutation finishes on its own.
 `getCommitDiff` and `getUnpushedBranchCounts` are coordinated reads. The
 integrate flow (`integrateWorktreeCommits`) reserves network capacity for its
 whole run because its fast-forward step may `git fetch` the target's upstream;
