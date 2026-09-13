@@ -294,6 +294,7 @@ export const useSessionProjectCollection = ({
     orderedSessions,
     pinnedSessionIds,
     sessionOrderRanks,
+    sessionById,
     sessions,
     rootSessions: structure.rootSessions,
   };

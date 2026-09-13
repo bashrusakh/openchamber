@@ -1,4 +1,5 @@
 import React from 'react';
+import type { Session } from '@opencode-ai/sdk/v2';
 import { toast } from '@/components/ui';
 import { useI18n } from '@/lib/i18n';
 import { useSessionMultiSelectStore } from '@/stores/useSessionMultiSelectStore';
@@ -14,6 +15,8 @@ type Args = {
   isInlineEditing: boolean;
   showDeletionDialog: boolean;
   foldersMap: Record<string, SessionFolder[]>;
+  /** Complete session metadata for selected API ids, independent of row visibility. */
+  selectedSessionsById: ReadonlyMap<string, Session>;
   /**
    * Selection scope is a project id or managed-Chats owner; this map resolves
    * it to every folder scope owned by that logical container. When the scope
@@ -69,6 +72,7 @@ export const useSidebarBulkActions = (args: Args) => {
     isInlineEditing,
     showDeletionDialog,
     foldersMap,
+    selectedSessionsById,
     getFolderScopesForSelectionScope,
     addSessionsToFolder,
     removeSessionsFromFolders,
@@ -100,8 +104,9 @@ export const useSidebarBulkActions = (args: Args) => {
     return deriveSessionRowSelectionArchived(
       sessionRowOrderRegistry?.getOrderedEntries() ?? [],
       selectedIds,
+      selectedSessionsById,
     );
-  }, [hasSelection, selectedIds, sessionRowOrderRegistry]);
+  }, [hasSelection, selectedIds, selectedSessionsById, sessionRowOrderRegistry]);
 
   const derivedSelectionScope = React.useMemo(() => {
     if (selectionScopeKey) return selectionScopeKey;

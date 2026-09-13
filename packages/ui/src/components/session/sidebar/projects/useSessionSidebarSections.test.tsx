@@ -11,6 +11,7 @@ import { useSessionSidebarSections } from './useSessionSidebarSections';
 import { buildSessionSearchRowModel } from './sessionSearchRowModel';
 import type { SessionGroup, SessionNode } from '../types';
 import { installHookTestDom } from '../test-utils/testDom';
+import { getProjectFolderScopesFromTopology } from '../sessions/sessionFolderIdentity';
 
 const CHATS_ROOT = '/home/user/.config/openchamber/chats';
 
@@ -611,6 +612,36 @@ describe('sidebar search parity: groups, folders, and display projections', () =
 
     expect(sections.flatSectionsForRender[0]?.groups.map((group) => group.id)).toEqual(['archived']);
     expect(sections.searchMatchCount).toBe(1);
+  });
+
+  test('keeps root and worktree folder scopes when search leaves only archived results', () => {
+    const worktree: WorktreeMetadata = {
+      path: '/repo/perf-wt',
+      projectDirectory: PROJECT_ROOT,
+      branch: 'feature',
+      label: 'Feature worktree',
+    };
+    const sections = buildProjectSections({
+      sessions: [
+        projectSession('ses_active', 'Grocery list'),
+        projectSession('ses_archived', 'Release archive', {
+          time: { created: 1, updated: 1, archived: 2 },
+        }),
+      ],
+      query: 'release',
+      worktrees: [worktree],
+    });
+
+    expect(sections.flatSectionsForRender[0]?.groups.map((group) => group.id)).toEqual(['archived']);
+    expect(sections.projectSections[0]?.groups.map((group) => group.id)).toEqual([
+      'root',
+      `worktree:${worktree.path}`,
+      'archived',
+    ]);
+    expect(getProjectFolderScopesFromTopology(sections.projectSections, 'project')).toEqual([
+      { scopeKey: PROJECT_ROOT, directory: PROJECT_ROOT },
+      { scopeKey: worktree.path, directory: worktree.path },
+    ]);
   });
 
   test('matches a folder name without a session or group match', () => {

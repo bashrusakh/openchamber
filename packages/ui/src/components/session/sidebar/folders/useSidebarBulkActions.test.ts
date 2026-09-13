@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import type { Session } from '@opencode-ai/sdk/v2';
 import { resolveSelectionFolderScopes } from './useSidebarBulkActions';
 import {
   deriveSessionRowBulkSelectAll,
@@ -6,8 +7,99 @@ import {
   deriveSessionRowSelectionScope,
   type SessionRowOrderEntry,
 } from '../sessions/sessionRowOrderUtils';
+import { getProjectFolderScopesFromTopology } from '../sessions/sessionFolderIdentity';
+import type { SessionGroup } from '../types';
+
+const sessionMetadata = (id: string, archived: boolean): Session => ({
+  id,
+  slug: id,
+  projectID: 'project-a',
+  title: id,
+  version: '1',
+  directory: '/workspace/project-a',
+  time: archived
+    ? { created: 1, updated: 1, archived: 2 }
+    : { created: 1, updated: 1 },
+});
+
+const folderScopeGroup = (overrides: Partial<SessionGroup>): SessionGroup => ({
+  id: 'root',
+  label: '',
+  branch: null,
+  description: null,
+  isMain: true,
+  worktree: null,
+  directory: '/workspace/project-a',
+  folderScopeKey: '/workspace/project-a',
+  sessions: [],
+  ...overrides,
+});
 
 describe('sidebar bulk project scopes', () => {
+  const projectTopology = [{
+    project: { id: 'project-a', normalizedPath: '/workspace/project-a' },
+    groups: [
+      folderScopeGroup({
+        folderScopes: [{ scopeKey: '/workspace/project-a', directory: '/workspace/project-a' }],
+      }),
+      folderScopeGroup({
+        id: 'worktree',
+        isMain: false,
+        directory: '/workspace/project-a-worktree',
+        folderScopeKey: '/workspace/project-a-worktree',
+      }),
+      folderScopeGroup({
+        id: 'archived',
+        isMain: false,
+        isArchivedBucket: true,
+        directory: null,
+        folderScopeKey: '/workspace/project-a/.archived',
+      }),
+    ],
+  }];
+
+  test('resolves root and worktree scopes from unfiltered topology and excludes archived scopes', () => {
+    expect(getProjectFolderScopesFromTopology(projectTopology, 'project-a')).toEqual([
+      { scopeKey: '/workspace/project-a', directory: '/workspace/project-a' },
+      { scopeKey: '/workspace/project-a-worktree', directory: '/workspace/project-a-worktree' },
+    ]);
+  });
+
+  test('passes directory scopes to bulk folder actions instead of the project id', () => {
+    expect(resolveSelectionFolderScopes(
+      'project-a',
+      (selectionScope) => getProjectFolderScopesFromTopology(projectTopology, selectionScope),
+    )).toEqual(['/workspace/project-a', '/workspace/project-a-worktree']);
+  });
+
+  test('falls back to the normalized project directory when only archived groups exist', () => {
+    expect(getProjectFolderScopesFromTopology([{
+      project: { id: 'project-a', normalizedPath: '/workspace/project-a' },
+      groups: [folderScopeGroup({
+        id: 'archived',
+        isMain: false,
+        isArchivedBucket: true,
+        directory: null,
+        folderScopeKey: '/workspace/project-a/.archived',
+      })],
+    }], 'project-a')).toEqual([
+      { scopeKey: '/workspace/project-a', directory: '/workspace/project-a' },
+    ]);
+  });
+
+  test('resolves the selected project from complete topology in single-project mode', () => {
+    const otherProject = {
+      project: { id: 'project-b', normalizedPath: '/workspace/project-b' },
+      groups: [folderScopeGroup({
+        directory: '/workspace/project-b',
+        folderScopeKey: '/workspace/project-b',
+      })],
+    };
+
+    expect(getProjectFolderScopesFromTopology([otherProject, ...projectTopology], 'project-a').map((scope) => scope.scopeKey))
+      .toEqual(['/workspace/project-a', '/workspace/project-a-worktree']);
+  });
+
   test('uses every root and worktree scope owned by the selected project', () => {
     const scopes = resolveSelectionFolderScopes('project-a', (projectId) => projectId === 'project-a'
       ? [
@@ -100,6 +192,39 @@ describe('deriveSessionRowSelectionArchived', () => {
     const entries = [entry('mounted', false), entry('offscreen-archived', true)];
 
     expect(deriveSessionRowSelectionArchived(entries, new Set(['offscreen-archived']))).toBe(true);
+  });
+
+  test('does not classify an unregistered active selection as archived-only', () => {
+    const entries = [entry('visible-archived', true)];
+
+    expect(deriveSessionRowSelectionArchived(
+      entries,
+      new Set(['visible-archived', 'hidden-active']),
+      new Map([
+        ['visible-archived', sessionMetadata('visible-archived', true)],
+        ['hidden-active', sessionMetadata('hidden-active', false)],
+      ]),
+    )).toBe(false);
+  });
+
+  test('treats selected ids missing from authoritative metadata as active', () => {
+    expect(deriveSessionRowSelectionArchived(
+      [entry('visible-archived', true)],
+      new Set(['visible-archived', 'missing-metadata']),
+      new Map([['visible-archived', sessionMetadata('visible-archived', true)]]),
+    )).toBe(false);
+  });
+
+  test('preserves archived-only classification for authoritative metadata and deduplicated ids', () => {
+    const entries = [entry('visible-archived', true), entry('visible-archived', true)];
+    const selectedIds = new Set(['visible-archived', 'hidden-archived']);
+    const selectedSessionsById = new Map([
+      ['visible-archived', sessionMetadata('visible-archived', true)],
+      ['hidden-archived', sessionMetadata('hidden-archived', true)],
+    ]);
+
+    expect(deriveSessionRowSelectionArchived(entries, selectedIds, selectedSessionsById)).toBe(true);
+    expect([...selectedIds]).toEqual(['visible-archived', 'hidden-archived']);
   });
 });
 

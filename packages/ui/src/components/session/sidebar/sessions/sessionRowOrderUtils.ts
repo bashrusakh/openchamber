@@ -1,4 +1,5 @@
 import { normalizePath } from '@/lib/pathNormalization';
+import type { Session } from '@opencode-ai/sdk/v2';
 import type { SessionNode } from '../types';
 import { getSessionFolderIdentityKey, getSessionSelectionScopeKey } from './sessionFolderIdentity';
 
@@ -318,19 +319,40 @@ export const deriveSessionRowBulkSelectAll = (
 };
 
 /**
- * Bulk delete versus archive: archived only when every selected registered row
- * is archived. Selected ids with no registered row are ignored, like the
- * previous DOM scan of unmounted rows.
+ * Bulk delete versus archive: archived only when every selected session is
+ * authoritatively archived. A selected id missing from that authority is
+ * treated as active so an incomplete sidebar projection cannot trigger a hard
+ * delete. When the authoritative map is unavailable, the registry can only
+ * classify IDs it contains; an absent ID is still treated as active.
  */
 export const deriveSessionRowSelectionArchived = (
   entries: readonly SessionRowOrderEntry[],
   selectedIds: ReadonlySet<string>,
+  selectedSessionsById?: ReadonlyMap<string, Session>,
 ): boolean => {
   let sawActive = false;
   let sawArchived = false;
+
+  if (selectedSessionsById) {
+    for (const id of selectedIds) {
+      const session = selectedSessionsById.get(id);
+      if (!session || !session.time?.archived) sawActive = true;
+      else sawArchived = true;
+      if (sawArchived && sawActive) return false;
+    }
+    return sawArchived && !sawActive;
+  }
+
+  const archivedById = new Map<string, boolean>();
   for (const entry of entries) {
-    if (!selectedIds.has(entry.id)) continue;
-    if (entry.archived) sawArchived = true;
+    if (selectedIds.has(entry.id) && !archivedById.has(entry.id)) {
+      archivedById.set(entry.id, entry.archived);
+    }
+  }
+  for (const id of selectedIds) {
+    const archived = archivedById.get(id);
+    if (archived === undefined) sawActive = true;
+    else if (archived) sawArchived = true;
     else sawActive = true;
     if (sawArchived && sawActive) return false;
   }

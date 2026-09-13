@@ -92,6 +92,7 @@ const BulkActionsHarness = () => {
     isInlineEditing: false,
     showDeletionDialog: false,
     foldersMap: {},
+    selectedSessionsById: new Map(),
     getFolderScopesForSelectionScope: noFolderScopes,
     addSessionsToFolder: noop,
     removeSessionsFromFolders: noop,

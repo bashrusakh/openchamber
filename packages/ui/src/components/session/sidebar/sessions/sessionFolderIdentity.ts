@@ -24,3 +24,35 @@ export const getSessionFolderScopes = (group: Pick<SessionGroup, 'folderScopes' 
   const scopeKey = group.folderScopeKey ?? normalizePath(group.directory ?? null);
   return scopeKey ? [{ scopeKey, directory: group.directory }] : [];
 };
+
+type ProjectFolderScopeSection = {
+  project: { id: string; normalizedPath: string };
+  groups: readonly Pick<SessionGroup, 'folderScopes' | 'folderScopeKey' | 'directory' | 'isArchivedBucket'>[];
+};
+
+/** Resolve project-owned folder scopes from the complete, unfiltered topology. */
+export const getProjectFolderScopesFromTopology = (
+  projectSections: readonly ProjectFolderScopeSection[],
+  projectId: string,
+): SessionGroupFolderScope[] => {
+  const section = projectSections.find((candidate) => candidate.project.id === projectId);
+  if (!section) return [];
+
+  const seen = new Set<string>();
+  const scopes: SessionGroupFolderScope[] = [];
+  for (const group of section.groups) {
+    if (group.isArchivedBucket) continue;
+    for (const scope of getSessionFolderScopes(group)) {
+      if (!scope.scopeKey) continue;
+      if (seen.has(scope.scopeKey)) continue;
+      seen.add(scope.scopeKey);
+      scopes.push(scope);
+    }
+  }
+  if (scopes.length > 0) return scopes;
+
+  const normalizedProjectPath = normalizePath(section.project.normalizedPath);
+  return normalizedProjectPath
+    ? [{ scopeKey: normalizedProjectPath, directory: normalizedProjectPath }]
+    : [];
+};

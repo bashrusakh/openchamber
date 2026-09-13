@@ -82,13 +82,16 @@ matching and ordering. Search does not fetch sessions or broaden list membership
 Selection order and bulk scope come from the render model, not the DOM. Each
 rendered list registers its rows with `sessions/sessionRowOrder.tsx` in the
 order it renders them, with managed Chats and Recent sections above the project
-sections, in that order, and shift-range selection, Ctrl/Cmd+A, and the bulk
-archive/delete scope read that registry. Rows that virtualization keeps
-unmounted are included because the entries come from the model, registration
-runs in layout effects so the registry matches the committed tree before any
-click, and registering never triggers a render. Every entry also carries a
-stable `rowKey` for its rendered occurrence. The session ID remains the API
-identity, so selecting the same session twice still produces one bulk action.
+sections, in that order, and shift-range selection and Ctrl/Cmd+A read that
+registry. Rows that virtualization keeps unmounted are included because the
+entries come from the model, registration runs in layout effects so the registry
+matches the committed tree before any click, and registering never triggers a
+render. Every entry also carries a stable `rowKey` for its rendered occurrence.
+The session ID remains the API identity, so selecting the same session twice
+still produces one bulk action. Bulk archive/delete classification instead
+reads authoritative session metadata for every selected ID, including IDs not
+present in the current registry; missing metadata is conservatively treated as
+active rather than permitting a hard-delete path.
 Shift-range selection first filters entries to the clicked row's scope, then
 resolves both ends by `rowKey`; if the stored anchor is missing, it falls back
 to the first row in that scope. Session row renderers and the registry must use

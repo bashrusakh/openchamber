@@ -35,7 +35,7 @@ import { useExpandedParents } from '../sessions/useExpandedParents';
 import { SessionGroupSection } from '../projects/SessionGroupSection';
 import { SessionRowOrderProvider } from '../sessions/sessionRowOrder';
 import { CHAT_DRAFT_PROJECT_ID, getChatsRootForHome, getChatsRootFromDirectory } from '@/lib/chatDirectories';
-import { getSessionFolderOwnerKey, getSessionFolderScopes } from '../sessions/sessionFolderIdentity';
+import { getProjectFolderScopesFromTopology, getSessionFolderOwnerKey, getSessionFolderScopes } from '../sessions/sessionFolderIdentity';
 import { isCapacitorApp } from '@/lib/platform';
 import { buildSessionSearchRowModel, type SessionSearchActivitySection, type SessionSearchRowModel } from '../projects/sessionSearchRowModel';
 
@@ -311,9 +311,8 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
     if (chatGroup && getSessionFolderOwnerKey(null, chatGroup.directory) === selectionScope) {
       return getSessionFolderScopes(chatGroup);
     }
-    const section = flatSectionsForRender.find((entry) => entry.project.id === selectionScope);
-    return section?.groups.find((group) => !group.isArchivedBucket)?.folderScopes ?? [];
-  }, [chatGroup, flatSectionsForRender]);
+    return getProjectFolderScopesFromTopology(projectSections, selectionScope);
+  }, [chatGroup, projectSections]);
   const projectHeaderSentinelRefs = React.useRef<Map<string, HTMLDivElement | null>>(new Map());
   const [stickyHeaderRefreshKey, setStickyHeaderRefreshKey] = React.useState(0);
   const onSearchRowsMounted = React.useCallback(() => {
@@ -729,6 +728,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
     <SessionProjectScroller model={scrollerModel} view={scrollerView} actions={scrollerActionSet} />
     <SessionBulkActions
       getFolderScopesForSelectionScope={getFolderScopesForSelectionScope}
+      selectedSessionsById={collection.sessionById}
       isInlineEditing={editingId !== null}
       startFolderRename={startFolderRename}
     />
