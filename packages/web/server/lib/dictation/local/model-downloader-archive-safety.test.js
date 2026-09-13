@@ -124,6 +124,22 @@ async function writeArchive(modelsDir, archiveBytes) {
   await writeFile(path.join(modelsDir, '.downloads', ARCHIVE_NAME), archiveBytes);
 }
 
+/**
+ * Valid bz2 around a tar cut mid-file-data: the bz2 wrapper is complete (it
+ * wraps the exact bytes handed to it), but tar-stream sees a file header that
+ * declares more bytes than the tar actually contains. That makes the failure
+ * arrive on the tar entry stream, not on the bzip2 decompressor as in the
+ * truncated-.tar.bz2 case above.
+ */
+async function truncatedEntryArchive() {
+  const tarBytes = await packTar(modelEntries());
+  const dataStart = tarBytes.indexOf(Buffer.from(fileContent(REQUIRED_FILES[0])));
+  expect(dataStart).toBeGreaterThan(0);
+  const cut = tarBytes.subarray(0, dataStart + 4);
+  expect(cut.length).toBeLessThan(tarBytes.length);
+  return compressBz2(cut);
+}
+
 /** Environment for extraction: no real tar/bzip2 reachable, only failing shims. */
 function extractionEnv() {
   return { ...process.env, PATH: fakeBinDir };
@@ -311,6 +327,20 @@ describe('extractTarArchive hostile archives', () => {
     await writeArchive(modelsDir, archiveBytes.subarray(0, Math.floor(archiveBytes.length / 2)));
 
     expect(runExtraction(modelsDir).ok).toBe(false);
+
+    await expectCleanFailure(modelsDir);
+  });
+
+  it('rejects a valid .tar.bz2 whose tar is cut mid-file without an uncaught exception', async () => {
+    const modelsDir = path.join(tempRoot, 'truncated-entry');
+    await writeArchive(modelsDir, await truncatedEntryArchive());
+
+    // The child exits non-zero when the tar entry stream's 'error' event has
+    // no listener (uncaught exception), and runExtraction() turns that into a
+    // test failure. A contained rejection comes back as ok:false instead.
+    const result = runExtraction(modelsDir);
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeTruthy();
 
     await expectCleanFailure(modelsDir);
   });

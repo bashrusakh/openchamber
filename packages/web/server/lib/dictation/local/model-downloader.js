@@ -95,6 +95,13 @@ async function extractTarArchive(archivePath, destDir) {
     };
 
     extract.on('entry', (header, stream, next) => {
+      // Attach synchronously, before any async branch can yield: when the
+      // archive ends mid-entry, tar-stream destroys the active entry stream
+      // with its error, and an entry 'error' with no listener is an uncaught
+      // exception. The listener stays for the entry's lifetime; `settled`
+      // turns any late error into a no-op once this extraction has ended.
+      stream.on('error', fail);
+
       const resolvedTarget = path.resolve(resolvedDest, header.name);
       const rel = path.relative(resolvedDest, resolvedTarget);
       if (rel.startsWith('..') || path.isAbsolute(rel)) {
@@ -118,15 +125,7 @@ async function extractTarArchive(archivePath, destDir) {
         .then(() => {
           const out = createWriteStream(resolvedTarget);
           out.on('error', fail);
-          stream.on('error', fail);
-          out.on('finish', () => {
-            // Drop this entry's listeners before proceeding: a late error
-            // from a finished entry must not destroy the extraction of the
-            // next one.
-            out.removeListener('error', fail);
-            stream.removeListener('error', fail);
-            next();
-          });
+          out.on('finish', next);
           stream.pipe(out);
         }, fail);
     });
