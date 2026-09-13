@@ -43,6 +43,7 @@ mock.module('vscode', () => ({
     onDidChangeTextEditorSelection: () => ({ dispose() {} }),
     state: { focused: true },
   },
+  env: { language: 'en' },
   Uri: {
     joinPath: (base, ...segments) => ({ fsPath: [base.fsPath, ...segments].join('/') }),
     file: (fsPath) => ({ fsPath }),
