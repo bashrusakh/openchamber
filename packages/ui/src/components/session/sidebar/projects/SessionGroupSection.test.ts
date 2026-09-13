@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { SessionFolder } from '@/stores/useSessionFoldersStore';
+import { getSessionFolderIdentityKey } from '../sessions/sessionFolderIdentity';
 import { normalizeFolderRoots, selectFolderIdsForProjection } from '../sessions/sessionNodeItemUtils';
 
 const folder = (id: string, parentId: string | null = null, sessionIds: string[] = []): SessionFolder => ({
@@ -27,6 +28,20 @@ describe('normalizeFolderRoots', () => {
     const folders = [folder('root-a'), folder('child-a', 'root-a'), folder('root-b')];
 
     expect(normalizeFolderRoots(folders).map((entry) => entry.id)).toEqual(['root-a', 'root-b']);
+  });
+
+  test('isolates duplicate folder ids across directory scopes', () => {
+    const folders = [
+      { ...folder('shared'), scopeKey: '/workspace' },
+      { ...folder('shared'), scopeKey: '/workspace/worktree' },
+      { ...folder('child', 'shared'), scopeKey: '/workspace/worktree' },
+    ];
+
+    expect(normalizeFolderRoots(folders).map((entry) => getSessionFolderIdentityKey(entry.scopeKey, entry.id)))
+      .toEqual([
+        getSessionFolderIdentityKey('/workspace', 'shared'),
+        getSessionFolderIdentityKey('/workspace/worktree', 'shared'),
+      ]);
   });
 });
 
@@ -66,6 +81,13 @@ describe('selectFolderIdsForProjection', () => {
       .toEqual(['root', 'child']);
   });
 
+  test('keeps an archived folder-name match even when no matching session is projected', () => {
+    const folders = [{ id: 'archive', name: 'Release archive', parentId: null, nodeCount: 0 }];
+
+    expect([...selectFolderIdsForProjection(folders, { archivedBucket: true, searchQuery: 'release' })])
+      .toEqual(['archive']);
+  });
+
   test('keeps a fuzzy folder match and its ancestor', () => {
     const folders = [
       { id: 'root', name: 'Root', parentId: null, nodeCount: 0 },
@@ -74,5 +96,18 @@ describe('selectFolderIdsForProjection', () => {
 
     expect([...selectFolderIdsForProjection(folders, { archivedBucket: false, searchQuery: 'release-notes' })])
       .toEqual(['root', 'child']);
+  });
+
+  test('does not let a matching subtree in one scope project a same-id folder in another', () => {
+    const worktreeRoot = getSessionFolderIdentityKey('/workspace/worktree', 'shared');
+    const worktreeChild = getSessionFolderIdentityKey('/workspace/worktree', 'release');
+    const folders = [
+      { id: 'shared', name: 'Unrelated', parentId: null, nodeCount: 0, scopeKey: '/workspace' },
+      { id: 'shared', name: 'Worktree root', parentId: null, nodeCount: 0, scopeKey: '/workspace/worktree' },
+      { id: 'release', name: 'Release notes', parentId: 'shared', nodeCount: 1, scopeKey: '/workspace/worktree' },
+    ];
+
+    expect([...selectFolderIdsForProjection(folders, { archivedBucket: false, searchQuery: 'release-notes' })])
+      .toEqual([worktreeRoot, worktreeChild]);
   });
 });

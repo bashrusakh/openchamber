@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { getSessionFolderIdentityKey } from '@/lib/sessionFolderIdentity';
 
 const storage = new Map<string, string>();
 let storageSetCount = 0;
@@ -95,6 +96,32 @@ describe('useSessionFoldersStore folder assignments', () => {
 
     expect(useSessionFoldersStore.getState().getFoldersForScope('/workspace/project')[0]?.sessionIds).toEqual([]);
     expect(useSessionFoldersStore.getState().getFoldersForScope('/workspace/project-worktree')[0]?.sessionIds).toEqual(['ses_1', 'ses_2']);
+  });
+
+  test('keeps collapse state independent when folder ids repeat across scopes', async () => {
+    const sharedFolder = { id: 'shared', name: 'Shared', sessionIds: [], createdAt: 1 };
+    useSessionFoldersStore.setState({
+      foldersMap: {
+        '/workspace/project': [sharedFolder],
+        '/workspace/project-worktree': [sharedFolder],
+      },
+      collapsedFolderIds: new Set(),
+    });
+
+    const store = useSessionFoldersStore.getState();
+    store.toggleFolderCollapse('/workspace/project', sharedFolder.id);
+
+    expect(useSessionFoldersStore.getState().collapsedFolderIds).toEqual(new Set([
+      getSessionFolderIdentityKey('/workspace/project', sharedFolder.id),
+    ]));
+
+    store.toggleFolderCollapse('/workspace/project-worktree', sharedFolder.id);
+    expect(useSessionFoldersStore.getState().collapsedFolderIds).toEqual(new Set([
+      getSessionFolderIdentityKey('/workspace/project', sharedFolder.id),
+      getSessionFolderIdentityKey('/workspace/project-worktree', sharedFolder.id),
+    ]));
+
+    await waitForPersist();
   });
 
   test('restores independent folder snapshots across runtime switches', async () => {

@@ -1,7 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- The provider, its registration hooks, and the registry factory are one coupled contract. */
 import React from 'react';
 import type { SessionRowOrderEntry } from './sessionRowOrderUtils';
-import { toSessionRowOrderIds } from './sessionRowOrderUtils';
 
 export type SessionRowOrderSegment = {
   order: number;
@@ -19,20 +18,16 @@ export type SessionRowOrderRegistry = {
   register: (key: string, segment: SessionRowOrderSegment) => void;
   unregister: (key: string) => void;
   getOrderedEntries: () => readonly SessionRowOrderEntry[];
-  getOrderedIds: () => readonly string[];
 };
 
 const EMPTY_ENTRIES: readonly SessionRowOrderEntry[] = [];
-const EMPTY_IDS: readonly string[] = [];
 
 export const createSessionRowOrderRegistry = (): SessionRowOrderRegistry => {
   const segments = new Map<string, SessionRowOrderSegment>();
   let cachedEntries: readonly SessionRowOrderEntry[] | null = null;
-  let cachedIds: readonly string[] | null = null;
 
   const invalidate = (): void => {
     cachedEntries = null;
-    cachedIds = null;
   };
 
   const getOrderedEntries = (): readonly SessionRowOrderEntry[] => {
@@ -53,12 +48,6 @@ export const createSessionRowOrderRegistry = (): SessionRowOrderRegistry => {
       if (segments.delete(key)) invalidate();
     },
     getOrderedEntries,
-    getOrderedIds: () => {
-      if (cachedIds) return cachedIds;
-      const entries = getOrderedEntries();
-      cachedIds = entries.length === 0 ? EMPTY_IDS : toSessionRowOrderIds(entries);
-      return cachedIds;
-    },
   };
 };
 

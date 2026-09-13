@@ -3,12 +3,19 @@ import React from 'react';
 type Args = {
   enabled?: boolean;
   isDesktopShellRuntime: boolean;
-  projectSections: unknown[];
+  projectSections: readonly unknown[];
   projectHeaderSentinelRefs: React.MutableRefObject<Map<string, HTMLDivElement | null>>;
+  refreshKey?: number;
 };
 
 export const useStickyProjectHeaders = (args: Args): Set<string> => {
-  const { enabled = true, isDesktopShellRuntime, projectSections, projectHeaderSentinelRefs } = args;
+  const {
+    enabled = true,
+    isDesktopShellRuntime,
+    projectSections,
+    projectHeaderSentinelRefs,
+    refreshKey = 0,
+  } = args;
   const [stuckProjectHeaders, setStuckProjectHeaders] = React.useState<Set<string>>(new Set());
 
   React.useEffect(() => {
@@ -17,6 +24,7 @@ export const useStickyProjectHeaders = (args: Args): Set<string> => {
       return;
     }
 
+    setStuckProjectHeaders((prev) => (prev.size === 0 ? prev : new Set()));
     const firstSentinel = Array.from(projectHeaderSentinelRefs.current.values()).find((el) => el !== null);
     const root = firstSentinel?.closest<HTMLElement>('.oc-sidebar-scroller') ?? null;
     if (!root) {
@@ -29,6 +37,8 @@ export const useStickyProjectHeaders = (args: Args): Set<string> => {
           const next = new Set(prev);
           let changed = false;
           for (const entry of entries) {
+            // SAFETY: Every observed target comes from projectHeaderSentinelRefs,
+            // whose values are HTML project-header sentinel elements.
             const projectId = (entry.target as HTMLElement).dataset.projectId;
             if (!projectId) continue;
 
@@ -45,15 +55,23 @@ export const useStickyProjectHeaders = (args: Args): Set<string> => {
       },
       { root, threshold: 0 },
     );
+    const observeCurrentSentinels = (): void => {
+      projectHeaderSentinelRefs.current.forEach((el) => {
+        if (el) observer.observe(el);
+      });
+    };
+    observeCurrentSentinels();
 
-    projectHeaderSentinelRefs.current.forEach((el) => {
-      if (el) {
-        observer.observe(el);
-      }
-    });
+    const mutationObserver = globalThis.MutationObserver
+      ? new MutationObserver(observeCurrentSentinels)
+      : null;
+    mutationObserver?.observe(root, { childList: true, subtree: true });
 
-    return () => observer.disconnect();
-  }, [enabled, isDesktopShellRuntime, projectHeaderSentinelRefs, projectSections]);
+    return () => {
+      mutationObserver?.disconnect();
+      observer.disconnect();
+    };
+  }, [enabled, isDesktopShellRuntime, projectHeaderSentinelRefs, projectSections, refreshKey]);
 
   return stuckProjectHeaders;
 };

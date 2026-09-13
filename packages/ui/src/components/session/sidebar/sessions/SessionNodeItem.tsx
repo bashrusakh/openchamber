@@ -32,6 +32,7 @@ import { getSyncSessionMaterializationStatus } from '@/sync/sync-refs';
 import { useViewportStore, viewportSessionKey } from '@/sync/viewport-store';
 import { DraggableSessionRow } from '../folders/sessionFolderDnd';
 import { canShowSessionWorktreeMenu, getSessionWorktreeMenuDisabled, nodeContainsSessionId, nodeHasPinnedMembershipChange, selectQuestionBadgeSessionScopes, selectRowBadgeVisibilityClass } from './sessionNodeItemUtils';
+import { getSessionFolderIdentityKey, getSessionSelectionScopeKey } from './sessionFolderIdentity';
 import { useSessionRowOrderRegistry } from './sessionRowOrder';
 import type { SessionNode } from '../types';
 import { formatProjectLabel, formatSessionCompactDateLabel, formatSessionDateLabel, normalizePath, renderHighlightedText } from '../utils';
@@ -79,6 +80,10 @@ export type SessionNodeItemProps = {
   depth?: number;
   groupDirectory?: string | null;
   projectId?: string | null;
+  /** Project id, or the managed-Chats directory owner for this row. */
+  folderOwnerKey?: string | null;
+  /** Logical selection scope; separate from the session's operational directory. */
+  selectionScopeKey?: string | null;
   archivedBucket?: boolean;
   pinnedSessionIds: Set<string>;
   expandedParents: Set<string>;
@@ -113,6 +118,10 @@ export type SessionNodeItemProps = {
   alwaysShowActions: boolean;
   secondaryMeta?: SecondaryMeta | null;
   renderContext?: 'project' | 'recent';
+  /** Stable identity of this rendered occurrence for range selection. */
+  rowKey?: string;
+  /** Stable row occurrence key for renderers that can show one session twice. */
+  dragKey?: string;
   /**
    * Precomputed set of session IDs whose subtree contains the session
    * currently being edited. Precomputed once per group render.
@@ -273,6 +282,8 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
     depth = 0,
     groupDirectory,
     projectId,
+    folderOwnerKey,
+    selectionScopeKey: explicitSelectionScopeKey,
     archivedBucket = false,
     pinnedSessionIds,
     expandedParents,
@@ -303,6 +314,8 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
     alwaysShowActions,
     secondaryMeta,
     renderContext = 'project',
+    rowKey,
+    dragKey,
     children,
   } = props;
   const togglePinnedSession = useSessionPinnedStore((state) => state.toggle);
@@ -384,8 +397,8 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   const prIconColor = prSummary ? `var(--pr-${prSummary.visualState})` : undefined;
   const sessionGroupingMode = useSessionDisplayStore((state) => state.sessionGroupingMode);
   // In by-worktree grouping the project tree already shows the branch on the
-  // group sub-header, so the per-row marker only appears in flat mode and in
-  // the mixed-context recent list.
+  // group sub-header, so the per-row marker only appears in flat project
+  // grouping and in the mixed-context recent list.
   const showInlineBranchMarker = Boolean(tooltipBranchLabel)
     && (renderContext === 'recent' || sessionGroupingMode === 'flat');
   const prStatusLabel = React.useMemo(() => {
@@ -415,7 +428,9 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   // Multi-select scope: sessions are flat per project, so selection groups by
   // project (falling back to the directory when no project is known) — a
   // selection must survive mixing sessions from different worktrees.
-  const selectionScopeKey = projectId ?? sessionDirectory ?? null;
+  const selectionScopeKey = explicitSelectionScopeKey !== undefined
+    ? explicitSelectionScopeKey
+    : getSessionSelectionScopeKey(projectId, sessionDirectory);
   const loadExportRecords = useSessionMessageRecordsForExport();
   const prefetchSessionMessages = usePrefetchSessionMessages();
   // Same gate as the sidebar's neighbor prefetch: the VS Code webview keeps
@@ -431,6 +446,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   // Shift-range order comes from the same render model that decides row
   // order; virtualization keeps rows unmounted, so the DOM cannot know it.
   const sessionRowOrderRegistry = useSessionRowOrderRegistry();
+  const sessionRowKey = rowKey ?? session.id;
 
   const collectNodeDescendantIds = React.useCallback((root: SessionNode): string[] => {
     const out: string[] = [];
@@ -899,14 +915,14 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
       event?.preventDefault();
       event?.stopPropagation();
       if (event?.shiftKey) {
-        const orderedIds = sessionRowOrderRegistry ? [...sessionRowOrderRegistry.getOrderedIds()] : [];
-        const currentAnchor = useSessionMultiSelectStore.getState().anchorId;
+        const orderedEntries = sessionRowOrderRegistry ? [...sessionRowOrderRegistry.getOrderedEntries()] : [];
+        const currentAnchor = useSessionMultiSelectStore.getState().anchorRowKey;
         const descendantsById = new Map<string, string[]>();
         descendantsById.set(session.id, collectNodeDescendantIds(node));
-        setRowRange(currentAnchor, session.id, orderedIds, selectionScopeKey, descendantsById);
+        setRowRange(currentAnchor, sessionRowKey, orderedEntries, selectionScopeKey, descendantsById);
         return;
       }
-      toggleRowSelected(session.id, selectionScopeKey, collectNodeDescendantIds(node));
+      toggleRowSelected(session.id, selectionScopeKey, collectNodeDescendantIds(node), sessionRowKey);
       return;
     }
     if (event?.currentTarget) holdSessionRowPosition(event.currentTarget);
@@ -1200,9 +1216,9 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
                   <Item disabled className="text-muted-foreground">{t('sessions.sidebar.folders.none')}</Item>
                 ) : (
                   folderEntries.map(({ scope, folder }) => {
-                    const isCurrent = currentEntry?.folder.id === folder.id;
+                    const isCurrent = currentEntry?.scope === scope && currentEntry.folder.id === folder.id;
                     return (
-                      <Item key={folder.id} onClick={() => {
+                      <Item key={getSessionFolderIdentityKey(scope, folder.id)} onClick={() => {
                         if (isCurrent) {
                           removeSessionFromFolder(scope, session.id);
                           return;
@@ -1367,13 +1383,14 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   );
 
   return (
-    <React.Fragment key={session.id}>
-      <DraggableSessionRow sessionId={session.id} sessionDirectory={sessionDirectory ?? null} sessionTitle={sessionTitle}>
+    <React.Fragment key={sessionRowKey}>
+      <DraggableSessionRow sessionId={session.id} dragKey={dragKey} ownerKey={folderOwnerKey ?? null} sessionDirectory={sessionDirectory ?? null} sessionTitle={sessionTitle}>
         <ContextMenu.Root open={isContextMenuOpen} onOpenChange={handleContextMenuOpenChange} onOpenChangeComplete={handleMenuOpenChangeComplete}>
           <ContextMenu.Trigger
             render={
               <div
                 data-session-row={session.id}
+                data-session-row-key={sessionRowKey}
                 data-session-scope={selectionScopeKey ?? ''}
                 data-session-archived={archivedBucket ? '1' : '0'}
                 aria-current={isActive ? 'page' : undefined}
@@ -1776,6 +1793,8 @@ const sessionNodeItemPropsChange = (prev: SessionNodeItemProps, next: SessionNod
   if (prev.projectId !== next.projectId) return 'projectId';
   if (prev.archivedBucket !== next.archivedBucket) return 'archivedBucket';
   if ((prev.renderContext ?? 'project') !== (next.renderContext ?? 'project')) return 'renderContext';
+  if (prev.rowKey !== next.rowKey) return 'rowKey';
+  if (prev.dragKey !== next.dragKey) return 'dragKey';
   if (prev.mobileVariant !== next.mobileVariant) return 'mobileVariant';
   if (prev.alwaysShowActions !== next.alwaysShowActions) return 'alwaysShowActions';
   if (prev.hasSessionSearchQuery !== next.hasSessionSearchQuery) return 'hasSessionSearchQuery';

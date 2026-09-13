@@ -22,11 +22,33 @@ describe('sidebar bulk project scopes', () => {
   test('keeps a directory scope when no project scope owns it', () => {
     expect(resolveSelectionFolderScopes('/workspace/vscode', () => [])).toEqual(['/workspace/vscode']);
   });
+
+  test('deduplicates repeated project scope entries before exposing folder targets', () => {
+    expect(resolveSelectionFolderScopes('project-a', () => [
+      { scopeKey: '/workspace/project-a', directory: '/workspace/project-a' },
+      { scopeKey: '/workspace/project-a', directory: '/workspace/project-a/' },
+    ])).toEqual(['/workspace/project-a']);
+  });
+
+  test('resolves every configured and dated managed-chat scope from its shared owner', () => {
+    const chatsRoot = '/home/user/.config/openchamber/chats';
+    expect(resolveSelectionFolderScopes(chatsRoot, (selectionScope) => selectionScope === chatsRoot
+      ? [
+        { scopeKey: chatsRoot, directory: chatsRoot },
+        { scopeKey: `${chatsRoot}/2026-09-13`, directory: `${chatsRoot}/2026-09-13` },
+        { scopeKey: '/home/user/.config/openchamber/chats-legacy', directory: '/home/user/.config/openchamber/chats-legacy' },
+      ]
+      : [])).toEqual([
+      chatsRoot,
+      `${chatsRoot}/2026-09-13`,
+      '/home/user/.config/openchamber/chats-legacy',
+    ]);
+  });
 });
 
 describe('deriveSessionRowBulkSelectAll', () => {
-  const inScope = (id: string): SessionRowOrderEntry => ({ id, scopeKey: 'project-a', archived: false });
-  const otherScope = (id: string): SessionRowOrderEntry => ({ id, scopeKey: 'project-b', archived: false });
+  const inScope = (id: string, occurrence = 0): SessionRowOrderEntry => ({ id, rowKey: `row:${id}:${occurrence}`, scopeKey: 'project-a', archived: false });
+  const otherScope = (id: string, occurrence = 0): SessionRowOrderEntry => ({ id, rowKey: `row:${id}:${occurrence}`, scopeKey: 'project-b', archived: false });
 
   test('returns null when no rows are registered', () => {
     expect(deriveSessionRowBulkSelectAll([], null)).toBeNull();
@@ -55,7 +77,7 @@ describe('deriveSessionRowBulkSelectAll', () => {
   });
 
   test('keeps duplicate ids for offscreen copies', () => {
-    const entries = [inScope('same'), inScope('same')];
+    const entries = [inScope('same', 0), inScope('same', 1)];
 
     expect(deriveSessionRowBulkSelectAll(entries, 'project-a')).toEqual({
       ids: ['same', 'same'],
@@ -65,7 +87,7 @@ describe('deriveSessionRowBulkSelectAll', () => {
 });
 
 describe('deriveSessionRowSelectionArchived', () => {
-  const entry = (id: string, archived: boolean): SessionRowOrderEntry => ({ id, scopeKey: 'project-a', archived });
+  const entry = (id: string, archived: boolean): SessionRowOrderEntry => ({ id, rowKey: `row:${id}`, scopeKey: 'project-a', archived });
 
   test('is archived only when every selected registered row is archived', () => {
     expect(deriveSessionRowSelectionArchived([entry('a', true), entry('b', true)], new Set(['a', 'b']))).toBe(true);
@@ -83,9 +105,9 @@ describe('deriveSessionRowSelectionArchived', () => {
 
 describe('deriveSessionRowSelectionScope', () => {
   const entries: SessionRowOrderEntry[] = [
-    { id: 'a', scopeKey: null, archived: false },
-    { id: 'b', scopeKey: '/repo/worktree', archived: false },
-    { id: 'c', scopeKey: 'project-a', archived: false },
+    { id: 'a', rowKey: 'row:a', scopeKey: null, archived: false },
+    { id: 'b', rowKey: 'row:b', scopeKey: '/repo/worktree', archived: false },
+    { id: 'c', rowKey: 'row:c', scopeKey: 'project-a', archived: false },
   ];
 
   test('returns the first selected entry scope in render order', () => {
@@ -99,8 +121,8 @@ describe('deriveSessionRowSelectionScope', () => {
 
   test('uses the selected-id insertion order, not render order', () => {
     const rendered: SessionRowOrderEntry[] = [
-      { id: 'renders-first', scopeKey: 'project-first', archived: false },
-      { id: 'selected-first', scopeKey: 'project-second', archived: false },
+      { id: 'renders-first', rowKey: 'row:renders-first', scopeKey: 'project-first', archived: false },
+      { id: 'selected-first', rowKey: 'row:selected-first', scopeKey: 'project-second', archived: false },
     ];
 
     expect(deriveSessionRowSelectionScope(rendered, new Set(['selected-first', 'renders-first']))).toBe('project-second');
@@ -109,9 +131,9 @@ describe('deriveSessionRowSelectionScope', () => {
 
   test('skips an id whose first entry has no scope even when a later duplicate has one', () => {
     const duplicated: SessionRowOrderEntry[] = [
-      { id: 'dup', scopeKey: null, archived: false },
-      { id: 'dup', scopeKey: 'project-later', archived: false },
-      { id: 'other', scopeKey: 'project-other', archived: false },
+      { id: 'dup', rowKey: 'row:dup:first', scopeKey: null, archived: false },
+      { id: 'dup', rowKey: 'row:dup:later', scopeKey: 'project-later', archived: false },
+      { id: 'other', rowKey: 'row:other', scopeKey: 'project-other', archived: false },
     ];
 
     expect(deriveSessionRowSelectionScope(duplicated, new Set(['dup', 'other']))).toBe('project-other');
@@ -119,8 +141,8 @@ describe('deriveSessionRowSelectionScope', () => {
 
   test('uses the first entry in render order for a duplicated id', () => {
     const duplicated: SessionRowOrderEntry[] = [
-      { id: 'dup', scopeKey: 'project-first', archived: false },
-      { id: 'dup', scopeKey: 'project-later', archived: false },
+      { id: 'dup', rowKey: 'row:dup:first', scopeKey: 'project-first', archived: false },
+      { id: 'dup', rowKey: 'row:dup:later', scopeKey: 'project-later', archived: false },
     ];
 
     expect(deriveSessionRowSelectionScope(duplicated, new Set(['dup']))).toBe('project-first');
@@ -128,8 +150,8 @@ describe('deriveSessionRowSelectionScope', () => {
 
   test('treats an empty scope like no scope', () => {
     const emptyScope: SessionRowOrderEntry[] = [
-      { id: 'empty', scopeKey: '', archived: false },
-      { id: 'scoped', scopeKey: 'project-a', archived: false },
+      { id: 'empty', rowKey: 'row:empty', scopeKey: '', archived: false },
+      { id: 'scoped', rowKey: 'row:scoped', scopeKey: 'project-a', archived: false },
     ];
 
     expect(deriveSessionRowSelectionScope(emptyScope, new Set(['empty', 'scoped']))).toBe('project-a');

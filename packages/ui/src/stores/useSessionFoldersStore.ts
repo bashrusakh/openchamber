@@ -4,6 +4,7 @@ import { getDeferredSafeStorage, getSafeStorage } from './utils/safeStorage';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { getRuntimeKey } from '@/lib/runtime-switch';
+import { getSessionFolderIdentityKey } from '@/lib/sessionFolderIdentity';
 
 // --- Types ---
 
@@ -20,6 +21,7 @@ export type SessionFoldersMap = Record<string, SessionFolder[]>;
 
 interface SessionFoldersState {
   foldersMap: SessionFoldersMap;
+  /** UI identity keys, encoded as scopeKey + NUL + folderId. */
   collapsedFolderIds: Set<string>;
 }
 
@@ -33,7 +35,7 @@ interface SessionFoldersActions {
   removeSessionFromFolder: (scopeKey: string, sessionId: string) => void;
   removeSessionEverywhere: (runtimeKey: string, sessionId: string) => void;
   removeSessionsFromFolders: (scopeKey: string, sessionIds: string[]) => void;
-  toggleFolderCollapse: (folderId: string) => void;
+  toggleFolderCollapse: (scopeKey: string, folderId: string) => void;
   getSessionFolderId: (scopeKey: string, sessionId: string) => string | null;
   resetForRuntimeSwitch: (runtimeKey: string) => void;
 }
@@ -195,7 +197,40 @@ const readPersistedFolders = (runtimeKey = activeFolderRuntimeKey): SessionFolde
   }
 };
 
-const readPersistedCollapsed = (runtimeKey = activeFolderRuntimeKey): Set<string> => {
+const normalizePersistedCollapsed = (
+  foldersMap: SessionFoldersMap,
+  values: readonly string[],
+): Set<string> => {
+  const legacyMatches = new Map<string, string[]>();
+  for (const [scopeKey, folders] of Object.entries(foldersMap)) {
+    for (const folder of folders) {
+      const key = getSessionFolderIdentityKey(scopeKey, folder.id);
+      const matches = legacyMatches.get(folder.id) ?? [];
+      matches.push(key);
+      legacyMatches.set(folder.id, matches);
+    }
+  }
+
+  const result = new Set<string>();
+  for (const value of values) {
+    if (value.includes('\u0000')) {
+      // Keep scoped values even if their folder is not in this snapshot. A
+      // later folder snapshot can make that UI state valid again.
+      result.add(value);
+      continue;
+    }
+    // Older snapshots stored bare ids. Migrate only an unambiguous id. An id
+    // found in multiple scopes cannot safely be assigned by a global-id guess.
+    const matches = legacyMatches.get(value) ?? [];
+    if (matches.length === 1 && matches[0]) result.add(matches[0]);
+  }
+  return result;
+};
+
+const readPersistedCollapsed = (
+  runtimeKey = activeFolderRuntimeKey,
+  foldersMap: SessionFoldersMap = {},
+): Set<string> => {
   try {
     claimLegacyStorage(runtimeKey);
     const raw = safeStorage.getItem(runtimeStorageKey(COLLAPSED_STORAGE_KEY, runtimeKey));
@@ -206,7 +241,10 @@ const readPersistedCollapsed = (runtimeKey = activeFolderRuntimeKey): Set<string
     if (!Array.isArray(parsed)) {
       return new Set();
     }
-    return new Set(parsed.filter((v): v is string => typeof v === 'string'));
+    return normalizePersistedCollapsed(
+      foldersMap,
+      parsed.filter((v): v is string => typeof v === 'string'),
+    );
   } catch {
     return new Set();
   }
@@ -305,6 +343,7 @@ const createFolderId = (): string => {
 };
 
 const syncCollapsedAfterFolderCleanup = (
+  scopeKey: string,
   prevFolders: SessionFolder[],
   nextFolders: SessionFolder[],
   collapsedFolderIds: Set<string>,
@@ -313,11 +352,12 @@ const syncCollapsedAfterFolderCleanup = (
   let nextCollapsed: Set<string> | null = null;
 
   for (const folder of prevFolders) {
-    if (!nextFolderIds.has(folder.id) && collapsedFolderIds.has(folder.id)) {
+    const collapseKey = getSessionFolderIdentityKey(scopeKey, folder.id);
+    if (!nextFolderIds.has(folder.id) && collapsedFolderIds.has(collapseKey)) {
       if (!nextCollapsed) {
         nextCollapsed = new Set(collapsedFolderIds);
       }
-      nextCollapsed.delete(folder.id);
+      nextCollapsed.delete(collapseKey);
     }
   }
 
@@ -326,11 +366,13 @@ const syncCollapsedAfterFolderCleanup = (
 
 // --- Store ---
 
+const initialFoldersMap = readPersistedFolders();
+
 export const useSessionFoldersStore = create<SessionFoldersStore>()(
   devtools(
     (set, get) => ({
-      foldersMap: readPersistedFolders(),
-      collapsedFolderIds: readPersistedCollapsed(),
+      foldersMap: initialFoldersMap,
+      collapsedFolderIds: readPersistedCollapsed(activeFolderRuntimeKey, initialFoldersMap),
 
       resetForRuntimeSwitch: (runtimeKey: string): void => {
         try { flushPendingBrowserPersistence(); } catch { /* deferred storage retains failed writes */ }
@@ -341,9 +383,10 @@ export const useSessionFoldersStore = create<SessionFoldersStore>()(
         diskHydrationInFlight = false;
         if (diskWriteTimer) clearTimeout(diskWriteTimer);
         diskWriteTimer = null;
+        const nextFoldersMap = readPersistedFolders(runtimeKey);
         set({
-          foldersMap: readPersistedFolders(runtimeKey),
-          collapsedFolderIds: readPersistedCollapsed(runtimeKey),
+          foldersMap: nextFoldersMap,
+          collapsedFolderIds: readPersistedCollapsed(runtimeKey, nextFoldersMap),
         });
         queueMicrotask(() => void hydrateSessionFoldersFromDisk());
       },
@@ -407,7 +450,7 @@ export const useSessionFoldersStore = create<SessionFoldersStore>()(
         const nextFolders = scopeFolders.filter((folder) => !idsToDelete.has(folder.id));
         const nextMap: SessionFoldersMap = { ...current, [scopeKey]: nextFolders };
         const collapsed = get().collapsedFolderIds;
-        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeFolders, nextFolders, collapsed);
+        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeKey, scopeFolders, nextFolders, collapsed);
         set(nextCollapsed
           ? { foldersMap: nextMap, collapsedFolderIds: nextCollapsed }
           : { foldersMap: nextMap });
@@ -444,7 +487,7 @@ export const useSessionFoldersStore = create<SessionFoldersStore>()(
         });
 
         const nextMap: SessionFoldersMap = { ...current, [scopeKey]: nextFolders };
-        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeFolders, nextFolders, get().collapsedFolderIds);
+        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeKey, scopeFolders, nextFolders, get().collapsedFolderIds);
 
         set(nextCollapsed
           ? { foldersMap: nextMap, collapsedFolderIds: nextCollapsed }
@@ -497,7 +540,7 @@ export const useSessionFoldersStore = create<SessionFoldersStore>()(
         });
 
         const nextMap: SessionFoldersMap = { ...current, [scopeKey]: nextFolders };
-        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeFolders, nextFolders, get().collapsedFolderIds);
+        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeKey, scopeFolders, nextFolders, get().collapsedFolderIds);
 
         set(nextCollapsed
           ? { foldersMap: nextMap, collapsedFolderIds: nextCollapsed }
@@ -526,7 +569,7 @@ export const useSessionFoldersStore = create<SessionFoldersStore>()(
 
         if (!changed) return;
         const nextMap: SessionFoldersMap = { ...current, [scopeKey]: nextFolders };
-        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeFolders, nextFolders, get().collapsedFolderIds);
+        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeKey, scopeFolders, nextFolders, get().collapsedFolderIds);
 
         set(nextCollapsed
           ? { foldersMap: nextMap, collapsedFolderIds: nextCollapsed }
@@ -552,7 +595,7 @@ export const useSessionFoldersStore = create<SessionFoldersStore>()(
 
         if (!changed) return;
         const nextMap: SessionFoldersMap = { ...current, [scopeKey]: nextFolders };
-        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeFolders, nextFolders, get().collapsedFolderIds);
+        const nextCollapsed = syncCollapsedAfterFolderCleanup(scopeKey, scopeFolders, nextFolders, get().collapsedFolderIds);
 
         set(nextCollapsed
           ? { foldersMap: nextMap, collapsedFolderIds: nextCollapsed }
@@ -583,13 +626,15 @@ export const useSessionFoldersStore = create<SessionFoldersStore>()(
         persistState(nextMap, get().collapsedFolderIds);
       },
 
-      toggleFolderCollapse: (folderId: string): void => {
+      toggleFolderCollapse: (scopeKey: string, folderId: string): void => {
+        if (!scopeKey || !folderId) return;
         const collapsed = get().collapsedFolderIds;
+        const collapseKey = getSessionFolderIdentityKey(scopeKey, folderId);
         const next = new Set(collapsed);
-        if (next.has(folderId)) {
-          next.delete(folderId);
+        if (next.has(collapseKey)) {
+          next.delete(collapseKey);
         } else {
-          next.add(folderId);
+          next.add(collapseKey);
         }
         set({ collapsedFolderIds: next });
         persistState(get().foldersMap, next);
@@ -653,7 +698,10 @@ const hydrateSessionFoldersFromDisk = async (): Promise<void> => {
       ? parsed.foldersMap
       : {};
     const diskCollapsed = Array.isArray(parsed.collapsedFolderIds)
-      ? new Set(parsed.collapsedFolderIds.filter((value): value is string => typeof value === 'string'))
+      ? normalizePersistedCollapsed(
+        diskFolders,
+        parsed.collapsedFolderIds.filter((value): value is string => typeof value === 'string'),
+      )
       : new Set<string>();
 
     if (generation !== folderRuntimeGeneration || runtimeKey !== getRuntimeKey()) return;

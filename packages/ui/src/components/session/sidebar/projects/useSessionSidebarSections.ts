@@ -6,6 +6,7 @@ import { dedupeSessionsById, normalizePath } from '../utils';
 import type { WorktreeMetadata } from '@/types/worktree';
 import type { SessionFoldersMap } from '@/stores/useSessionFoldersStore';
 import { streamPerfCount } from '@/stores/utils/streamDebug';
+import { getSessionFolderScopes } from '../sessions/sessionFolderIdentity';
 
 type ProjectItem = {
   id: string;
@@ -200,9 +201,8 @@ export const useSessionSidebarSections = (args: Args) => {
     const addSearchData = (group: SessionGroup) => {
       const { nodes: filteredNodes, matchedCount: matchedSessionCount } = filterSessionNodesForSearch(group.sessions, normalizedSessionSearchQuery);
       const groupMatches = !isIdQuery && matchesRankQuery([buildGroupSearchText(group)], normalizedSessionSearchQuery);
-      const scopeKey = normalizePath(group.directory ?? null);
-      const scopeFolders = scopeKey ? (foldersMap[scopeKey] ?? []) : [];
-      const folderNameMatchCount = isIdQuery ? 0 : scopeFolders.filter((folder) => matchesRankQuery([folder.name], normalizedSessionSearchQuery)).length;
+       const scopeFolders = getSessionFolderScopes(group).flatMap(({ scopeKey }) => foldersMap[scopeKey] ?? []);
+       const folderNameMatchCount = isIdQuery ? 0 : scopeFolders.filter((folder) => matchesRankQuery([folder.name], normalizedSessionSearchQuery)).length;
 
       result.set(group, {
         filteredNodes,
@@ -264,12 +264,9 @@ export const useSessionSidebarSections = (args: Args) => {
       const sessions = nonArchivedGroups.flatMap((group) => hasSessionSearchQuery
         ? (groupSearchDataByGroup.get(group)?.filteredNodes ?? [])
         : group.sessions);
-      const folderScopes = nonArchivedGroups
-        .map((group) => ({
-          scopeKey: group.folderScopeKey ?? normalizePath(group.directory ?? null),
-          directory: group.directory ?? null,
-        }))
-        .filter((scope): scope is { scopeKey: string; directory: string | null } => Boolean(scope.scopeKey));
+       const folderScopes = nonArchivedGroups
+         .flatMap((group) => getSessionFolderScopes(group))
+         .filter((scope, index, scopes) => scopes.findIndex((candidate) => candidate.scopeKey === scope.scopeKey) === index);
       const rootGroup = nonArchivedGroups.find((group) => group.isMain) ?? null;
 
       const flatGroup: SessionGroup = {
@@ -301,35 +298,18 @@ export const useSessionSidebarSections = (args: Args) => {
 
       const flatSection: ProjectSection = {
         project: section.project,
-        groups: [flatGroup, ...archivedGroups],
+        // When search leaves only archived results, the empty flat group is a
+        // synthetic projection rather than an intentional matching group.
+        // Keep an empty flat group when a non-archived group matched by name or
+        // folder, because that result still has meaningful empty-group UI.
+        groups: hasSessionSearchQuery && nonArchivedGroups.length === 0
+          ? archivedGroups
+          : [flatGroup, ...archivedGroups],
       };
       cache.set(section, { query: normalizedSessionSearchQuery, section: flatSection });
       return flatSection;
     });
   }, [groupSearchDataByGroup, hasSessionSearchQuery, normalizedSessionSearchQuery, sectionsForRender]);
-
-  const searchMatchCount = React.useMemo(() => {
-    if (!hasSessionSearchQuery) {
-      return 0;
-    }
-
-    const countGroup = (total: number, group: SessionGroup): number => {
-      const data = groupSearchDataByGroup.get(group);
-      if (!data) {
-        return total;
-      }
-      const metadataMatches = data.folderNameMatchCount + (data.groupMatches ? 1 : 0);
-      return total + data.matchedSessionCount + metadataMatches;
-    };
-
-    const projectMatches = sectionsForRender.reduce(
-      (total, section) => section.groups.reduce(countGroup, total),
-      0,
-    );
-    // Chats the user can see in the list count as matches too, or the header
-    // reports zero while their results sit right underneath it.
-    return standaloneGroups.reduce(countGroup, projectMatches);
-  }, [hasSessionSearchQuery, sectionsForRender, standaloneGroups, groupSearchDataByGroup]);
 
   return {
     projectSections,
@@ -338,6 +318,5 @@ export const useSessionSidebarSections = (args: Args) => {
     searchableProjectSections,
     sectionsForRender,
     flatSectionsForRender,
-    searchMatchCount,
   };
 };

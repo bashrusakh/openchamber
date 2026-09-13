@@ -21,6 +21,7 @@ import type { ProjectSortOrder } from '@/stores/useSessionDisplayStore';
 import { streamPerfCount } from '@/stores/utils/streamDebug';
 import { Icon } from '@/components/icon/Icon';
 import { DirectoryActionIndicator } from '../sessions/DirectoryActionIndicator';
+import { SessionSearchRows, type SessionSearchRowsProps } from './SessionSearchRows';
 
 type SessionProjectScrollerState = Pick<SessionGroupSectionProps,
   | 'editingId'
@@ -90,8 +91,13 @@ type SessionProjectScrollerModel = {
   projectRepoStatus: Map<string, boolean | null>;
   stuckProjectHeaders: Set<string>;
   projectHeaderSentinelRefs: React.MutableRefObject<Map<string, HTMLDivElement | null>>;
+  onSearchRowsMounted?: () => void;
   state: SessionProjectScrollerState;
   groupProps: SessionProjectScrollerGroupProps;
+  searchRowModel?: SessionSearchRowsProps['model'];
+  toggleActivitySection?: (key: 'chats' | 'active-now') => void;
+  onNewChat?: () => void;
+  searchRowsMountVersion?: number;
 };
 
 type SessionProjectScrollerView = {
@@ -113,7 +119,7 @@ type SessionProjectScrollerActions = {
   toggleProject: (id: string) => void;
   setActiveProjectIdOnly: (id: string) => void;
   setSessionSwitcherOpen: (open: boolean) => void;
-  openNewSessionDraft: (options?: { selectedProjectId?: string | null; directoryOverride?: string | null }) => void;
+  openNewSessionDraft: (options?: { selectedProjectId?: string | null; directoryOverride?: string | null; targetFolderId?: string; target?: 'chat' | 'project' }) => void;
   openNewWorktreeDialog: () => void;
   openWorktreesPage: (id: string) => void;
   openProjectEditDialog: (id: string) => void;
@@ -148,6 +154,11 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
   const { model, view, actions } = props;
   const isInlineEditing = model.state.editingId !== null;
   const enableStickyFade = view.isDesktopShellRuntime && view.stickyZoneHeaders && !model.singleProjectMode;
+  // SAFETY: React's CSSProperties type does not include custom properties; the
+  // literal contains only the sticky fade variable consumed by this component.
+  const stickyFadeStyle = enableStickyFade
+    ? ({ '--scroll-shadow-top-size': '0px' } as React.CSSProperties)
+    : undefined;
   const projectSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -193,7 +204,12 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
     model.singleProjectMode,
     model.singleProjectId,
   );
-  const hasProjectScroller = model.projectSections.length > 0 && renderedSections.length > 0;
+  const searchRows = view.hasSessionSearchQuery ? model.searchRowModel?.rows ?? [] : [];
+  const searchHasActivityHeaders = searchRows.some((row) => row.kind === 'activity-header');
+  const searchHasProjectHeaders = searchRows.some((row) => row.kind === 'project-header');
+  const hasProjectScroller = view.hasSessionSearchQuery
+    ? searchHasProjectHeaders || searchHasActivityHeaders
+    : model.projectSections.length > 0 && renderedSections.length > 0;
   const [isRecentHeaderStuck, setIsRecentHeaderStuck] = React.useState(false);
   React.useLayoutEffect(() => {
     const root = scrollContainerRef.current;
@@ -214,26 +230,50 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
     }, { root, threshold: 0 });
     observer.observe(recentStart);
     return () => observer.disconnect();
-  }, [enableStickyFade, hasProjectScroller, model.topContent]);
+  }, [enableStickyFade, hasProjectScroller, model.searchRowModel, model.searchRowsMountVersion, model.topContent]);
   React.useLayoutEffect(() => {
     if (enableStickyFade && hasProjectScroller && scrollContainerRef.current) {
       syncTopFade(scrollContainerRef.current);
     }
   }, [enableStickyFade, hasProjectScroller, syncTopFade]);
   let stuckProject: ProjectSection['project'] | null = null;
-  for (const section of model.projectSections) {
-    if (model.stuckProjectHeaders.has(section.project.id)) {
-      stuckProject = section.project;
+  if (view.hasSessionSearchQuery) {
+    for (const row of searchRows) {
+      if (row.kind === 'project-header' && model.stuckProjectHeaders.has(row.project.id)) {
+        stuckProject = row.project;
+      }
+    }
+  } else {
+    for (const section of model.projectSections) {
+      if (model.stuckProjectHeaders.has(section.project.id)) {
+        stuckProject = section.project;
+      }
     }
   }
+  const hasSharedSessions = view.hasSessionSearchQuery ? searchHasActivityHeaders : Boolean(model.hasSharedSessions);
   // The IntersectionObserver reports the stuck header asynchronously, a frame or
   // two after the synchronous fade has already hidden the real header — which
   // otherwise leaves a one-frame gap where the title blinks out with no crisp
   // replacement. Seed the overlay with the topmost rendered project so it is
   // ready in the same frame; the observer then corrects it. When shared sessions
   // lead the list, the activity fallback below owns the top instead of a project.
-  const leadingProject =
-    stuckProject ?? (model.hasSharedSessions ? null : renderedSections[0]?.project ?? null);
+  const leadingProject = stuckProject ?? (
+    hasSharedSessions
+      ? null
+      : view.hasSessionSearchQuery
+        ? searchRows.find((row): row is Extract<typeof row, { kind: 'project-header' }> => row.kind === 'project-header')?.project ?? null
+        : renderedSections[0]?.project ?? null
+  );
+  const searchHasRecentHeader = searchRows.some((row) => row.kind === 'activity-header' && row.activityKey === 'active-now');
+  const searchHasChatsHeader = searchRows.some((row) => row.kind === 'activity-header' && row.activityKey === 'chats');
+  const stickyActivityKey = isRecentHeaderStuck && searchHasRecentHeader
+    ? 'active-now'
+    : searchHasChatsHeader
+      ? 'chats'
+      : 'active-now';
+  const showRecentActivityHeader = view.hasSessionSearchQuery
+    ? stickyActivityKey === 'active-now'
+    : isRecentHeaderStuck;
   const leadingProjectLabel = leadingProject ? getProjectLabel(leadingProject, view.homeDirectory) : null;
   const projectPickerOptions = React.useMemo(() => model.projectSections.map((section) => ({
     id: section.project.id,
@@ -244,6 +284,96 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
     projectIconImage: section.project.iconImage,
     projectIconBackground: section.project.iconBackground,
   })), [model.projectSections, view.homeDirectory]);
+  const stickyHeaderOverlay = enableStickyFade && (leadingProject || hasSharedSessions) ? (
+    <div
+      className="oc-sticky-fade-overlay pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center gap-1.5 py-1 pl-4 pr-5"
+      aria-hidden="true"
+    >
+      {leadingProject && leadingProjectLabel ? (
+        <>
+          <ProjectHeaderIdentity
+            id={leadingProject.id}
+            projectLabel={leadingProjectLabel}
+            projectIcon={leadingProject.icon}
+            projectColor={leadingProject.color}
+            projectIconImage={leadingProject.iconImage}
+            projectIconBackground={leadingProject.iconBackground}
+          />
+          <DirectoryActionIndicator directory={leadingProject.normalizedPath} className="ml-auto" />
+        </>
+      ) : (
+        <>
+          <Icon name={showRecentActivityHeader ? 'history' : 'chat-4'} className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/80" />
+          <span className="truncate typography-ui-label font-semibold lowercase text-foreground">
+            {showRecentActivityHeader
+              ? t('sessions.sidebar.activity.recentTitle')
+              : t('sessions.sidebar.activity.chatsTitle')}
+          </span>
+        </>
+      )}
+    </div>
+  ) : null;
+
+  if (view.hasSessionSearchQuery && model.searchRowModel && model.toggleActivitySection && model.onNewChat) {
+    const searchRowsProps: SessionSearchRowsProps = {
+      model: model.searchRowModel,
+      scrollContainerRef,
+      homeDirectory: view.homeDirectory,
+      hideDirectoryControls: view.hideDirectoryControls,
+      isDesktopShellRuntime: view.isDesktopShellRuntime,
+      stickyZoneHeaders: view.stickyZoneHeaders,
+      onRowsMounted: model.onSearchRowsMounted,
+      mobileVariant: view.mobileVariant,
+      alwaysShowActions: view.alwaysShowActions,
+      singleProjectMode: model.singleProjectMode,
+      projectPickerOptions,
+      activeProjectId: model.activeProjectId,
+      projectRepoStatus: model.projectRepoStatus,
+      openSidebarMenuKey: model.state.openSidebarMenuKey,
+      setOpenSidebarMenuKey: model.state.setOpenSidebarMenuKey,
+      sessionProps: {
+        ...model.groupProps,
+        editingId: model.state.editingId,
+        setOpenSidebarMenuKey: model.state.setOpenSidebarMenuKey,
+        onToggleCollapsedGroup: actions.group.onToggleCollapsedGroup,
+      },
+      toggleProject: actions.toggleProject,
+      setActiveProjectIdOnly: actions.setActiveProjectIdOnly,
+      setSessionSwitcherOpen: actions.setSessionSwitcherOpen,
+      openNewSessionDraft: actions.openNewSessionDraft,
+      openNewWorktreeDialog: actions.openNewWorktreeDialog,
+      openWorktreesPage: actions.openWorktreesPage,
+      openProjectEditDialog: actions.openProjectEditDialog,
+      removeProject: actions.removeProject,
+      setSingleProjectId: actions.setSingleProjectId,
+      onNewChat: model.onNewChat,
+      toggleActivitySection: model.toggleActivitySection,
+      renderProjectStatusIndicator: actions.renderProjectStatusIndicator,
+      projectHeaderSentinelRefs: model.projectHeaderSentinelRefs,
+    };
+    return (
+      <div
+        className="oc-sticky-fade-root relative flex min-h-0 flex-1"
+         style={stickyFadeStyle}
+        onPointerDownCapture={enableStickyFade ? blockObscuredInteraction : undefined}
+        onClickCapture={enableStickyFade ? blockObscuredInteraction : undefined}
+        onContextMenuCapture={enableStickyFade ? blockObscuredInteraction : undefined}
+      >
+        <ScrollableOverlay
+          ref={scrollContainerRef}
+          useScrollShadow
+          hideTopScrollShadow={!enableStickyFade}
+          scrollShadowSize={96}
+          outerClassName="flex-1 min-h-0"
+          className="oc-sidebar-scroller oc-sticky-fade-scroller space-y-1.5 pb-1 pl-2.5 pr-2 [overflow-anchor:none]"
+          onScroll={enableStickyFade ? (event) => syncTopFade(event.currentTarget) : undefined}
+        >
+          {searchRowsProps.model.hasResults ? <SessionSearchRows {...searchRowsProps} /> : model.searchEmptyState}
+        </ScrollableOverlay>
+        {stickyHeaderOverlay}
+      </div>
+    );
+  }
 
   if (model.projectSections.length === 0) {
     return <ScrollableOverlay useScrollShadow scrollShadowSize={96} outerClassName="flex-1 min-h-0" className="space-y-1 pb-1 pl-2.5 pr-2">{model.topContent}{model.emptyState}</ScrollableOverlay>;
@@ -265,7 +395,7 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
     <div
       className="oc-sticky-fade-root relative flex min-h-0 flex-1"
       // SAFETY: this custom property configures the viewport-owned edge fade.
-      style={enableStickyFade ? { '--scroll-shadow-top-size': '0px' } as React.CSSProperties : undefined}
+       style={stickyFadeStyle}
       onPointerDownCapture={enableStickyFade ? blockObscuredInteraction : undefined}
       onClickCapture={enableStickyFade ? blockObscuredInteraction : undefined}
       onContextMenuCapture={enableStickyFade ? blockObscuredInteraction : undefined}
@@ -429,33 +559,7 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
         </DndContext>
       )}
       </ScrollableOverlay>
-      {enableStickyFade && (leadingProject || model.hasSharedSessions) ? (
-        <div
-          className="oc-sticky-fade-overlay pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center gap-1.5 py-1 pl-4 pr-5"
-          aria-hidden="true"
-        >
-          {leadingProject && leadingProjectLabel ? (
-            <>
-              <ProjectHeaderIdentity
-                id={leadingProject.id}
-                projectLabel={leadingProjectLabel}
-                projectIcon={leadingProject.icon}
-                projectColor={leadingProject.color}
-                projectIconImage={leadingProject.iconImage}
-                projectIconBackground={leadingProject.iconBackground}
-              />
-              <DirectoryActionIndicator directory={leadingProject.normalizedPath} className="ml-auto" />
-            </>
-          ) : (
-            <>
-              <Icon name={isRecentHeaderStuck ? 'history' : 'chat-4'} className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/80" />
-              <span className="truncate typography-ui-label font-semibold lowercase text-foreground">
-                {isRecentHeaderStuck ? t('sessions.sidebar.activity.recentTitle') : t('sessions.sidebar.activity.chatsTitle')}
-              </span>
-            </>
-          )}
-        </div>
-      ) : null}
+      {stickyHeaderOverlay}
     </div>
   );
 }

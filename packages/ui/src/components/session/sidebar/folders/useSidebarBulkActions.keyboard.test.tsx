@@ -60,15 +60,15 @@ const setUserAgent = (value: string): void => {
 // Mirrors the real render order: a project segment and the Recent duplicate,
 // plus a second scope used to prove the store scope filters the selection.
 const PROJECT_SEGMENT: readonly SessionRowOrderEntry[] = [
-  { id: 'ses_a', scopeKey: 'project', archived: false },
-  { id: 'ses_b', scopeKey: 'project', archived: false },
+  { id: 'ses_a', rowKey: 'project:ses_a', scopeKey: 'project', archived: false },
+  { id: 'ses_b', rowKey: 'project:ses_b', scopeKey: 'project', archived: false },
 ];
 const RECENT_SEGMENT: readonly SessionRowOrderEntry[] = [
-  { id: 'ses_a', scopeKey: 'project', archived: false },
-  { id: 'ses_c', scopeKey: 'project', archived: false },
+  { id: 'ses_a', rowKey: 'recent:ses_a', scopeKey: 'project', archived: false },
+  { id: 'ses_c', rowKey: 'recent:ses_c', scopeKey: 'project', archived: false },
 ];
 const OTHER_SCOPE_SEGMENT: readonly SessionRowOrderEntry[] = [
-  { id: 'ses_other', scopeKey: 'project-b', archived: false },
+  { id: 'ses_other', rowKey: 'other:ses_other', scopeKey: 'project-b', archived: false },
 ];
 
 const noop = (): void => undefined;
@@ -92,7 +92,7 @@ const BulkActionsHarness = () => {
     isInlineEditing: false,
     showDeletionDialog: false,
     foldersMap: {},
-    getFolderScopesForProject: noFolderScopes,
+    getFolderScopesForSelectionScope: noFolderScopes,
     addSessionsToFolder: noop,
     removeSessionsFromFolders: noop,
     createFolderAndStartRename: noFolder,

@@ -10,13 +10,23 @@ import {
   useSessionRowOrderRegistry,
   type SessionRowOrderRegistry,
 } from './sessionRowOrder';
-import { toSessionRowOrderIds, type SessionRowOrderEntry } from './sessionRowOrderUtils';
+import type { SessionRowOrderEntry } from './sessionRowOrderUtils';
 
-const entry = (id: string, scopeKey: string | null = 'project-a', archived = false): SessionRowOrderEntry => ({
+const entry = (
+  id: string,
+  scopeKey: string | null = 'project-a',
+  archived = false,
+  rowKey = `row:${id}`,
+): SessionRowOrderEntry => ({
   id,
+  rowKey,
   scopeKey,
   archived,
 });
+
+const orderedIds = (registry: SessionRowOrderRegistry): string[] => (
+  registry.getOrderedEntries().map((item) => item.id)
+);
 
 type ProviderCapture = {
   registry: SessionRowOrderRegistry | null;
@@ -34,7 +44,7 @@ describe('session row order registry', () => {
     registry.register('early', { order: 0, entries: [entry('a')] });
     registry.register('middle', { order: 1, entries: [entry('b1'), entry('b2')] });
 
-    expect(registry.getOrderedIds()).toEqual(['a', 'b1', 'b2', 'c']);
+    expect(orderedIds(registry)).toEqual(['a', 'b1', 'b2', 'c']);
     expect(registry.getOrderedEntries()).toEqual([
       entry('a'),
       entry('b1'),
@@ -45,28 +55,29 @@ describe('session row order registry', () => {
 
   test('includes every model row, including ones virtualization keeps unmounted', () => {
     const registry = createSessionRowOrderRegistry();
-    const offscreen = Array.from({ length: 2000 }, (_, index) => entry(`row-${index}`));
-    registry.register('recent', { order: 0, entries: [entry('row-0')] });
+    const offscreen = Array.from({ length: 2000 }, (_, index) => entry(`row-${index}`, 'project-a', false, `project:row-${index}`));
+    registry.register('recent', { order: 0, entries: [entry('row-0', 'project-a', false, 'recent:row-0')] });
     registry.register('project', { order: 1000, entries: offscreen });
 
-    const orderedIds = registry.getOrderedIds();
-    expect(orderedIds).toHaveLength(2001);
-    expect(orderedIds[0]).toBe('row-0');
-    expect(orderedIds[orderedIds.length - 1]).toBe('row-1999');
-    expect(orderedIds.filter((id) => id === 'row-0')).toHaveLength(2);
+    const ids = orderedIds(registry);
+    expect(ids).toHaveLength(2001);
+    expect(ids[0]).toBe('row-0');
+    expect(ids[ids.length - 1]).toBe('row-1999');
+    expect(ids.filter((id) => id === 'row-0')).toHaveLength(2);
+    expect(new Set(registry.getOrderedEntries().map((item) => item.rowKey)).size).toBe(2001);
   });
 
   test('unregisters a segment and rebuilds the cached order', () => {
     const registry = createSessionRowOrderRegistry();
     registry.register('a', { order: 0, entries: [entry('a')] });
     registry.register('b', { order: 1, entries: [entry('b')] });
-    expect(registry.getOrderedIds()).toEqual(['a', 'b']);
+    expect(orderedIds(registry)).toEqual(['a', 'b']);
 
     registry.unregister('a');
-    expect(registry.getOrderedIds()).toEqual(['b']);
+    expect(orderedIds(registry)).toEqual(['b']);
 
     registry.unregister('missing');
-    expect(registry.getOrderedIds()).toEqual(['b']);
+    expect(orderedIds(registry)).toEqual(['b']);
   });
 });
 
@@ -86,7 +97,7 @@ describe('session row order provider', () => {
       const registry = useSessionRowOrderRegistry();
       capture.registry = registry;
       React.useEffect(() => {
-        capture.observed = registry?.getOrderedIds() ?? null;
+        capture.observed = registry?.getOrderedEntries().map((item) => item.id) ?? null;
       }, [registry]);
       return null;
     };
@@ -103,7 +114,7 @@ describe('session row order provider', () => {
       expect(capture.registry).not.toBeNull();
       expect(capture.observed).toEqual(['early', 'late']);
       if (!capture.registry) throw new Error('registry was not provided');
-      expect(capture.registry.getOrderedIds()).toEqual(['early', 'late']);
+      expect(orderedIds(capture.registry)).toEqual(['early', 'late']);
     } finally {
       await act(async () => root.unmount());
       dom.restore();
@@ -141,11 +152,11 @@ describe('session row order provider', () => {
       expect(consumerRenders).toBe(1);
       const consumerRegistry = consumerCapture.registry;
       if (!consumerRegistry) throw new Error('consumer did not receive the registry');
-      expect(consumerRegistry.getOrderedIds()).toEqual(['a']);
+      expect(orderedIds(consumerRegistry)).toEqual(['a']);
 
       await act(async () => setEntries([entry('b')]));
       expect(consumerRenders).toBe(1);
-      expect(consumerRegistry.getOrderedIds()).toEqual(['b']);
+      expect(orderedIds(consumerRegistry)).toEqual(['b']);
     } finally {
       await act(async () => root.unmount());
       dom.restore();
@@ -167,12 +178,19 @@ describe('shift-range selection inputs', () => {
       entries: Array.from({ length: 500 }, (_, index) => entry(`row-${index}`)),
     });
 
-    const orderedIds = toSessionRowOrderIds(registry.getOrderedEntries());
+    const orderedEntries = registry.getOrderedEntries();
     const descendantsById = new Map([['row-10', ['row-10-child']]]);
-    useSessionMultiSelectStore.getState().setRange('row-0', 'row-10', orderedIds, 'project-a', descendantsById);
+    useSessionMultiSelectStore.getState().setRange(
+      orderedEntries[1]?.rowKey ?? null,
+      orderedEntries[11]?.rowKey ?? '',
+      orderedEntries,
+      'project-a',
+      descendantsById,
+    );
 
     const state = useSessionMultiSelectStore.getState();
     expect(state.anchorId).toBe('row-0');
+    expect(state.anchorRowKey).toBe('row:row-0');
     expect(state.selectedIds.has('pinned')).toBe(false);
     expect(state.selectedIds.has('row-0')).toBe(true);
     expect(state.selectedIds.has('row-10')).toBe(true);
@@ -185,11 +203,12 @@ describe('shift-range selection inputs', () => {
     const registry = createSessionRowOrderRegistry();
     registry.register('section', { order: 1000, entries: [entry('first'), entry('second'), entry('third')] });
 
-    const orderedIds = toSessionRowOrderIds(registry.getOrderedEntries());
-    useSessionMultiSelectStore.getState().setRange('removed', 'second', orderedIds, 'project-a');
+    const orderedEntries = registry.getOrderedEntries();
+    useSessionMultiSelectStore.getState().setRange('removed', 'row:second', orderedEntries, 'project-a');
 
     const state = useSessionMultiSelectStore.getState();
     expect(state.anchorId).toBe('first');
+    expect(state.anchorRowKey).toBe('row:first');
     expect([...state.selectedIds].sort()).toEqual(['first', 'second']);
   });
 });

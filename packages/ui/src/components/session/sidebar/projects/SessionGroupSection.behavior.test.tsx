@@ -9,7 +9,6 @@ import type { Session } from '@opencode-ai/sdk/v2';
 import type { GroupSearchData, SessionGroup } from '../types';
 import type { SessionGroupSectionProps } from './SessionGroupSection';
 import type { SessionTreeItemProps } from '../sessions/SessionTreeItem';
-import { SESSION_GROUP_VIRTUALIZE_THRESHOLD } from '../sessions/sessionNodeItemUtils';
 import { installHookTestDom } from '../test-utils/testDom';
 import {
   SessionRowOrderProvider,
@@ -25,6 +24,10 @@ type FolderCallbacks = {
 type RegistryCapture = {
   registry: SessionRowOrderRegistry | null;
 };
+
+const orderedIds = (registry: SessionRowOrderRegistry | null): string[] => (
+  registry?.getOrderedEntries().map((entry) => entry.id) ?? []
+);
 
 type RowPropsCapture = Pick<SessionGroupSectionProps,
   | 'allowReselect'
@@ -177,20 +180,6 @@ const searchDataFor = (target: SessionGroup): WeakMap<SessionGroup, GroupSearchD
   },
 ]]);
 
-const nestedGroup = (childCount: number, idPrefix: string): SessionGroup => ({
-  ...group,
-  // SAFETY: SessionGroupSection only reads the fixture session ids and structure in this test.
-  sessions: [{
-    session: { id: `${idPrefix}-root` } as Session,
-    children: Array.from({ length: childCount }, (_, index) => ({
-      session: { id: `${idPrefix}-child-${String(index).padStart(2, '0')}` } as Session,
-      children: [],
-      worktree: null,
-    })),
-    worktree: null,
-  }],
-});
-
 const flatRootGroup = (rootCount: number, isArchivedBucket: boolean): SessionGroup => ({
   ...group,
   isArchivedBucket,
@@ -285,6 +274,36 @@ describe('SessionGroupSection public behavior', () => {
     }
   });
 
+  test('keeps managed-chat selection scoped to the shared root, not the dated session directory', async () => {
+    const dom = installHookTestDom();
+    const root = createRoot(dom.container);
+     const capture: RegistryCapture = { registry: null };
+     const chatsRoot = '/home/user/.config/openchamber/chats';
+     const datedDirectory = `${chatsRoot}/2026-09-13/session-chat`;
+     // SAFETY: The mocked row renderer only reads the session identity and directory;
+     // the fixture intentionally omits unrelated SDK fields.
+     const managedChatSession = { id: 'chat', directory: datedDirectory } as Session;
+     const managedChatGroup: SessionGroupSectionProps['group'] = {
+       ...group,
+       directory: chatsRoot,
+       folderScopeKey: chatsRoot,
+       folderScopes: [{ scopeKey: chatsRoot, directory: chatsRoot }],
+       sessions: [{ session: managedChatSession, children: [], worktree: null }],
+     };
+    renderedRowCalls = [];
+
+    try {
+      await renderGroup(root, managedChatGroup, capture, { projectId: null });
+
+      expect(renderedRowCalls[0]?.selectionScopeKey).toBe(chatsRoot);
+      expect(capture.registry?.getOrderedEntries().map((entry) => entry.scopeKey)).toEqual([chatsRoot]);
+    } finally {
+      await act(async () => root.unmount());
+      renderedRowCalls = [];
+      dom.restore();
+    }
+  });
+
   test('a large searched list keeps every model row registered in order for both buckets', async () => {
     const dom = installHookTestDom();
     const root = createRoot(dom.container);
@@ -334,75 +353,15 @@ describe('SessionGroupSection public behavior', () => {
     const expectedIds = Array.from({ length: 60 }, (_, index) => `session-${String(index).padStart(2, '0')}`);
 
     try {
-      // Both groups cross the virtualize threshold while searching; the
-      // registry must still carry the full model order for offscreen rows.
+      // Both buckets must keep the full model order available to selection.
       await renderSearched(searchedGroup(false));
-      expect(capture.registry?.getOrderedIds()).toEqual(expectedIds);
+      expect(orderedIds(capture.registry)).toEqual(expectedIds);
 
       await renderSearched(searchedGroup(true));
-      expect(capture.registry?.getOrderedIds()).toEqual(expectedIds);
+      expect(orderedIds(capture.registry)).toEqual(expectedIds);
     } finally {
       await act(async () => root.unmount());
       useSessionFoldersStore.setState(originalFolders, true);
-      dom.restore();
-    }
-  });
-
-  test('a large searched nested group flattens to one bounded row batch per session', async () => {
-    const dom = installHookTestDom();
-    const root = createRoot(dom.container);
-    const originalFolders = useSessionFoldersStore.getState();
-    useSessionFoldersStore.setState({ foldersMap: {} });
-    const capture: RegistryCapture = { registry: null };
-    const target = nestedGroup(60, 'nested');
-    renderedRowCalls = [];
-
-    try {
-      await renderGroup(root, target, capture, { hasSessionSearchQuery: true, normalizedSessionSearchQuery: 'session' });
-
-      // No scroll element resolves under the test DOM, so the pre-ready
-      // fallback renders the first threshold batch of flat rows; the layout
-      // effect flips to the virtual window before paint in a browser.
-      expect(renderedRowCalls).toHaveLength(SESSION_GROUP_VIRTUALIZE_THRESHOLD);
-      expect(renderedRowCalls.every((call) => call.renderChildren === false)).toBe(true);
-      expect(renderedRowCalls.map((call) => call.depth)).toEqual([
-        0,
-        ...Array.from({ length: SESSION_GROUP_VIRTUALIZE_THRESHOLD - 1 }, () => 1),
-      ]);
-      expect(renderedRowCalls[0]?.node.session.id).toBe('nested-root');
-      expect(capture.registry?.getOrderedIds()).toEqual([
-        'nested-root',
-        ...Array.from({ length: 60 }, (_, index) => `nested-child-${String(index).padStart(2, '0')}`),
-      ]);
-    } finally {
-      await act(async () => root.unmount());
-      useSessionFoldersStore.setState(originalFolders, true);
-      renderedRowCalls = [];
-      dom.restore();
-    }
-  });
-
-  test('a searched group below the threshold keeps tree mode', async () => {
-    const dom = installHookTestDom();
-    const root = createRoot(dom.container);
-    const originalFolders = useSessionFoldersStore.getState();
-    useSessionFoldersStore.setState({ foldersMap: {} });
-    const capture: RegistryCapture = { registry: null };
-    const target = nestedGroup(10, 'small');
-    renderedRowCalls = [];
-
-    try {
-      await renderGroup(root, target, capture, { hasSessionSearchQuery: true, normalizedSessionSearchQuery: 'session' });
-
-      // Tree mode renders only the root row; its children stay nested inside.
-      expect(renderedRowCalls).toHaveLength(1);
-      expect(renderedRowCalls[0]?.node.session.id).toBe('small-root');
-      expect(renderedRowCalls[0]?.renderChildren).toBeUndefined();
-      expect(capture.registry?.getOrderedIds()).toHaveLength(11);
-    } finally {
-      await act(async () => root.unmount());
-      useSessionFoldersStore.setState(originalFolders, true);
-      renderedRowCalls = [];
       dom.restore();
     }
   });
@@ -421,7 +380,7 @@ describe('SessionGroupSection public behavior', () => {
 
       expect(renderedRowCalls).toHaveLength(60);
       expect(renderedRowCalls.every((call) => call.renderChildren === undefined)).toBe(true);
-      expect(capture.registry?.getOrderedIds()).toHaveLength(60);
+      expect(orderedIds(capture.registry)).toHaveLength(60);
     } finally {
       await act(async () => root.unmount());
       useSessionFoldersStore.setState(originalFolders, true);
@@ -430,7 +389,7 @@ describe('SessionGroupSection public behavior', () => {
     }
   });
 
-  test('a non-search archived bucket virtualizes whole roots, never flat rows', async () => {
+  test('a non-search archived bucket keeps whole roots as tree rows', async () => {
     const dom = installHookTestDom();
     const root = createRoot(dom.container);
     const originalFolders = useSessionFoldersStore.getState();
@@ -442,11 +401,10 @@ describe('SessionGroupSection public behavior', () => {
     try {
       await renderGroup(root, target, capture, { visibleSessionCount: 60 });
 
-      // Roots mode keeps whole subtrees as one item; flat rows would set
-      // renderChildren=false.
+      // Roots mode keeps whole subtrees as one item.
       expect(renderedRowCalls).toHaveLength(60);
       expect(renderedRowCalls.every((call) => call.renderChildren === undefined)).toBe(true);
-      expect(capture.registry?.getOrderedIds()).toHaveLength(60);
+      expect(orderedIds(capture.registry)).toHaveLength(60);
     } finally {
       await act(async () => root.unmount());
       useSessionFoldersStore.setState(originalFolders, true);

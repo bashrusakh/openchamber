@@ -21,7 +21,6 @@ import type { GroupSearchData, SessionGroup, SessionNode } from '../types';
 import { isBranchDifferentFromLabel, normalizePath, renderHighlightedText } from '../utils';
 import { compareSessionsByLifecycleOrder, EMPTY_SESSION_ORDER_RANKS } from '@/sync/session-ordering';
 import {
-  SESSION_GROUP_VIRTUALIZE_THRESHOLD,
   collectSubtreeContainingId,
   computeNodeStructureKey,
   nodeHasPinnedMembershipChange,
@@ -33,9 +32,13 @@ import {
   selectSessionGroupScrollElement,
   selectSessionGroupVirtualizationMode,
 } from '../sessions/sessionNodeItemUtils';
+import {
+  getSessionFolderIdentityKey,
+  getSessionFolderOwnerKey,
+  getSessionFolderScopes,
+} from '../sessions/sessionFolderIdentity';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 
-type FolderScope = { scopeKey: string; directory: string | null };
 import { getGitHubPrStatusKey, usePrVisualSummary } from '@/stores/useGitHubPrStatusStore';
 import { useI18n } from '@/lib/i18n';
 import { useChildStoreManager } from '@/sync/sync-context';
@@ -45,7 +48,10 @@ import { useCollapsedSessionActivityState } from '../sessions/collapsedActivityS
 import { SessionTreeItem, type SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import { FolderDeleteConfirmDialog } from '../shell/ConfirmDialogs';
 import { useRegisterSessionRowOrder } from '../sessions/sessionRowOrder';
-import { buildSessionGroupRowModel, type SessionRowOrderItem } from '../sessions/sessionRowOrderUtils';
+import {
+  buildSessionGroupRowOrderEntries,
+  getSessionNodeRowKeys,
+} from '../sessions/sessionRowOrderUtils';
 
 type DeleteFolderConfirm = {
   scopeKey: string;
@@ -395,10 +401,11 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   const folderScopeKey = group.folderScopeKey ?? normalizePath(group.directory ?? null);
   // Merged flat groups list every contributing scope; single-scope groups
   // (archived buckets, VS Code workspaces) fall back to folderScopeKey.
-  const folderScopes = React.useMemo<FolderScope[]>(() => {
-    if (group.folderScopes && group.folderScopes.length > 0) return group.folderScopes;
-    return folderScopeKey ? [{ scopeKey: folderScopeKey, directory: group.directory ?? null }] : [];
-  }, [folderScopeKey, group.directory, group.folderScopes]);
+  const folderScopes = React.useMemo(
+    () => getSessionFolderScopes(group),
+    [group],
+  );
+  const folderOwnerKey = getSessionFolderOwnerKey(projectId, group.directory);
   // A group only needs folders and collapse state from its own scopes. The
   // shallow projection retains its reference for mutations elsewhere.
   const folderProjection = useSessionFoldersStore(useShallow(React.useCallback(
@@ -410,10 +417,13 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     return folders.map((folder) => ({ folder, scopeKey, scopeDirectory: directory }));
   }), [folderProjection, folderScopes]);
   const collapsedFolderIds = useSessionFoldersStore(useShallow(React.useCallback(
-    (state) => new Set(folderProjection.flatMap((folders) => folders
-      .filter((folder) => state.collapsedFolderIds.has(folder.id))
-      .map((folder) => folder.id))),
-    [folderProjection],
+    (state) => new Set(folderScopes.flatMap(({ scopeKey }, index) => {
+      const folders = folderProjection[index] ?? EMPTY_FOLDERS;
+      return folders
+        .filter((folder) => state.collapsedFolderIds.has(getSessionFolderIdentityKey(scopeKey, folder.id)))
+        .map((folder) => getSessionFolderIdentityKey(scopeKey, folder.id));
+    })),
+    [folderProjection, folderScopes],
   )));
 
   const nodeBySessionId = React.useMemo(() => {
@@ -436,9 +446,10 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   }), [scopeFolders, nodeBySessionId, compareSessionNodes]);
 
   const allFoldersForGroup = React.useMemo(() => {
-    const visibleFolderIds = selectFolderIdsForProjection(
-      allFoldersForGroupBase.map(({ folder, nodes }) => ({
+    const visibleFolderKeys = selectFolderIdsForProjection(
+      allFoldersForGroupBase.map(({ folder, scopeKey, nodes }) => ({
         id: folder.id,
+        scopeKey,
         name: folder.name,
         parentId: folder.parentId,
         nodeCount: nodes.length,
@@ -448,7 +459,9 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
         searchQuery: hasSessionSearchQuery ? normalizedSessionSearchQuery : '',
       },
     );
-    return allFoldersForGroupBase.filter(({ folder }) => visibleFolderIds.has(folder.id));
+    return allFoldersForGroupBase.filter(({ folder, scopeKey }) => (
+      visibleFolderKeys.has(getSessionFolderIdentityKey(scopeKey, folder.id))
+    ));
   }, [allFoldersForGroupBase, group.isArchivedBucket, hasSessionSearchQuery, normalizedSessionSearchQuery]);
 
   const effectiveEditingId = editingId;
@@ -458,38 +471,45 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   const sessionIdsInFolders = React.useMemo(() => new Set(allFoldersForGroup.flatMap((f) => f.folder.sessionIds)), [allFoldersForGroup]);
   const ungroupedSessions = React.useMemo(() => sourceGroupNodes.filter((node) => !sessionIdsInFolders.has(node.session.id)), [sourceGroupNodes, sessionIdsInFolders]);
   const rootFolders = React.useMemo(() => {
-    const entryById = new Map(allFoldersForGroup.map((entry) => [entry.folder.id, entry]));
-    return normalizeFolderRoots(allFoldersForGroup.map((entry) => entry.folder))
-      .map((folder) => entryById.get(folder.id))
+    const entryByKey = new Map(allFoldersForGroup.map((entry) => [
+      getSessionFolderIdentityKey(entry.scopeKey, entry.folder.id),
+      entry,
+    ]));
+    return normalizeFolderRoots(allFoldersForGroup.map((entry) => ({ ...entry.folder, scopeKey: entry.scopeKey })))
+      .map((folder) => entryByKey.get(getSessionFolderIdentityKey(folder.scopeKey ?? '', folder.id)))
       .filter((entry): entry is (typeof allFoldersForGroup)[number] => Boolean(entry));
   }, [allFoldersForGroup]);
   const childFoldersByParentId = React.useMemo(() => {
     const map = new Map<string, typeof allFoldersForGroup>();
     allFoldersForGroup.forEach((entry) => {
       if (!entry.folder.parentId) return;
-      const children = map.get(entry.folder.parentId) ?? [];
+      const parentKey = getSessionFolderIdentityKey(entry.scopeKey, entry.folder.parentId);
+      const children = map.get(parentKey) ?? [];
       children.push(entry);
-      map.set(entry.folder.parentId, children);
+      map.set(parentKey, children);
     });
     return map;
   }, [allFoldersForGroup]);
   const activityNodesByFolderId = React.useMemo(() => {
-    const foldersById = new Map(allFoldersForGroup.map((entry) => [entry.folder.id, entry] as const));
+    const foldersByKey = new Map(allFoldersForGroup.map((entry) => [
+      getSessionFolderIdentityKey(entry.scopeKey, entry.folder.id),
+      entry,
+    ] as const));
     const result = new Map<string, SessionNode[]>();
-    const visit = (folderId: string, seen: Set<string>): SessionNode[] => {
-      const cached = result.get(folderId);
+    const visit = (folderKey: string, seen: Set<string>): SessionNode[] => {
+      const cached = result.get(folderKey);
       if (cached !== undefined) return cached;
-      if (seen.has(folderId)) return [];
-      seen.add(folderId);
-      const entry = foldersById.get(folderId);
+      if (seen.has(folderKey)) return [];
+      seen.add(folderKey);
+      const entry = foldersByKey.get(folderKey);
       const nodes = entry ? [...entry.nodes] : [];
-      for (const child of childFoldersByParentId.get(folderId) ?? []) {
-        nodes.push(...visit(child.folder.id, seen));
+      for (const child of childFoldersByParentId.get(folderKey) ?? []) {
+        nodes.push(...visit(getSessionFolderIdentityKey(child.scopeKey, child.folder.id), seen));
       }
-      result.set(folderId, nodes);
+      result.set(folderKey, nodes);
       return nodes;
     };
-    allFoldersForGroup.forEach(({ folder }) => visit(folder.id, new Set()));
+    allFoldersForGroup.forEach((entry) => visit(getSessionFolderIdentityKey(entry.scopeKey, entry.folder.id), new Set()));
     return result;
   }, [allFoldersForGroup, childFoldersByParentId]);
 
@@ -571,7 +591,8 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
 
   // Hooks below MUST stay above the search-empty early-return so they fire in
   // the same order every render — rules-of-hooks.
-  const rowModel = React.useMemo(() => buildSessionGroupRowModel({
+  const rowOrderEntries = React.useMemo(() => buildSessionGroupRowOrderEntries({
+    groupKey,
     isCollapsed,
     hasSessionSearchQuery,
     collapsedFolderIds,
@@ -579,6 +600,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     archivedBucket: group.isArchivedBucket === true,
     projectId,
     groupDirectory: group.directory,
+    selectionScopeKey: folderOwnerKey,
     rootFolders,
     childFoldersByParentId,
     visibleSessions,
@@ -586,38 +608,39 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     childFoldersByParentId,
     collapsedFolderIds,
     effectiveExpandedParents,
+    groupKey,
     group.directory,
     group.isArchivedBucket,
     hasSessionSearchQuery,
-    isCollapsed,
-    projectId,
-    rootFolders,
+     isCollapsed,
+     projectId,
+     folderOwnerKey,
+     rootFolders,
     visibleSessions,
   ]);
-  useRegisterSessionRowOrder(rowOrderBase, rowModel.entries);
+  useRegisterSessionRowOrder(rowOrderBase, rowOrderEntries);
 
-  // One virtualizer serves three shapes at the shared threshold: a searched
-  // list virtualizes row by row (`flat`) so a matched parent's whole subtree
-  // stays bounded; an unsearched archived bucket virtualizes whole root
-  // subtrees (`roots`); everything else stays in normal flow (small lists and
-  // the non-search active Show more flow).
+  const visibleSessionRowKeys = React.useMemo(
+    () => getSessionNodeRowKeys(groupKey, visibleSessions),
+    [groupKey, visibleSessions],
+  );
+
+  // Large unsearched archived buckets virtualize whole root subtrees. Small
+  // lists and the non-search active Show more flow stay in normal document
+  // order. Search results use the single global virtualizer in
+  // SessionSearchRows rather than one virtualizer per group.
   const virtualizationMode = selectSessionGroupVirtualizationMode({
     isArchivedBucket: group.isArchivedBucket === true,
-    hasSessionSearchQuery,
     rootCount: visibleSessions.length,
-    flatRowCount: rowModel.items.length,
   });
-  const shouldVirtualize = virtualizationMode !== 'none';
+  const shouldVirtualize = virtualizationMode === 'roots';
 
   // Expanded parents render their children inline, making them much taller
-  // than the fixed estimate, so widen the window that stays mounted. Only the
-  // roots mode has inline children; flat items are single rows. While a
-  // search is active every parent renders expanded regardless of the
-  // persisted expansion set.
+  // than the fixed estimate, so widen the window that stays mounted. Search
+  // rows are owned by the global virtualizer and are not handled here.
   const bucketTag = group.isArchivedBucket ? 'archived' : 'active';
   const hasExpandedParent = virtualizationMode === 'roots' && visibleSessions.some((node) => {
     if (node.children.length === 0) return false;
-    if (hasSessionSearchQuery) return true;
     const expansionKey = `project:${bucketTag}:${node.session.id}`;
     return effectiveExpandedParents.has(expansionKey);
   });
@@ -720,20 +743,17 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     resolvedScrollElement: virtualScrollEl,
   });
   const virtualizerReady = shouldVirtualize && effectiveScrollElement !== null;
-  const virtualItemCount = virtualizationMode === 'flat' ? rowModel.items.length : visibleSessions.length;
   const sessionVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
-    count: virtualItemCount,
+    count: visibleSessions.length,
     enabled: virtualizerReady,
     getScrollElement: () => effectiveScrollElement,
     initialOffset: () => effectiveScrollElement?.scrollTop ?? 0,
     estimateSize: () => ROW_ESTIMATE_PX,
     // Roots mode can inline expanded parent subtrees, which dwarf the row
-    // estimate; flat items are single rows. Widen the window only for roots.
+    // estimate; widen the window only for roots with expanded children.
     overscan: hasExpandedParent ? 20 : 8,
     scrollMargin: virtualScrollMargin,
-    getItemKey: (index) => (virtualizationMode === 'flat'
-      ? rowModel.items[index]?.node.session.id ?? index
-      : visibleSessions[index]?.session.id ?? index),
+    getItemKey: (index) => visibleSessionRowKeys[index] ?? visibleSessions[index]?.session.id ?? index,
   });
 
   // Hooks below MUST stay above the search-empty early-return so they
@@ -752,8 +772,8 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
 
   // Flat list of all sessions in this group (including nested children).
   // Used by both the "delete all archived" button and the "delete worktree"
-  // button. Memoize so the recursive flatten only runs when the underlying
-  // source group nodes change, not on every render.
+  // button. Memoize so the recursive walk only runs when the underlying source
+  // group nodes change, not on every render.
   const allGroupSessions = React.useMemo(
     () => collectGroupSessions(sourceGroupNodes),
     [collectGroupSessions, sourceGroupNodes],
@@ -768,25 +788,29 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     if (!group.isArchivedBucket) return new Map<string, Session[]>();
     const result = new Map<string, Session[]>();
     const childIdsByParentId = new Map<string, string[]>();
-    for (const { folder } of allFoldersForGroup) {
+    for (const { folder, scopeKey } of allFoldersForGroup) {
       if (!folder.parentId) continue;
-      const existing = childIdsByParentId.get(folder.parentId) ?? [];
-      existing.push(folder.id);
-      childIdsByParentId.set(folder.parentId, existing);
+      const parentKey = getSessionFolderIdentityKey(scopeKey, folder.parentId);
+      const existing = childIdsByParentId.get(parentKey) ?? [];
+      existing.push(getSessionFolderIdentityKey(scopeKey, folder.id));
+      childIdsByParentId.set(parentKey, existing);
     }
-    const visit = (targetFolderId: string, seen: Set<string>): Session[] => {
-      if (seen.has(targetFolderId)) return [];
-      seen.add(targetFolderId);
-      const directEntry = allFoldersForGroup.find(({ folder: candidate }) => candidate.id === targetFolderId);
+    const visit = (targetFolderKey: string, seen: Set<string>): Session[] => {
+      if (seen.has(targetFolderKey)) return [];
+      seen.add(targetFolderKey);
+      const directEntry = allFoldersForGroup.find(({ folder: candidate, scopeKey }) => (
+        getSessionFolderIdentityKey(scopeKey, candidate.id) === targetFolderKey
+      ));
       const collected: Session[] = directEntry ? collectGroupSessions(directEntry.nodes) : [];
-      const childIds = childIdsByParentId.get(targetFolderId) ?? [];
+      const childIds = childIdsByParentId.get(targetFolderKey) ?? [];
       for (const childId of childIds) {
         collected.push(...visit(childId, seen));
       }
       return collected;
     };
-    for (const { folder } of allFoldersForGroup) {
-      result.set(folder.id, visit(folder.id, new Set()));
+    for (const { folder, scopeKey } of allFoldersForGroup) {
+      const folderKey = getSessionFolderIdentityKey(scopeKey, folder.id);
+      result.set(folderKey, visit(folderKey, new Set()));
     }
     return result;
   }, [allFoldersForGroup, collectGroupSessions, group.isArchivedBucket]);
@@ -808,12 +832,14 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
 
   const renderOneFolderItem = (entry: FolderEntry, displayName: string): React.ReactNode => {
     const { folder, scopeKey, scopeDirectory, nodes } = entry;
-    const folderSessionsForDelete = folderSessionsForDeleteById.get(folder.id) ?? [];
+    const folderKey = getSessionFolderIdentityKey(scopeKey, folder.id);
+    const rowKeys = getSessionNodeRowKeys(`${groupKey}:folder:${folderKey}`, nodes);
+    const folderSessionsForDelete = folderSessionsForDeleteById.get(folderKey) ?? [];
     const isRenamingFolder = folderRename?.folderId === folder.id && folderRename?.scopeKey === scopeKey;
 
-    const isFolderCollapsed = hasSessionSearchQuery ? false : collapsedFolderIds.has(folder.id);
+    const isFolderCollapsed = hasSessionSearchQuery ? false : collapsedFolderIds.has(folderKey);
     const item = (collapsedActivityState: ReturnType<typeof useCollapsedSessionActivityState>) => (
-      <DroppableFolderWrapper key={folder.id} folderId={folder.id}>
+      <DroppableFolderWrapper key={folderKey} folderId={folder.id} scopeKey={scopeKey} ownerKey={folderOwnerKey}>
         {(droppableRef, isDropTarget) => (
           <SessionFolderItem
             folder={folder}
@@ -821,7 +847,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
             sessions={nodes}
             isCollapsed={isFolderCollapsed}
             collapsedActivityState={collapsedActivityState}
-            onToggle={() => toggleFolderCollapse(folder.id)}
+            onToggle={() => toggleFolderCollapse(scopeKey, folder.id)}
             onRename={(name) => {
               renameFolder(scopeKey, folder.id, name);
             }}
@@ -839,7 +865,9 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                 deleteFolder(scopeKey, folder.id);
                 return;
               }
-              const subFolderCount = allFoldersForGroup.filter(({ folder: f }) => f.parentId === folder.id).length;
+               const subFolderCount = allFoldersForGroup.filter(({ folder: f, scopeKey: childScopeKey }) => (
+                 childScopeKey === scopeKey && f.parentId === folder.id
+               )).length;
               const sessionCount = nodes.length;
               setDeleteFolderConfirm({
                 scopeKey,
@@ -880,8 +908,8 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
             hideActions={false}
             archivedBucket={group.isArchivedBucket === true}
           >
-            {nodes.map((node) => <SessionTreeItem
-              key={node.session.id}
+            {nodes.map((node, index) => <SessionTreeItem
+              key={rowKeys[index] ?? node.session.id}
               node={node}
               pinnedSessionIds={pinnedSessionIds}
               expandedParents={expandedParents}
@@ -894,9 +922,12 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
               openSidebarMenuKey={openSidebarMenuKey}
               mobileVariant={mobileVariant}
               alwaysShowActions={alwaysShowActions}
-              groupDirectory={scopeDirectory ?? group.directory}
-              projectId={projectId}
-              archivedBucket={group.isArchivedBucket === true}
+               groupDirectory={scopeDirectory ?? group.directory}
+               projectId={projectId}
+               folderOwnerKey={folderOwnerKey}
+               selectionScopeKey={folderOwnerKey}
+               archivedBucket={group.isArchivedBucket === true}
+              rowKey={rowKeys[index] ?? node.session.id}
               renderExtras={{ subtreeContainsEditing, menuOpenSessionId, nodeStructureKey: resolveNodeStructureKey(node), childRenderExtrasFor }}
               setEditingId={props.setEditingId}
               setEditTitle={props.setEditTitle}
@@ -917,8 +948,8 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     );
     if (!isFolderCollapsed) return item(null);
     return <CollapsedFolderActivity
-      key={folder.id}
-      nodes={activityNodesByFolderId.get(folder.id) ?? nodes}
+      key={folderKey}
+      nodes={activityNodesByFolderId.get(folderKey) ?? nodes}
       includeUnreadSubtasks={notifyOnSubtasks}
     >{item}</CollapsedFolderActivity>;
   };
@@ -931,20 +962,23 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     for (const entry of allFoldersForGroup) {
       const parentId = entry.folder.parentId;
       if (!parentId) continue;
-      const existing = childEntriesByParentId.get(parentId);
+      const parentKey = getSessionFolderIdentityKey(entry.scopeKey, parentId);
+      const existing = childEntriesByParentId.get(parentKey);
       if (existing) existing.push(entry);
-      else childEntriesByParentId.set(parentId, [entry]);
+      else childEntriesByParentId.set(parentKey, [entry]);
     }
     const out: React.ReactNode[] = [];
     const visited = new Set<string>();
     const visit = (entry: FolderEntry, parentPath: string) => {
-      if (visited.has(entry.folder.id)) return;
-      visited.add(entry.folder.id);
+      const folderKey = getSessionFolderIdentityKey(entry.scopeKey, entry.folder.id);
+      if (visited.has(folderKey)) return;
+      visited.add(folderKey);
       const displayName = parentPath ? `${parentPath} / ${entry.folder.name}` : entry.folder.name;
       out.push(renderOneFolderItem(entry, displayName));
-      const isFolderCollapsed = !hasSessionSearchQuery && collapsedFolderIds.has(entry.folder.id);
+      const isFolderCollapsed = !hasSessionSearchQuery
+        && collapsedFolderIds.has(getSessionFolderIdentityKey(entry.scopeKey, entry.folder.id));
       if (isFolderCollapsed) return;
-      (childEntriesByParentId.get(entry.folder.id) ?? []).forEach((child) => visit(child, displayName));
+      (childEntriesByParentId.get(folderKey) ?? []).forEach((child) => visit(child, displayName));
     };
     rootFolders.forEach((entry) => visit(entry, ''));
     return out;
@@ -997,8 +1031,8 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     </span>
   ) : null;
 
-  const renderSessionRow = (node: SessionNode, depth?: number, renderChildren?: boolean): React.ReactNode => <SessionTreeItem
-    key={node.session.id}
+  const renderSessionRow = (node: SessionNode, rowKey: string): React.ReactNode => <SessionTreeItem
+    key={rowKey}
     node={node}
     pinnedSessionIds={pinnedSessionIds}
     expandedParents={expandedParents}
@@ -1011,11 +1045,12 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     openSidebarMenuKey={openSidebarMenuKey}
     mobileVariant={mobileVariant}
     alwaysShowActions={alwaysShowActions}
-    depth={depth}
-    renderChildren={renderChildren}
     groupDirectory={group.directory}
     projectId={projectId}
+    folderOwnerKey={folderOwnerKey}
+    selectionScopeKey={folderOwnerKey}
     archivedBucket={group.isArchivedBucket === true}
+    rowKey={rowKey}
     renderExtras={{ subtreeContainsEditing, menuOpenSessionId, nodeStructureKey: resolveNodeStructureKey(node), childRenderExtrasFor }}
     setEditingId={props.setEditingId}
     setEditTitle={props.setEditTitle}
@@ -1031,46 +1066,45 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
      startSessionWorktreeMenuLoad={props.startSessionWorktreeMenuLoad}
    />;
 
-  const renderSessionNode = (node: SessionNode): React.ReactNode => renderSessionRow(node);
-  // Flat search rows render one session each: children are separate virtual
-  // items, and `depth` preserves the tree indentation.
-  const renderFlatRow = (item: SessionRowOrderItem): React.ReactNode => renderSessionRow(item.node, item.depth, false);
+  const renderSessionNode = (node: SessionNode, index: number): React.ReactNode => renderSessionRow(
+    node,
+    visibleSessionRowKeys[index] ?? node.session.id,
+  );
 
   const body = (
     <SessionFolderDndScope
       scopeKey={folderScopes[0]?.scopeKey ?? folderScopeKey}
+      ownerKey={folderOwnerKey}
       hasFolders={allFoldersForGroup.length > 0}
-      onSessionDroppedOnFolder={(sessionId, folderId) => {
-        const targetEntry = allFoldersForGroup.find(({ folder }) => folder.id === folderId);
-        if (!targetEntry) return;
-        // Clear membership in other scopes first — the store only dedupes
-        // within one scope, and a session must live in a single folder.
-        const foldersStore = useSessionFoldersStore.getState();
-        for (const { scopeKey } of folderScopes) {
+      onSessionDroppedOnFolder={(sessionId, target, sourceOwnerKey) => {
+        if (!folderOwnerKey || sourceOwnerKey !== folderOwnerKey || target.ownerKey !== folderOwnerKey) return;
+        const targetEntries = allFoldersForGroup.filter(({ folder, scopeKey }) => (
+          scopeKey === target.scopeKey && folder.id === target.folderId
+        ));
+        if (targetEntries.length !== 1) return;
+         const targetEntry = targetEntries[0];
+         if (!targetEntry) return;
+         // Clear membership in other scopes first — the store only dedupes
+         // within one scope, and a session must live in a single folder.
+         const foldersStore = useSessionFoldersStore.getState();
+         const currentTargetFolders = foldersStore.foldersMap[targetEntry.scopeKey] ?? EMPTY_FOLDERS;
+         if (currentTargetFolders.filter((folder) => folder.id === targetEntry.folder.id).length !== 1) return;
+         for (const { scopeKey } of folderScopes) {
           if (scopeKey === targetEntry.scopeKey) continue;
           if (foldersStore.getSessionFolderId(scopeKey, sessionId)) {
             foldersStore.removeSessionFromFolder(scopeKey, sessionId);
           }
         }
-        addSessionToFolder(targetEntry.scopeKey, folderId, sessionId);
+        addSessionToFolder(targetEntry.scopeKey, targetEntry.folder.id, sessionId);
       }}
     >
       {renderFolderItems()}
       {shouldVirtualize ? (
         <div ref={virtualContainerRef}>
           {!virtualizerReady ? (
-            // No scroll element yet: the initial mount before the parent ref
-            // is committed, or a section without a provided ref (e.g. the
-            // chats section) until the ancestor walk resolves one. This
-            // wrapper must exist for that resolution; rendering plain rows
-            // meanwhile keeps the container's height real so the scroller
-            // never collapses/clamps during the flip. Flat mode caps those
-            // plain rows at the threshold so the first commit of a broad
-            // search cannot mount thousands of rows; the layout effect flips
-            // to the virtual window before paint.
-            virtualizationMode === 'flat'
-              ? rowModel.items.slice(0, SESSION_GROUP_VIRTUALIZE_THRESHOLD).map(renderFlatRow)
-              : visibleSessions.map(renderSessionNode)
+            // No scroll element yet: keep the container's height real while
+            // the ancestor walk resolves the parent scroller.
+            visibleSessions.map(renderSessionNode)
           ) : (
           <div style={{ height: sessionVirtualizer.getTotalSize(), position: 'relative' }}>
             {/* Absolutely positioned rows (canonical tanstack layout): with
@@ -1079,12 +1113,11 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                 below the group. Per-item offsets cannot drift. item.start
                 includes scrollMargin (ancestor-scroll offset), so subtract it. */}
             {sessionVirtualizer.getVirtualItems().map((item) => {
-              const flatItem = virtualizationMode === 'flat' ? rowModel.items[item.index] : null;
-              const node = virtualizationMode === 'flat' ? flatItem?.node : visibleSessions[item.index];
+              const node = visibleSessions[item.index];
               if (!node) return null;
               return (
                 <div
-                  key={node.session.id}
+                  key={visibleSessionRowKeys[item.index] ?? node.session.id}
                   data-index={item.index}
                   ref={sessionVirtualizer.measureElement}
                   // Rows carry my-0.5 (2px), which COLLAPSES to 2px between
@@ -1104,7 +1137,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                     transform: `translateY(${item.start - virtualScrollMargin}px)`,
                   }}
                 >
-                  {flatItem ? renderFlatRow(flatItem) : renderSessionNode(node)}
+                  {renderSessionNode(node, item.index)}
                 </div>
               );
             })}

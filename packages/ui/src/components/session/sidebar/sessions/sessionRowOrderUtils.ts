@@ -1,5 +1,6 @@
 import { normalizePath } from '@/lib/pathNormalization';
 import type { SessionNode } from '../types';
+import { getSessionFolderIdentityKey, getSessionSelectionScopeKey } from './sessionFolderIdentity';
 
 /**
  * One row in the sidebar's logical render order. Selection (shift range,
@@ -9,14 +10,61 @@ import type { SessionNode } from '../types';
  */
 export type SessionRowOrderEntry = {
   id: string;
+  /** Stable identity of this rendered occurrence, distinct from the session id. */
+  rowKey: string;
   scopeKey: string | null;
   archived: boolean;
 };
 
-/** One flattened render row: the node plus its `SessionTreeItem` depth. */
-export type SessionRowOrderItem = {
-  node: SessionNode;
-  depth: number;
+/**
+ * Build the row key used by a normal session tree. The container identifies
+ * the rendered list (group, folder, or activity item), while the occurrence
+ * disambiguates duplicate session ids in that list.
+ */
+const createSessionRowKey = (
+  containerKey: string,
+  sessionId: string,
+  occurrence = 0,
+): string => {
+  const baseKey = `${containerKey}:session:${sessionId}`;
+  return occurrence === 0 ? baseKey : `${baseKey}:${occurrence}`;
+};
+
+const createSessionChildRowKey = (
+  parentRowKey: string,
+  sessionId: string,
+  occurrence = 0,
+): string => {
+  const baseKey = `${parentRowKey}/child:${sessionId}`;
+  return occurrence === 0 ? baseKey : `${baseKey}:${occurrence}`;
+};
+
+/** Root occurrence keys for one normal session-tree list. */
+export const getSessionNodeRowKeys = (
+  containerKey: string,
+  nodes: readonly SessionNode[],
+): string[] => {
+  const occurrences = new Map<string, number>();
+  return nodes.map((node) => {
+    const baseKey = createSessionRowKey(containerKey, node.session.id);
+    const occurrence = occurrences.get(baseKey) ?? 0;
+    occurrences.set(baseKey, occurrence + 1);
+    return createSessionRowKey(containerKey, node.session.id, occurrence);
+  });
+};
+
+/** Child occurrence keys derived from the current rendered parent row. */
+export const getSessionChildRowKeys = (
+  parentRowKey: string,
+  children: readonly SessionNode[],
+): string[] => {
+  const occurrences = new Map<string, number>();
+  return children.map((child) => {
+    const baseKey = createSessionChildRowKey(parentRowKey, child.session.id);
+    const occurrence = occurrences.get(baseKey) ?? 0;
+    occurrences.set(baseKey, occurrence + 1);
+    return createSessionChildRowKey(parentRowKey, child.session.id, occurrence);
+  });
 };
 
 type SessionRowOrderRenderContext = 'project' | 'recent';
@@ -26,12 +74,14 @@ type AppendSessionNodeRowsOptions = {
   projectId: string | null | undefined;
   /** Directory fallback matching the row's `groupDirectory` prop. */
   fallbackDirectory: string | null | undefined;
+  /** Logical selection scope, separate from the row's operational directory. */
+  selectionScopeKey?: string | null;
   renderContext: SessionRowOrderRenderContext;
   archived: boolean;
   hasSessionSearchQuery: boolean;
   expandedParents: ReadonlySet<string>;
-  /** When provided, flattened render items are collected alongside entries. */
-  items?: SessionRowOrderItem[] | null;
+  /** Stable row-key container for this rendered list. */
+  rowKeyContainerKey?: string;
 };
 
 const expansionKeyFor = (
@@ -44,22 +94,28 @@ const expansionKeyFor = (
  * Append the depth-first document order of `nodes`, mirroring
  * `SessionNodeItem`'s render/expansion rule exactly: a node's children follow
  * it only while the node is expanded, and a search forces every row expanded.
- * Entries always follow the inclusion rules; `items` additionally records the
- * flattened row order (node + depth) for renderers that mount rows
- * individually.
+ * Entries follow the same inclusion rules as the rendered session tree.
  */
 export const appendSessionNodeRowEntries = (
   out: SessionRowOrderEntry[],
   nodes: readonly SessionNode[],
   options: AppendSessionNodeRowsOptions,
 ): void => {
-  const items = options.items ?? null;
-  const visit = (node: SessionNode, inheritedDirectory: string | null | undefined, depth: number): void => {
-    const scopeKey = options.projectId
-      ?? normalizePath(node.session.directory ?? null)
-      ?? normalizePath(inheritedDirectory);
-    out.push({ id: node.session.id, scopeKey, archived: options.archived });
-    if (items) items.push({ node, depth });
+  const rowKeyContainerKey = options.rowKeyContainerKey
+    ?? `${options.renderContext}:${options.archived ? 'archived' : 'active'}:${normalizePath(options.fallbackDirectory ?? null) ?? 'unscoped'}`;
+  const rootRowKeys = getSessionNodeRowKeys(rowKeyContainerKey, nodes);
+  const visit = (
+    node: SessionNode,
+    inheritedDirectory: string | null | undefined,
+    rowKey: string,
+  ): void => {
+    const scopeKey = options.selectionScopeKey !== undefined
+      ? options.selectionScopeKey
+      : getSessionSelectionScopeKey(
+        options.projectId,
+        node.session.directory ?? inheritedDirectory,
+      );
+    out.push({ id: node.session.id, rowKey, scopeKey, archived: options.archived });
     if (!options.hasSessionSearchQuery && !options.expandedParents.has(
       expansionKeyFor(options.renderContext, options.archived, node.session.id),
     )) {
@@ -68,18 +124,29 @@ export const appendSessionNodeRowEntries = (
     // SessionTreeItem threads the nearest directory down to child rows; a
     // child without its own directory uses its parent's, not the group's.
     const childDirectory = node.session.directory ?? inheritedDirectory;
-    node.children.forEach((child) => visit(child, childDirectory, depth + 1));
+    const childRowKeys = getSessionChildRowKeys(rowKey, node.children);
+    node.children.forEach((child, index) => {
+      const childRowKey = childRowKeys[index];
+      if (!childRowKey) return;
+      visit(child, childDirectory, childRowKey);
+    });
   };
-  nodes.forEach((node) => visit(node, options.fallbackDirectory, 0));
+  nodes.forEach((node, index) => {
+    const rowKey = rootRowKeys[index];
+    if (!rowKey) return;
+    visit(node, options.fallbackDirectory, rowKey);
+  });
 };
 
 export type SessionRowOrderFolderEntry = {
   folder: { id: string };
+  scopeKey: string;
   scopeDirectory: string | null;
   nodes: readonly SessionNode[];
 };
 
 type SessionGroupRowOrderInput = {
+  groupKey: string;
   /** Outside search, a collapsed group renders no rows at all. */
   isCollapsed: boolean;
   hasSessionSearchQuery: boolean;
@@ -88,36 +155,24 @@ type SessionGroupRowOrderInput = {
   archivedBucket: boolean;
   projectId: string | null | undefined;
   groupDirectory: string | null | undefined;
+  /** Logical selection scope for every row in this group. */
+  selectionScopeKey?: string | null;
   rootFolders: readonly SessionRowOrderFolderEntry[];
   childFoldersByParentId: ReadonlyMap<string, readonly SessionRowOrderFolderEntry[]>;
   visibleSessions: readonly SessionNode[];
 };
 
-type SessionGroupRowModel = {
-  /** Every rendered row in document order; selection reads these. */
-  entries: SessionRowOrderEntry[];
-  /**
-   * Flattened rows for the region the virtualizer owns — the ungrouped
-   * sessions. Folder rows keep rendering in normal flow above the virtual
-   * list, so they stay out of `items` rather than duplicating their content.
-   */
-  items: SessionRowOrderItem[];
-};
-
 /**
  * Mirror `SessionGroupSection`'s body order: folders first (each folder's own
  * nodes, then its child folders; a collapsed folder hides its whole subtree),
- * then the ungrouped sessions already sliced by the show-more limit. Entries
- * cover every rendered row; items cover only the ungrouped region the
- * virtual list mounts, flattened to one row per retained session.
+ * then the ungrouped sessions already sliced by the show-more limit.
  */
-export const buildSessionGroupRowModel = (
+export const buildSessionGroupRowOrderEntries = (
   input: SessionGroupRowOrderInput,
-): SessionGroupRowModel => {
-  if (input.isCollapsed) return { entries: [], items: [] };
+): SessionRowOrderEntry[] => {
+  if (input.isCollapsed) return [];
 
   const entries: SessionRowOrderEntry[] = [];
-  const items: SessionRowOrderItem[] = [];
   const expansion = {
     renderContext: 'project' as const,
     archived: input.archivedBucket,
@@ -126,32 +181,83 @@ export const buildSessionGroupRowModel = (
   };
   const visited = new Set<string>();
   const visitFolder = (entry: SessionRowOrderFolderEntry): void => {
-    if (visited.has(entry.folder.id)) return;
-    visited.add(entry.folder.id);
+    const folderKey = getSessionFolderIdentityKey(entry.scopeKey, entry.folder.id);
+    if (visited.has(folderKey)) return;
+    visited.add(folderKey);
     // A collapsed folder hides its own session rows along with every child
     // folder; SessionFolderItem only renders `nodes` while expanded.
-    if (!input.hasSessionSearchQuery && input.collapsedFolderIds.has(entry.folder.id)) return;
+    if (!input.hasSessionSearchQuery && input.collapsedFolderIds.has(folderKey)) return;
     appendSessionNodeRowEntries(entries, entry.nodes, {
       ...expansion,
       projectId: input.projectId,
       fallbackDirectory: entry.scopeDirectory ?? input.groupDirectory,
+      selectionScopeKey: input.selectionScopeKey,
+      rowKeyContainerKey: `${input.groupKey}:folder:${entry.scopeKey}:${entry.folder.id}`,
     });
-    (input.childFoldersByParentId.get(entry.folder.id) ?? []).forEach(visitFolder);
+    (input.childFoldersByParentId.get(folderKey) ?? []).forEach(visitFolder);
   };
   input.rootFolders.forEach(visitFolder);
   appendSessionNodeRowEntries(entries, input.visibleSessions, {
     ...expansion,
     projectId: input.projectId,
     fallbackDirectory: input.groupDirectory,
-    items,
+    selectionScopeKey: input.selectionScopeKey,
+    rowKeyContainerKey: input.groupKey,
   });
-  return { entries, items };
+  return entries;
 };
 
 type SessionRowOrderActivityItem = {
   node: SessionNode;
   projectId: string | null;
   groupDirectory: string | null;
+  selectionScopeKey?: string | null;
+};
+
+const activityRowContainerKey = (
+  item: SessionRowOrderActivityItem,
+  sectionKey: string,
+  occurrence: number,
+): string => `activity:${sectionKey}:${item.node.session.id}:${occurrence}`;
+
+const activityRowKey = (
+  item: SessionRowOrderActivityItem,
+  sectionKey: string,
+  occurrence: number,
+): string => createSessionRowKey(
+  activityRowContainerKey(item, sectionKey, occurrence),
+  item.node.session.id,
+);
+
+const buildActivityRootOccurrences = (
+  items: readonly SessionRowOrderActivityItem[],
+  visibleLimit: number,
+): number[] => {
+  const occurrences = new Map<string, number>();
+  return items.slice(0, visibleLimit).map((item) => {
+    const sessionId = item.node.session.id;
+    const occurrence = occurrences.get(sessionId) ?? 0;
+    occurrences.set(sessionId, occurrence + 1);
+    return occurrence;
+  });
+};
+
+const buildActivityRootRowKeys = (
+  items: readonly SessionRowOrderActivityItem[],
+  visibleLimit: number,
+  sectionKey: string,
+): string[] => {
+  const visibleItems = items.slice(0, visibleLimit);
+  const occurrences = buildActivityRootOccurrences(visibleItems, visibleItems.length);
+  return visibleItems.map((item, index) => activityRowKey(item, sectionKey, occurrences[index] ?? 0));
+};
+
+/** Root occurrence keys for one Recent/activity section. */
+export const buildActivitySessionRowKeys = (
+  items: readonly SessionRowOrderActivityItem[],
+  options: { visibleLimit: number; sectionKey?: string },
+): string[] => {
+  return buildActivityRootRowKeys(items, options.visibleLimit, options.sectionKey ?? 'active-now');
 };
 
 /**
@@ -165,25 +271,27 @@ export const buildActivityRowOrderEntries = (
     visibleLimit: number;
     hasSessionSearchQuery: boolean;
     expandedParents: ReadonlySet<string>;
+    sectionKey?: string;
   },
 ): SessionRowOrderEntry[] => {
   const out: SessionRowOrderEntry[] = [];
-  for (const item of items.slice(0, options.visibleLimit)) {
+  const sectionKey = options.sectionKey ?? 'active-now';
+  const visibleItems = items.slice(0, options.visibleLimit);
+  const occurrences = buildActivityRootOccurrences(visibleItems, visibleItems.length);
+  visibleItems.forEach((item, index) => {
     appendSessionNodeRowEntries(out, [item.node], {
       projectId: item.projectId,
       fallbackDirectory: item.groupDirectory,
+      selectionScopeKey: item.selectionScopeKey,
       renderContext: 'recent',
       archived: false,
       hasSessionSearchQuery: options.hasSessionSearchQuery,
       expandedParents: options.expandedParents,
+      rowKeyContainerKey: activityRowContainerKey(item, sectionKey, occurrences[index] ?? 0),
     });
-  }
+  });
   return out;
 };
-
-export const toSessionRowOrderIds = (entries: readonly SessionRowOrderEntry[]): string[] => (
-  entries.map((entry) => entry.id)
-);
 
 type SessionRowOrderBulkSelection = {
   ids: string[];

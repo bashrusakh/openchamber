@@ -2,11 +2,14 @@ import { describe, expect, mock, test } from 'bun:test';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { I18nProvider } from '@/lib/i18n';
-import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
+import { useSessionFoldersStore, type SessionFolder } from '@/stores/useSessionFoldersStore';
 import { useSessionMultiSelectStore } from '@/stores/useSessionMultiSelectStore';
 import { installHookTestDom } from '../test-utils/testDom';
+import type { SidebarFolderTarget } from './useSidebarBulkActions';
 
 type BulkActionCapture = {
+  scopeFolders: readonly { scopeKey: string; folder: SessionFolder }[];
+  onMoveToFolder: (target: SidebarFolderTarget) => void;
   onCreateFolderAndMove: () => void;
 };
 
@@ -53,7 +56,7 @@ describe('SessionBulkActions public behavior', () => {
       await act(async () => root.render(
         <I18nProvider>
           <SessionBulkActions
-            getFolderScopesForProject={() => [{ scopeKey: '/workspace', directory: '/workspace' }]}
+            getFolderScopesForSelectionScope={() => [{ scopeKey: '/workspace', directory: '/workspace' }]}
             isInlineEditing
             startFolderRename={(scopeKey, folder) => renameRequests.push({ scopeKey, folder })}
           />
@@ -72,6 +75,60 @@ describe('SessionBulkActions public behavior', () => {
       useSessionMultiSelectStore.setState(originalSelection, true);
       if (cssDescriptor) Object.defineProperty(globalThis, 'CSS', cssDescriptor);
       else Reflect.deleteProperty(globalThis, 'CSS');
+      bulkActionCapture = null;
+      dom.restore();
+    }
+  });
+
+  test('keeps duplicate folder ids scoped and resolves bulk moves by target scope', async () => {
+    const dom = installHookTestDom();
+    const root = createRoot(dom.container);
+    const originalFolders = useSessionFoldersStore.getState();
+    const originalSelection = useSessionMultiSelectStore.getState();
+    const removals: Array<{ scopeKey: string; ids: string[] }> = [];
+    const moved: Array<{ scopeKey: string; folderId: string; ids: string[] }> = [];
+    const rootFolder: SessionFolder = { id: 'same-id', name: 'Root folder', parentId: null, sessionIds: ['session-a'], createdAt: 1 };
+    const worktreeFolder: SessionFolder = { id: 'same-id', name: 'Worktree folder', parentId: null, sessionIds: [], createdAt: 2 };
+    useSessionFoldersStore.setState({
+      foldersMap: {
+        '/workspace': [rootFolder],
+        '/workspace/worktree': [worktreeFolder],
+      },
+      removeSessionsFromFolders: (scopeKey, ids) => removals.push({ scopeKey, ids }),
+      addSessionsToFolder: (scopeKey, folderId, ids) => moved.push({ scopeKey, folderId, ids }),
+    });
+    useSessionMultiSelectStore.setState({
+      enabled: true,
+      selectedIds: new Set(['session-a']),
+      scopeKey: 'project-a',
+      anchorId: 'session-a',
+    });
+
+    try {
+      await act(async () => root.render(
+        <I18nProvider>
+          <SessionBulkActions
+            getFolderScopesForSelectionScope={() => [
+              { scopeKey: '/workspace', directory: '/workspace' },
+              { scopeKey: '/workspace/worktree', directory: '/workspace/worktree' },
+            ]}
+            isInlineEditing={false}
+            startFolderRename={() => undefined}
+          />
+        </I18nProvider>,
+      ));
+      expect(bulkActionCapture?.scopeFolders.map(({ scopeKey, folder }) => `${scopeKey}:${folder.id}`)).toEqual([
+        '/workspace:same-id',
+        '/workspace/worktree:same-id',
+      ]);
+
+      await act(async () => bulkActionCapture?.onMoveToFolder({ scopeKey: '/workspace/worktree', folderId: 'same-id' }));
+      expect(removals).toEqual([{ scopeKey: '/workspace', ids: ['session-a'] }]);
+      expect(moved).toEqual([{ scopeKey: '/workspace/worktree', folderId: 'same-id', ids: ['session-a'] }]);
+    } finally {
+      await act(async () => root.unmount());
+      useSessionFoldersStore.setState(originalFolders, true);
+      useSessionMultiSelectStore.setState(originalSelection, true);
       bulkActionCapture = null;
       dom.restore();
     }

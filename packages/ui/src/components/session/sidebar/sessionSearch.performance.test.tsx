@@ -12,6 +12,7 @@ import { createSessionOwnershipIndex } from './sessions/sessionOwnership';
 import { useProjectSessionLists } from './projects/useProjectSessionLists';
 import { useSessionGrouping } from './projects/useSessionGrouping';
 import { useSessionSidebarSections } from './projects/useSessionSidebarSections';
+import { buildSessionSearchRowModel, type SessionSearchRowModel } from './projects/sessionSearchRowModel';
 import type { SessionGroup, SessionNode, SessionNodeSearchResult } from './types';
 import { installHookTestDom } from './test-utils/testDom';
 
@@ -21,8 +22,8 @@ import { installHookTestDom } from './test-utils/testDom';
  * What is real:
  * - `useDebouncedValue` (the production 120ms debounce).
  * - `useSessionGrouping` and its real `filterSessionNodesForSearch` matcher.
- * - `useSessionSidebarSections` and its real per-group search pass, flat/grouped
- *   projections and `searchMatchCount`.
+ * - `useSessionSidebarSections` and `buildSessionSearchRowModel`, including the
+ *   real per-group search pass, final projection, and rendered-session count.
  * - `useProjectSessionLists` + `createSessionOwnershipIndex` project routing.
  * - `useSessionActions` row callbacks, exactly as `SessionTreeItem` wires them.
  *
@@ -53,12 +54,11 @@ import { installHookTestDom } from './test-utils/testDom';
  * Scale baselines print `[session-search-perf]` JSON lines with the filter
  * invocation count/time and the matched-node counts per scenario.
  *
- * Measurement limitation: the row data path is real, but `SessionGroupSection`
- * cannot be mounted here, so this file cannot count mounted rows. It pins the
- * exact node count the component receives (`filteredNodes.length` = every
- * matched session). Since Step 4 the component virtualizes 50+ row search
- * results in both buckets, so that model count is no longer the mounted-row
- * count.
+ * Measurement limitation: the row data path is real, but the mounted search
+ * renderer cannot be imported here, so this file cannot count mounted rows. It
+ * pins the exact node count the renderer receives (`filteredNodes.length` =
+ * every matched session). The separate renderer behavior test covers the
+ * viewport window and overscan contract.
  */
 
 const PROJECT_ROOT = '/repo/perf';
@@ -114,6 +114,7 @@ type SectionsResult = ReturnType<typeof useSessionSidebarSections>;
 type WiredSearchState = {
   actions: ReturnType<typeof useSessionActions>;
   sections: SectionsResult;
+  searchRowModel: SessionSearchRowModel;
 };
 
 type WiredSearchArgs = {
@@ -174,6 +175,23 @@ const useWiredSearchState = ({
     foldersMap: EMPTY_FOLDERS,
     standaloneGroups: EMPTY_STANDALONE_GROUPS,
   });
+  const searchRowModel = React.useMemo(() => buildSessionSearchRowModel({
+    sections: sections.sectionsForRender,
+    chatGroup: null,
+    groupSearchDataByGroup: sections.groupSearchDataByGroup,
+    foldersMap: EMPTY_FOLDERS,
+    normalizedQuery: normalizedSessionSearchQuery,
+    collapsedProjects: new Set(),
+    collapsedActivitySections: new Set(),
+    showOnlyMainWorkspace: false,
+    activeProjectId: null,
+    singleProjectMode: false,
+    singleProjectId: null,
+    showRecentSection: false,
+    recentSections: [],
+    pinnedSessionIds: EMPTY_PINNED,
+    sessionOrderIndex: EMPTY_SESSION_ORDER,
+  }), [normalizedSessionSearchQuery, sections.groupSearchDataByGroup, sections.sectionsForRender]);
   const actions = useSessionActions({
     mobileVariant: false,
     allowReselect: false,
@@ -189,19 +207,21 @@ const useWiredSearchState = ({
     copiedSessionId: null,
     setCopiedSessionId: noopStringOrNull,
   });
-  return { actions, sections };
+  return { actions, sections, searchRowModel };
 };
 
-const renderSectionsSnapshot = (sessions: SearchedSessions, query: string, filterCost: FilterCost): SectionsResult => {
-  let captured: SectionsResult | null = null;
+type SearchSnapshot = Pick<WiredSearchState, 'sections' | 'searchRowModel'>;
+
+const renderSectionsSnapshot = (sessions: SearchedSessions, query: string, filterCost: FilterCost): SearchSnapshot => {
+  let captured: SearchSnapshot | null = null;
   const Harness = () => {
-    const { sections } = useWiredSearchState({
+    const state = useWiredSearchState({
       sessions,
       normalizedSessionSearchQuery: query,
       resetSessionSearch: noop,
       filterCost,
     });
-    captured = sections;
+    captured = state;
     return null;
   };
   renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(Harness)));
@@ -250,7 +270,8 @@ const measureScenario = (
   renderSectionsSnapshot(sessions, query, { calls: 0, ms: 0 });
   const filterCost: FilterCost = { calls: 0, ms: 0 };
   const startedAt = performance.now();
-  const sections = renderSectionsSnapshot(sessions, query, filterCost);
+  const snapshot = renderSectionsSnapshot(sessions, query, filterCost);
+  const { sections } = snapshot;
   const renderMs = performance.now() - startedAt;
   const metrics: ScenarioMetrics = {
     scenario,
@@ -262,7 +283,7 @@ const measureScenario = (
     renderMs: roundMs(renderMs),
     matchedRoot: groupMatchCount(sections, 'root'),
     matchedArchived: groupMatchCount(sections, 'archived'),
-    searchMatchCount: sections.searchMatchCount,
+    searchMatchCount: snapshot.searchRowModel.searchMatchCount,
     rootRowsWithoutSearch: groupById(sections, 'root')?.sessions.length ?? 0,
     archivedRowsWithoutSearch: groupById(sections, 'archived')?.sessions.length ?? 0,
   };
@@ -295,9 +316,8 @@ describe('session search data path at scale', () => {
       const searched = measureScenario(`archived-${count}-broad`, 0, count, 'release');
       // Two groups carry the search data: the project root and the archived bucket.
       expect(searched.filterCalls).toBe(2);
-      // Every archived row is search-matched. The component virtualizes 50+
-      // row search results, so this is the model count it receives, not the
-      // mounted-row count (which this harness cannot measure).
+      // Every archived row is search-matched. This is the model count the
+      // renderer receives, not the mounted-row count.
       expect(searched.matchedArchived).toBe(count);
       expect(searched.matchedRoot).toBe(0);
       expect(searched.searchMatchCount).toBe(count);
@@ -330,13 +350,13 @@ const LiveHarness = ({ sessions, capture }: { sessions: SearchedSessions; captur
     setRawQuery((current) => (current.length === 0 ? current : ''));
     setIsSessionSearchOpen((current) => (current ? false : current));
   }, []);
-  const { actions, sections } = useWiredSearchState({
+  const { actions, sections, searchRowModel } = useWiredSearchState({
     sessions,
     normalizedSessionSearchQuery: normalizedQuery,
     resetSessionSearch,
     filterCost: capture.filterCost,
   });
-  capture.state = { actions, sections };
+  capture.state = { actions, sections, searchRowModel };
   capture.setRawQuery = setRawQuery;
   capture.setSearchOpen = setIsSessionSearchOpen;
   return null;
@@ -369,7 +389,7 @@ describe('pre-debounce referential contract', () => {
       // The raw query has changed but 120ms have not elapsed: the search pass
       // must not run and the render-ready sections must keep their references.
       expect(capture.filterCost.calls).toBe(0);
-      expect(capture.state!.sections.searchMatchCount).toBe(0);
+       expect(capture.state!.searchRowModel.searchMatchCount).toBe(0);
       expect(capture.state!.sections.sectionsForRender).toBe(initialSections.sectionsForRender);
       expect(capture.state!.sections.flatSectionsForRender).toBe(initialFlat);
 
@@ -377,7 +397,7 @@ describe('pre-debounce referential contract', () => {
 
       // Only the debounced query starts the real search work.
       expect(capture.filterCost.calls).toBe(2);
-      expect(capture.state!.sections.searchMatchCount).toBe(50);
+       expect(capture.state!.searchRowModel.searchMatchCount).toBe(50);
     } finally {
       await act(async () => root.unmount());
       dom.restore();
@@ -436,7 +456,7 @@ describe('debounced search flush at scale', () => {
           filterCalls: capture.filterCost.calls,
           filterMs: roundMs(capture.filterCost.ms),
           flushMs: roundMs(flushMs),
-          searchMatchCount: capture.state!.sections.searchMatchCount,
+           searchMatchCount: capture.state!.searchRowModel.searchMatchCount,
         };
         console.log(`[session-search-perf] ${JSON.stringify(metrics)}`);
         expect(metrics.filterCalls).toBe(2);

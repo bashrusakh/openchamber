@@ -10,14 +10,16 @@ import {
   resolveMenuOpenSessionId,
 } from '../sessions/sessionNodeItemUtils';
 import type { SessionNodeRenderExtras } from '../sessions/sessionNodeItemUtils';
+import { getSessionFolderOwnerKey, getSessionSelectionScopeKey } from '../sessions/sessionFolderIdentity';
 import { SessionTreeItem, type SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import { useRegisterSessionRowOrder } from '../sessions/sessionRowOrder';
-import { buildActivityRowOrderEntries } from '../sessions/sessionRowOrderUtils';
+import { buildActivityRowOrderEntries, buildActivitySessionRowKeys } from '../sessions/sessionRowOrderUtils';
 
 export type ActivityItem = {
   node: SessionNode;
   projectId: string | null;
   groupDirectory: string | null;
+  selectionScopeKey?: string | null;
   secondaryMeta: {
     projectLabel?: string | null;
     branchLabel?: string | null;
@@ -80,13 +82,14 @@ const RELATIVE_TIME_TICK_INTERVAL_MS = 60_000;
 const ActivitySectionRowOrder: React.FC<{
   order: number;
   items: readonly ActivityItem[];
+  sectionKey: string;
   visibleLimit: number;
   hasSessionSearchQuery: boolean;
   expandedParents: ReadonlySet<string>;
-}> = ({ order, items, visibleLimit, hasSessionSearchQuery, expandedParents }) => {
+}> = ({ order, items, sectionKey, visibleLimit, hasSessionSearchQuery, expandedParents }) => {
   const entries = React.useMemo(
-    () => buildActivityRowOrderEntries(items, { visibleLimit, hasSessionSearchQuery, expandedParents }),
-    [expandedParents, hasSessionSearchQuery, items, visibleLimit],
+    () => buildActivityRowOrderEntries(items, { visibleLimit, hasSessionSearchQuery, expandedParents, sectionKey }),
+    [expandedParents, hasSessionSearchQuery, items, sectionKey, visibleLimit],
   );
   useRegisterSessionRowOrder(order, entries);
   return null;
@@ -214,6 +217,7 @@ export function SidebarActivitySections(props: Props): React.ReactNode {
           visibleCountBySection.get(section.key) ?? initialVisibleCount,
         );
         const visibleItems = section.items.slice(0, visibleLimit);
+        const visibleItemRowKeys = buildActivitySessionRowKeys(section.items, { visibleLimit, sectionKey: section.key });
         const remainingCount = section.items.length - visibleItems.length;
         const usesCustomRenderer = section.key === 'chats' && Boolean(props.renderChatsSection);
         const canShowFewer = !usesCustomRenderer && !flatVariant && section.items.length > initialVisibleCount && remainingCount === 0;
@@ -221,15 +225,18 @@ export function SidebarActivitySections(props: Props): React.ReactNode {
           <ActivitySectionRowOrder
             order={sectionOrderById.get(section.key) ?? 0}
             items={section.items}
+            sectionKey={section.key}
             visibleLimit={visibleLimit}
             hasSessionSearchQuery={props.hasSessionSearchQuery}
             expandedParents={props.expandedParents}
           />
         ) : null;
         const getRenderExtras = buildRenderExtras(visibleItems.map((item) => item.node));
-        const renderItem = (item: ActivityItem) => (
+        const renderItem = (item: ActivityItem, index: number) => {
+          const rowKey = visibleItemRowKeys[index] ?? item.node.session.id;
+          return (
           <SessionTreeItem
-            key={item.node.session.id}
+            key={rowKey}
             node={item.node}
             pinnedSessionIds={pinnedSessionIds}
             expandedParents={props.expandedParents}
@@ -242,10 +249,13 @@ export function SidebarActivitySections(props: Props): React.ReactNode {
             openSidebarMenuKey={props.openSidebarMenuKey}
             mobileVariant={props.mobileVariant}
             alwaysShowActions={props.alwaysShowActions}
-            groupDirectory={item.groupDirectory}
-            projectId={item.projectId}
-            secondaryMeta={item.secondaryMeta}
+             groupDirectory={item.groupDirectory}
+             projectId={item.projectId}
+             folderOwnerKey={getSessionFolderOwnerKey(item.projectId, item.groupDirectory)}
+             selectionScopeKey={item.selectionScopeKey ?? getSessionSelectionScopeKey(item.projectId, item.groupDirectory)}
+             secondaryMeta={item.secondaryMeta}
             renderContext="recent"
+            rowKey={rowKey}
             renderExtras={getRenderExtras(item.node)}
             setEditingId={props.setEditingId}
             setEditTitle={props.setEditTitle}
@@ -260,7 +270,8 @@ export function SidebarActivitySections(props: Props): React.ReactNode {
             setCopiedSessionId={props.setCopiedSessionId}
             startSessionWorktreeMenuLoad={props.startSessionWorktreeMenuLoad}
           />
-        );
+          );
+        };
 
         if (flatVariant) {
           return (

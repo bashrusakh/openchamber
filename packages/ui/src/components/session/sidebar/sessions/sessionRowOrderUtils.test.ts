@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import type { Session } from '@opencode-ai/sdk/v2';
 import type { SessionNode } from '../types';
+import { getSessionFolderIdentityKey } from './sessionFolderIdentity';
 import {
   appendSessionNodeRowEntries,
   buildActivityRowOrderEntries,
-  buildSessionGroupRowModel,
-  toSessionRowOrderIds,
+  buildActivitySessionRowKeys,
+  buildSessionGroupRowOrderEntries,
   type SessionRowOrderEntry,
   type SessionRowOrderFolderEntry,
 } from './sessionRowOrderUtils';
@@ -115,8 +116,8 @@ describe('appendSessionNodeRowEntries', () => {
     });
 
     expect(out).toEqual([
-      { id: 'parent', scopeKey: '/fallback', archived: false },
-      { id: 'child', scopeKey: '/fallback', archived: false },
+      { id: 'parent', rowKey: 'project:active:/fallback:session:parent', scopeKey: '/fallback', archived: false },
+      { id: 'child', rowKey: 'project:active:/fallback:session:parent/child:child', scopeKey: '/fallback', archived: false },
     ]);
 
     const projectOut: SessionRowOrderEntry[] = [];
@@ -128,7 +129,7 @@ describe('appendSessionNodeRowEntries', () => {
       hasSessionSearchQuery: false,
       expandedParents: new Set(),
     });
-    expect(projectOut[0]).toEqual({ id: 'direct', scopeKey: 'project-a', archived: false });
+    expect(projectOut[0]).toEqual({ id: 'direct', rowKey: 'project:active:/fallback:session:direct', scopeKey: 'project-a', archived: false });
   });
 
   test('normalizes directory scopes and inherits the parent directory for directory-less children', () => {
@@ -145,32 +146,53 @@ describe('appendSessionNodeRowEntries', () => {
     });
 
     expect(out).toEqual([
-      { id: 'parent', scopeKey: '/repo/worktree', archived: false },
-      { id: 'child', scopeKey: '/repo/worktree', archived: false },
+      { id: 'parent', rowKey: 'project:active:/fallback:session:parent', scopeKey: '/repo/worktree', archived: false },
+      { id: 'child', rowKey: 'project:active:/fallback:session:parent/child:child', scopeKey: '/repo/worktree', archived: false },
     ]);
+  });
+
+  test('uses one explicit logical scope for managed-chat rows with dated directories', () => {
+    const out: SessionRowOrderEntry[] = [];
+    const chatsRoot = '/home/user/.config/openchamber/chats';
+    const chatDirectory = `${chatsRoot}/2026-09-13/session-chat`;
+    appendSessionNodeRowEntries(out, [node('chat', [node('chat-child', [], chatDirectory)], chatDirectory)], {
+      projectId: null,
+      fallbackDirectory: chatDirectory,
+      selectionScopeKey: chatsRoot,
+      renderContext: 'project',
+      archived: false,
+      hasSessionSearchQuery: true,
+      expandedParents: new Set(),
+    });
+
+    expect(out.map((entry) => entry.scopeKey)).toEqual([chatsRoot, chatsRoot]);
   });
 });
 
-describe('buildSessionGroupRowModel', () => {
+describe('buildSessionGroupRowOrderEntries', () => {
   const folderA: SessionRowOrderFolderEntry = {
     folder: { id: 'folder-a' },
-    scopeDirectory: '/repo',
+    scopeKey: '/repo/worktree',
+    scopeDirectory: '/repo/worktree',
     nodes: [node('a1')],
   };
   const folderAChild: SessionRowOrderFolderEntry = {
     folder: { id: 'folder-a-child' },
+    scopeKey: '/repo/worktree',
     scopeDirectory: '/repo/worktree',
     nodes: [node('a1-child', [], null)],
   };
   const folderB: SessionRowOrderFolderEntry = {
     folder: { id: 'folder-b' },
+    scopeKey: '/repo',
     scopeDirectory: '/repo',
     nodes: [node('b1')],
   };
-  const childFoldersByParentId = new Map([['folder-a', [folderAChild]]]);
+  const childFoldersByParentId = new Map([[getSessionFolderIdentityKey('/repo/worktree', 'folder-a'), [folderAChild]]]);
 
-  const build = (overrides: Partial<Parameters<typeof buildSessionGroupRowModel>[0]> = {}) =>
-    buildSessionGroupRowModel({
+  const build = (overrides: Partial<Parameters<typeof buildSessionGroupRowOrderEntries>[0]> = {}) =>
+    buildSessionGroupRowOrderEntries({
+      groupKey: 'project-a:group',
       isCollapsed: false,
       hasSessionSearchQuery: false,
       collapsedFolderIds: new Set(),
@@ -183,20 +205,31 @@ describe('buildSessionGroupRowModel', () => {
       visibleSessions: [node('ungrouped')],
       ...overrides,
     });
-  const itemIds = (model: ReturnType<typeof buildSessionGroupRowModel>): string[] =>
-    model.items.map((item) => item.node.session.id);
 
   test('renders folder nodes before their child folders, then the ungrouped sessions', () => {
-    expect(ids(build().entries)).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
+    expect(ids(build())).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
   });
 
   test('a collapsed group registers nothing', () => {
-    expect(build({ isCollapsed: true }).entries).toEqual([]);
-    expect(build({ isCollapsed: true }).items).toEqual([]);
+    expect(build({ isCollapsed: true })).toEqual([]);
   });
 
   test('a collapsed folder hides its own nodes and its whole child-folder subtree', () => {
-    expect(ids(build({ collapsedFolderIds: new Set(['folder-a']) }).entries)).toEqual(['b1', 'ungrouped']);
+    expect(ids(build({ collapsedFolderIds: new Set([getSessionFolderIdentityKey('/repo/worktree', 'folder-a')]) }))).toEqual(['b1', 'ungrouped']);
+  });
+
+  test('scopes collapse when folder ids repeat across scopes', () => {
+    const sameIdInProjectRoot: SessionRowOrderFolderEntry = {
+      folder: { id: 'folder-a' },
+      scopeKey: '/repo',
+      scopeDirectory: '/repo',
+      nodes: [node('project-root-session')],
+    };
+
+    expect(ids(build({
+      rootFolders: [folderA, sameIdInProjectRoot],
+      collapsedFolderIds: new Set([getSessionFolderIdentityKey('/repo/worktree', 'folder-a')]),
+    }))).toEqual(['project-root-session', 'ungrouped']);
   });
 
   test('an active search overrides folder collapse and node expansion', () => {
@@ -204,7 +237,7 @@ describe('buildSessionGroupRowModel', () => {
       hasSessionSearchQuery: true,
       collapsedFolderIds: new Set(['folder-a']),
       expandedParents: new Set(),
-    }).entries)).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
+    }))).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
   });
 
   test('walks expanded ungrouped parents depth-first', () => {
@@ -214,11 +247,11 @@ describe('buildSessionGroupRowModel', () => {
     expect(ids(build({
       visibleSessions: [parent, node('ungrouped-last')],
       expandedParents: new Set(['project:active:ungrouped-parent', 'project:active:ungrouped-grandchild']),
-    }).entries)).toEqual(['a1', 'a1-child', 'b1', 'ungrouped-parent', 'ungrouped-grandchild', 'ungrouped-last']);
+    }))).toEqual(['a1', 'a1-child', 'b1', 'ungrouped-parent', 'ungrouped-grandchild', 'ungrouped-last']);
   });
 
   test('marks every entry of an archived bucket as archived', () => {
-    const { entries } = build({ archivedBucket: true, projectId: null, groupDirectory: null });
+    const entries = build({ archivedBucket: true, projectId: null, groupDirectory: null });
 
     expect(entries.map((entry) => entry.archived)).toEqual([true, true, true, true]);
     expect(entries[0]?.scopeKey).toBe('/repo');
@@ -227,79 +260,25 @@ describe('buildSessionGroupRowModel', () => {
   test('keeps duplicate session ids (recent and project copies both register)', () => {
     const duplicate: SessionRowOrderFolderEntry = {
       folder: { id: 'folder-duplicate' },
+      scopeKey: '/repo',
       scopeDirectory: '/repo',
       nodes: [node('ungrouped')],
     };
 
-    expect(ids(build({ rootFolders: [duplicate] }).entries)).toEqual(['ungrouped', 'ungrouped']);
+    const entries = build({ rootFolders: [duplicate] });
+    expect(ids(entries)).toEqual(['ungrouped', 'ungrouped']);
+    expect(entries[0]?.rowKey).not.toBe(entries[1]?.rowKey);
   });
 
   test('uses the folder worktree directory as the scope fallback', () => {
-    const { entries } = build({ projectId: null, hasSessionSearchQuery: true });
+    const entries = build({ projectId: null, hasSessionSearchQuery: true });
 
-    expect(entries[1]).toEqual({ id: 'a1-child', scopeKey: '/repo/worktree', archived: false });
-  });
-
-  test('collects entries and items with the same ids in order when the group has no folders', () => {
-    const model = build({
-      rootFolders: [],
-      childFoldersByParentId: new Map(),
-      visibleSessions: [node('first'), node('second')],
+    expect(entries[1]).toEqual({
+      id: 'a1-child',
+      rowKey: 'project-a:group:folder:/repo/worktree:folder-a-child:session:a1-child',
+      scopeKey: '/repo/worktree',
+      archived: false,
     });
-
-    expect(ids(model.entries)).toEqual(['first', 'second']);
-    expect(itemIds(model)).toEqual(ids(model.entries));
-  });
-
-  test('tracks the SessionTreeItem depth for nested chains under search', () => {
-    const grandchild = node('grandchild');
-    const child = node('child', [grandchild]);
-    const root = node('root', [child]);
-    const model = build({
-      rootFolders: [],
-      childFoldersByParentId: new Map(),
-      visibleSessions: [root],
-      hasSessionSearchQuery: true,
-    });
-
-    expect(model.items.map((item) => [item.node.session.id, item.depth])).toEqual([
-      ['root', 0],
-      ['child', 1],
-      ['grandchild', 2],
-    ]);
-  });
-
-  test('tracks depth through manual expansion without a search', () => {
-    const child = node('child');
-    const root = node('root', [child]);
-    const model = build({
-      rootFolders: [],
-      childFoldersByParentId: new Map(),
-      visibleSessions: [root],
-      expandedParents: new Set(['project:active:root']),
-    });
-
-    expect(model.items.map((item) => [item.node.session.id, item.depth])).toEqual([
-      ['root', 0],
-      ['child', 1],
-    ]);
-  });
-
-  test('flattens only the ungrouped region; folder rows keep normal flow', () => {
-    const model = build();
-
-    expect(ids(model.entries)).toEqual(['a1', 'a1-child', 'b1', 'ungrouped']);
-    expect(itemIds(model)).toEqual(['ungrouped']);
-  });
-
-  test('keeps duplicate ids in the flattened items', () => {
-    const model = build({
-      rootFolders: [],
-      childFoldersByParentId: new Map(),
-      visibleSessions: [node('same'), node('same')],
-    });
-
-    expect(itemIds(model)).toEqual(['same', 'same']);
   });
 });
 
@@ -335,16 +314,27 @@ describe('buildActivityRowOrderEntries', () => {
       { visibleLimit: 7, hasSessionSearchQuery: false, expandedParents: new Set() },
     );
 
-    expect(entries).toEqual([{ id: 'root', scopeKey: 'project-a', archived: false }]);
+    expect(entries).toEqual([{
+      id: 'root',
+      rowKey: 'activity:active-now:root:0:session:root',
+      scopeKey: 'project-a',
+      archived: false,
+    }]);
   });
-});
 
-describe('toSessionRowOrderIds', () => {
-  test('preserves duplicates in order', () => {
-    expect(toSessionRowOrderIds([
-      { id: 'same', scopeKey: 'project-a', archived: false },
-      { id: 'other', scopeKey: 'project-a', archived: false },
-      { id: 'same', scopeKey: 'project-a', archived: false },
-    ])).toEqual(['same', 'other', 'same']);
+  test('assigns distinct row keys to duplicate Recent occurrences', () => {
+    const duplicate = node('duplicate');
+    const items = [item('duplicate'), { ...item('duplicate'), node: duplicate }];
+    const entries = buildActivityRowOrderEntries(
+      items,
+      { visibleLimit: 7, hasSessionSearchQuery: false, expandedParents: new Set(), sectionKey: 'active-now' },
+    );
+
+    expect(entries.map((entry) => entry.id)).toEqual(['duplicate', 'duplicate']);
+    expect(entries[0]?.rowKey).not.toBe(entries[1]?.rowKey);
+    expect(entries.map((entry) => entry.rowKey)).toEqual(buildActivitySessionRowKeys(items, {
+      visibleLimit: 7,
+      sectionKey: 'active-now',
+    }));
   });
 });

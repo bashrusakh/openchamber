@@ -69,8 +69,8 @@ describe('SessionTreeItem public behavior', () => {
       const [menuKey, setMenuKey] = React.useState<string | null>(null);
       const [copiedSessionId, setCopiedSessionId] = React.useState<string | null>(null);
       const rows = [
-        { renderContext: 'project' as const, groupDirectory: '/workspace' },
-        { renderContext: 'recent' as const, groupDirectory: '/workspace' },
+        { renderContext: 'project' as const, groupDirectory: '/workspace', selectionScopeKey: '/workspace', rowKey: 'project:session:same-session' },
+        { renderContext: 'recent' as const, groupDirectory: '/workspace', selectionScopeKey: '/workspace', rowKey: 'activity:active-now:same-session:0:session:same-session' },
       ];
       return <>{rows.map((context) => <SessionTreeItem
         key={context.renderContext}
@@ -104,6 +104,11 @@ describe('SessionTreeItem public behavior', () => {
     try {
       await act(async () => root.render(<I18nProvider><Harness /></I18nProvider>));
       expect(renderedRows).toHaveLength(2);
+      expect(renderedRows.map((row) => row.rowKey)).toEqual([
+        'project:session:same-session',
+        'activity:active-now:same-session:0:session:same-session',
+      ]);
+      expect(renderedRows.map((row) => row.selectionScopeKey)).toEqual(['/workspace', '/workspace']);
 
       await act(async () => renderedRows[0]?.handleSessionDoubleClick(sharedSession.id, sharedSession.title));
       expect(renderedRows).toHaveLength(4);

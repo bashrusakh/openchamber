@@ -8,6 +8,7 @@ import type { WorktreeMetadata } from '@/types/worktree';
 import { I18nProvider } from '@/lib/i18n';
 import { useSessionGrouping } from './useSessionGrouping';
 import { useSessionSidebarSections } from './useSessionSidebarSections';
+import { buildSessionSearchRowModel } from './sessionSearchRowModel';
 import type { SessionGroup, SessionNode } from '../types';
 import { installHookTestDom } from '../test-utils/testDom';
 
@@ -38,10 +39,35 @@ const chatsGroup = (sessions: Session[]): SessionGroup => ({
 });
 
 type Sections = ReturnType<typeof useSessionSidebarSections>;
+type SectionsWithSearchMatchCount = Sections & { searchMatchCount: number };
+
+const getFinalSearchMatchCount = (
+  sections: Sections,
+  query: string,
+  foldersMap: SessionFoldersMap,
+  chatGroup: SessionGroup | null = null,
+): number => buildSessionSearchRowModel({
+  sections: sections.sectionsForRender,
+  chatGroup,
+  groupSearchDataByGroup: sections.groupSearchDataByGroup,
+  foldersMap,
+  normalizedQuery: query,
+  collapsedProjects: new Set(),
+  collapsedActivitySections: new Set(),
+  showOnlyMainWorkspace: false,
+  activeProjectId: null,
+  singleProjectMode: false,
+  singleProjectId: null,
+  showRecentSection: false,
+  recentSections: [],
+  pinnedSessionIds: new Set(),
+  sessionOrderIndex: new Map(),
+}).searchMatchCount;
 
 // The real matcher and the real grouping callbacks run here: the reported bug
 // was never about matching, so a stubbed matcher would test nothing.
-const renderSections = (group: SessionGroup, query: string, projectSessions?: Session[]): Sections => {
+const renderSections = (group: SessionGroup, query: string, projectSessions?: Session[]): SectionsWithSearchMatchCount => {
+  const foldersMap: SessionFoldersMap = { [CHATS_ROOT]: [{ id: 'folder', name: group.label, sessionIds: [], createdAt: 1 }] };
   let captured: Sections | null = null;
   const Harness = () => {
     const grouping = useSessionGrouping({
@@ -66,15 +92,18 @@ const renderSections = (group: SessionGroup, query: string, projectSessions?: Se
       normalizedSessionSearchQuery: query,
       filterSessionNodesForSearch: grouping.filterSessionNodesForSearch,
       buildGroupSearchText: grouping.buildGroupSearchText,
-      foldersMap: { [CHATS_ROOT]: [{ id: 'folder', name: group.label, sessionIds: [], createdAt: 1 }] },
+       foldersMap,
       standaloneGroups: projectSessions ? [] : [group],
     });
     return null;
   };
 
   renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(Harness)));
-  if (!captured) throw new Error('sections hook was not mounted');
-  return captured;
+  const sections = captured;
+  if (!sections) throw new Error('sections hook was not mounted');
+  return Object.assign(sections, {
+    searchMatchCount: getFinalSearchMatchCount(sections, query, foldersMap, projectSessions ? null : group),
+  });
 };
 
 // Issue #3200: the managed chats render outside every project section. They
@@ -198,7 +227,7 @@ describe('sidebar search over standalone groups', () => {
 
     expect(sections.groupSearchDataByGroup.get(rootGroup)?.matchedSessionCount).toBe(1);
     expect(sections.groupSearchDataByGroup.get(archivedGroup)?.matchedSessionCount).toBe(1);
-    expect(sections.searchMatchCount).toBe(2);
+     expect(sections.searchMatchCount).toBe(2);
     expect(sections.flatSectionsForRender[0]?.groups[0]?.sessions.map((node) => node.session.id)).toEqual(['ses_active']);
   });
 
@@ -213,7 +242,7 @@ describe('sidebar search over standalone groups', () => {
     expect(data?.groupMatches).toBe(true);
     expect(data?.folderNameMatchCount).toBe(1);
     expect(data?.hasMatch).toBe(true);
-    expect(sections.searchMatchCount).toBe(2);
+     expect(sections.searchMatchCount).toBe(0);
   });
 });
 
@@ -261,7 +290,7 @@ const buildProjectSections = ({
   query: string;
   worktrees?: WorktreeMetadata[];
   folders?: SessionFoldersMap;
-}): Sections => {
+}): SectionsWithSearchMatchCount => {
   let captured: Sections | null = null;
   const activeSessions = sessions.filter((session) => !session.time?.archived);
   const archivedSessions = sessions.filter((session) => Boolean(session.time?.archived));
@@ -294,12 +323,15 @@ const buildProjectSections = ({
     return null;
   };
   renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(Harness)));
-  if (!captured) throw new Error('sections hook was not mounted');
-  return captured;
+  const sections = captured;
+  if (!sections) throw new Error('sections hook was not mounted');
+  return Object.assign(sections, {
+    searchMatchCount: getFinalSearchMatchCount(sections, query, folders),
+  });
 };
 
 type LiveSectionsControls = {
-  sections: Sections | null;
+  sections: SectionsWithSearchMatchCount | null;
   setSessions: React.Dispatch<React.SetStateAction<Session[]>> | null;
   setQuery: React.Dispatch<React.SetStateAction<string>> | null;
   setWorktrees: React.Dispatch<React.SetStateAction<WorktreeMetadata[]>> | null;
@@ -338,7 +370,7 @@ const mountLiveSections = (initialSessions: Session[], initialQuery: string) => 
       () => (worktrees.length > 0 ? new Map([[PROJECT_ROOT, worktrees]]) : EMPTY_WORKTREES),
       [worktrees],
     );
-    controls.sections = useSessionSidebarSections({
+    const sections = useSessionSidebarSections({
       normalizedProjects: PROJECTS,
       getSessionsForProject,
       getArchivedSessionsForProject,
@@ -354,6 +386,9 @@ const mountLiveSections = (initialSessions: Session[], initialQuery: string) => 
       buildGroupSearchText: grouping.buildGroupSearchText,
       foldersMap: EMPTY_FOLDERS,
       standaloneGroups: [],
+    });
+    controls.sections = Object.assign(sections, {
+      searchMatchCount: getFinalSearchMatchCount(sections, query, EMPTY_FOLDERS),
     });
     controls.setSessions = setSessions;
     controls.setQuery = setQuery;
@@ -554,13 +589,28 @@ describe('sidebar search parity: groups, folders, and display projections', () =
     expect(data?.folderNameMatchCount).toBe(0);
     expect(data?.hasMatch).toBe(true);
     expect(nodeIds(groupNodes(sections, worktreeGroup))).toEqual([]);
-    expect(sections.searchMatchCount).toBe(1);
+     expect(sections.searchMatchCount).toBe(0);
 
     // Grouped display keeps the matching worktree group; flat display merges
     // the (empty) non-archived result into a single flat group.
     expect(sections.sectionsForRender[0]?.groups.map((group) => group.id)).toEqual([`worktree:${worktree.path}`]);
     expect(sections.flatSectionsForRender[0]?.groups[0]?.id).toBe('flat');
     expect(sections.flatSectionsForRender[0]?.groups[0]?.sessions).toEqual([]);
+  });
+
+  test('omits the synthetic flat group when only the archived bucket matches', () => {
+    const sections = buildProjectSections({
+      sessions: [
+        projectSession('ses_active', 'Grocery list'),
+        projectSession('ses_archived', 'Release archive', {
+          time: { created: 1, updated: 1, archived: 2 },
+        }),
+      ],
+      query: 'release',
+    });
+
+    expect(sections.flatSectionsForRender[0]?.groups.map((group) => group.id)).toEqual(['archived']);
+    expect(sections.searchMatchCount).toBe(1);
   });
 
   test('matches a folder name without a session or group match', () => {
@@ -587,6 +637,6 @@ describe('sidebar search parity: groups, folders, and display projections', () =
     expect(data?.folderNameMatchCount).toBe(1);
     expect(data?.hasMatch).toBe(true);
     expect(nodeIds(groupNodes(sections, rootGroup))).toEqual([]);
-    expect(sections.searchMatchCount).toBe(1);
+     expect(sections.searchMatchCount).toBe(0);
   });
 });

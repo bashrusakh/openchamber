@@ -81,31 +81,40 @@ matching and ordering. Search does not fetch sessions or broaden list membership
 
 Selection order and bulk scope come from the render model, not the DOM. Each
 rendered list registers its rows with `sessions/sessionRowOrder.tsx` in the
-order it renders them — managed Chats and Recent sections above the project
-sections, in that order — and shift-range selection, Ctrl/Cmd+A, and the bulk
+order it renders them, with managed Chats and Recent sections above the project
+sections, in that order, and shift-range selection, Ctrl/Cmd+A, and the bulk
 archive/delete scope read that registry. Rows that virtualization keeps
 unmounted are included because the entries come from the model, registration
 runs in layout effects so the registry matches the committed tree before any
-click, and registering never triggers a render.
+click, and registering never triggers a render. Every entry also carries a
+stable `rowKey` for its rendered occurrence. The session ID remains the API
+identity, so selecting the same session twice still produces one bulk action.
+Shift-range selection first filters entries to the clicked row's scope, then
+resolves both ends by `rowKey`; if the stored anchor is missing, it falls back
+to the first row in that scope. Session row renderers and the registry must use
+the same key. DnD `dragKey` remains a separate occurrence identity.
 
 ## Row virtualization
 
-`SessionGroupSection` owns the sidebar's only virtualizer
-(`@tanstack/react-virtual`). `selectSessionGroupVirtualizationMode`
-(`sessions/sessionNodeItemUtils.ts`) picks the mode at the shared 50-row
-threshold: a searched group with 50+ retained rows virtualizes each row
-individually (`flat`), so a directly matched parent's hundreds of descendants
-stay bounded too; otherwise an unsearched archived bucket with 50+ roots
-virtualizes whole root subtrees with their expanded children inline (`roots`);
-everything else keeps normal flow (the non-search active flow needs it for the
-incremental Show more control).
-Flat rows carry their DFS depth and render without children, so content,
-order, and indentation match the tree. The pre-ready fallback renders plain
-rows for roots mode and at most one threshold batch for flat mode; the layout
-effect switches to the virtual window before paint. Folders still render above
-the virtual list in normal flow — folder contents are not flattened in this
-step, and the flat model covers the ungrouped region. The selection registry
-still carries every model row.
+Normal project rendering keeps its existing per-group behavior. An unsearched
+archived bucket with 50+ roots uses `@tanstack/react-virtual` to keep whole
+root subtrees together with their expanded children; smaller groups and the
+non-search active flow stay in normal document order, including the incremental
+Show more control.
+
+A searched list does not mount one virtualizer per project or group.
+`SessionProjectCollection` builds `projects/sessionSearchRowModel.ts`, and
+`SessionProjectScroller` mounts one `@tanstack/react-virtual` instance against
+the actual `ScrollableOverlay`. The model contains activity, project, group,
+folder, empty, and session rows in document order. It also supplies the
+complete selection registry, so offscreen rows remain selectable.
+
+Search has no result cap or Show more batching. Before the overlay's real scroll
+element is available, the global search list mounts no result rows and keeps an
+estimated content height. Once the element resolves, it mounts only the
+viewport window plus overscan. Search disables project/group sorting DnD while
+active, but keeps session-to-folder actions and folder controls available for
+mounted rows. The selection registry still carries every model row.
 
 ## Loading rules
 
