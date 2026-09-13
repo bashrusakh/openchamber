@@ -131,7 +131,7 @@ export function GitHubPrPickerDialog({
       setHasMore(false);
       setError(describeError(e));
     } finally {
-      if (!signal?.aborted) setIsLoading(false);
+      if (!signal?.aborted && generation === requestGenerationRef.current) setIsLoading(false);
     }
   }, [debouncedQuery, describeError, github, githubAuthChecked, githubAuthStatus, projectDirectory, t]);
 

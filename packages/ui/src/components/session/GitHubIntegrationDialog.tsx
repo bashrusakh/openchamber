@@ -147,7 +147,7 @@ export function GitHubIntegrationDialog({
       setSelectedPr(null);
       setError(describeLoadError(err));
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (!signal?.aborted && generation === requestGenerationRef.current) setLoading(false);
     }
   }, [activeTab, describeLoadError, github, githubAuthChecked, githubAuthStatus, projectDirectory, t]);
 
