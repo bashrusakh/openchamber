@@ -581,6 +581,57 @@ describe('openNewSessionDraft project binding', () => {
     }
   });
 
+  test('keeps a Chat draft that replaces a project draft while stale-directory recovery is pending', async () => {
+    const originalGetDirectoryAvailability = opencodeClient.getDirectoryAvailability;
+    const originalActivateDirectory = useConfigStore.getState().activateDirectory;
+    const availabilityCalls = [];
+    const availabilityResolvers = [];
+    useConfigStore.setState({ activateDirectory: async () => {} });
+    opencodeClient.getDirectoryAvailability = (directory) => {
+      availabilityCalls.push(directory);
+      return new Promise((resolve) => {
+        availabilityResolvers.push(resolve);
+      });
+    };
+
+    try {
+      useSessionUIStore.getState().openNewSessionDraft({ directoryOverride: '/external/worktree' });
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'project',
+        directoryOverride: '/external/worktree',
+      });
+      expect(availabilityCalls).toEqual(['/external/worktree']);
+
+      // The draft flips to Chat while the availability probe is still pending,
+      // keeping the live directory recovery is probing. The earlier directory
+      // re-checks still match it, so only the post-await target re-check can
+      // stop recovery from rewriting this Chat draft as a repaired project.
+      const replacedDraft = useSessionUIStore.getState().newSessionDraft;
+      useSessionUIStore.setState({
+        newSessionDraft: {
+          ...replacedDraft,
+          draftId: replacedDraft.draftId + 1,
+          target: 'chat',
+          selectedProjectId: CHAT_DRAFT_PROJECT_ID,
+        },
+      });
+      const persistedTargetBeforeResolution = getDeferredSafeStorage().getItem(DRAFT_TARGET_KEY);
+
+      availabilityResolvers[0]('missing');
+      await Bun.sleep(0);
+
+      expect(useSessionUIStore.getState().newSessionDraft).toMatchObject({
+        target: 'chat',
+        selectedProjectId: CHAT_DRAFT_PROJECT_ID,
+        directoryOverride: '/external/worktree',
+      });
+      expect(getDeferredSafeStorage().getItem(DRAFT_TARGET_KEY)).toBe(persistedTargetBeforeResolution);
+    } finally {
+      opencodeClient.getDirectoryAvailability = originalGetDirectoryAvailability;
+      useConfigStore.setState({ activateDirectory: originalActivateDirectory });
+    }
+  });
+
   test('restores the recorded project target when no live directory is set', () => {
     getDeferredSafeStorage().setItem(
       DRAFT_TARGET_KEY,
