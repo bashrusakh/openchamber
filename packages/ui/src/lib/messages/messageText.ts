@@ -6,6 +6,7 @@ type UserTextPart = Part & { text?: string; content?: string; shellAction?: { ou
 type MarkdownFence = {
     character: '`' | '~';
     length: number;
+    contentIndent: number;
 };
 
 type MarkdownListItem = {
@@ -32,16 +33,27 @@ const hasAtMostThreeColumnIndent = (indentation: string | undefined): boolean =>
     indentation !== undefined && getIndentWidth(indentation) <= 3
 );
 
-const getFence = (line: string): MarkdownFence | null => {
+const getEnclosingContentIndent = (indent: number, listItems: MarkdownListItem[]): number => {
+    for (let index = listItems.length - 1; index >= 0; index -= 1) {
+        const listItem = listItems[index];
+        if (listItem && indent >= listItem.contentIndent) return listItem.contentIndent;
+    }
+    return 0;
+};
+
+const getFence = (line: string, listItems: MarkdownListItem[]): MarkdownFence | null => {
     const match = line.match(FENCE_OPEN_RE);
     const indentation = match?.[1];
     const marker = match?.[2];
-    if (!hasAtMostThreeColumnIndent(indentation) || !marker || (marker[0] === '`' && match[3]?.includes('`'))) {
+    if (indentation === undefined || !marker || (marker[0] === '`' && match[3]?.includes('`'))) {
         return null;
     }
     const character = marker[0];
     if (character !== '`' && character !== '~') return null;
-    return { character, length: marker.length };
+    const indent = getIndentWidth(indentation);
+    const contentIndent = getEnclosingContentIndent(indent, listItems);
+    if (indent - contentIndent > 3) return null;
+    return { character, length: marker.length, contentIndent };
 };
 
 const closesFence = (line: string, fence: MarkdownFence): boolean => {
@@ -49,7 +61,8 @@ const closesFence = (line: string, fence: MarkdownFence): boolean => {
     const indentation = match?.[1];
     const marker = match?.[2];
     return Boolean(
-        hasAtMostThreeColumnIndent(indentation)
+        indentation !== undefined
+        && getIndentWidth(indentation) - fence.contentIndent <= 3
         && marker
         && marker[0] === fence.character
         && marker.length >= fence.length,
@@ -84,8 +97,8 @@ const getListItem = (line: string): MarkdownListItem | null => {
     return { markerIndent, contentIndent, codeIndent: contentIndent + 4 };
 };
 
-const isMarkdownBlockBoundary = (line: string): boolean => (
-    Boolean(getFence(line)) || isThematicBreak(line) || isBlockBoundary(line)
+const isMarkdownBlockBoundary = (line: string, listItems: MarkdownListItem[]): boolean => (
+    Boolean(getFence(line, listItems)) || isThematicBreak(line) || isBlockBoundary(line)
 );
 
 const getListContinuation = (
@@ -128,7 +141,7 @@ const isLazyListContinuation = (
     listItems: MarkdownListItem[],
     hasPendingBlankLines: boolean,
 ): boolean => {
-    if (hasPendingBlankLines || listItems.length === 0 || isMarkdownBlockBoundary(line)) return false;
+    if (hasPendingBlankLines || listItems.length === 0 || isMarkdownBlockBoundary(line, listItems)) return false;
     const current = listItems[listItems.length - 1];
     return Boolean(current && getLineIndent(line) < current.contentIndent);
 };
@@ -218,7 +231,7 @@ const createMarkdownScanner = (mode: MarkdownScannerMode) => {
 
         state.pendingBlankLines = 0;
 
-        const nextFence = getFence(line);
+        const nextFence = getFence(line, state.listItems);
         if (nextFence) {
             state.fence = nextFence;
         } else if (isIndentedCode && !validListItem && !listContinuation) {
@@ -240,21 +253,72 @@ const createMarkdownScanner = (mode: MarkdownScannerMode) => {
             : undefined;
     };
 
+    const isInsideCodeBlock = (): boolean => Boolean(state.fence || state.indentedCodeIndent);
+
+    const isInsideCodeBlockAfterLine = (line: string): boolean => {
+        const snapshot = {
+            ...state,
+            listItems: [...state.listItems],
+            pendingIndentedBlankLines: state.pendingIndentedBlankLines ? [...state.pendingIndentedBlankLines] : null,
+        };
+        scanLine(line);
+        const isInside = isInsideCodeBlock();
+        state.fence = snapshot.fence;
+        state.indentedCodeIndent = snapshot.indentedCodeIndent;
+        state.listItems = snapshot.listItems;
+        state.pendingIndentedBlankLines = snapshot.pendingIndentedBlankLines;
+        state.pendingIndentedBlankLineCount = snapshot.pendingIndentedBlankLineCount;
+        state.pendingBlankLines = snapshot.pendingBlankLines;
+        return isInside;
+    };
+
     return {
         scanLine,
-        isInsideCodeBlock: (): boolean => Boolean(state.fence || state.indentedCodeIndent),
+        isInsideCodeBlock,
+        isInsideCodeBlockAfterLine,
     };
 };
 
-const isInsideMarkdownCodeBlock = (text: string): boolean => {
-    const lines = text.replace(/\r\n?/g, '\n').split('\n');
+const createIncrementalCodeBlockScanner = () => {
     const scanner = createMarkdownScanner('count');
+    let currentLine = '';
+    let pendingCarriageReturn = false;
 
-    for (const line of lines) {
-        scanner.scanLine(line);
-    }
+    const endLine = (): void => {
+        scanner.scanLine(currentLine);
+        currentLine = '';
+    };
 
-    return scanner.isInsideCodeBlock();
+    const append = (text: string): void => {
+        let chunk = text;
+        if (pendingCarriageReturn) {
+            pendingCarriageReturn = false;
+            endLine();
+            if (chunk.startsWith('\n')) chunk = chunk.slice(1);
+        }
+        if (chunk.length === 0) return;
+        if (chunk.endsWith('\r')) {
+            pendingCarriageReturn = true;
+            chunk = chunk.slice(0, -1);
+        }
+
+        const lines = chunk.replace(/\r\n?/g, '\n').split('\n');
+        for (let index = 0; index < lines.length - 1; index += 1) {
+            currentLine += lines[index];
+            endLine();
+        }
+        currentLine += lines[lines.length - 1];
+    };
+
+    return {
+        append,
+        // Mirrors scanning the accumulated text, including a final line without a terminator.
+        isInsideCodeBlock: (): boolean => (
+            pendingCarriageReturn || currentLine.length > 0
+                ? scanner.isInsideCodeBlockAfterLine(currentLine)
+                : scanner.isInsideCodeBlock()
+        ),
+    };
 };
 
 const countBoundaryLineBreaks = (text: string, fromStart: boolean): number => {
@@ -267,19 +331,23 @@ const countBoundaryLineBreaks = (text: string, fromStart: boolean): number => {
 
 const joinTextParts = (textParts: string[]): string => {
     let joined = '';
+    const codeBlockScanner = createIncrementalCodeBlockScanner();
 
     textParts.forEach((text, index) => {
         if (index === 0) {
             joined = text;
+            codeBlockScanner.append(text);
             return;
         }
 
         const previousText = textParts[index - 1];
         const boundaryLineBreaks = countBoundaryLineBreaks(previousText, false)
             + countBoundaryLineBreaks(text, true);
-        const desiredLineBreaks = isInsideMarkdownCodeBlock(joined) ? 1 : 2;
+        const desiredLineBreaks = codeBlockScanner.isInsideCodeBlock() ? 1 : 2;
         const separator = '\n'.repeat(Math.max(0, desiredLineBreaks - boundaryLineBreaks));
-        joined += `${separator}${text}`;
+        const appendedText = `${separator}${text}`;
+        joined += appendedText;
+        codeBlockScanner.append(appendedText);
     });
 
     return joined;

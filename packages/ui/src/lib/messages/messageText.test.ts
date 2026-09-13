@@ -89,6 +89,54 @@ describe('flattenAssistantTextParts', () => {
     ))).toBe('- item\n    continuation\n\n    next continuation');
   });
 
+  test('recognizes a fence indented relative to its enclosing list item', () => {
+    expect(flattenAssistantTextParts(textParts(
+      '- item\n\n    ```ts\n    a\n\n\n\n    b\n    ```\n\n    after',
+    ))).toBe('- item\n\n    ```ts\n    a\n\n\n\n    b\n    ```\n\n    after');
+  });
+
+  test('recognizes a nested-list fence relative to the innermost list item', () => {
+    const nested = [
+      '- outer',
+      '',
+      '    - inner',
+      '',
+      '        ```ts',
+      '        a',
+      '',
+      '',
+      '',
+      '',
+      '        b',
+      '        ```',
+      '',
+      '    after inner',
+      '',
+      '',
+      '',
+      '    last line',
+    ].join('\n');
+
+    expect(flattenAssistantTextParts(textParts(nested))).toBe([
+      '- outer',
+      '',
+      '    - inner',
+      '',
+      '        ```ts',
+      '        a',
+      '',
+      '',
+      '',
+      '',
+      '        b',
+      '        ```',
+      '',
+      '    after inner',
+      '',
+      '    last line',
+    ].join('\n'));
+  });
+
   test('preserves blank lines in indented code blocks', () => {
     expect(flattenAssistantTextParts(textParts(
       'Before\n\n\n\n    const first = 1;\n\n\n\n    const second = 2;\n\n\n\nAfter',
@@ -136,6 +184,27 @@ describe('flattenAssistantTextParts', () => {
       'const second = 2;',
       '```',
     ].join('\n'));
+  });
+
+  test('joins a large streamed part list without rescanning the accumulated text', () => {
+    const texts = Array.from({ length: 1000 }, (_, index) => {
+      let text = `Segment ${index}: `;
+      while (text.length < 119) text += 'markdown text ';
+      return text;
+    });
+    const parts = textParts(...texts);
+    const expected = texts.join('\n\n');
+
+    flattenAssistantTextParts(parts.slice(0, 50));
+
+    const startedAt = performance.now();
+    const joined = flattenAssistantTextParts(parts);
+    const elapsed = performance.now() - startedAt;
+
+    expect(joined).toBe(expected);
+    // Rescanning the accumulated text at every part boundary is quadratic (~2s here);
+    // the incremental scanner keeps this input in the tens of milliseconds.
+    expect(elapsed).toBeLessThan(1000);
   });
 });
 
