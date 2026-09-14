@@ -42,13 +42,14 @@ const chatsGroup = (sessions: Session[]): SessionGroup => ({
 type Sections = ReturnType<typeof useSessionSidebarSections>;
 type SectionsWithSearchMatchCount = Sections & { searchMatchCount: number };
 
-const getFinalSearchMatchCount = (
+const buildSearchRowModel = (
   sections: Sections,
   query: string,
   foldersMap: SessionFoldersMap,
+  sectionProjection: Sections['sectionsForRender'],
   chatGroup: SessionGroup | null = null,
-): number => buildSessionSearchRowModel({
-  sections: sections.sectionsForRender,
+) => buildSessionSearchRowModel({
+  sections: sectionProjection,
   chatGroup,
   groupSearchDataByGroup: sections.groupSearchDataByGroup,
   foldersMap,
@@ -63,7 +64,20 @@ const getFinalSearchMatchCount = (
   recentSections: [],
   pinnedSessionIds: new Set(),
   sessionOrderIndex: new Map(),
-}).searchMatchCount;
+});
+
+const getFinalSearchMatchCount = (
+  sections: Sections,
+  query: string,
+  foldersMap: SessionFoldersMap,
+  chatGroup: SessionGroup | null = null,
+): number => buildSearchRowModel(sections, query, foldersMap, sections.sectionsForRender, chatGroup).searchMatchCount;
+
+const getFlatSearchRowModel = (
+  sections: Sections,
+  query: string,
+  foldersMap: SessionFoldersMap,
+) => buildSearchRowModel(sections, query, foldersMap, sections.flatSectionsForRender);
 
 // The real matcher and the real grouping callbacks run here: the reported bug
 // was never about matching, so a stubbed matcher would test nothing.
@@ -336,6 +350,7 @@ type LiveSectionsControls = {
   setSessions: React.Dispatch<React.SetStateAction<Session[]>> | null;
   setQuery: React.Dispatch<React.SetStateAction<string>> | null;
   setWorktrees: React.Dispatch<React.SetStateAction<WorktreeMetadata[]>> | null;
+  setFoldersMap: React.Dispatch<React.SetStateAction<SessionFoldersMap>> | null;
 };
 
 /**
@@ -343,14 +358,25 @@ type LiveSectionsControls = {
  * in-place model update (rename, delete, archive, worktree move, object
  * replacement) is applied to a mounted hook while the query stays active.
  */
-const mountLiveSections = (initialSessions: Session[], initialQuery: string) => {
+const mountLiveSections = (
+  initialSessions: Session[],
+  initialQuery: string,
+  initialFoldersMap: SessionFoldersMap = EMPTY_FOLDERS,
+) => {
   const dom = installHookTestDom();
   const root = createRoot(dom.container);
-  const controls: LiveSectionsControls = { sections: null, setSessions: null, setQuery: null, setWorktrees: null };
+  const controls: LiveSectionsControls = {
+    sections: null,
+    setSessions: null,
+    setQuery: null,
+    setWorktrees: null,
+    setFoldersMap: null,
+  };
   const Harness = () => {
     const [sessions, setSessions] = React.useState<Session[]>(initialSessions);
     const [query, setQuery] = React.useState(initialQuery);
     const [worktrees, setWorktrees] = React.useState<WorktreeMetadata[]>(EMPTY_WORKTREE_LIST);
+    const [foldersMap, setFoldersMap] = React.useState<SessionFoldersMap>(initialFoldersMap);
     const grouping = useSessionGrouping({
       homeDirectory: '/home/user',
       worktreeMetadata: EMPTY_WORKTREE_METADATA,
@@ -385,15 +411,16 @@ const mountLiveSections = (initialSessions: Session[], initialQuery: string) => 
       normalizedSessionSearchQuery: query,
       filterSessionNodesForSearch: grouping.filterSessionNodesForSearch,
       buildGroupSearchText: grouping.buildGroupSearchText,
-      foldersMap: EMPTY_FOLDERS,
+      foldersMap,
       standaloneGroups: [],
     });
     controls.sections = Object.assign(sections, {
-      searchMatchCount: getFinalSearchMatchCount(sections, query, EMPTY_FOLDERS),
+      searchMatchCount: getFinalSearchMatchCount(sections, query, foldersMap),
     });
     controls.setSessions = setSessions;
     controls.setQuery = setQuery;
     controls.setWorktrees = setWorktrees;
+    controls.setFoldersMap = setFoldersMap;
     return null;
   };
   return {
@@ -441,6 +468,58 @@ describe('sidebar search live updates while a query is active', () => {
       const renamedInto = harness.controls.sections!;
       expect(nodeIds(groupNodes(renamedInto, mainGroup(renamedInto)))).toEqual(['ses_b']);
       expect(renamedInto.searchMatchCount).toBe(1);
+    } finally {
+      await harness.unmount();
+    }
+  });
+
+  test('keeps flat search rows and refreshes folder matches after a folder rename', async () => {
+    const session = projectSession('ses_a', 'Release notes');
+    const initialFolders: SessionFoldersMap = {
+      [PROJECT_ROOT]: [{ id: 'folder-release', name: 'Grocery plans', sessionIds: [session.id], createdAt: 1 }],
+    };
+    const updatedFolders: SessionFoldersMap = {
+      [PROJECT_ROOT]: [{ id: 'folder-release', name: 'Release plans', sessionIds: [session.id], createdAt: 1 }],
+    };
+    const harness = mountLiveSections([session], 'release', initialFolders);
+    try {
+      await harness.render();
+      const initial = harness.controls.sections!;
+      const initialRootGroup = mainGroup(initial);
+      const initialFlatGroup = initial.flatSectionsForRender[0]?.groups[0];
+      if (!initialRootGroup || !initialFlatGroup) throw new Error('expected the initial project groups');
+
+      const initialRows = getFlatSearchRowModel(initial, 'release', initialFolders);
+      expect(initialRows.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.id)).toEqual(['ses_a']);
+      expect(initialRows.rows.filter((row) => row.kind === 'folder').map((row) => row.displayName)).toEqual(['Grocery plans']);
+      expect(initial.searchMatchCount).toBe(1);
+      expect(initial.groupSearchDataByGroup.get(initialRootGroup)?.folderNameMatchCount).toBe(0);
+      expect(initial.groupSearchDataByGroup.get(initialFlatGroup)?.folderNameMatchCount).toBe(0);
+
+      await act(async () => {
+        harness.controls.setFoldersMap!(updatedFolders);
+      });
+
+      const updated = harness.controls.sections!;
+      const updatedRootGroup = mainGroup(updated);
+      const updatedFlatGroup = updated.flatSectionsForRender[0]?.groups[0];
+      if (!updatedRootGroup || !updatedFlatGroup) throw new Error('expected the updated project groups');
+
+      // A new search-data map causes searchableProjectSections to create a new
+      // section identity, so the flat cache must rebuild and register its
+      // synthetic group in the current map.
+      expect(updated.sectionsForRender[0]).not.toBe(initial.sectionsForRender[0]);
+      expect(updated.flatSectionsForRender[0]).not.toBe(initial.flatSectionsForRender[0]);
+      expect(updated.groupSearchDataByGroup.get(updatedRootGroup)?.folderNameMatchCount).toBe(1);
+      expect(updated.groupSearchDataByGroup.get(updatedRootGroup)?.hasMatch).toBe(true);
+      expect(updated.groupSearchDataByGroup.get(updatedFlatGroup)?.folderNameMatchCount).toBe(1);
+      expect(updated.groupSearchDataByGroup.get(updatedFlatGroup)?.hasMatch).toBe(true);
+
+      const updatedRows = getFlatSearchRowModel(updated, 'release', updatedFolders);
+      expect(updatedRows.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.id)).toEqual(['ses_a']);
+      expect(updatedRows.rows.filter((row) => row.kind === 'folder').map((row) => row.displayName)).toEqual(['Release plans']);
+      expect(updatedRows.searchMatchCount).toBe(1);
+      expect(updated.searchMatchCount).toBe(1);
     } finally {
       await harness.unmount();
     }
