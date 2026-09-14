@@ -22,6 +22,7 @@ import { streamPerfCount } from '@/stores/utils/streamDebug';
 import { Icon } from '@/components/icon/Icon';
 import { DirectoryActionIndicator } from '../sessions/DirectoryActionIndicator';
 import { SessionSearchRows, type SessionSearchRowsProps } from './SessionSearchRows';
+import { useStickySentinelObserver } from './useStickyProjectHeaders';
 
 type SessionProjectScrollerState = Pick<SessionGroupSectionProps,
   | 'editingId'
@@ -91,6 +92,7 @@ type SessionProjectScrollerModel = {
   projectRepoStatus: Map<string, boolean | null>;
   stuckProjectHeaders: Set<string>;
   projectHeaderSentinelRefs: React.MutableRefObject<Map<string, HTMLDivElement | null>>;
+  scrollContainerRef: React.RefObject<HTMLElement | null>;
   onSearchRowsMounted?: () => void;
   state: SessionProjectScrollerState;
   groupProps: SessionProjectScrollerGroupProps;
@@ -167,10 +169,9 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
   );
 
-  // Threaded into SessionGroupSection so the archived-bucket virtualizer
-  // can resolve the scrolling ancestor synchronously (no getComputedStyle
-  // walk) and skip the cost of a style recalc on every render.
-  const scrollContainerRef = React.useRef<HTMLElement | null>(null);
+  // Threaded into SessionGroupSection so the archived-bucket virtualizer and
+  // sticky observers use the same authoritative scrolling element.
+  const scrollContainerRef = model.scrollContainerRef;
   // Keep per-scroll measurements out of React state so the interaction guard
   // can read the current fade boundary without rerendering the sidebar.
   const topFadeSizeRef = React.useRef(0);
@@ -210,32 +211,24 @@ function SessionProjectScrollerComponent(props: Props): React.ReactNode {
   const hasProjectScroller = view.hasSessionSearchQuery
     ? searchHasProjectHeaders || searchHasActivityHeaders
     : model.projectSections.length > 0 && renderedSections.length > 0;
-  const [isRecentHeaderStuck, setIsRecentHeaderStuck] = React.useState(false);
-  React.useLayoutEffect(() => {
-    const root = scrollContainerRef.current;
-    const recentStart = root?.querySelector<HTMLElement>('[data-sidebar-activity-start="active-now"]');
-    if (!enableStickyFade || !hasProjectScroller || !root || !recentStart) {
-      setIsRecentHeaderStuck(false);
-      return;
-    }
-
-    // Observe the section boundary, not its sticky header. Scrolling within a
-    // section must not rerender the list or scan its session rows.
-    setIsRecentHeaderStuck(recentStart.getBoundingClientRect().top < root.getBoundingClientRect().top);
-    const observer = new IntersectionObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      const rootTop = entry.rootBounds?.top ?? root.getBoundingClientRect().top;
-      setIsRecentHeaderStuck(!entry.isIntersecting && entry.boundingClientRect.top < rootTop);
-    }, { root, threshold: 0 });
-    observer.observe(recentStart);
-    return () => observer.disconnect();
-  }, [enableStickyFade, hasProjectScroller, model.searchRowModel, model.searchRowsMountVersion, model.topContent]);
+  const resolveRecentSentinels = React.useCallback((): ReadonlyMap<string, HTMLElement | null> => {
+    const recentStart = scrollContainerRef.current?.querySelector<HTMLElement>('[data-sidebar-activity-start="active-now"]');
+    return recentStart
+      ? new Map([['active-now', recentStart]])
+      : new Map<string, HTMLElement | null>();
+  }, [scrollContainerRef]);
+  const stuckActivityHeaders = useStickySentinelObserver({
+    enabled: enableStickyFade && hasProjectScroller,
+    rootRef: scrollContainerRef,
+    resolveSentinels: resolveRecentSentinels,
+    refreshKey: `${view.hasSessionSearchQuery ? 'search' : 'normal'}:${model.searchRowsMountVersion ?? 0}`,
+  });
+  const isRecentHeaderStuck = stuckActivityHeaders.has('active-now');
   React.useLayoutEffect(() => {
     if (enableStickyFade && hasProjectScroller && scrollContainerRef.current) {
       syncTopFade(scrollContainerRef.current);
     }
-  }, [enableStickyFade, hasProjectScroller, syncTopFade]);
+  }, [enableStickyFade, hasProjectScroller, scrollContainerRef, syncTopFade]);
   let stuckProject: ProjectSection['project'] | null = null;
   if (view.hasSessionSearchQuery) {
     for (const row of searchRows) {

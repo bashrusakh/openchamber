@@ -1,5 +1,7 @@
 import type { Session } from '@opencode-ai/sdk/v2';
+import { getRuntimeKey } from '@/lib/runtime-switch';
 import type { SessionFolder, SessionFoldersMap } from '@/stores/useSessionFoldersStore';
+import { getPinnedSessionKey } from '@/stores/useSessionPinnedStore';
 import type {
   GroupSearchData,
   SessionGroup,
@@ -178,11 +180,24 @@ const countRenderedSessions = (rows: readonly SessionSearchRow[], normalizedQuer
   return sessionIds.size;
 };
 
+const isNodePinned = (
+  node: SessionNode,
+  fallbackDirectory: string | null,
+  pinnedSessionIds: ReadonlySet<string>,
+  runtimeKey: string,
+): boolean => {
+  const directory = normalizePath(node.session.directory ?? null) ?? normalizePath(fallbackDirectory ?? null);
+  const key = directory ? getPinnedSessionKey(runtimeKey, directory, node.session.id) : null;
+  return key ? pinnedSessionIds.has(key) : false;
+};
+
 const compareNodes = (
   a: SessionNode,
   b: SessionNode,
   pinnedSessionIds: ReadonlySet<string>,
   sessionOrderIndex: ReadonlyMap<string, number>,
+  fallbackDirectory: string | null,
+  runtimeKey: string,
 ): number => {
   const aIndex = sessionOrderIndex.get(a.session.id);
   const bIndex = sessionOrderIndex.get(b.session.id);
@@ -195,8 +210,8 @@ const compareNodes = (
   // The grouped data is already lifecycle ordered. This stable tie breaker is
   // enough for search projection work and keeps a pinned replacement in the
   // same order as the existing sidebar rows.
-  const aPinned = pinnedSessionIds.has(a.session.id);
-  const bPinned = pinnedSessionIds.has(b.session.id);
+  const aPinned = isNodePinned(a, fallbackDirectory, pinnedSessionIds, runtimeKey);
+  const bPinned = isNodePinned(b, fallbackDirectory, pinnedSessionIds, runtimeKey);
   if (aPinned !== bPinned) return aPinned ? -1 : 1;
   return 0;
 };
@@ -221,8 +236,9 @@ const projectGroup = (
   sessionOrderIndex: ReadonlyMap<string, number>,
 ): SearchGroupProjection => {
   const folderOwnerKey = getSessionFolderOwnerKey(projectId, group.directory);
+  const runtimeKey = getRuntimeKey();
   const sourceNodes = [...(searchData?.filteredNodes ?? [])]
-    .sort((a, b) => compareNodes(a, b, pinnedSessionIds, sessionOrderIndex));
+    .sort((a, b) => compareNodes(a, b, pinnedSessionIds, sessionOrderIndex, group.directory, runtimeKey));
   const nodeBySessionId = collectNodesById(sourceNodes);
   const folderEntriesBase = getSessionFolderScopes(group).flatMap(({ scopeKey, directory }) => {
     const folders = foldersMap[scopeKey] ?? EMPTY_FOLDERS;
@@ -232,7 +248,7 @@ const projectGroup = (
       scopeDirectory: directory,
       folderOwnerKey,
       nodes: selectFolderRootNodes(folder.sessionIds, nodeBySessionId)
-        .sort((a, b) => compareNodes(a, b, pinnedSessionIds, sessionOrderIndex)),
+        .sort((a, b) => compareNodes(a, b, pinnedSessionIds, sessionOrderIndex, directory, runtimeKey)),
     }));
   });
   const visibleFolderKeys = selectFolderIdsForProjection(

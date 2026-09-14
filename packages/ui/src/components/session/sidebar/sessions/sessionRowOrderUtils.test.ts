@@ -276,7 +276,7 @@ describe('buildSessionGroupRowOrderEntries', () => {
 
     expect(entries[1]).toEqual({
       id: 'a1-child',
-      rowKey: 'project-a:group:folder:/repo/worktree:folder-a-child:session:a1-child',
+      rowKey: `project-a:group:folder:${getSessionFolderIdentityKey('/repo/worktree', 'folder-a-child')}:session:a1-child`,
       scopeKey: '/repo/worktree',
       archived: false,
     });
@@ -332,6 +332,21 @@ describe('buildSessionGroupRenderRowModel', () => {
     ]);
     expect(result.rows.filter((row) => row.kind === 'session').map((row) => row.key))
       .toEqual(result.entries.map((entry) => entry.rowKey));
+  });
+
+  test('uses the scoped folder identity for folder row containers', () => {
+    const result = model({ useCanonicalFolderRowKeys: true });
+    const expectedRowKey = `project-a:group:folder:${getSessionFolderIdentityKey('/repo', 'folder-a')}:session:folder-a-session`;
+
+    expect(result.rows[1]?.key).toBe(expectedRowKey);
+    expect(result.entries[0]?.rowKey).toBe(expectedRowKey);
+  });
+
+  test('keeps established archived virtual folder occurrence keys', () => {
+    const result = model();
+
+    expect(result.rows[1]?.key).toBe('project-a:group:folder:/repo:folder-a:session:folder-a-session');
+    expect(result.entries[0]?.rowKey).toBe(result.rows[1]?.key);
   });
 
   test('flattens expanded descendants into the same model with stable occurrence keys', () => {

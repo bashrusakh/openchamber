@@ -52,6 +52,7 @@ import {
   buildSessionGroupRowOrderEntries,
   buildSessionGroupRenderRowModel,
   getSessionNodeRowKeys,
+  getSessionFolderRowContainerKey,
   type SessionGroupRenderRow,
 } from '../sessions/sessionRowOrderUtils';
 
@@ -630,8 +631,23 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
 
   // Hooks below MUST stay above the search-empty early-return so they fire in
   // the same order every render — rules-of-hooks.
+  // Large unsearched archived buckets virtualize one flat render-row stream
+  // containing folder headers, folder bodies, nested folders, and ungrouped
+  // sessions. Small lists and the non-search active Show more flow stay in
+  // normal document order. Search results use the single global virtualizer in
+  // SessionSearchRows rather than one virtualizer per group.
+  const virtualizationMode = selectSessionGroupVirtualizationMode({
+    isArchivedBucket: group.isArchivedBucket === true,
+    // The existing mode helper's count slot now receives the complete body
+    // model, including folder headers, folder sessions, and ungrouped rows.
+    rootCount: archivedGroupRenderRowModel.rows.length,
+  });
+  const shouldVirtualize = !hasSessionSearchQuery && virtualizationMode === 'roots';
+
   const rowOrderEntries = React.useMemo(() => {
-    if (group.isArchivedBucket && !hasSessionSearchQuery) {
+    // The archived virtual model is also the mounted row model, so retain its
+    // established keys. Normal-flow rows use the canonical scoped folder key.
+    if (group.isArchivedBucket && !hasSessionSearchQuery && shouldVirtualize) {
       return archivedGroupRenderRowModel.entries;
     }
     return buildSessionGroupRowOrderEntries({
@@ -657,10 +673,11 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     group.directory,
     group.isArchivedBucket,
     hasSessionSearchQuery,
-     isCollapsed,
-     projectId,
-     folderOwnerKey,
-     rootFolders,
+    isCollapsed,
+    projectId,
+    folderOwnerKey,
+    rootFolders,
+    shouldVirtualize,
     visibleSessions,
   ]);
   useRegisterSessionRowOrder(rowOrderBase, rowOrderEntries);
@@ -669,19 +686,6 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     () => getSessionNodeRowKeys(groupKey, visibleSessions),
     [groupKey, visibleSessions],
   );
-
-  // Large unsearched archived buckets virtualize one flat render-row stream
-  // containing folder headers, folder bodies, nested folders, and ungrouped
-  // sessions. Small lists and the non-search active Show more flow stay in
-  // normal document order. Search results use the single global virtualizer in
-  // SessionSearchRows rather than one virtualizer per group.
-  const virtualizationMode = selectSessionGroupVirtualizationMode({
-    isArchivedBucket: group.isArchivedBucket === true,
-    // The existing mode helper's count slot now receives the complete body
-    // model, including folder headers, folder sessions, and ungrouped rows.
-    rootCount: archivedGroupRenderRowModel.rows.length,
-  });
-  const shouldVirtualize = !hasSessionSearchQuery && virtualizationMode === 'roots';
 
   // Keep a wider window when an expanded parent is present. The group model
   // now gives each descendant its own virtual row, but this preserves the
@@ -885,7 +889,9 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   ): React.ReactNode => {
     const { folder, scopeKey, scopeDirectory, nodes } = entry;
     const folderKey = getSessionFolderIdentityKey(scopeKey, folder.id);
-    const rowKeys = renderBody ? getSessionNodeRowKeys(`${groupKey}:folder:${folderKey}`, nodes) : [];
+    const rowKeys = renderBody
+      ? getSessionNodeRowKeys(getSessionFolderRowContainerKey(groupKey, scopeKey, folder.id), nodes)
+      : [];
     const folderSessionsForDelete = folderSessionsForDeleteById.get(folderKey) ?? [];
     const isRenamingFolder = folderRename?.folderId === folder.id && folderRename?.scopeKey === scopeKey;
 
@@ -968,9 +974,11 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
             hideActions={false}
              archivedBucket={group.isArchivedBucket === true}
            >
-             {renderBody ? nodes.map((node, index) => <SessionTreeItem
-               key={rowKeys[index] ?? node.session.id}
-               node={node}
+              {renderBody ? nodes.map((node, index) => {
+                const nodeRowKey = rowKeys[index] ?? node.session.id;
+                return <SessionTreeItem
+                key={nodeRowKey}
+                node={node}
                pinnedSessionIds={pinnedSessionIds}
                expandedParents={expandedParents}
                hasSessionSearchQuery={hasSessionSearchQuery}
@@ -987,8 +995,9 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                 folderOwnerKey={folderOwnerKey}
                 selectionScopeKey={folderOwnerKey}
                 archivedBucket={group.isArchivedBucket === true}
-               rowKey={rowKeys[index] ?? node.session.id}
-               renderExtras={{ subtreeContainsEditing, menuOpenSessionId, nodeStructureKey: resolveNodeStructureKey(node), childRenderExtrasFor }}
+                rowKey={nodeRowKey}
+                dragKey={nodeRowKey}
+                renderExtras={{ subtreeContainsEditing, menuOpenSessionId, nodeStructureKey: resolveNodeStructureKey(node), childRenderExtrasFor }}
                setEditingId={props.setEditingId}
                setEditTitle={props.setEditTitle}
                 toggleParent={props.toggleParent}
@@ -1001,7 +1010,8 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
                startFolderRename={props.startFolderRename}
                setCopiedSessionId={props.setCopiedSessionId}
                startSessionWorktreeMenuLoad={props.startSessionWorktreeMenuLoad}
-              />) : null}
+               />;
+              }) : null}
            </SessionFolderItem>
          )}
        </DroppableFolderWrapper>
@@ -1132,7 +1142,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
       selectionScopeKey={folderOwnerKey}
       archivedBucket={group.isArchivedBucket === true}
       rowKey={rowKey}
-      dragKey={options.dragKey}
+       dragKey={options.dragKey ?? rowKey}
       renderChildren={options.renderChildren}
       renderExtras={{ subtreeContainsEditing, menuOpenSessionId, nodeStructureKey: resolveNodeStructureKey(node), childRenderExtrasFor }}
       setEditingId={props.setEditingId}

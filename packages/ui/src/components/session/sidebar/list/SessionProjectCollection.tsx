@@ -314,6 +314,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
     return getProjectFolderScopesFromTopology(projectSections, selectionScope);
   }, [chatGroup, projectSections]);
   const projectHeaderSentinelRefs = React.useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const scrollContainerRef = React.useRef<HTMLElement | null>(null);
   const [stickyHeaderRefreshKey, setStickyHeaderRefreshKey] = React.useState(0);
   const onSearchRowsMounted = React.useCallback(() => {
     setStickyHeaderRefreshKey((value) => value + 1);
@@ -429,9 +430,9 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
   const stuckProjectHeaders = useStickyProjectHeaders({
     enabled: view.stickyZoneHeaders,
     isDesktopShellRuntime: view.isDesktopShellRuntime,
-    projectSections: view.hasSessionSearchQuery ? searchRowModel.rows : projectSections,
     projectHeaderSentinelRefs,
-    refreshKey: stickyHeaderRefreshKey,
+    scrollContainerRef,
+    refreshKey: `${stickyHeaderRefreshKey}:${view.hasSessionSearchQuery ? 'search' : 'normal'}:${projectSections.length}:${orderedSectionsForRender.length}`,
   });
   React.useEffect(() => {
     onSearchMatchCountChange(searchRowModel.searchMatchCount);
@@ -629,6 +630,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
     projectRepoStatus: topology.projectRepoStatus,
     stuckProjectHeaders,
     projectHeaderSentinelRefs,
+    scrollContainerRef,
     state: { editingId, openSidebarMenuKey, setOpenSidebarMenuKey, visibleSessionCountByGroup },
     groupProps,
   }), [

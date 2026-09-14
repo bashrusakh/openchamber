@@ -40,6 +40,28 @@ const createSessionChildRowKey = (
   return occurrence === 0 ? baseKey : `${baseKey}:${occurrence}`;
 };
 
+/**
+ * Canonical container key for normal folder session rows. Folder ids are only
+ * unique within their scoped folder identity, so keep that identity intact in
+ * the row key instead of rebuilding it with another separator.
+ */
+export const getSessionFolderRowContainerKey = (
+  groupKey: string,
+  scopeKey: string,
+  folderId: string,
+): string => `${groupKey}:folder:${getSessionFolderIdentityKey(scopeKey, folderId)}`;
+
+/**
+ * Archived virtual rows already use this key in the committed virtual model.
+ * Keep it as a compatibility path while normal-flow rows move to the scoped
+ * folder identity above.
+ */
+const getSessionVirtualFolderRowContainerKey = (
+  groupKey: string,
+  scopeKey: string,
+  folderId: string,
+): string => `${groupKey}:folder:${scopeKey}:${folderId}`;
+
 /** Root occurrence keys for one normal session-tree list. */
 export const getSessionNodeRowKeys = (
   containerKey: string,
@@ -196,6 +218,11 @@ type SessionGroupRowOrderInput = {
   rootFolders: readonly SessionRowOrderFolderEntry[];
   childFoldersByParentId: ReadonlyMap<string, readonly SessionRowOrderFolderEntry[]>;
   visibleSessions: readonly SessionNode[];
+  /**
+   * Normal-flow rows use the scoped folder identity. Large archived virtual
+   * rows leave this unset to retain their established occurrence keys.
+   */
+  useCanonicalFolderRowKeys?: boolean;
 };
 
 export type SessionGroupRenderRow =
@@ -280,6 +307,7 @@ export const buildSessionGroupRenderRowModel = (
   };
 
   const visitedFolders = new Set<string>();
+  const useCanonicalFolderRowKeys = input.useCanonicalFolderRowKeys ?? !input.archivedBucket;
   const visitFolder = (entry: SessionRowOrderFolderEntry, parentPath: string): void => {
     const folderKey = getSessionFolderIdentityKey(entry.scopeKey, entry.folder.id);
     if (visitedFolders.has(folderKey)) return;
@@ -287,7 +315,9 @@ export const buildSessionGroupRenderRowModel = (
 
     const folderName = entry.folder.name ?? entry.folder.id;
     const displayName = parentPath ? `${parentPath} / ${folderName}` : folderName;
-    const folderRowKey = `${input.groupKey}:folder:${entry.scopeKey}:${entry.folder.id}`;
+    const folderRowKey = useCanonicalFolderRowKeys
+      ? getSessionFolderRowContainerKey(input.groupKey, entry.scopeKey, entry.folder.id)
+      : getSessionVirtualFolderRowContainerKey(input.groupKey, entry.scopeKey, entry.folder.id);
     rows.push({ kind: 'folder-header', key: folderRowKey, entry, displayName });
 
     if (!input.hasSessionSearchQuery && input.collapsedFolderIds.has(folderKey)) return;
@@ -315,7 +345,10 @@ export const buildSessionGroupRenderRowModel = (
  */
 export const buildSessionGroupRowOrderEntries = (
   input: SessionGroupRowOrderInput,
-): SessionRowOrderEntry[] => [...buildSessionGroupRenderRowModel(input).entries];
+): SessionRowOrderEntry[] => [...buildSessionGroupRenderRowModel({
+  ...input,
+  useCanonicalFolderRowKeys: true,
+}).entries];
 
 type SessionRowOrderActivityItem = {
   node: SessionNode;

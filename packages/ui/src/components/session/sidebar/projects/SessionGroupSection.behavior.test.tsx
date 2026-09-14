@@ -5,6 +5,7 @@ import { Window } from 'happy-dom';
 import { I18nProvider } from '@/lib/i18n';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 import { useUIStore } from '@/stores/useUIStore';
+import { useSessionMultiSelectStore } from '@/stores/useSessionMultiSelectStore';
 import type { SessionFolder } from '@/stores/useSessionFoldersStore';
 import type { Session } from '@opencode-ai/sdk/v2';
 import type { GroupSearchData, SessionGroup } from '../types';
@@ -24,6 +25,7 @@ type FolderCallbacks = {
 
 type FolderPropsCapture = FolderCallbacks & {
   renderBody?: boolean;
+  children?: React.ReactNode;
 };
 
 type RegistryCapture = {
@@ -52,7 +54,7 @@ mock.module('../../SessionFolderItem', () => ({
   SessionFolderItem: (props: FolderPropsCapture) => {
     folderCallbacks = props;
     renderedFolderBodies.push(props.renderBody ?? true);
-    return null;
+    return props.children ?? null;
   },
 }));
 
@@ -349,6 +351,90 @@ describe('SessionGroupSection public behavior', () => {
       expect(capture.registry?.getOrderedEntries().map((entry) => entry.scopeKey)).toEqual([chatsRoot]);
     } finally {
       await act(async () => root.unmount());
+      renderedRowCalls = [];
+      dom.restore();
+    }
+  });
+
+  test('keeps rendered folder row keys aligned with the registry for shift-range selection', async () => {
+    const dom = installHookTestDom();
+    const root = createRoot(dom.container);
+    const originalFolders = useSessionFoldersStore.getState();
+    const originalSelection = useSessionMultiSelectStore.getState();
+    const sessionIds = ['folder-session-a', 'folder-session-b'];
+    const folderWithSessions: SessionFolder = { ...folder, sessionIds };
+    const folderGroup: SessionGroupSectionProps['group'] = {
+      ...group,
+      sessions: sessionIds.map((id) => ({
+        // SAFETY: The mocked row renderer only reads the fixture session id.
+        session: { id } as Session,
+        children: [],
+        worktree: null,
+      })),
+    };
+    const capture: RegistryCapture = { registry: null };
+    renderedRowCalls = [];
+    useSessionFoldersStore.setState({ foldersMap: { '/workspace': [folderWithSessions] } });
+
+    try {
+      await renderGroup(root, folderGroup, capture);
+
+      const renderedRowKeys = renderedRowCalls.map((row) => row.rowKey);
+      const orderedEntries = capture.registry?.getOrderedEntries() ?? [];
+      expect(renderedRowKeys).toEqual(orderedEntries.map((entry) => entry.rowKey));
+      expect(renderedRowCalls.map((row) => row.dragKey)).toEqual(renderedRowKeys);
+
+      const firstRowKey = renderedRowKeys[0];
+      const clickedRowKey = renderedRowKeys[1];
+      if (!firstRowKey || !clickedRowKey) throw new Error('Expected two folder session rows');
+      useSessionMultiSelectStore.getState().setRange(
+        firstRowKey,
+        clickedRowKey,
+        orderedEntries,
+        'project',
+      );
+
+      expect([...useSessionMultiSelectStore.getState().selectedIds]).toEqual(sessionIds);
+      expect(useSessionMultiSelectStore.getState().anchorRowKey).toBe(firstRowKey);
+    } finally {
+      await act(async () => root.unmount());
+      useSessionFoldersStore.setState(originalFolders, true);
+      useSessionMultiSelectStore.setState(originalSelection, true);
+      renderedRowCalls = [];
+      dom.restore();
+    }
+  });
+
+  test('gives duplicate normal folder occurrences distinct drag keys', async () => {
+    const dom = installHookTestDom();
+    const root = createRoot(dom.container);
+    const originalFolders = useSessionFoldersStore.getState();
+    const duplicateSessionId = 'folder-session-duplicate';
+    const firstFolder: SessionFolder = { ...folder, id: 'folder-a', sessionIds: [duplicateSessionId] };
+    const secondFolder: SessionFolder = { ...folder, id: 'folder-b', sessionIds: [duplicateSessionId] };
+    const duplicateGroup: SessionGroupSectionProps['group'] = {
+      ...group,
+      sessions: [{
+        // SAFETY: The mocked row renderer only reads the fixture session id.
+        session: { id: duplicateSessionId } as Session,
+        children: [],
+        worktree: null,
+      }],
+    };
+    const capture: RegistryCapture = { registry: null };
+    renderedRowCalls = [];
+    useSessionFoldersStore.setState({ foldersMap: { '/workspace': [firstFolder, secondFolder] } });
+
+    try {
+      await renderGroup(root, duplicateGroup, capture);
+
+      const dragKeys = renderedRowCalls.map((row) => row.dragKey);
+      expect(dragKeys).toHaveLength(2);
+      expect(dragKeys[0]).toBeDefined();
+      expect(dragKeys[0]).not.toBe(dragKeys[1]);
+    } finally {
+      await act(async () => root.unmount());
+      useSessionFoldersStore.setState(originalFolders, true);
       renderedRowCalls = [];
       dom.restore();
     }

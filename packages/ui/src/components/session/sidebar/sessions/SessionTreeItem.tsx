@@ -203,10 +203,10 @@ export function SessionTreeItem({
        folderOwnerKey={folderOwnerKey}
        selectionScopeKey={selectionScopeKey}
        archivedBucket={archivedBucket}
-      secondaryMeta={secondaryMeta}
-      renderContext={renderContext}
-      rowKey={currentRowKey}
-      dragKey={dragKey}
+       secondaryMeta={secondaryMeta}
+       renderContext={renderContext}
+       rowKey={currentRowKey}
+       dragKey={dragKey ?? currentRowKey}
       subtreeContainsEditing={renderExtras?.subtreeContainsEditing ?? EMPTY_SUBTREE_CONTAINS_EDITING}
       menuOpenSessionId={renderExtras?.menuOpenSessionId ?? null}
       nodeStructureKey={renderExtras?.nodeStructureKey ?? ''}
@@ -241,9 +241,10 @@ export function SessionTreeItem({
             startSessionWorktreeMenuLoad={startSessionWorktreeMenuLoad}
            mobileVariant={mobileVariant}
            alwaysShowActions={alwaysShowActions}
-           depth={depth + 1}
-           rowKey={childRowKey}
-           {...childContext}
+            depth={depth + 1}
+            rowKey={childRowKey}
+            dragKey={childRowKey}
+            {...childContext}
            renderExtras={childRenderExtrasFor?.(child)}
         />
         );

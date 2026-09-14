@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import type { Session } from '@opencode-ai/sdk/v2';
 import type { SessionFoldersMap } from '@/stores/useSessionFoldersStore';
+import { getPinnedSessionKey } from '@/stores/useSessionPinnedStore';
+import { getRuntimeKey } from '@/lib/runtime-switch';
 import type { GroupSearchData, SessionGroup, SessionNode } from '../types';
 import { buildSessionSearchRowModel, type SessionSearchRowModelArgs } from './sessionSearchRowModel';
 
@@ -253,6 +255,90 @@ describe('buildSessionSearchRowModel', () => {
     expect(folderRow?.folder.id).toBe('archived-folder');
     expect(folderRow?.archivedBucket).toBe(true);
     expect(model.rows.filter((row) => row.kind === 'session')).toHaveLength(0);
+  });
+
+  test('prioritizes a canonically pinned archived session without active ordering', () => {
+    const pinned = makeNode({
+      ...makeSession('ses_pinned', 'Release pinned', `${PROJECT_ROOT}/`),
+      time: { created: 1, updated: 1, archived: 2 },
+    });
+    const unpinned = makeNode({
+      ...makeSession('ses_unpinned', 'Release unpinned'),
+      time: { created: 1, updated: 1, archived: 2 },
+    });
+    const group = makeGroup('archived', [unpinned, pinned], {
+      directory: null,
+      folderScopeKey: `__archived__:${PROJECT_ROOT}`,
+      isArchivedBucket: true,
+    });
+    const pinnedKey = getPinnedSessionKey(getRuntimeKey(), PROJECT_ROOT, pinned.session.id)!;
+    const model = buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      pinnedSessionIds: new Set([pinnedKey]),
+      groupSearchDataByGroup: searchDataFor(group),
+    });
+
+    expect(model.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.id)).toEqual([
+      pinned.session.id,
+      unpinned.session.id,
+    ]);
+  });
+
+  test('isolates duplicate session IDs by normalized directory and runtime', () => {
+    const currentDirectory = makeNode(makeSession('ses_duplicate', 'Release current', `${PROJECT_ROOT}/`));
+    const otherDirectory = makeNode(makeSession('ses_duplicate', 'Release other', `${PROJECT_ROOT}/other`));
+    const group = makeGroup('archived', [otherDirectory, currentDirectory], {
+      directory: null,
+      folderScopeKey: `__archived__:${PROJECT_ROOT}`,
+      isArchivedBucket: true,
+    });
+    const currentKey = getPinnedSessionKey(getRuntimeKey(), PROJECT_ROOT, currentDirectory.session.id)!;
+    const currentDirectoryModel = buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      pinnedSessionIds: new Set([currentKey]),
+      groupSearchDataByGroup: searchDataFor(group),
+    });
+    const foreignRuntimeKey = getPinnedSessionKey('other-runtime', PROJECT_ROOT, currentDirectory.session.id)!;
+    const foreignRuntimeModel = buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      pinnedSessionIds: new Set([foreignRuntimeKey]),
+      groupSearchDataByGroup: searchDataFor(group),
+    });
+
+    expect(currentDirectoryModel.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.directory)).toEqual([
+      `${PROJECT_ROOT}/`,
+      `${PROJECT_ROOT}/other`,
+    ]);
+    expect(foreignRuntimeModel.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.directory)).toEqual([
+      `${PROJECT_ROOT}/other`,
+      `${PROJECT_ROOT}/`,
+    ]);
+  });
+
+  test('keeps active session order precedence ahead of pin priority', () => {
+    const pinned = makeNode(makeSession('ses_pinned', 'Release pinned'));
+    const earlier = makeNode(makeSession('ses_earlier', 'Release earlier'));
+    const group = makeGroup('main', [pinned, earlier]);
+    const pinnedKey = getPinnedSessionKey(getRuntimeKey(), PROJECT_ROOT, pinned.session.id)!;
+    const model = buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      pinnedSessionIds: new Set([pinnedKey]),
+      sessionOrderIndex: new Map([[earlier.session.id, 0], [pinned.session.id, 1]]),
+      groupSearchDataByGroup: searchDataFor(group),
+    });
+
+    expect(model.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.id)).toEqual([
+      earlier.session.id,
+      pinned.session.id,
+    ]);
   });
 
   test('orders chats and recent rows before project rows while keeping duplicate occurrences', () => {
