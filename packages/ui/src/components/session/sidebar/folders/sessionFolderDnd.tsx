@@ -19,6 +19,13 @@ export type SessionFolderDropTarget = {
   ownerKey: string;
 };
 
+const ARCHIVED_FOLDER_SCOPE_PREFIX = '__archived__:';
+
+const isArchivedSessionFolderScope = (scopeKey: string): boolean => (
+  scopeKey.startsWith(ARCHIVED_FOLDER_SCOPE_PREFIX)
+  && scopeKey.length > ARCHIVED_FOLDER_SCOPE_PREFIX.length
+);
+
 export const DraggableSessionRow: React.FC<{
   sessionId: string;
   /** Optional row occurrence key for lists that can render one session twice. */
@@ -27,11 +34,13 @@ export const DraggableSessionRow: React.FC<{
   ownerKey: string | null;
   sessionDirectory: string | null;
   sessionTitle: string;
+  archivedBucket?: boolean;
   children: React.ReactNode;
-}> = ({ sessionId, dragKey, ownerKey, sessionDirectory, sessionTitle, children }) => {
+}> = ({ sessionId, dragKey, ownerKey, sessionDirectory, sessionTitle, archivedBucket = false, children }) => {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `session-drag:${dragKey ?? sessionId}`,
-    data: { type: 'session', sessionId, ownerKey, sessionDirectory, sessionTitle },
+    disabled: archivedBucket,
+    data: { type: 'session', sessionId, ownerKey, sessionDirectory, sessionTitle, archivedBucket },
   });
 
   const handlePointerDown = React.useCallback(
@@ -62,13 +71,15 @@ export const DroppableFolderWrapper: React.FC<{
   folderId: string;
   scopeKey: string;
   ownerKey: string | null;
+  disabled?: boolean;
   children: (
     droppableRef: (node: HTMLElement | null) => void,
     isOver: boolean,
   ) => React.ReactNode;
-}> = ({ folderId, scopeKey, ownerKey, children }) => {
+}> = ({ folderId, scopeKey, ownerKey, disabled = false, children }) => {
   const { setNodeRef, isOver } = useDroppable({
     id: `folder-drop:${getSessionFolderIdentityKey(scopeKey, folderId)}`,
+    disabled: disabled || isArchivedSessionFolderScope(scopeKey),
     data: { type: 'folder', folderId, scopeKey, ownerKey },
   });
   return <>{children(setNodeRef, isOver)}</>;
@@ -105,6 +116,7 @@ export const SessionFolderDndScope: React.FC<{
       type?: string;
       sessionId?: string;
       ownerKey?: string | null;
+      archivedBucket?: boolean;
     } | undefined;
     // SAFETY: DnD data is written by DroppableFolderWrapper in this module and
     // is validated by the discriminant/required-field checks below before use.
@@ -123,6 +135,8 @@ export const SessionFolderDndScope: React.FC<{
       || !overData.folderId
       || !overData.scopeKey
       || !overData.ownerKey
+      || activeData.archivedBucket === true
+      || isArchivedSessionFolderScope(overData.scopeKey)
       || activeData.ownerKey !== overData.ownerKey
     ) return;
     onSessionDroppedOnFolder(activeData.sessionId, {

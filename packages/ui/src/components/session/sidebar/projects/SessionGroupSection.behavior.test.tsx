@@ -1,6 +1,7 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { afterAll, describe, expect, mock, test } from 'bun:test';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Window } from 'happy-dom';
 import { I18nProvider } from '@/lib/i18n';
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 import { useUIStore } from '@/stores/useUIStore';
@@ -21,6 +22,10 @@ type FolderCallbacks = {
   onDelete: () => void;
 };
 
+type FolderPropsCapture = FolderCallbacks & {
+  renderBody?: boolean;
+};
+
 type RegistryCapture = {
   registry: SessionRowOrderRegistry | null;
 };
@@ -39,12 +44,14 @@ type RowPropsCapture = Pick<SessionGroupSectionProps,
 >;
 
 let folderCallbacks: FolderCallbacks | null = null;
+let renderedFolderBodies: boolean[] = [];
 let rowPropsCapture: RowPropsCapture | null = null;
 let renderedRowCalls: SessionTreeItemProps[] = [];
 
 mock.module('../../SessionFolderItem', () => ({
-  SessionFolderItem: (props: FolderCallbacks) => {
+  SessionFolderItem: (props: FolderPropsCapture) => {
     folderCallbacks = props;
+    renderedFolderBodies.push(props.renderBody ?? true);
     return null;
   },
 }));
@@ -87,7 +94,50 @@ mock.module('../sessions/SessionTreeItem', () => ({
   },
 }));
 
+const installRealTestDom = () => {
+  const browser = new Window({ url: 'http://localhost' });
+  const descriptors = new Map<string, PropertyDescriptor | undefined>();
+  for (const [key, value] of Object.entries({
+    window: browser,
+    document: browser.document,
+    navigator: browser.navigator,
+    localStorage: browser.localStorage,
+    Element: browser.Element,
+    HTMLElement: browser.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  })) {
+    descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { value, configurable: true });
+  }
+  Object.defineProperty(browser.HTMLElement.prototype, 'offsetHeight', {
+    configurable: true,
+    get: () => 32,
+  });
+  Object.defineProperty(browser.HTMLElement.prototype, 'offsetWidth', {
+    configurable: true,
+    get: () => 320,
+  });
+  const container = document.createElement('div');
+  document.body.append(container);
+  return {
+    container,
+    restore: async () => {
+      await browser.happyDOM.close();
+      for (const [key, descriptor] of descriptors) {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else Reflect.deleteProperty(globalThis, key);
+      }
+    },
+  };
+};
+
+// Install a real DOM before loading react-virtual so its layout-effect path is
+// selected for the mounted-window regression below.
+const initialDom = installRealTestDom();
+
 const { SessionGroupSection } = await import('./SessionGroupSection');
+
+afterAll(async () => initialDom.restore());
 
 const folder: SessionFolder = {
   id: 'folder-a',
@@ -389,7 +439,7 @@ describe('SessionGroupSection public behavior', () => {
     }
   });
 
-  test('a non-search archived bucket keeps whole roots as tree rows', async () => {
+  test('a non-search archived bucket does not mount rows before the scroll element resolves', async () => {
     const dom = installHookTestDom();
     const root = createRoot(dom.container);
     const originalFolders = useSessionFoldersStore.getState();
@@ -401,15 +451,58 @@ describe('SessionGroupSection public behavior', () => {
     try {
       await renderGroup(root, target, capture, { visibleSessionCount: 60 });
 
-      // Roots mode keeps whole subtrees as one item.
-      expect(renderedRowCalls).toHaveLength(60);
-      expect(renderedRowCalls.every((call) => call.renderChildren === undefined)).toBe(true);
+      // The hook-test DOM intentionally has no real scrolling ancestor. The
+      // virtual fallback must reserve space without eagerly mounting the full
+      // archived model.
+      expect(renderedRowCalls).toHaveLength(0);
       expect(orderedIds(capture.registry)).toHaveLength(60);
     } finally {
       await act(async () => root.unmount());
       useSessionFoldersStore.setState(originalFolders, true);
       renderedRowCalls = [];
       dom.restore();
+    }
+  });
+
+  test('a non-search archived bucket virtualizes the complete render-row model', async () => {
+    const dom = installRealTestDom();
+    const scrollContainer = dom.container;
+    Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 640 });
+    Object.defineProperty(scrollContainer, 'scrollTop', { configurable: true, writable: true, value: 0 });
+    Object.defineProperty(scrollContainer, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ top: 0, left: 0, right: 320, bottom: 640, width: 320, height: 640 }),
+    });
+    const root = createRoot(scrollContainer);
+    const originalFolders = useSessionFoldersStore.getState();
+    const capture: RegistryCapture = { registry: null };
+    const target = flatRootGroup(60, true);
+    const archivedFolder: SessionFolder = {
+      ...folder,
+      sessionIds: target.sessions.map((node) => node.session.id),
+    };
+    useSessionFoldersStore.setState({ foldersMap: { '/workspace': [archivedFolder] } });
+    renderedFolderBodies = [];
+    renderedRowCalls = [];
+
+    try {
+      await renderGroup(root, target, capture, {
+        visibleSessionCount: 60,
+        scrollContainerRef: { current: scrollContainer },
+      });
+
+      expect(renderedRowCalls.length).toBeGreaterThan(0);
+      expect(renderedRowCalls.length).toBeLessThan(60);
+      expect(renderedRowCalls.every((call) => call.renderChildren === false)).toBe(true);
+      expect(renderedFolderBodies).toContain(false);
+      expect(renderedFolderBodies).not.toContain(true);
+      expect(orderedIds(capture.registry)).toHaveLength(60);
+    } finally {
+      await act(async () => root.unmount());
+      useSessionFoldersStore.setState(originalFolders, true);
+      renderedFolderBodies = [];
+      renderedRowCalls = [];
+      await dom.restore();
     }
   });
 });

@@ -1,7 +1,17 @@
 import { describe, expect, test } from 'bun:test';
 import type { SessionFolder } from '@/stores/useSessionFoldersStore';
+import type { Session } from '@opencode-ai/sdk/v2';
 import { getSessionFolderIdentityKey } from '../sessions/sessionFolderIdentity';
-import { normalizeFolderRoots, selectFolderIdsForProjection } from '../sessions/sessionNodeItemUtils';
+import {
+  normalizeFolderRoots,
+  selectFolderIdsForProjection,
+  selectSessionGroupVirtualizationMode,
+} from '../sessions/sessionNodeItemUtils';
+import {
+  buildSessionGroupRenderRowModel,
+  type SessionRowOrderFolderEntry,
+} from '../sessions/sessionRowOrderUtils';
+import type { SessionNode } from '../types';
 
 const folder = (id: string, parentId: string | null = null, sessionIds: string[] = []): SessionFolder => ({
   id,
@@ -9,6 +19,13 @@ const folder = (id: string, parentId: string | null = null, sessionIds: string[]
   parentId,
   sessionIds,
   createdAt: 1,
+});
+
+const sessionNode = (id: string): SessionNode => ({
+  // SAFETY: virtualization threshold coverage only reads the fixture session id.
+  session: { id } as Session,
+  children: [],
+  worktree: null,
 });
 
 describe('normalizeFolderRoots', () => {
@@ -109,5 +126,40 @@ describe('selectFolderIdsForProjection', () => {
 
     expect([...selectFolderIdsForProjection(folders, { archivedBucket: false, searchQuery: 'release-notes' })])
       .toEqual([worktreeRoot, worktreeChild]);
+  });
+});
+
+describe('archived group virtualization threshold', () => {
+  const renderableArchivedRowCount = (sessionCount: number): number => {
+    const entry: SessionRowOrderFolderEntry = {
+      folder: { id: 'archive', name: 'Archive', parentId: null },
+      scopeKey: '/workspace',
+      scopeDirectory: '/workspace',
+      nodes: Array.from({ length: sessionCount }, (_, index) => sessionNode(`session-${index}`)),
+    };
+    return buildSessionGroupRenderRowModel({
+      groupKey: 'project:archive',
+      isCollapsed: false,
+      hasSessionSearchQuery: false,
+      collapsedFolderIds: new Set(),
+      expandedParents: new Set(),
+      archivedBucket: true,
+      projectId: 'project',
+      groupDirectory: '/workspace',
+      rootFolders: [entry],
+      childFoldersByParentId: new Map(),
+      visibleSessions: [],
+    }).rows.length;
+  };
+
+  test('uses the complete flattened folder model at threshold -1, threshold, and +1', () => {
+    const renderableCounts = [48, 49, 50].map(renderableArchivedRowCount);
+    const modes = renderableCounts.map((rootCount) => selectSessionGroupVirtualizationMode({
+      isArchivedBucket: true,
+      rootCount,
+    }));
+
+    expect(renderableCounts).toEqual([49, 50, 51]);
+    expect(modes).toEqual(['none', 'roots', 'roots']);
   });
 });

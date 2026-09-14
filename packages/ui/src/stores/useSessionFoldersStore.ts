@@ -19,6 +19,11 @@ export interface SessionFolder {
 
 export type SessionFoldersMap = Record<string, SessionFolder[]>;
 
+export type ArchivedFolderAssignment = {
+  name: string;
+  sessionIds: readonly string[];
+};
+
 interface SessionFoldersState {
   foldersMap: SessionFoldersMap;
   /** UI identity keys, encoded as scopeKey + NUL + folderId. */
@@ -32,6 +37,11 @@ interface SessionFoldersActions {
   deleteFolder: (scopeKey: string, folderId: string) => void;
   addSessionToFolder: (scopeKey: string, folderId: string, sessionId: string) => void;
   addSessionsToFolder: (scopeKey: string, folderId: string, sessionIds: string[]) => void;
+  reconcileArchivedFolders: (
+    scopeKey: string,
+    assignments: readonly ArchivedFolderAssignment[],
+    knownSessionIds?: readonly string[],
+  ) => void;
   removeSessionFromFolder: (scopeKey: string, sessionId: string) => void;
   removeSessionEverywhere: (runtimeKey: string, sessionId: string) => void;
   removeSessionsFromFolders: (scopeKey: string, sessionIds: string[]) => void;
@@ -49,6 +59,7 @@ const COLLAPSED_STORAGE_KEY = 'oc.sessions.folderCollapse';
 const STORAGE_INDEX_KEY = 'oc.sessions.folders.v2.index';
 const SESSION_FOLDERS_API_PATH = '/api/session-folders';
 const DISK_WRITE_DEBOUNCE_MS = 250;
+const ARCHIVED_FOLDER_SCOPE_PREFIX = '__archived__:';
 
 const safeStorage = getDeferredSafeStorage();
 const immediateSafeStorage = getSafeStorage();
@@ -342,6 +353,56 @@ const createFolderId = (): string => {
   return `folder_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 };
 
+const isArchivedFolderScope = (scopeKey: string): boolean => (
+  scopeKey.startsWith(ARCHIVED_FOLDER_SCOPE_PREFIX)
+  && scopeKey.length > ARCHIVED_FOLDER_SCOPE_PREFIX.length
+);
+
+type NormalizedArchivedFolderAssignment = {
+  name: string;
+  sessionIds: string[];
+};
+
+const normalizeArchivedFolderAssignments = (
+  assignments: readonly ArchivedFolderAssignment[],
+): NormalizedArchivedFolderAssignment[] => {
+  const byName = new Map<string, NormalizedArchivedFolderAssignment>();
+  const assignedSessionIds = new Set<string>();
+
+  for (const assignment of assignments) {
+    const name = assignment.name.trim();
+    if (!name) continue;
+    const nameKey = name.toLowerCase();
+    let normalized = byName.get(nameKey);
+    if (!normalized) {
+      normalized = { name, sessionIds: [] };
+      byName.set(nameKey, normalized);
+    }
+
+    for (const sessionId of assignment.sessionIds) {
+      const normalizedSessionId = sessionId.trim();
+      if (!normalizedSessionId || assignedSessionIds.has(normalizedSessionId)) continue;
+      assignedSessionIds.add(normalizedSessionId);
+      normalized.sessionIds.push(normalizedSessionId);
+    }
+  }
+
+  return [...byName.values()].filter((assignment) => assignment.sessionIds.length > 0);
+};
+
+const normalizeSessionIds = (sessionIds: readonly string[]): Set<string> => {
+  const result = new Set<string>();
+  for (const sessionId of sessionIds) {
+    const normalizedSessionId = sessionId.trim();
+    if (normalizedSessionId) result.add(normalizedSessionId);
+  }
+  return result;
+};
+
+const sessionIdsEqual = (left: readonly string[], right: readonly string[]): boolean => (
+  left.length === right.length && left.every((sessionId, index) => sessionId === right[index])
+);
+
 const syncCollapsedAfterFolderCleanup = (
   scopeKey: string,
   prevFolders: SessionFolder[],
@@ -546,6 +607,92 @@ export const useSessionFoldersStore = create<SessionFoldersStore>()(
           ? { foldersMap: nextMap, collapsedFolderIds: nextCollapsed }
           : { foldersMap: nextMap });
         persistState(nextMap, nextCollapsed ?? get().collapsedFolderIds);
+      },
+
+      reconcileArchivedFolders: (
+        scopeKey: string,
+        assignments: readonly ArchivedFolderAssignment[],
+        knownSessionIds: readonly string[] = [],
+      ): void => {
+        if (!isArchivedFolderScope(scopeKey)) return;
+
+        const normalizedAssignments = normalizeArchivedFolderAssignments(assignments);
+        const current = get().foldersMap;
+        const existingFolders = current[scopeKey] ?? [];
+        const knownIds = normalizeSessionIds(knownSessionIds);
+        const sessionIdsToReconcile = new Set(knownIds);
+        const targetAssignments: Array<{ folder: SessionFolder; sessionIds: Set<string> }> = [];
+        const folderByName = new Map<string, SessionFolder>();
+
+        for (const folder of existingFolders) {
+          const name = folder.name.trim();
+          if (name && !folderByName.has(name.toLowerCase())) {
+            folderByName.set(name.toLowerCase(), folder);
+          }
+        }
+
+        let foldersWereCreated = false;
+        const nextFolders = [...existingFolders];
+        for (const assignment of normalizedAssignments) {
+          const assignmentSessionIds = normalizeSessionIds(assignment.sessionIds);
+          if (assignmentSessionIds.size === 0) continue;
+          for (const sessionId of assignmentSessionIds) sessionIdsToReconcile.add(sessionId);
+
+          const nameKey = assignment.name.toLowerCase();
+          let folder = folderByName.get(nameKey);
+          if (!folder) {
+            folder = {
+              id: createFolderId(),
+              name: assignment.name,
+              sessionIds: [],
+              createdAt: Date.now(),
+              parentId: null,
+            };
+            folderByName.set(nameKey, folder);
+            nextFolders.push(folder);
+            foldersWereCreated = true;
+          }
+          targetAssignments.push({ folder, sessionIds: assignmentSessionIds });
+        }
+
+        const targetSessionIdsByFolder = new Map<SessionFolder, Set<string>>(
+          targetAssignments.map(({ folder, sessionIds }) => [folder, sessionIds]),
+        );
+        let foldersChanged = foldersWereCreated;
+        const reconciledFolders = nextFolders.map((folder) => {
+          const targetSessionIds = targetSessionIdsByFolder.get(folder);
+          const retainedSessionIds: string[] = [];
+          const retainedTargetIds = new Set<string>();
+
+          for (const sessionId of folder.sessionIds) {
+            if (!sessionIdsToReconcile.has(sessionId)) {
+              retainedSessionIds.push(sessionId);
+              continue;
+            }
+            if (targetSessionIds?.has(sessionId) && !retainedTargetIds.has(sessionId)) {
+              retainedSessionIds.push(sessionId);
+              retainedTargetIds.add(sessionId);
+            }
+          }
+
+          if (targetSessionIds) {
+            for (const sessionId of targetSessionIds) {
+              if (retainedTargetIds.has(sessionId)) continue;
+              retainedSessionIds.push(sessionId);
+              retainedTargetIds.add(sessionId);
+            }
+          }
+
+          if (sessionIdsEqual(folder.sessionIds, retainedSessionIds)) return folder;
+          foldersChanged = true;
+          return { ...folder, sessionIds: retainedSessionIds };
+        });
+
+        if (!foldersChanged) return;
+        const nextMap = { ...current, [scopeKey]: reconciledFolders };
+        const collapsed = get().collapsedFolderIds;
+        set({ foldersMap: nextMap });
+        persistState(nextMap, collapsed);
       },
 
       removeSessionsFromFolders: (scopeKey: string, sessionIds: string[]): void => {

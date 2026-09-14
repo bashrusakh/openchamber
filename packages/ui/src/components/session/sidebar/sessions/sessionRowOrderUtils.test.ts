@@ -6,6 +6,7 @@ import {
   appendSessionNodeRowEntries,
   buildActivityRowOrderEntries,
   buildActivitySessionRowKeys,
+  buildSessionGroupRenderRowModel,
   buildSessionGroupRowOrderEntries,
   type SessionRowOrderEntry,
   type SessionRowOrderFolderEntry,
@@ -279,6 +280,134 @@ describe('buildSessionGroupRowOrderEntries', () => {
       scopeKey: '/repo/worktree',
       archived: false,
     });
+  });
+});
+
+describe('buildSessionGroupRenderRowModel', () => {
+  const folderA: SessionRowOrderFolderEntry = {
+    folder: { id: 'folder-a', name: 'Folder A', parentId: null },
+    scopeKey: '/repo',
+    scopeDirectory: '/repo',
+    nodes: [node('folder-a-session')],
+  };
+  const folderAChild: SessionRowOrderFolderEntry = {
+    folder: { id: 'folder-a-child', name: 'Child', parentId: 'folder-a' },
+    scopeKey: '/repo',
+    scopeDirectory: '/repo',
+    nodes: [node('folder-child-session')],
+  };
+  const model = (overrides: Partial<Parameters<typeof buildSessionGroupRenderRowModel>[0]> = {}) => (
+    buildSessionGroupRenderRowModel({
+      groupKey: 'project-a:group',
+      isCollapsed: false,
+      hasSessionSearchQuery: false,
+      collapsedFolderIds: new Set(),
+      expandedParents: new Set(),
+      archivedBucket: true,
+      projectId: 'project-a',
+      groupDirectory: '/repo',
+      rootFolders: [folderA],
+      childFoldersByParentId: new Map([
+        [getSessionFolderIdentityKey('/repo', 'folder-a'), [folderAChild]],
+      ]),
+      visibleSessions: [node('ungrouped-session')],
+      ...overrides,
+    })
+  );
+  const rowLabels = (rows: ReturnType<typeof buildSessionGroupRenderRowModel>['rows']): string[] => rows.map((row) => {
+    if (row.kind === 'folder-header') return `folder:${row.entry.folder.id}`;
+    if (row.kind === 'folder-empty') return `empty:${row.entry.folder.id}`;
+    return row.node.session.id;
+  });
+
+  test('places folder headers, folder occurrences, nested folders, and ungrouped rows in one order', () => {
+    const result = model();
+
+    expect(rowLabels(result.rows)).toEqual([
+      'folder:folder-a',
+      'folder-a-session',
+      'folder:folder-a-child',
+      'folder-child-session',
+      'ungrouped-session',
+    ]);
+    expect(result.rows.filter((row) => row.kind === 'session').map((row) => row.key))
+      .toEqual(result.entries.map((entry) => entry.rowKey));
+  });
+
+  test('flattens expanded descendants into the same model with stable occurrence keys', () => {
+    const parent = node('parent', [node('child')]);
+    const result = model({
+      rootFolders: [],
+      childFoldersByParentId: new Map(),
+      visibleSessions: [parent],
+      expandedParents: new Set(['project:archived:parent']),
+    });
+
+    expect(rowLabels(result.rows)).toEqual(['parent', 'child']);
+    expect(result.rows[0]?.kind).toBe('session');
+    expect(result.rows[1]?.kind).toBe('session');
+    if (result.rows[0]?.kind === 'session' && result.rows[1]?.kind === 'session') {
+      expect(result.rows[0].key).toBe('project-a:group:session:parent');
+      expect(result.rows[1].key).toBe('project-a:group:session:parent/child:child');
+      expect(result.rows[1].depth).toBe(1);
+    }
+  });
+
+  test('keeps a collapsed folder header while hiding its body and descendants', () => {
+    const result = model({
+      collapsedFolderIds: new Set([getSessionFolderIdentityKey('/repo', 'folder-a')]),
+      visibleSessions: [],
+    });
+
+    expect(rowLabels(result.rows)).toEqual(['folder:folder-a']);
+    expect(result.entries).toEqual([]);
+  });
+
+  test('represents an expanded empty folder body without mounting session rows', () => {
+    const emptyFolder: SessionRowOrderFolderEntry = {
+      folder: { id: 'empty', name: 'Empty', parentId: null },
+      scopeKey: '/repo',
+      scopeDirectory: '/repo',
+      nodes: [],
+    };
+    const result = model({
+      rootFolders: [emptyFolder],
+      childFoldersByParentId: new Map(),
+      visibleSessions: [],
+    });
+
+    expect(rowLabels(result.rows)).toEqual(['folder:empty', 'empty:empty']);
+    expect(result.entries).toEqual([]);
+  });
+
+  test('does not duplicate malformed cyclic folder components', () => {
+    const cycleA: SessionRowOrderFolderEntry = {
+      folder: { id: 'cycle-a', name: 'Cycle A', parentId: 'cycle-b' },
+      scopeKey: '/repo',
+      scopeDirectory: '/repo',
+      nodes: [node('cycle-a-session')],
+    };
+    const cycleB: SessionRowOrderFolderEntry = {
+      folder: { id: 'cycle-b', name: 'Cycle B', parentId: 'cycle-a' },
+      scopeKey: '/repo',
+      scopeDirectory: '/repo',
+      nodes: [node('cycle-b-session')],
+    };
+    const result = model({
+      rootFolders: [cycleA],
+      childFoldersByParentId: new Map([
+        [getSessionFolderIdentityKey('/repo', 'cycle-a'), [cycleB]],
+        [getSessionFolderIdentityKey('/repo', 'cycle-b'), [cycleA]],
+      ]),
+      visibleSessions: [],
+    });
+
+    expect(rowLabels(result.rows)).toEqual([
+      'folder:cycle-a',
+      'cycle-a-session',
+      'folder:cycle-b',
+      'cycle-b-session',
+    ]);
   });
 });
 

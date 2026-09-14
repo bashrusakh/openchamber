@@ -11,6 +11,9 @@ kept at this root in `types.ts` and `utils.tsx`.
 - `sessions/` owns session rows, row actions, expansion, ownership, and activity indicators.
 - `recent/` owns Recent and managed Chats activity projections.
 - `folders/` owns folder DnD, bulk actions, archived folders, and folder UI.
+  Archived folders are directory-derived read-only projections. Their membership
+  is reconciled in batches after global sessions and worktree topology are
+  complete, so archived rows and targets do not expose session-folder DnD.
 - Root session right-click and overflow menus expose `Move to worktree`: a submenu
   listing the canonical primary and linked worktree destinations, with the current
   target disabled and a separate `New worktree...` action. Opening the submenu

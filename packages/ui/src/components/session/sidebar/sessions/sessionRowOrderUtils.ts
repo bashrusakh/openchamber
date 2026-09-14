@@ -91,6 +91,58 @@ const expansionKeyFor = (
   sessionId: string,
 ): string => `${renderContext}:${archived ? 'archived' : 'active'}:${sessionId}`;
 
+type SessionNodeRowTraversalOptions = {
+  renderContext: SessionRowOrderRenderContext;
+  archived: boolean;
+  hasSessionSearchQuery: boolean;
+  expandedParents: ReadonlySet<string>;
+  fallbackDirectory: string | null | undefined;
+  rowKeyContainerKey: string;
+};
+
+type SessionNodeRowVisitor = (
+  node: SessionNode,
+  rowKey: string,
+  depth: number,
+  inheritedDirectory: string | null | undefined,
+) => void;
+
+const visitSessionNodeRows = (
+  nodes: readonly SessionNode[],
+  options: SessionNodeRowTraversalOptions,
+  visitor: SessionNodeRowVisitor,
+): void => {
+  const rootRowKeys = getSessionNodeRowKeys(options.rowKeyContainerKey, nodes);
+  const visit = (
+    node: SessionNode,
+    inheritedDirectory: string | null | undefined,
+    rowKey: string,
+    depth: number,
+  ): void => {
+    visitor(node, rowKey, depth, inheritedDirectory);
+    if (!options.hasSessionSearchQuery && !options.expandedParents.has(
+      expansionKeyFor(options.renderContext, options.archived, node.session.id),
+    )) {
+      return;
+    }
+    // SessionTreeItem threads the nearest directory down to child rows; a
+    // child without its own directory uses its parent's, not the group's.
+    const childDirectory = node.session.directory ?? inheritedDirectory;
+    const childRowKeys = getSessionChildRowKeys(rowKey, node.children);
+    node.children.forEach((child, index) => {
+      const childRowKey = childRowKeys[index];
+      if (!childRowKey) return;
+      visit(child, childDirectory, childRowKey, depth + 1);
+    });
+  };
+
+  nodes.forEach((node, index) => {
+    const rowKey = rootRowKeys[index];
+    if (!rowKey) return;
+    visit(node, options.fallbackDirectory, rowKey, 0);
+  });
+};
+
 /**
  * Append the depth-first document order of `nodes`, mirroring
  * `SessionNodeItem`'s render/expansion rule exactly: a node's children follow
@@ -104,12 +156,14 @@ export const appendSessionNodeRowEntries = (
 ): void => {
   const rowKeyContainerKey = options.rowKeyContainerKey
     ?? `${options.renderContext}:${options.archived ? 'archived' : 'active'}:${normalizePath(options.fallbackDirectory ?? null) ?? 'unscoped'}`;
-  const rootRowKeys = getSessionNodeRowKeys(rowKeyContainerKey, nodes);
-  const visit = (
-    node: SessionNode,
-    inheritedDirectory: string | null | undefined,
-    rowKey: string,
-  ): void => {
+  visitSessionNodeRows(nodes, {
+    renderContext: options.renderContext,
+    archived: options.archived,
+    hasSessionSearchQuery: options.hasSessionSearchQuery,
+    expandedParents: options.expandedParents,
+    fallbackDirectory: options.fallbackDirectory,
+    rowKeyContainerKey,
+  }, (node, rowKey, _depth, inheritedDirectory) => {
     const scopeKey = options.selectionScopeKey !== undefined
       ? options.selectionScopeKey
       : getSessionSelectionScopeKey(
@@ -117,30 +171,11 @@ export const appendSessionNodeRowEntries = (
         node.session.directory ?? inheritedDirectory,
       );
     out.push({ id: node.session.id, rowKey, scopeKey, archived: options.archived });
-    if (!options.hasSessionSearchQuery && !options.expandedParents.has(
-      expansionKeyFor(options.renderContext, options.archived, node.session.id),
-    )) {
-      return;
-    }
-    // SessionTreeItem threads the nearest directory down to child rows; a
-    // child without its own directory uses its parent's, not the group's.
-    const childDirectory = node.session.directory ?? inheritedDirectory;
-    const childRowKeys = getSessionChildRowKeys(rowKey, node.children);
-    node.children.forEach((child, index) => {
-      const childRowKey = childRowKeys[index];
-      if (!childRowKey) return;
-      visit(child, childDirectory, childRowKey);
-    });
-  };
-  nodes.forEach((node, index) => {
-    const rowKey = rootRowKeys[index];
-    if (!rowKey) return;
-    visit(node, options.fallbackDirectory, rowKey);
   });
 };
 
 export type SessionRowOrderFolderEntry = {
-  folder: { id: string };
+  folder: { id: string; name?: string; parentId?: string | null };
   scopeKey: string;
   scopeDirectory: string | null;
   nodes: readonly SessionNode[];
@@ -163,16 +198,48 @@ type SessionGroupRowOrderInput = {
   visibleSessions: readonly SessionNode[];
 };
 
-/**
- * Mirror `SessionGroupSection`'s body order: folders first (each folder's own
- * nodes, then its child folders; a collapsed folder hides its whole subtree),
- * then the ungrouped sessions already sliced by the show-more limit.
- */
-export const buildSessionGroupRowOrderEntries = (
-  input: SessionGroupRowOrderInput,
-): SessionRowOrderEntry[] => {
-  if (input.isCollapsed) return [];
+export type SessionGroupRenderRow =
+  | {
+    kind: 'folder-header';
+    key: string;
+    entry: SessionRowOrderFolderEntry;
+    displayName: string;
+  }
+  | {
+    kind: 'folder-empty';
+    key: string;
+    entry: SessionRowOrderFolderEntry;
+  }
+  | {
+    kind: 'session';
+    key: string;
+    node: SessionNode;
+    depth: number;
+    /** Directory fallback threaded to SessionTreeItem for this occurrence. */
+    groupDirectory: string | null;
+  };
 
+type SessionGroupRenderRowModel = {
+  rows: readonly SessionGroupRenderRow[];
+  entries: readonly SessionRowOrderEntry[];
+};
+
+const EMPTY_SESSION_GROUP_RENDER_ROW_MODEL: SessionGroupRenderRowModel = {
+  rows: [],
+  entries: [],
+};
+
+/**
+ * Build the one flat row model used by a large archived group. Folder headers,
+ * empty-folder bodies, and every visible session occurrence share this model so
+ * a folder body cannot bypass the group's virtual window.
+ */
+export const buildSessionGroupRenderRowModel = (
+  input: SessionGroupRowOrderInput,
+): SessionGroupRenderRowModel => {
+  if (input.isCollapsed) return EMPTY_SESSION_GROUP_RENDER_ROW_MODEL;
+
+  const rows: SessionGroupRenderRow[] = [];
   const entries: SessionRowOrderEntry[] = [];
   const expansion = {
     renderContext: 'project' as const,
@@ -180,33 +247,75 @@ export const buildSessionGroupRowOrderEntries = (
     hasSessionSearchQuery: input.hasSessionSearchQuery,
     expandedParents: input.expandedParents,
   };
-  const visited = new Set<string>();
-  const visitFolder = (entry: SessionRowOrderFolderEntry): void => {
-    const folderKey = getSessionFolderIdentityKey(entry.scopeKey, entry.folder.id);
-    if (visited.has(folderKey)) return;
-    visited.add(folderKey);
-    // A collapsed folder hides its own session rows along with every child
-    // folder; SessionFolderItem only renders `nodes` while expanded.
-    if (!input.hasSessionSearchQuery && input.collapsedFolderIds.has(folderKey)) return;
-    appendSessionNodeRowEntries(entries, entry.nodes, {
+  const appendSessionRows = (
+    nodes: readonly SessionNode[],
+    fallbackDirectory: string | null | undefined,
+    rowKeyContainerKey: string,
+  ): void => {
+    visitSessionNodeRows(nodes, {
       ...expansion,
-      projectId: input.projectId,
-      fallbackDirectory: entry.scopeDirectory ?? input.groupDirectory,
-      selectionScopeKey: input.selectionScopeKey,
-      rowKeyContainerKey: `${input.groupKey}:folder:${entry.scopeKey}:${entry.folder.id}`,
+      fallbackDirectory,
+      rowKeyContainerKey,
+    }, (node, rowKey, depth, inheritedDirectory) => {
+      const scopeKey = input.selectionScopeKey !== undefined
+        ? input.selectionScopeKey
+        : getSessionSelectionScopeKey(
+          input.projectId,
+          node.session.directory ?? inheritedDirectory,
+        );
+      rows.push({
+        kind: 'session',
+        key: rowKey,
+        node,
+        depth,
+        groupDirectory: inheritedDirectory ?? null,
+      });
+      entries.push({
+        id: node.session.id,
+        rowKey,
+        scopeKey,
+        archived: input.archivedBucket,
+      });
     });
-    (input.childFoldersByParentId.get(folderKey) ?? []).forEach(visitFolder);
   };
-  input.rootFolders.forEach(visitFolder);
-  appendSessionNodeRowEntries(entries, input.visibleSessions, {
-    ...expansion,
-    projectId: input.projectId,
-    fallbackDirectory: input.groupDirectory,
-    selectionScopeKey: input.selectionScopeKey,
-    rowKeyContainerKey: input.groupKey,
-  });
-  return entries;
+
+  const visitedFolders = new Set<string>();
+  const visitFolder = (entry: SessionRowOrderFolderEntry, parentPath: string): void => {
+    const folderKey = getSessionFolderIdentityKey(entry.scopeKey, entry.folder.id);
+    if (visitedFolders.has(folderKey)) return;
+    visitedFolders.add(folderKey);
+
+    const folderName = entry.folder.name ?? entry.folder.id;
+    const displayName = parentPath ? `${parentPath} / ${folderName}` : folderName;
+    const folderRowKey = `${input.groupKey}:folder:${entry.scopeKey}:${entry.folder.id}`;
+    rows.push({ kind: 'folder-header', key: folderRowKey, entry, displayName });
+
+    if (!input.hasSessionSearchQuery && input.collapsedFolderIds.has(folderKey)) return;
+    if (entry.nodes.length === 0) {
+      rows.push({ kind: 'folder-empty', key: `${folderRowKey}:empty`, entry });
+    } else {
+      appendSessionRows(
+        entry.nodes,
+        entry.scopeDirectory ?? input.groupDirectory,
+        folderRowKey,
+      );
+    }
+    (input.childFoldersByParentId.get(folderKey) ?? []).forEach((child) => visitFolder(child, displayName));
+  };
+
+  input.rootFolders.forEach((entry) => visitFolder(entry, ''));
+  appendSessionRows(input.visibleSessions, input.groupDirectory, input.groupKey);
+  return { rows, entries };
 };
+
+/**
+ * Mirror `SessionGroupSection`'s body order: folders first (each folder's own
+ * nodes, then its child folders; a collapsed folder hides its whole subtree),
+ * then the ungrouped sessions already sliced by the show-more limit.
+ */
+export const buildSessionGroupRowOrderEntries = (
+  input: SessionGroupRowOrderInput,
+): SessionRowOrderEntry[] => [...buildSessionGroupRenderRowModel(input).entries];
 
 type SessionRowOrderActivityItem = {
   node: SessionNode;

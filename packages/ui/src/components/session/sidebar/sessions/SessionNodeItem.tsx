@@ -1384,7 +1384,14 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
 
   return (
     <React.Fragment key={sessionRowKey}>
-      <DraggableSessionRow sessionId={session.id} dragKey={dragKey} ownerKey={folderOwnerKey ?? null} sessionDirectory={sessionDirectory ?? null} sessionTitle={sessionTitle}>
+      <DraggableSessionRow
+        sessionId={session.id}
+        dragKey={dragKey}
+        ownerKey={folderOwnerKey ?? null}
+        sessionDirectory={sessionDirectory ?? null}
+        sessionTitle={sessionTitle}
+        archivedBucket={archivedBucket}
+      >
         <ContextMenu.Root open={isContextMenuOpen} onOpenChange={handleContextMenuOpenChange} onOpenChangeComplete={handleMenuOpenChangeComplete}>
           <ContextMenu.Trigger
             render={
@@ -1791,6 +1798,8 @@ const sessionNodeItemPropsChange = (prev: SessionNodeItemProps, next: SessionNod
   if (prev.depth !== next.depth) return 'depth';
   if (prev.groupDirectory !== next.groupDirectory) return 'groupDirectory';
   if (prev.projectId !== next.projectId) return 'projectId';
+  if (prev.folderOwnerKey !== next.folderOwnerKey) return 'folderOwnerKey';
+  if (prev.selectionScopeKey !== next.selectionScopeKey) return 'selectionScopeKey';
   if (prev.archivedBucket !== next.archivedBucket) return 'archivedBucket';
   if ((prev.renderContext ?? 'project') !== (next.renderContext ?? 'project')) return 'renderContext';
   if (prev.rowKey !== next.rowKey) return 'rowKey';
