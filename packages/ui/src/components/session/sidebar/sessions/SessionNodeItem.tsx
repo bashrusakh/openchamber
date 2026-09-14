@@ -45,7 +45,7 @@ import { SessionActivityDuration } from '@/components/session/SessionActivityDur
 import { useSessionMultiSelectStore } from '@/stores/useSessionMultiSelectStore';
 import { useI18n } from '@/lib/i18n';
 import { useShiftKeyHeld } from '@/hooks/useShiftKeyHeld';
-import { getSessionGoal } from '@/lib/sessionGoalMetadata';
+import { getSessionGoal, type SessionGoalStatus } from '@/lib/sessionGoalMetadata';
 import { sessionGoalStatusColor, sessionGoalStatusLabelKey } from '@/lib/sessionGoalPresentation';
 import { getRuntimeBearerTokenSync } from '@/lib/runtime-auth';
 import { getRuntimeApiBaseUrl } from '@/lib/runtime-switch';
@@ -154,10 +154,22 @@ export type SessionNodeItemProps = {
   children?: React.ReactNode;
 };
 
-const areNodeWorktreeRenderSemanticsEqual = (prev: SessionNode, next: SessionNode): boolean => (
-  normalizePath(prev.worktree?.path ?? null) === normalizePath(next.worktree?.path ?? null)
-  && prev.worktree?.branch === next.worktree?.branch
-);
+const areNodeWorktreeRenderSemanticsEqual = (prev: SessionNode, next: SessionNode): boolean => {
+  const previousWorktree = prev.worktree;
+  const nextWorktree = next.worktree;
+  if (previousWorktree === nextWorktree) return true;
+  if (!previousWorktree || !nextWorktree) return previousWorktree === nextWorktree;
+
+  return normalizePath(previousWorktree.path) === normalizePath(nextWorktree.path)
+    && normalizePath(previousWorktree.projectDirectory) === normalizePath(nextWorktree.projectDirectory)
+    && previousWorktree.branch === nextWorktree.branch
+    && previousWorktree.label === nextWorktree.label
+    && previousWorktree.name === nextWorktree.name
+    && normalizePath(previousWorktree.worktreeRoot) === normalizePath(nextWorktree.worktreeRoot)
+    && previousWorktree.worktreeStatus === nextWorktree.worktreeStatus
+    && previousWorktree.worktreeSource === nextWorktree.worktreeSource
+    && previousWorktree.headState === nextWorktree.headState;
+};
 
 // Shared row geometry: the gutter edge matches the zone-header band padding
 // (px-1.5 = 6px), the marker slot is icon-wide (14px) with a 6px gap, so row
@@ -488,7 +500,14 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   const isMovingToWorktree = useIsSessionWorktreeMovePending(session.id);
   const isAiRenaming = useIsSessionAiRenamePending(session.id, sessionDirectory);
   const isSessionActionPending = isMovingToWorktree || isAiRenaming;
-  const currentWorktreeMetadata = node.worktree ?? useSessionUIStore.getState().getWorktreeMetadata(session.id) ?? null;
+  // The session attachment is the same source used while building project
+  // nodes and is updated independently during worktree bootstrap. Prefer it
+  // over the node's topology fallback so status transitions reach the menu
+  // closure without subscribing this row to the broad worktree maps.
+  const storedWorktreeMetadata = useSessionUIStore(
+    React.useCallback((state) => state.worktreeMetadata.get(session.id), [session.id]),
+  );
+  const currentWorktreeMetadata = storedWorktreeMetadata ?? node.worktree ?? null;
   const [worktreeTargets, setWorktreeTargets] = React.useState<SessionWorktreeMenuTarget[]>([]);
   const [worktreeTargetsLoading, setWorktreeTargetsLoading] = React.useState(false);
   const [worktreeTargetsLoadFailed, setWorktreeTargetsLoadFailed] = React.useState(false);
@@ -1777,6 +1796,10 @@ const hasExpansionMembershipChange = (prev: SessionNodeItemProps, next: SessionN
   );
 };
 
+const getSessionGoalGlyphStatus = (session: Session): SessionGoalStatus | null => (
+  getSessionGoal(session)?.status ?? null
+);
+
 const areSessionRenderSemanticsEqual = (prev: Session, next: Session): boolean => (
   prev.id === next.id
   && prev.title === next.title
@@ -1786,6 +1809,7 @@ const areSessionRenderSemanticsEqual = (prev: Session, next: Session): boolean =
   && prev.time?.created === next.time?.created
   && prev.time?.updated === next.time?.updated
   && prev.time?.archived === next.time?.archived
+  && getSessionGoalGlyphStatus(prev) === getSessionGoalGlyphStatus(next)
 );
 
 // Returns the name of the first prop whose change requires a render, or null
