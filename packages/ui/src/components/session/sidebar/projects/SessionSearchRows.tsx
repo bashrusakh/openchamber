@@ -604,7 +604,7 @@ export const SessionSearchRows: React.FC<SessionSearchRowsProps> = (props) => {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const [scrollElement, setScrollElement] = React.useState<HTMLElement | null>(null);
   const [relativeTimeTick, setRelativeTimeTick] = React.useState(0);
-  const hasRecentRows = model.rows.some((row) => row.kind === 'session' && row.renderContext === 'recent');
+  const hasRecentRows = model.hasRecentRows;
   React.useLayoutEffect(() => {
     const content = contentRef.current;
     const threadedScrollElement = scrollContainerRef.current;
@@ -637,7 +637,7 @@ export const SessionSearchRows: React.FC<SessionSearchRowsProps> = (props) => {
   });
   const visibleRows = virtualizer.getVirtualItems();
   const rowsToRender = scrollElement ? visibleRows : [];
-  const folderRows = model.rows.filter((row): row is SessionSearchFolderRow => row.kind === 'folder');
+  const folderRows = model.folderRows;
 
   const handleSessionDroppedOnFolder = React.useCallback((sessionId: string, target: SessionFolderDropTarget, sourceOwnerKey: string) => {
     if (sourceOwnerKey !== target.ownerKey) return;

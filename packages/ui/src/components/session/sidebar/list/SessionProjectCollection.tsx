@@ -390,7 +390,15 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
   }
   const searchRowModel = React.useMemo<SessionSearchRowModel>(() => {
     if (!view.hasSessionSearchQuery) {
-      return { rows: [], entries: [], projectSections: [], hasResults: false, searchMatchCount: 0 };
+      return {
+        rows: [],
+        entries: [],
+        projectSections: [],
+        hasResults: false,
+        hasRecentRows: false,
+        folderRows: [],
+        searchMatchCount: 0,
+      };
     }
     return buildSessionSearchRowModel({
       sections: orderedSectionsForRender,

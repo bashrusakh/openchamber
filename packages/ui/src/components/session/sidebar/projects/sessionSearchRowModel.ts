@@ -114,6 +114,10 @@ export type SessionSearchRowModel = {
   entries: readonly SessionRowOrderEntry[];
   projectSections: readonly ProjectSection[];
   hasResults: boolean;
+  /** True when the expanded Recent projection contributes session rows. */
+  hasRecentRows: boolean;
+  /** The folder rows in `rows`, retained for search DnD without a render scan. */
+  folderRows: readonly SessionSearchFolderRow[];
   /** Number of unique session ids in the final rendered projection. */
   searchMatchCount: number;
 };
@@ -357,6 +361,7 @@ const appendGroupBody = ({
   projection,
   rows,
   entries,
+  folderRows,
 }: {
   group: SessionGroup;
   groupKey: string;
@@ -364,6 +369,7 @@ const appendGroupBody = ({
   projection: SearchGroupProjection;
   rows: SessionSearchRow[];
   entries: SessionRowOrderEntry[];
+  folderRows: SessionSearchFolderRow[];
 }): boolean => {
   const visitedFolders = new Set<string>();
   const selectionScopeKey = getSessionFolderOwnerKey(projectId, group.directory);
@@ -396,7 +402,7 @@ const appendGroupBody = ({
     const displayName = parentPath ? `${parentPath} / ${entry.folder.name}` : entry.folder.name;
     const folderKey = `${groupKey}:folder:${entryKey}`;
     const isCollapsed = false;
-    rows.push({
+    const folderRow: SessionSearchFolderRow = {
       kind: 'folder',
       key: folderKey,
       folder: entry.folder,
@@ -412,7 +418,9 @@ const appendGroupBody = ({
       isCollapsed,
       deleteSessions: collectFolderSessions(entryKey, new Set()),
       subFolderCount: projection.childFoldersByParentId.get(entryKey)?.length ?? 0,
-    });
+    };
+    rows.push(folderRow);
+    folderRows.push(folderRow);
     hasBody = true;
     if (isCollapsed) return;
     appendSessionRows({
@@ -458,6 +466,7 @@ const appendGroup = ({
   args,
   rows,
   entries,
+  folderRows,
 }: {
   group: SessionGroup;
   groupKey: string;
@@ -467,6 +476,7 @@ const appendGroup = ({
   args: SessionSearchRowModelArgs;
   rows: SessionSearchRow[];
   entries: SessionRowOrderEntry[];
+  folderRows: SessionSearchFolderRow[];
 }): void => {
   const projection = projectGroup(
     group,
@@ -507,6 +517,7 @@ const appendGroup = ({
     projection,
     rows,
     entries,
+    folderRows,
   });
   if (!hasBody) {
     rows.push({
@@ -523,6 +534,7 @@ const appendProject = (
   args: SessionSearchRowModelArgs,
   rows: SessionSearchRow[],
   entries: SessionRowOrderEntry[],
+  folderRows: SessionSearchFolderRow[],
 ): void => {
   const projectId = section.project.id;
   const isCollapsed = !args.singleProjectMode && !args.showOnlyMainWorkspace
@@ -557,6 +569,7 @@ const appendProject = (
     args,
     rows,
     entries,
+    folderRows,
   }));
 };
 
@@ -565,6 +578,7 @@ const appendChatGroup = (
   args: SessionSearchRowModelArgs,
   rows: SessionSearchRow[],
   entries: SessionRowOrderEntry[],
+  folderRows: SessionSearchFolderRow[],
 ): void => {
   const projection = projectGroup(
     group,
@@ -583,6 +597,7 @@ const appendChatGroup = (
     projection,
     rows,
     entries,
+    folderRows,
   });
   if (!hasBody) {
     rows.push({
@@ -597,16 +612,18 @@ const appendChatGroup = (
 export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): SessionSearchRowModel => {
   const rows: SessionSearchRow[] = [];
   const entries: SessionRowOrderEntry[] = [];
+  const folderRows: SessionSearchFolderRow[] = [];
   const projectSections = args.singleProjectMode
     ? args.sections.filter((section) => section.project.id === args.singleProjectId)
     : args.sections;
   const chatSearchData = args.chatGroup ? args.groupSearchDataByGroup.get(args.chatGroup) : undefined;
   const hasProjectResults = projectSections.length > 0;
   const hasRecentResults = args.showRecentSection && args.recentSections.some((section) => section.items.length > 0);
+  const hasRecentRows = hasRecentResults && !args.collapsedActivitySections.has('active-now');
   const hasChatResults = chatSearchData?.hasMatch === true;
   const hasResults = hasProjectResults || hasRecentResults || hasChatResults;
   if (!hasResults) {
-    return { rows, entries, projectSections, hasResults: false, searchMatchCount: 0 };
+    return { rows, entries, projectSections, hasResults: false, hasRecentRows, folderRows, searchMatchCount: 0 };
   }
 
   if (args.chatGroup) {
@@ -618,7 +635,7 @@ export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): Ses
       isCollapsed: args.collapsedActivitySections.has('chats'),
     });
     if (!args.collapsedActivitySections.has('chats') && hasChatResults) {
-      appendChatGroup(args.chatGroup, args, rows, entries);
+       appendChatGroup(args.chatGroup, args, rows, entries, folderRows);
     }
   }
 
@@ -648,18 +665,18 @@ export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): Ses
            archivedBucket: false,
           renderContext: 'recent',
           secondaryMeta: item.secondaryMeta,
-          rows,
-          entries,
-        });
+           rows,
+           entries,
+          });
       });
     });
   }
 
   if (args.showOnlyMainWorkspace) {
     const activeSection = projectSections.find((section) => section.project.id === args.activeProjectId) ?? projectSections[0];
-    if (activeSection) appendProject(activeSection, args, rows, entries);
+    if (activeSection) appendProject(activeSection, args, rows, entries, folderRows);
   } else {
-    projectSections.forEach((section) => appendProject(section, args, rows, entries));
+    projectSections.forEach((section) => appendProject(section, args, rows, entries, folderRows));
   }
 
   return {
@@ -667,6 +684,8 @@ export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): Ses
     entries,
     projectSections,
     hasResults: rows.length > 0,
+    hasRecentRows,
+    folderRows,
     searchMatchCount: countRenderedSessions(rows, args.normalizedQuery),
   };
 };

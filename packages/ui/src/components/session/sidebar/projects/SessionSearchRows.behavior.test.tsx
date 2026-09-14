@@ -104,8 +104,33 @@ const makeModel = (count: number): SessionSearchRowModel => {
     entries: rows.map((row) => ({ id: row.node.session.id, rowKey: row.key, scopeKey: 'project', archived: false })),
     projectSections: [],
     hasResults: true,
+    hasRecentRows: false,
+    folderRows: [],
     searchMatchCount: count,
   };
+};
+
+const makeScanCountingModel = (count: number) => {
+  const model = makeModel(count);
+  const scanCalls = { some: 0, filter: 0 };
+  const rows = [...model.rows];
+  const originalSome = rows.some;
+  const originalFilter = rows.filter;
+  Object.defineProperty(rows, 'some', {
+    configurable: true,
+    value: (...args: Parameters<typeof originalSome>) => {
+      scanCalls.some += 1;
+      return originalSome.call(rows, ...args);
+    },
+  });
+  Object.defineProperty(rows, 'filter', {
+    configurable: true,
+    value: (...args: Parameters<typeof originalFilter>) => {
+      scanCalls.filter += 1;
+      return originalFilter.call(rows, ...args);
+    },
+  });
+  return { model: { ...model, rows }, scanCalls };
 };
 
 const makeProps = (
@@ -224,6 +249,32 @@ describe('SessionSearchRows public behavior', () => {
     }
   });
 
+  test('does not scan the full row model during an ordinary virtualizer rerender', async () => {
+    const dom = installRealTestDom();
+    const scrollContainer = dom.container;
+    scrollContainer.className = 'overlay-scrollbar-container';
+    Object.defineProperty(scrollContainer, 'offsetHeight', { configurable: true, value: 96 });
+    Object.defineProperty(scrollContainer, 'offsetWidth', { configurable: true, value: 320 });
+    scrollContainer.getBoundingClientRect = () => new window.DOMRect(0, 0, 320, 96);
+    const root = createRoot(scrollContainer);
+    const scrollContainerRef = { current: scrollContainer };
+    const { model, scanCalls } = makeScanCountingModel(1000);
+    renderedRows.length = 0;
+
+    try {
+      await act(async () => root.render(<SessionSearchRows {...makeProps(model, scrollContainerRef)} />));
+      const initialScanCalls = { ...scanCalls };
+
+      await act(async () => root.render(<SessionSearchRows {...makeProps(model, scrollContainerRef)} />));
+
+      expect(scanCalls).toEqual(initialScanCalls);
+    } finally {
+      await act(async () => root.unmount());
+      renderedRows.length = 0;
+      await dom.restore();
+    }
+  });
+
   test('passes distinct row keys to duplicate session occurrences', async () => {
     const dom = installRealTestDom();
     Object.defineProperty(dom.container, 'offsetHeight', { configurable: true, value: 96 });
@@ -263,6 +314,8 @@ describe('SessionSearchRows public behavior', () => {
       ],
       projectSections: [],
       hasResults: true,
+      hasRecentRows: true,
+      folderRows: [],
       searchMatchCount: 1,
     };
 
@@ -286,6 +339,70 @@ describe('SessionSearchRows public behavior', () => {
     }
   });
 
+  test('keeps the Recent relative-time tick behavior', async () => {
+    const dom = installRealTestDom();
+    const scrollContainer = dom.container;
+    scrollContainer.className = 'overlay-scrollbar-container';
+    Object.defineProperty(scrollContainer, 'offsetHeight', { configurable: true, value: 96 });
+    Object.defineProperty(scrollContainer, 'offsetWidth', { configurable: true, value: 320 });
+    scrollContainer.getBoundingClientRect = () => new window.DOMRect(0, 0, 320, 96);
+    const root = createRoot(scrollContainer);
+    const scrollContainerRef = { current: scrollContainer };
+    const session = makeSession('ses_recent');
+    const row = {
+      kind: 'session' as const,
+      key: 'activity:active-now:ses_recent:session:ses_recent',
+      node: { session, children: [], worktree: null },
+      depth: 0,
+      projectId: 'project',
+      groupDirectory: '/repo/project',
+      folderOwnerKey: 'project',
+      archivedBucket: false,
+      renderContext: 'recent' as const,
+    };
+    const model: SessionSearchRowModel = {
+      rows: [row],
+      entries: [{ id: session.id, rowKey: row.key, scopeKey: 'project', archived: false }],
+      projectSections: [],
+      hasResults: true,
+      hasRecentRows: true,
+      folderRows: [],
+      searchMatchCount: 1,
+    };
+    const intervalCallbacks: Array<() => void> = [];
+    const originalSetInterval = window.setInterval;
+    const originalClearInterval = window.clearInterval;
+    Object.defineProperty(window, 'setInterval', {
+      configurable: true,
+      value: (callback: () => void) => {
+        intervalCallbacks.push(callback);
+        return 1;
+      },
+    });
+    Object.defineProperty(window, 'clearInterval', {
+      configurable: true,
+      value: () => undefined,
+    });
+    renderedRows.length = 0;
+
+    try {
+      await act(async () => root.render(<SessionSearchRows {...makeProps(model, scrollContainerRef)} />));
+
+      expect(intervalCallbacks).toHaveLength(1);
+      expect(renderedRows.at(-1)?.renderExtras?.relativeTimeTick).toBe(0);
+
+      await act(async () => intervalCallbacks[0]?.());
+
+      expect(renderedRows.at(-1)?.renderExtras?.relativeTimeTick).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      Object.defineProperty(window, 'setInterval', { configurable: true, value: originalSetInterval });
+      Object.defineProperty(window, 'clearInterval', { configurable: true, value: originalClearInterval });
+      renderedRows.length = 0;
+      await dom.restore();
+    }
+  });
+
   test('marks search activity headers as sticky when the display setting is enabled', async () => {
     const dom = installRealTestDom();
     Object.defineProperty(dom.container, 'offsetHeight', { configurable: true, value: 96 });
@@ -303,6 +420,8 @@ describe('SessionSearchRows public behavior', () => {
       entries: [],
       projectSections: [],
       hasResults: true,
+      hasRecentRows: false,
+      folderRows: [],
       searchMatchCount: 0,
     };
 

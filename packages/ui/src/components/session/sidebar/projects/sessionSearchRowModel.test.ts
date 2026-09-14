@@ -169,6 +169,72 @@ describe('buildSessionSearchRowModel', () => {
       { scopeKey: WORKTREE_ROOT, folderId: 'shared-folder', ownerKey: 'project', nodeIds: ['ses_worktree'] },
     ]);
     expect(model.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.id)).toEqual(['ses_project', 'ses_worktree']);
+    expect(model.folderRows.map((row) => ({
+      scopeKey: row.scopeKey,
+      folderId: row.folder.id,
+      ownerKey: row.folderOwnerKey,
+      nodeIds: row.nodes.map((node) => node.session.id),
+    }))).toEqual([
+      { scopeKey: PROJECT_ROOT, folderId: 'shared-folder', ownerKey: 'project', nodeIds: ['ses_project'] },
+      { scopeKey: WORKTREE_ROOT, folderId: 'shared-folder', ownerKey: 'project', nodeIds: ['ses_worktree'] },
+    ]);
+  });
+
+  test('derives recent-row presence from visible recent sections', () => {
+    const recentItem = {
+      node: makeNode(makeSession('ses_recent', 'Release recent')),
+      projectId: 'project',
+      groupDirectory: PROJECT_ROOT,
+      secondaryMeta: null,
+    };
+    const buildRecentModel = (collapsedActivitySections: ReadonlySet<'chats' | 'active-now'>, items = [recentItem]) => buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [],
+      chatGroup: null,
+      showRecentSection: true,
+      recentSections: [{ key: 'active-now', items }],
+      collapsedActivitySections,
+      groupSearchDataByGroup: new WeakMap(),
+    });
+
+    expect(buildRecentModel(new Set()).hasRecentRows).toBe(true);
+    expect(buildRecentModel(new Set(['active-now'])).hasRecentRows).toBe(false);
+    expect(buildRecentModel(new Set(), []).hasRecentRows).toBe(false);
+  });
+
+  test('rebuilds folder rows when the folder map or search projection changes', () => {
+    const node = makeNode(makeSession('ses_folder', 'Release folder session'));
+    const group = makeGroup('main', [node]);
+    const build = (foldersMap: SessionFoldersMap, filteredNodes: SessionNode[]) => buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      foldersMap,
+      groupSearchDataByGroup: new WeakMap([[group, {
+        filteredNodes,
+        matchedSessionCount: filteredNodes.length,
+        folderNameMatchCount: 1,
+        groupMatches: false,
+        hasMatch: true,
+      }]]),
+    });
+    const initialModel = build({
+      [PROJECT_ROOT]: [{ id: 'folder-a', name: 'Release plans', sessionIds: [node.session.id], createdAt: 1 }],
+    }, [node]);
+    const projectedModel = build({
+      [PROJECT_ROOT]: [{ id: 'folder-a', name: 'Release plans', sessionIds: [node.session.id], createdAt: 1 }],
+    }, []);
+    const changedFoldersModel = build({
+      [PROJECT_ROOT]: [{ id: 'folder-b', name: 'Release plans', sessionIds: [], createdAt: 2 }],
+    }, []);
+
+    expect(initialModel.folderRows.map((row) => row.folder.id)).toEqual(['folder-a']);
+    expect(initialModel.folderRows[0]?.nodes.map((entry) => entry.session.id)).toEqual([node.session.id]);
+    expect(projectedModel.folderRows.map((row) => row.folder.id)).toEqual(['folder-a']);
+    expect(projectedModel.folderRows[0]?.nodes).toEqual([]);
+    expect(projectedModel.folderRows).not.toBe(initialModel.folderRows);
+    expect(changedFoldersModel.folderRows.map((row) => row.folder.id)).toEqual(['folder-b']);
+    expect(changedFoldersModel.folderRows[0]?.nodes).toEqual([]);
   });
 
   test('keeps folder-only managed-chat matches from every chat scope', () => {
@@ -382,6 +448,7 @@ describe('buildSessionSearchRowModel', () => {
     ]);
     expect(model.searchMatchCount).toBe(2);
     expect(model.entries.map((entry) => entry.id)).toEqual(['ses_chat', 'ses_duplicate', 'ses_duplicate']);
-     expect(model.entries[1]?.rowKey).not.toBe(model.entries[2]?.rowKey);
-   });
+    expect(model.entries[1]?.rowKey).not.toBe(model.entries[2]?.rowKey);
+    expect(model.hasRecentRows).toBe(true);
+  });
 });
