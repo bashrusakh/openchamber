@@ -4,6 +4,11 @@ import type { Root } from 'react-dom/client';
 import { Window } from 'happy-dom';
 
 type IntersectionCallback = (entries: IntersectionObserverEntry[]) => void;
+type IntersectionEmission = {
+  element: Element;
+  isIntersecting: boolean;
+  top: number;
+};
 
 class TestIntersectionObserver {
   static instances: TestIntersectionObserver[] = [];
@@ -30,18 +35,26 @@ class TestIntersectionObserver {
   }
 
   emit(element: Element, isIntersecting: boolean, top: number): void {
-    if (this.disconnected || !this.observed.has(element)) return;
-    const bounds = new DOMRect(0, top, 1, 1);
-    const entry: IntersectionObserverEntry = {
-      boundingClientRect: bounds,
-      intersectionRatio: isIntersecting ? 1 : 0,
-      intersectionRect: bounds,
-      isIntersecting,
-      rootBounds: new DOMRect(0, 100, 1, 1),
-      target: element,
-      time: 0,
-    };
-    this.callback([entry]);
+    this.emitEntries([{ element, isIntersecting, top }]);
+  }
+
+  emitEntries(emissions: IntersectionEmission[]): void {
+    if (this.disconnected) return;
+    const entries = emissions
+      .filter(({ element }) => this.observed.has(element))
+      .map(({ element, isIntersecting, top }): IntersectionObserverEntry => {
+        const bounds = new DOMRect(0, top, 1, 1);
+        return {
+          boundingClientRect: bounds,
+          intersectionRatio: isIntersecting ? 1 : 0,
+          intersectionRect: bounds,
+          isIntersecting,
+          rootBounds: new DOMRect(0, 100, 1, 1),
+          target: element,
+          time: 0,
+        };
+      });
+    if (entries.length > 0) this.callback(entries);
   }
 }
 
@@ -96,9 +109,10 @@ const { useStickyProjectHeaders, useStickySentinelObserver } = await import('./u
 type ObserverHarnessProps = {
   rootRef: React.RefObject<HTMLElement | null>;
   enabled: boolean;
+  refreshKey?: number | string;
 };
 
-const ActivityObserverHarness: React.FC<ObserverHarnessProps> = ({ rootRef, enabled }) => {
+const ActivityObserverHarness: React.FC<ObserverHarnessProps> = ({ rootRef, enabled, refreshKey }) => {
   const resolveSentinels = React.useCallback((): ReadonlyMap<string, HTMLElement | null> => {
     const activeNowSentinel = rootRef.current?.querySelector<HTMLElement>('[data-sidebar-activity-start="active-now"]');
     return activeNowSentinel
@@ -109,6 +123,7 @@ const ActivityObserverHarness: React.FC<ObserverHarnessProps> = ({ rootRef, enab
     enabled,
     rootRef,
     resolveSentinels,
+    refreshKey,
   });
   return <output data-sticky-state={[...stuckHeaders].join(',')} />;
 };
@@ -150,12 +165,14 @@ const ProjectObserverHarness: React.FC<ProjectObserverHarnessProps> = ({
   targetsRef,
   enabled,
   isDesktopShellRuntime,
+  refreshKey,
 }) => {
   const stuckHeaders = useStickyProjectHeaders({
     enabled,
     isDesktopShellRuntime,
     projectHeaderSentinelRefs: targetsRef,
     scrollContainerRef: rootRef,
+    refreshKey,
   });
   return <output data-sticky-state={[...stuckHeaders].join(',')} />;
 };
@@ -164,7 +181,7 @@ type Fixture = {
   host: HTMLElement;
   scrollRoot: HTMLElement;
   root: Root;
-  rootRef: React.RefObject<HTMLElement | null>;
+  rootRef: React.MutableRefObject<HTMLElement | null>;
   targetsRef: React.MutableRefObject<Map<string, HTMLDivElement | null>>;
 };
 
@@ -173,7 +190,7 @@ const makeFixture = (): Fixture => {
   const scrollRoot = document.createElement('div');
   host.append(scrollRoot);
   document.body.append(host);
-  const rootRef = { current: scrollRoot };
+  const rootRef: React.MutableRefObject<HTMLElement | null> = { current: scrollRoot };
   const targetsRef = { current: new Map<string, HTMLDivElement | null>() };
   return {
     host,
@@ -187,6 +204,11 @@ const makeFixture = (): Fixture => {
 const makeSentinel = (): HTMLDivElement => document.createElement('div');
 
 const stickyState = (host: HTMLElement): string => host.querySelector('output')?.dataset.stickyState ?? '';
+
+const stickyKeys = (host: HTMLElement): string[] => {
+  const state = stickyState(host);
+  return state ? state.split(',') : [];
+};
 
 const latestIntersectionObserver = (): TestIntersectionObserver => {
   const observer = TestIntersectionObserver.instances.at(-1);
@@ -302,6 +324,105 @@ describe('sticky sentinel observer lifecycle', () => {
     }
   });
 
+  test('keeps the fallback state bounded while sequential project sentinels are evicted', async () => {
+    const fixture = makeFixture();
+    try {
+      await act(async () => fixture.root.render(
+        <ProjectObserverHarness
+          rootRef={fixture.rootRef}
+          targetsRef={fixture.targetsRef}
+          enabled
+          isDesktopShellRuntime
+        />,
+      ));
+      const intersectionObserver = latestIntersectionObserver();
+
+      for (let index = 0; index < 32; index += 1) {
+        const key = `project-${index}`;
+        const sentinel = makeSentinel();
+        fixture.targetsRef.current.set(key, sentinel);
+        fixture.scrollRoot.append(sentinel);
+        await act(async () => latestMutationObserver().trigger());
+        await act(async () => intersectionObserver.emit(sentinel, false, 50));
+        expect(stickyKeys(fixture.host)).toEqual([key]);
+
+        fixture.targetsRef.current.delete(key);
+        sentinel.remove();
+        await act(async () => latestMutationObserver().trigger());
+        expect(stickyKeys(fixture.host)).toEqual([key]);
+      }
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+
+  test('chooses the latest above-root project in resolver order, not observer callback order', async () => {
+    const fixture = makeFixture();
+    const projectA = makeSentinel();
+    const projectB = makeSentinel();
+    const projectC = makeSentinel();
+    fixture.targetsRef.current.set('project-a', projectA);
+    fixture.targetsRef.current.set('project-b', projectB);
+    fixture.targetsRef.current.set('project-c', projectC);
+    fixture.scrollRoot.append(projectA, projectB, projectC);
+    try {
+      await act(async () => fixture.root.render(
+        <ProjectObserverHarness
+          rootRef={fixture.rootRef}
+          targetsRef={fixture.targetsRef}
+          enabled
+          isDesktopShellRuntime
+        />,
+      ));
+      const intersectionObserver = latestIntersectionObserver();
+
+      await act(async () => intersectionObserver.emitEntries([
+        { element: projectC, isIntersecting: false, top: 70 },
+        { element: projectA, isIntersecting: false, top: 20 },
+        { element: projectB, isIntersecting: false, top: 45 },
+      ]));
+
+      expect(stickyKeys(fixture.host)).toEqual(['project-c']);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+
+  test('selects a mounted header from current geometry after the selected header is evicted', async () => {
+    const fixture = makeFixture();
+    const projectA = makeSentinel();
+    fixture.targetsRef.current.set('project-a', projectA);
+    fixture.scrollRoot.append(projectA);
+    try {
+      await act(async () => fixture.root.render(
+        <ProjectObserverHarness
+          rootRef={fixture.rootRef}
+          targetsRef={fixture.targetsRef}
+          enabled
+          isDesktopShellRuntime
+        />,
+      ));
+      const intersectionObserver = latestIntersectionObserver();
+      await act(async () => intersectionObserver.emit(projectA, false, 50));
+      expect(stickyKeys(fixture.host)).toEqual(['project-a']);
+
+      fixture.targetsRef.current.delete('project-a');
+      projectA.remove();
+      const projectB = makeSentinel();
+      Object.defineProperty(projectB, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => new DOMRect(0, -10, 1, 1),
+      });
+      fixture.targetsRef.current.set('project-b', projectB);
+      fixture.scrollRoot.append(projectB);
+      await act(async () => latestMutationObserver().trigger());
+
+      expect(stickyKeys(fixture.host)).toEqual(['project-b']);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+
   test('retains a stuck project while virtualization evicts and replaces other sentinels', async () => {
     const fixture = makeFixture();
     const projectA = makeSentinel();
@@ -349,6 +470,39 @@ describe('sticky sentinel observer lifecycle', () => {
 
       expect(intersectionObserver.observed.has(replacementA)).toBe(true);
       expect(stickyState(fixture.host)).toBe('');
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+
+  test('retains the selected latest header when an older mounted sentinel remains above the root', async () => {
+    const fixture = makeFixture();
+    const projectA = makeSentinel();
+    const projectB = makeSentinel();
+    fixture.targetsRef.current.set('project-a', projectA);
+    fixture.targetsRef.current.set('project-b', projectB);
+    fixture.scrollRoot.append(projectA, projectB);
+    try {
+      await act(async () => fixture.root.render(
+        <ProjectObserverHarness
+          rootRef={fixture.rootRef}
+          targetsRef={fixture.targetsRef}
+          enabled
+          isDesktopShellRuntime
+        />,
+      ));
+      const intersectionObserver = latestIntersectionObserver();
+      await act(async () => intersectionObserver.emitEntries([
+        { element: projectA, isIntersecting: false, top: 20 },
+        { element: projectB, isIntersecting: false, top: 45 },
+      ]));
+      expect(stickyKeys(fixture.host)).toEqual(['project-b']);
+
+      fixture.targetsRef.current.delete('project-b');
+      projectB.remove();
+      await act(async () => latestMutationObserver().trigger());
+
+      expect(stickyKeys(fixture.host)).toEqual(['project-b']);
     } finally {
       await unmountFixture(fixture);
     }
@@ -418,6 +572,37 @@ describe('sticky sentinel observer lifecycle', () => {
     }
   });
 
+  test('reverses through current headers and clears the fallback at the root', async () => {
+    const fixture = makeFixture();
+    const projectA = makeSentinel();
+    const projectB = makeSentinel();
+    fixture.targetsRef.current.set('project-a', projectA);
+    fixture.targetsRef.current.set('project-b', projectB);
+    fixture.scrollRoot.append(projectA, projectB);
+    try {
+      await act(async () => fixture.root.render(
+        <ProjectObserverHarness
+          rootRef={fixture.rootRef}
+          targetsRef={fixture.targetsRef}
+          enabled
+          isDesktopShellRuntime
+        />,
+      ));
+      const intersectionObserver = latestIntersectionObserver();
+      await act(async () => intersectionObserver.emit(projectA, false, 50));
+      await act(async () => intersectionObserver.emit(projectB, false, 50));
+      expect(stickyKeys(fixture.host)).toEqual(['project-b']);
+
+      await act(async () => intersectionObserver.emit(projectB, true, 120));
+      expect(stickyKeys(fixture.host)).toEqual(['project-a']);
+
+      await act(async () => intersectionObserver.emit(projectA, true, 120));
+      expect(stickyKeys(fixture.host)).toEqual([]);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+
   test('clears sticky state and disconnects on disable', async () => {
     const fixture = makeFixture();
     const sentinel = makeSentinel();
@@ -449,6 +634,68 @@ describe('sticky sentinel observer lifecycle', () => {
       expect(stickyState(fixture.host)).toBe('');
       expect(intersectionObserver.disconnected).toBe(true);
       expect(mutationObserver.disconnected).toBe(true);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+
+  test('clears sticky state when the scroll root is lost', async () => {
+    const fixture = makeFixture();
+    const sentinel = makeSentinel();
+    fixture.targetsRef.current.set('project-a', sentinel);
+    fixture.scrollRoot.append(sentinel);
+    try {
+      await act(async () => fixture.root.render(
+        <ProjectObserverHarness
+          rootRef={fixture.rootRef}
+          targetsRef={fixture.targetsRef}
+          enabled
+          isDesktopShellRuntime
+        />,
+      ));
+      const intersectionObserver = latestIntersectionObserver();
+      await act(async () => intersectionObserver.emit(sentinel, false, 50));
+      expect(stickyKeys(fixture.host)).toEqual(['project-a']);
+
+      fixture.rootRef.current = null;
+      await act(async () => latestMutationObserver().trigger());
+
+      expect(stickyKeys(fixture.host)).toEqual([]);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+
+  test('clears sticky state on a structural observer reset', async () => {
+    const fixture = makeFixture();
+    const sentinel = makeSentinel();
+    fixture.targetsRef.current.set('project-a', sentinel);
+    fixture.scrollRoot.append(sentinel);
+    try {
+      await act(async () => fixture.root.render(
+        <ProjectObserverHarness
+          rootRef={fixture.rootRef}
+          targetsRef={fixture.targetsRef}
+          enabled
+          isDesktopShellRuntime
+          refreshKey={0}
+        />,
+      ));
+      const intersectionObserver = latestIntersectionObserver();
+      await act(async () => intersectionObserver.emit(sentinel, false, 50));
+      expect(stickyKeys(fixture.host)).toEqual(['project-a']);
+
+      await act(async () => fixture.root.render(
+        <ProjectObserverHarness
+          rootRef={fixture.rootRef}
+          targetsRef={fixture.targetsRef}
+          enabled
+          isDesktopShellRuntime
+          refreshKey={1}
+        />,
+      ));
+
+      expect(stickyKeys(fixture.host)).toEqual([]);
     } finally {
       await unmountFixture(fixture);
     }

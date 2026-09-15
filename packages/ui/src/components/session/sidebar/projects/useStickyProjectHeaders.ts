@@ -17,8 +17,39 @@ type StickySentinelObserverArgs = {
   refreshKey?: number | string;
 };
 
+type StickySentinelObservation = {
+  key: string;
+  order: number;
+  top: number;
+  isAboveScroller: boolean;
+};
+
 const clearStickyHeaders = (setStuckHeaders: React.Dispatch<React.SetStateAction<Set<string>>>): void => {
   setStuckHeaders((previous) => (previous.size === 0 ? previous : new Set()));
+};
+
+const compareStickySentinels = (
+  first: StickySentinelObservation,
+  second: StickySentinelObservation,
+): number => {
+  // The resolver order is the document order for the project row model. The
+  // geometry and key tie-breakers keep selection deterministic for resolvers
+  // that cannot distinguish two candidates by order.
+  if (first.order !== second.order) return first.order - second.order;
+  if (first.top !== second.top) return first.top - second.top;
+  if (first.key === second.key) return 0;
+  return first.key < second.key ? -1 : 1;
+};
+
+const selectLatestStuckHeader = (
+  observations: ReadonlyMap<Element, StickySentinelObservation>,
+): string | null => {
+  let latest: StickySentinelObservation | null = null;
+  for (const observation of observations.values()) {
+    if (!observation.isAboveScroller) continue;
+    if (!latest || compareStickySentinels(observation, latest) > 0) latest = observation;
+  }
+  return latest?.key ?? null;
 };
 
 /**
@@ -47,82 +78,120 @@ export const useStickySentinelObserver = (args: StickySentinelObserverArgs): Set
     }
 
     let disposed = false;
-    let observedSentinels = new Map<Element, string>();
-    const intersectionObserver = globalThis.IntersectionObserver
-      ? new IntersectionObserver((entries) => {
-        if (disposed) return;
-        setStuckHeaders((previous) => {
-          const next = new Set(previous);
-          let changed = false;
-          for (const entry of entries) {
-            const key = observedSentinels.get(entry.target);
-            if (!key) continue;
+    let selectedKey: string | null = null;
+    let observedSentinels = new Map<Element, StickySentinelObservation>();
+    let intersectionObserver: IntersectionObserver | null = null;
 
-            const rootTop = entry.rootBounds?.top ?? root.getBoundingClientRect().top;
-            const isAboveScroller = !entry.isIntersecting && entry.boundingClientRect.top < rootTop;
-            if (next.has(key) === isAboveScroller) continue;
+    const publishSelectedKey = (nextKey: string | null): void => {
+      if (selectedKey === nextKey) return;
+      selectedKey = nextKey;
+      setStuckHeaders(nextKey === null ? new Set() : new Set([nextKey]));
+    };
 
-            changed = true;
-            if (isAboveScroller) next.add(key);
-            else next.delete(key);
-          }
-          return changed ? next : previous;
-        });
-      }, { root, threshold: 0 })
-      : null;
+    const findObservedSentinel = (key: string): StickySentinelObservation | null => {
+      for (const observation of observedSentinels.values()) {
+        if (observation.key === key) return observation;
+      }
+      return null;
+    };
+
+    const resolveCurrentSentinels = (): Map<Element, { key: string; order: number }> => {
+      const currentSentinels = new Map<Element, { key: string; order: number }>();
+      let order = 0;
+      for (const [key, element] of resolveSentinels()) {
+        if (element && root.contains(element)) currentSentinels.set(element, { key, order });
+        order += 1;
+      }
+      return currentSentinels;
+    };
 
     const syncObservedSentinels = (): void => {
       if (disposed) return;
       if (rootRef.current !== root) {
         observedSentinels = new Map();
-        clearStickyHeaders(setStuckHeaders);
+        publishSelectedKey(null);
         return;
       }
 
-      const currentSentinels = new Map<Element, string>();
-      for (const [key, element] of resolveSentinels()) {
-        if (element && root.contains(element)) {
-          currentSentinels.set(element, key);
+      const currentSentinels = resolveCurrentSentinels();
+      let currentSelectedElement: Element | null = null;
+      if (selectedKey !== null) {
+        for (const [element, sentinel] of currentSentinels) {
+          if (sentinel.key === selectedKey) {
+            currentSelectedElement = element;
+            break;
+          }
         }
       }
-
-      const replacedKeys = new Set<string>();
-      for (const [element, key] of observedSentinels) {
-        const currentKey = currentSentinels.get(element);
-        if (currentKey === key) continue;
+      for (const [element, observation] of observedSentinels) {
+        const currentKey = currentSentinels.get(element)?.key;
+        if (currentKey === observation.key) continue;
         intersectionObserver?.unobserve(element);
-        // An element reused for another key is a real key replacement. A key
-        // whose virtual element simply disappeared is handled below as an
-        // eviction and keeps its last known sticky state.
-        if (currentKey !== undefined) replacedKeys.add(key);
-      }
-      for (const [element, key] of currentSentinels) {
-        if (observedSentinels.get(element) !== key) intersectionObserver?.observe(element);
       }
 
-      const initiallyStuckKeys = new Set<string>();
-      let rootTop: number | null = null;
-      for (const [element, key] of currentSentinels) {
-        if (observedSentinels.get(element) === key) continue;
-        replacedKeys.add(key);
-        rootTop ??= root.getBoundingClientRect().top;
-        if (element.getBoundingClientRect().top < rootTop) initiallyStuckKeys.add(key);
+      const nextObservedSentinels = new Map<Element, StickySentinelObservation>();
+      let hasNewStuckSentinel = false;
+      for (const [element, sentinel] of currentSentinels) {
+        const previous = observedSentinels.get(element);
+        if (previous?.key === sentinel.key) {
+          nextObservedSentinels.set(element, { ...previous, order: sentinel.order });
+          continue;
+        }
+
+        intersectionObserver?.observe(element);
+        const top = element.getBoundingClientRect().top;
+        const rootTop = root.getBoundingClientRect().top;
+        const observation = {
+          key: sentinel.key,
+          order: sentinel.order,
+          top,
+          isAboveScroller: top < rootTop,
+        } satisfies StickySentinelObservation;
+        nextObservedSentinels.set(element, observation);
+        if (observation.isAboveScroller) hasNewStuckSentinel = true;
       }
-      observedSentinels = currentSentinels;
-      setStuckHeaders((previous) => {
-        let changed = false;
-        const next = new Set(previous);
-        for (const key of replacedKeys) {
-          if (next.delete(key)) changed = true;
-        }
-        for (const key of initiallyStuckKeys) {
-          if (next.has(key)) continue;
-          next.add(key);
-          changed = true;
-        }
-        return changed ? next : previous;
-      });
+      observedSentinels = nextObservedSentinels;
+
+      const latestStuckKey = selectLatestStuckHeader(observedSentinels);
+      const selectedKeyWasEvicted = selectedKey !== null && currentSelectedElement === null;
+      if (latestStuckKey !== null && (!selectedKeyWasEvicted || hasNewStuckSentinel)) {
+        publishSelectedKey(latestStuckKey);
+        return;
+      }
+
+      if (selectedKeyWasEvicted) return;
+
+      const currentSelected = selectedKey === null ? null : findObservedSentinel(selectedKey);
+      if (currentSelected && !currentSelected.isAboveScroller) {
+        publishSelectedKey(null);
+      }
     };
+
+    intersectionObserver = globalThis.IntersectionObserver
+      ? new IntersectionObserver((entries) => {
+        if (disposed) return;
+        syncObservedSentinels();
+        if (rootRef.current !== root) return;
+
+        for (const entry of entries) {
+          const observation = observedSentinels.get(entry.target);
+          if (!observation || !root.contains(entry.target)) continue;
+
+          const rootTop = entry.rootBounds?.top ?? root.getBoundingClientRect().top;
+          observation.top = entry.boundingClientRect.top;
+          observation.isAboveScroller = !entry.isIntersecting && observation.top < rootTop;
+        }
+
+        const latestStuckKey = selectLatestStuckHeader(observedSentinels);
+        if (latestStuckKey !== null) {
+          publishSelectedKey(latestStuckKey);
+          return;
+        }
+
+        const currentSelected = selectedKey === null ? null : findObservedSentinel(selectedKey);
+        if (currentSelected && !currentSelected.isAboveScroller) publishSelectedKey(null);
+      }, { root, threshold: 0 })
+      : null;
 
     syncObservedSentinels();
     const mutationObserver = globalThis.MutationObserver
