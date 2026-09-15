@@ -47,6 +47,8 @@ interface VSCodeWorkspaceFolderConfig {
 }
 
 interface ProjectsStore {
+  hasServerSnapshot: boolean;
+  serverSnapshotFailed: boolean;
   projects: ProjectEntry[];
   activeProjectId: string | null;
   manualProjectOrder: string[];
@@ -567,6 +569,8 @@ if (vscodeWorkspace) {
 export const useProjectsStore = create<ProjectsStore>()(
   devtools((set, get) => ({
     projects: effectiveInitialProjects,
+    hasServerSnapshot: false,
+    serverSnapshotFailed: false,
     activeProjectId: initialActiveProjectId,
     manualProjectOrder: readPersistedManualOrder(),
 
@@ -996,6 +1000,7 @@ export const useProjectsStore = create<ProjectsStore>()(
     },
 
     resetForRuntimeSwitch: () => {
+      set({ hasServerSnapshot: false, serverSnapshotFailed: false });
       if (isVSCodeProjectsRuntime) {
         return;
       }
@@ -1019,6 +1024,7 @@ export const useProjectsStore = create<ProjectsStore>()(
 
       const current = get();
       const incomingIds = new Set(incomingProjects.map((p) => p.id));
+      if (!current.hasServerSnapshot || current.serverSnapshotFailed) set({ hasServerSnapshot: true, serverSnapshotFailed: false });
 
       // The settings document is shared by every window on this server, so
       // outside a bootstrap sync the incoming active pointer is just another
@@ -1098,6 +1104,9 @@ export const useProjectsStore = create<ProjectsStore>()(
 );
 
 if (typeof window !== 'undefined') {
+  window.addEventListener('openchamber:settings-sync-failed', () => {
+    useProjectsStore.setState({ serverSnapshotFailed: true });
+  });
   window.addEventListener('openchamber:settings-synced', (event: Event) => {
     const detail = (event as CustomEvent<SettingsSyncedDetail>).detail;
     if (detail && typeof detail === 'object' && detail.settings) {

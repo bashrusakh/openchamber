@@ -176,6 +176,10 @@ state and shows loading or fetch failure separately from an eligible count.
 
 ### Live cross-directory session/status view
 
+Extension session subscriptions project these same stores through `lib/guests/workspace.ts`; they own no poller or git discovery. `global-session-status.observedById` retains explicit live activity/outcomes for at most 2,000 sessions in memory. A status snapshot can establish current activity but does not manufacture a successful turn. An error followed by idle retains its failed outcome until another run starts; runtime reset clears observations. Extension task status remains extension-owned.
+
+The session creation action accepts `navigation: "preserve"` for background extension launches. It still registers the returned directory, initializes message loading, marks the session as OpenChamber-created, and updates the global cache, but never selects it. Explicit guest `openSession` performs selection later. `session-ui-store.worktreeDiscoveryByProject` publishes topology loading/ready/error separately from retained worktree records; the existing sidebar discovery and control-event refresh own these flags.
+
 Use the sync hooks backed by aggregated child stores when the UI needs **live truth** for sessions or statuses across all initialized directories.
 
 Current consumers:
@@ -604,6 +608,16 @@ final content height. Afterwards "at the end" is an invariant, not a scroll:
 while the reader sits on the end of a session that is not producing output,
 content growth re-pins with one instant write; output growth belongs to the
 follow logic, which glides only while the session is working.
+
+`useChatTimelineScroll` retires an outgoing scroll container through
+`components/chat/lib/scroll/retireScrollContent.ts`. Chromium can retain a
+queued scroll event's target while animation frames are suspended, keeping its
+detached conversation tree alive. After React's commit and Markdown DOM-cache
+capture, a microtask clears the retired container's remaining children. The
+cleanup requires both a disconnected node and released ownership, so ref
+reattachment, Strict Mode and connected hidden views keep their contents.
+Nodes already transferred to the Markdown cache remain intact. This shared
+cleanup runs independently of animation frames across all chat runtimes.
 
 `bun run profile:switch` measures both moments; see `scripts/perf/DOCUMENTATION.md`.
 

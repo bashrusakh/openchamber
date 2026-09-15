@@ -702,8 +702,11 @@ export const syncDesktopSettings = async (options?: { bootstrap?: boolean; adopt
     const webSettings = await fetchWebSettings(context);
     if (webSettings && isSettingsRuntimeContextCurrent(context)) {
       await applySettings(webSettings);
+    } else if (isSettingsRuntimeContextCurrent(context)) {
+      window.dispatchEvent(new Event('openchamber:settings-sync-failed'));
     }
   } catch (error) {
+    if (isSettingsRuntimeContextCurrent(context)) window.dispatchEvent(new Event('openchamber:settings-sync-failed'));
     console.warn('Failed to synchronise settings:', error);
   } finally {
     _settingsMutationTracker.finish(operation);

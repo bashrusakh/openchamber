@@ -57,6 +57,7 @@ You can also add a local `.zip` or an https link to a git repository or a zip fi
         "entry": "panel/index.html"
       },
       "attach": "dialog",
+      "page": true,
       "capabilities": ["prompt", "sessions"],
       "integration": {
         "name": "Acme",
@@ -88,7 +89,11 @@ You can also add a local `.zip` or an https link to a git repository or a zip fi
 - `{ "mode": "dialog", "entry": "panel/attach.html" }` opens a separate page of yours in the window, so the picker does not have to share code with the rail panel
 - omit it and the extension stays off that menu
 
-Your page can tell which one it is in from `ctx.surface` (`panel` or `dialog`). When the user clicks an item you attached earlier, the same surface opens again with `ctx.item` set to that item, including any `data` you stored on it, so you can show its details instead of the list. From the + menu or the rail icon `ctx.item` is `null`.
+Your page can tell where it is from `ctx.surface`: `panel`, `dialog`, or `page`. When the user clicks an attached item, its `data` comes back in `ctx.item`. Opening from the rail, + menu, or full-screen page menu starts without an item.
+
+`contributes.page: true` makes your panel available full-screen from the Extension pages menu above the session list. Use `{ "entry": "panel/page.html", "title": "Board" }` for separate HTML and an optional title. Ship that HTML and its built scripts. A page requires `panel.entry`, uses the same sandbox and permissions, and opens only when the user selects it. Reload, pause, removal, or a server switch closes it.
+
+For a board, use `host.storage` for persistent JSON and the project/worktree/session methods for shared app data. `startSession` can target another project or worktree without closing the board. See [Host API](/sdk/host/) for subscriptions, live states, and partial creation results.
 
 `contributes.integration` is optional. It adds a card at Settings → Integrations where the user connects an account. See [Accounts and network](#accounts-and-network).
 
@@ -101,7 +106,7 @@ Drawing a panel and reading the current session need no permission. Anything tha
 | Capability | What it allows |
 | --- | --- |
 | `prompt` | send messages into the user's session (`prompt({ send: true })`, `startSession` with `text`) |
-| `sessions` | create sessions and worktrees (`startSession`) |
+| `sessions` | list projects, worktrees, and session states; create and open sessions across registered projects |
 | `files` | read and write files inside the open project (`readFile`, `writeFile`, `listDir`, `stat` with a relative path) |
 | `model` | one-off text generation with the user's Small Model (`generate`), outside any session |
 

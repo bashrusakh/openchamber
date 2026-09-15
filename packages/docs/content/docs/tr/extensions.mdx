@@ -5,6 +5,10 @@ description: OpenChamber'a üçüncü taraf uzantılar kurun, neler yapabilecekl
 
 # Uzantılar
 
+Bir uzantı, görev panosu gibi tam ekran bir sayfa sunabilir. Oturum listesinin üstündeki Uzantı sayfaları menüsünden açın. Menü yalnızca etkin ve onaylanmış sayfalar varsa görünür. Sohbet seçme, yenileme, duraklatma, kaldırma veya sunucu değiştirme sayfayı kapatır. Uzantı sayfayı kendi başına açamaz.
+
+Uzantının kendi verileri bağlı sunucuda saklanır ve uzantı kaldırılınca silinir. Bir pano, projenizde dosya oluşturmadan farklı proje ve çalışma ağaçlarındaki oturumları izleyebilir.
+
 **Ayarlar → Uzantılar** üzerinden başkalarının yaptığı panelleri OpenChamber'a ekleyebilirsiniz. Uzantı, sağ raya yerleşen ve yerleşik panellerin yanında duran küçük bir sayfadır. Size başka bir hizmetten veri gösterebilir, sohbete bir görev iliştirebilir ve izin verirseniz oturum başlatabilir, istem gönderebilir ya da dosya okuyabilir.
 
 Uzantılar OpenChamber web ve masaüstünde çalışır. VS Code ve mobil uygulama henüz onları yüklemiyor. OpenCode eklentileriyle aynı şey değildir.
@@ -29,7 +33,7 @@ Klasörden kurulum doğrudan o klasörden çalışır, bu yüzden uzantı geliş
 Panel göstermek ve hangi proje ile oturumun açık olduğunu okumak izin gerektirmez. Sizin adınıza bir şey yapan her şey izin gerektirir ve tüm listeyi kurulumda bir kez görürsünüz:
 
 - **Oturumlarınıza mesaj gönderme**: modele istem yazıp gönderir, bu jeton harcar ve araç çalıştırabilir.
-- **Oturum ve çalışma ağacı oluşturma**: geçerli projede.
+- **Projelere ve oturumlara erişim**: projeleri, çalışma ağaçlarını ve oturum durumlarını listeler; kayıtlı projelerde oturum oluşturur ve açar. Konuşma içeriği gizli kalır.
 - **Proje dosyalarını okuma ve yazma**: açık projedeki her dosya.
 - **Proje dışındaki dosyaları okuma ve yazma**: yalnızca iletişim kutusunda listelenen konumlar.
 - **Small Model’inizi kullanma**: oturumlarınızın dışında tek seferlik metin üretimi, Ayarlar → Oturumlar → Small Model'deki modelle. Jeton harcar.

@@ -1,6 +1,6 @@
 ---
 title: Eklenti oluşturma
-description: @openchamber/sdk ile OpenChamber'a kendi panelinizi ekleyin, bir klasörden veya git adresinden kurun ve connectHost üzerinden uygulamayla konuşun.
+description: "@openchamber/sdk ile OpenChamber'a kendi panelinizi ekleyin, bir klasörden veya git adresinden kurun ve connectHost üzerinden uygulamayla konuşun."
 ---
 
 # Eklenti oluşturma
@@ -57,6 +57,7 @@ Yerel bir `.zip` dosyası ya da bir git deposuna veya zip dosyasına giden https
         "entry": "panel/index.html"
       },
       "attach": "dialog",
+      "page": true,
       "capabilities": ["prompt", "sessions"],
       "integration": {
         "name": "Acme",
@@ -88,7 +89,11 @@ Yerel bir `.zip` dosyası ya da bir git deposuna veya zip dosyasına giden https
 - `{ "mode": "dialog", "entry": "panel/attach.html" }` pencerede size ait ayrı bir sayfa açar; böylece seçicinin şerit paneliyle kod paylaşması gerekmez
 - atlarsanız eklenti o menüde görünmez
 
-Sayfanız `ctx.surface` (`panel` veya `dialog`) üzerinden hangisinde olduğunu anlayabilir. Kullanıcı daha önce iliştirdiğiniz bir öğeye tıkladığında aynı yüzey yeniden açılır ve `ctx.item` o öğeye, üzerine kaydettiğiniz `data` dahil, ayarlanır; böylece liste yerine öğenin ayrıntılarını gösterebilirsiniz. + menüsünden veya şerit simgesinden açıldığında `ctx.item` `null` olur.
+`ctx.surface`, `panel`, `dialog` veya `page` olur. İliştirilmiş bir öğeye tıklanınca verileri `ctx.item` içinde gelir; diğer durumlarda değer `null` olur.
+
+`contributes.page: true`, paneli oturum listesinin üstündeki Uzantı sayfaları menüsünden tam ekran açılabilir yapar. `{ "entry": "panel/page.html", "title": "Board" }` ayrı HTML ve isteğe bağlı başlık kullanır. `panel.entry` zorunludur; yalıtım ve izinler aynıdır. Sayfayı yalnızca kullanıcı açar. Yenileme, duraklatma, kaldırma veya sunucu değiştirme sayfayı kapatır.
+
+Panolar `host.storage` ile proje, worktree ve oturum listelerini ve canlı durumları kullanabilir. `startSession`, panoyu kapatmadan başka bir projeyi hedefleyebilir. Bkz. [Host API](/sdk/host/).
 
 `contributes.integration` isteğe bağlıdır. Ayarlar → Entegrasyonlar sayfasına kullanıcının hesap bağladığı bir kart ekler. Bkz. [Hesaplar ve ağ](#hesaplar-ve-ağ).
 
@@ -101,7 +106,7 @@ Panel çizmek ve geçerli oturumu okumak izin gerektirmez. Kullanıcı adına bi
 | Yetenek | Neye izin verir |
 | --- | --- |
 | `prompt` | kullanıcının oturumuna mesaj göndermek (`prompt({ send: true })`, `text` ile `startSession`) |
-| `sessions` | oturum ve worktree oluşturmak (`startSession`) |
+| `sessions` | projeleri, worktree ve oturum durumlarını listelemek; kayıtlı projelerde oturum oluşturmak ve açmak |
 | `files` | açık projedeki dosyaları okuyup yazmak (göreli yol ile `readFile`, `writeFile`, `listDir`, `stat`) |
 | `model` | kullanıcının Small Model'iyle tek seferlik metin üretimi (`generate`), herhangi bir oturumun dışında |
 

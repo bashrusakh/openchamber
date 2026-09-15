@@ -28,6 +28,9 @@ export type AttachContributionObject = {
 
 export type AttachContribution = boolean | AttachMode | AttachContributionObject;
 
+/** A user-opened full-screen page, optionally with its own HTML and title. */
+export type PageContribution = true | { entry: string; title?: string };
+
 export type GuestActionWhere = 'message' | 'session';
 export type GuestActionRole = 'user' | 'assistant';
 /** What a session action wants alongside the session id and title. */
@@ -323,6 +326,7 @@ export const isGuestFilesystemPattern = (value: string): boolean => {
 export type OpenChamberContributes = {
   panel: PanelContribution;
   attach?: AttachContribution;
+  page?: PageContribution;
   capabilities?: DeclaredGuestCapability[];
   integration?: IntegrationContribution;
   service?: ServiceContribution;
@@ -402,6 +406,11 @@ export const resolveAttachEntry = (
   return attach.entry ?? null;
 };
 
+export const resolvePageEntry = (contributes: Pick<OpenChamberContributes, 'panel' | 'page'>): string | null => {
+  if (!contributes.page || !contributes.panel.entry) return null;
+  return contributes.page === true ? contributes.panel.entry : contributes.page.entry;
+};
+
 export type OpenChamberEngines = {
   openchamber: string;
 };
@@ -425,6 +434,7 @@ export type ParseManifestErrorCode =
   | 'invalid-panel-icon'
   | 'invalid-panel-entry'
   | 'invalid-attach'
+  | 'invalid-page'
   | 'invalid-capabilities'
   | 'invalid-integration'
   | 'invalid-service'

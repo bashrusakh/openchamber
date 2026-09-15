@@ -26,7 +26,7 @@ const host = connectHost();
 | `locale` | 应用的语言标签 |
 | `directory` | 当前项目目录，或 `null` |
 | `session` | `{ id, title, busy }` 或 `null`。没有标题时回退为会话 id。`busy` 是实时状态。会话有 `model` 和 `agent`（OpenCode 的 agent）时也会出现。 |
-| `surface` | 在侧栏中为 `panel`，在附加窗口中为 `dialog` |
+| `surface` | 侧栏为 `panel`，附加窗口为 `dialog`，全屏为 `page` |
 | `item` | 此界面因何而打开，或 `null`：用户点击的已附加条目（与你传给 `attach` 的字段相同，包括 `data`）、来自你声明的某个操作的消息（`kind: "message"`）或会话（`kind: "session"`）。见[操作](/sdk/#操作命令和徽标)。 |
 | `connection` | 你的集成的 `{ connected, account }` |
 | `settings` | 你在 `integration.settings` 中声明的字段的值 |
@@ -98,7 +98,9 @@ await host.startSession({
 
 `providerId` 是你的面板 id；无论如何 OpenChamber 都会用你的 id 覆盖它。`id` 是你自己为条目定义的标识符。`kind` 为 `issue`（默认）或 `pull`。`text` 是给模型的可选上下文，去除首尾空白后 1 到 16000 个字符。`data` 是你自定义的可选 JSON（状态、评论，任何内容），序列化后最多 16000 个字符。OpenChamber 会把它和标签一起保存，并在用户点击标签时通过 `ctx.item` 原样交还；它永远不会到达模型。
 
-`startSession` 在当前项目中创建会话。设置 `worktree: true` 时，OpenChamber 会先创建一个 git worktree，并在那里打开会话。设置了 `text` 且已选择模型时，它会作为第一条消息发送。结果是 `{ sessionId, sent }`，其中 `sent` 为 `sent`、`no-model`、`skipped` 或 `failed`。即使结果是 `no-model` 或 `failed`，会话也已存在。没有打开的项目、worktree 创建失败或会话创建失败，都是 `HOST_REJECTED` 错误。
+`startSession` 接受 `projectId`，无需切换当前项目。省略 `worktree` 表示目标目录，`true` 创建自动命名的工作树，`{ kind: "existing", directory }` 选择已知工作树，`{ kind: "new", name?, baseBranch? }` 指定新工作树名称和基准分支。名称同时用于分支。`navigation` 默认为 `"preserve"`；`"open"` 打开新聊天。首条消息的模型、代理和变体在创建开始时确定。
+
+结果包含 `sessionId`、`directory`、`sent`、`linked` 及可选 `worktree`。`sent` 为 `sent`、`no-model`、`skipped` 或 `failed`；`linked: false` 表示条目保存失败。准备或会话创建失败后若保留了工作树，返回 `sessionId: null` 和 `failure: "bootstrap-failed" | "session-create-failed"`。重试前请检查结果。最多等待180秒；超时不代表已回滚创建。
 
 `sessionLink` 把条目附加到当前打开的会话。没有项目或没有会话时是 `NO_SESSION` 错误。
 
@@ -128,6 +130,16 @@ host.onSessionLifecycle((event) => {
 不带 `send` 时，`prompt` 会替换聊天框中的文本。带 `send: true` 时，它会用用户已选择的模型和 agent 发送消息。扩展永远不会自己选择它们。没有打开的会话时是 `NO_SESSION`。会话忙碌时发送是 `SESSION_BUSY`；忙碌时写入聊天框仍然可以。结果是 `{ sent }`，取值与 `startSession` 相同。
 
 `onSessionLifecycle` 告诉你会话正在做什么。`phase` 在模型工作时为 `started`，在会话转为空闲时为 `completed`，出现意外状态时为 `failure`。较晚注册的监听器会立即收到当前阶段。
+
+## 项目、实时会话和存储
+
+`listProjects()`、`listWorktrees(projectId)`、`listSessions(projectId)` 使用已有 `sessions` 权限读取共享状态，不会每次遍历 Git，也不暴露对话内容。项目包含 ID、名称和目录；工作树包含分支和可用状态。会话包含时间戳、父会话、工作树，以及仅属于此扩展的附加条目。包括已知的归档会话。
+
+`await onProjects(listener)`、`await onWorktrees(projectId, listener)`、`await onSessions(projectId, listener)` 返回取消订阅函数。请处理注册失败。先发送初始快照，再发送更新。每个 iframe 最多32个订阅；`dispose()`、关闭、暂停、移除和切换服务器都会清理订阅。`state` 为 `loading`、`ready` 或 `error`，会话另有按目录的 `coverage`。失败保留已有数据，只有 `ready` 表示完整结果，包括真正的空列表。
+
+`activity` 为 `unknown`、`idle`、`running`、`retrying`、`waiting-permission` 或 `waiting-question`。`outcome` 为观测到的 `completed`、`failed` 或 `null`，仅在内存中保留最多2,000个会话，不从历史推断。错误后的 idle 保留失败结果直到下次运行。这不代表任务完成。`openSession(sessionId)` 显式打开聊天。
+
+`host.storage.get(key)`、`set(key, value)`、`delete(key)`、`keys()` 无需额外权限即可在连接的服务器保存扩展自己的 JSON。缺少的键返回 `undefined`，保存的 null 仍为 null。键长1到128字符，每个值最多64 KiB UTF-8，整个空间最多2 MiB及2,000个键。项目专属数据可将项目 ID 加入键名。写入串行且原子化，失败保留已有数据。卸载扩展会删除存储。
 
 ## request
 

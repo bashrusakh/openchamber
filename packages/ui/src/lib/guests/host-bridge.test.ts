@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { OPENCHAMBER_SDK_CHANNEL, type GuestMessage, type GuestRequest, type ResolveResultPayload } from '@openchamber/sdk';
-
+import { OPENCHAMBER_SDK_CHANNEL, type GuestMessage, type ResolveResultPayload, type StartSessionRequest } from '@openchamber/sdk';
 import type { GuestFileProxyResult, GuestFileRequest } from './files.ts';
 import type { GuestGenerateProxyResult } from './generate.ts';
 
@@ -20,44 +19,13 @@ const toast: GuestMessage = {
   payload: { kind: 'info', message: 'Hello' },
 };
 
-const effects = (overrides: {
-  toast?: (kind: 'info' | 'success' | 'error', message: string) => void;
-  openUrl?: () => Promise<boolean>;
-  openSurface?: () => void;
-  writeClipboard?: (text: string) => Promise<boolean>;
-  compose?: (text: string, mode: 'replace' | 'append') => void;
-  attach?: (issue: { providerId: string; id: string; title: string; url: string; kind?: string; author?: string }) => void;
-  startSession?: (request: { providerId: string; id: string; title: string; url: string; worktree?: boolean }) => Promise<
-    { sessionId: string; sent: 'sent' | 'no-model' | 'skipped' | 'failed' } | null
-  >;
-  prompt?: (request: { text: string; send?: boolean }) => Promise<
-    | { ok: true; result: { sent: 'sent' | 'no-model' | 'skipped' | 'failed' } }
-    | { ok: false; code: 'HOST_REJECTED' | 'NO_SESSION' | 'SESSION_BUSY'; message: string }
-  >;
-  sessionLink?: (issue: { providerId: string; id: string; title: string; url: string }) => Promise<
-    | { ok: true }
-    | { ok: false; code: 'HOST_REJECTED' | 'NO_SESSION'; message: string }
-  >;
-  close?: () => void;
-  oauthStart?: () => Promise<boolean>;
-  oauthDisconnect?: () => Promise<boolean>;
-  request?: (request: GuestRequest) => Promise<
-    | { ok: true; result: { status: number; body: string } }
-    | { ok: false; code: 'HOST_REJECTED' | 'DISCONNECTED' | 'BAD_PATH' | 'NO_INTEGRATION'; message: string }
-  >;
-  serviceRequest?: (request: GuestRequest) => Promise<
-    | { ok: true; result: { status: number; body: string } }
-    | { ok: false; code: 'HOST_REJECTED' | 'NO_SERVICE' | 'SERVICE_FAILED' | 'BAD_PATH'; message: string }
-  >;
-  serviceStatus?: () => Promise<
-    | { ok: true; result: { status: 'stopped' | 'starting' | 'ready' | 'failed' } }
-    | { ok: false; code: 'HOST_REJECTED' | 'NO_SERVICE'; message: string }
-  >;
-  file?: (request: GuestFileRequest) => Promise<GuestFileProxyResult>;
-  generate?: (request: { prompt: string; system?: string; maxOutputTokens?: number }) => Promise<GuestGenerateProxyResult>;
-  setBadge?: (count: number | null) => void;
-  resolveResult?: (id: string, payload: ResolveResultPayload) => void;
-} = {}) => ({
+type BridgeEffects = Parameters<typeof answerGuestMessage>[1];
+const effects = (overrides: Partial<BridgeEffects> = {}): BridgeEffects => ({
+  workspaceRead: overrides.workspaceRead ?? (() => ({ kind: 'projects', state: 'ready', projects: [] })),
+  workspaceSubscribe: overrides.workspaceSubscribe ?? (() => {}),
+  workspaceUnsubscribe: overrides.workspaceUnsubscribe ?? (() => {}),
+  storage: overrides.storage ?? (async () => ({ storage: true, op: 'keys', keys: [] })),
+  openSession: overrides.openSession ?? (() => {}),
   toast: overrides.toast ?? (() => {}),
   openUrl: overrides.openUrl ?? (async () => true),
   openSurface: overrides.openSurface ?? (() => {}),
@@ -229,7 +197,7 @@ describe('answerGuestMessage', () => {
   });
 
   test('starts a session and rejects a file url', async () => {
-    const seen: Array<{ id: string; worktree?: boolean }> = [];
+    const seen: Array<Pick<StartSessionRequest, 'id' | 'worktree'>> = [];
     const ok = await answerGuestMessage({
       channel: OPENCHAMBER_SDK_CHANNEL,
       v: 1,

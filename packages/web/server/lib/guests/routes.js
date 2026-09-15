@@ -1,4 +1,6 @@
 import express from 'express';
+import { guestStorageRequestSchema } from '@openchamber/sdk/schemas';
+import { runGuestStorage } from './storage.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import { z } from 'zod';
@@ -563,6 +565,21 @@ export const registerGuestRoutes = (app, {
       }
       console.error('Failed to proxy guest service request:', error);
       res.status(500).json({ error: 'Failed to proxy guest service request' });
+    }
+  });
+
+  app.post('/api/guests/:id/storage', json80, async (req, res) => {
+    const parsed = guestStorageRequestSchema.safeParse(req.body);
+    if (!parsed.success || !isGuestPanelId(req.params.id)) return res.status(400).json({ error: 'HOST_REJECTED', message: 'Invalid storage request.' });
+    try {
+      const result = await runGuestStorage(persistPath, req.params.id, parsed.data, async () => {
+        const guest = await loadGuest(req.params.id);
+        if (!guest || guest.enabled === false || !guest.entry) throw new Error('Extension is unavailable.');
+        if (!requestedGuestCapabilities(guest).every((capability) => guest.capabilityGrants.includes(capability))) throw new Error('Extension needs approval.');
+      });
+      return res.json(result);
+    } catch {
+      return res.status(400).json({ error: 'HOST_REJECTED', message: 'Storage operation failed. Check extension approval and storage limits.' });
     }
   });
 

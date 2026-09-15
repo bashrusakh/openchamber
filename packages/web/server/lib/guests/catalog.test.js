@@ -207,6 +207,23 @@ describe('listInstalledGuests', () => {
 });
 
 describe('page-less packages', () => {
+  test('validates full-screen HTML and built scripts and publishes its title', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oc-page-'));
+    try {
+      await fs.mkdir(path.join(dir, 'panel'));
+      await fs.writeFile(path.join(dir, 'panel/index.html'), '<p>Panel</p>');
+      await fs.writeFile(path.join(dir, 'package.json'), JSON.stringify({ version: '1.0.0', openchamber: {
+        apiVersion: 1, contributes: { panel: { id: 'board', name: 'Board', icon: 'window', entry: 'panel/index.html' }, page: { entry: 'panel/page.html', title: 'Tasks' } },
+      } }));
+      expect(await inspectGuestPackage(dir)).toMatchObject({ ok: false, code: 'invalid-manifest' });
+      await fs.writeFile(path.join(dir, 'panel/page.html'), '<script src="page.js"></script>');
+      expect(await inspectGuestPackage(dir)).toMatchObject({ ok: false, code: 'missing-build' });
+      await fs.writeFile(path.join(dir, 'panel/page.js'), 'console.log("page")');
+      const inspected = await inspectGuestPackage(dir);
+      expect(inspected.ok).toBe(true);
+      expect(toPublicGuest(inspected.guest)).toMatchObject({ pageEntry: 'panel/page.html', pageTitle: 'Tasks' });
+    } finally { await fs.rm(dir, { recursive: true, force: true }); }
+  });
   test('installs a tools-only package without entry, omits entry from the row, and never serves it a frame', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oc-guest-'));
     const guestRoot = path.join(dir, 'tools-only');

@@ -29,7 +29,7 @@ A folder install runs straight from that folder, so someone developing an extens
 Showing a panel and reading which project and session are open needs no permission. Anything that acts on your behalf does, and you see the whole list once, when you install:
 
 - **Send messages in your sessions**: writes and sends prompts to the model, which costs tokens and can run tools.
-- **Create sessions and worktrees**: in the current project.
+- **Access projects and sessions**: list registered projects, worktrees, and session states; create and open sessions in those projects. This does not expose conversation content.
 - **Read and write project files**: any file in the open project.
 - **Read and write files outside the project**: only the locations listed in the dialog.
 - **Use your Small Model**: one-off text generation outside your sessions, with the model from Settings → Sessions → Small Model. Costs tokens.
@@ -40,6 +40,10 @@ Showing a panel and reading which project and session are open needs no permissi
 When a newer version asks for more than you allowed, the card shows **Needs approval** and a **Review permissions** button. Until you allow the new list, that extension stays off.
 
 ## Where it shows up
+
+An extension can also offer a full-screen page, such as a task board. Open it from **Extension pages** above the session list. The menu appears only when an enabled, approved extension offers a page. Selecting a chat brings you back; reload, pause, removal, or switching servers closes the page too. An extension cannot open a full-screen page on its own.
+
+Extensions can save their own data on the connected OpenChamber server without putting files in your project. The data survives reloads and is deleted when you remove the extension. A board can track agents working in different projects or worktrees, while deciding its own task statuses.
 
 Besides its panel on the rail, an extension can add entries to menus you already use: the actions on a chat message, the menu of a session, the + menu next to the chat box, and slash commands like `/task ABC-12` that attach something without opening anything. It can also give its own tools a proper icon, title, and output layout in the chat, the way OpenChamber's built-in tools have. The extension decides which of these it offers; all of them are off until you allow the extension.
 

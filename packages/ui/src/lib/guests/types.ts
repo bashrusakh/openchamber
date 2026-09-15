@@ -21,6 +21,8 @@ export type InstalledGuest = {
   attach?: AttachContribution;
   /** HTML the attach dialog loads instead of `entry`; only sent for dialog-mode guests that declared one. */
   attachEntry?: string;
+  pageEntry?: string;
+  pageTitle?: string;
   integration?: PublicIntegration;
   /** Declared `contributes.filesystem` patterns, shown on the approval dialog. */
   filesystem?: string[];

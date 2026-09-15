@@ -246,6 +246,10 @@ const toolsSchema = z.array(toolSchema).min(1).max(GUEST_TOOLS_MAX);
 const contributesSchema = z.object({
   panel: panelSchema,
   attach: attachSchema.optional(),
+  page: z.union([z.literal(true), z.object({
+    entry: z.string().trim().refine(isSafeAssetPath),
+    title: z.string().trim().min(1).max(200).optional(),
+  })]).optional(),
   capabilities: z.array(z.enum(DECLARED_GUEST_CAPABILITIES)).max(8).optional(),
   integration: integrationSchema.optional(),
   service: serviceSchema.optional(),
@@ -265,6 +269,7 @@ const contributesSchema = z.object({
  */
 const pageOnlyContributions = (contributes: z.output<typeof contributesSchema>): string[] => {
   const declared: string[] = [];
+  if (contributes.page !== undefined) declared.push('page');
   if (contributes.attach !== undefined && contributes.attach !== false) declared.push('attach');
   if (contributes.capabilities && contributes.capabilities.length > 0) declared.push('capabilities');
   if (contributes.integration !== undefined) declared.push('integration');
@@ -356,6 +361,9 @@ const failureFromIssue = (issue: { path: ReadonlyArray<PropertyKey>; code: strin
       return fail('invalid-capabilities', 'contributes.capabilities may list "prompt", "sessions", and "files".');
     default:
       break;
+  }
+  if (path === 'contributes.page' || path.startsWith('contributes.page.')) {
+    return fail('invalid-page', 'contributes.page must be true or { entry: "<package HTML>", title?: "Page title" }.');
   }
   if (path === 'contributes.attach' || path.startsWith('contributes.attach.')) {
     return fail(

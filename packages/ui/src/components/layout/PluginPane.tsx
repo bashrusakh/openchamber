@@ -1,6 +1,9 @@
 import React from 'react';
 import { toast } from 'sonner';
 import {
+  HostRequestError,
+  OPENCHAMBER_SDK_CHANNEL,
+  OPENCHAMBER_SDK_API_VERSION,
   EMPTY_GUEST_CONNECTION,
   GUEST_REQUEST_TIMEOUT_MS,
   guestFileScope,
@@ -52,6 +55,9 @@ import {
 import { useGuestOauthStore } from '@/lib/guests/oauth-store';
 import { linkGuestSession, promptGuestSession, startGuestSession } from '@/lib/guests/start-session';
 import { useGuestsStore } from '@/lib/guests/store';
+import { readGuestWorkspace, observeGuestWorkspace, openGuestSession } from '@/lib/guests/workspace';
+import { guestStorageOperation } from '@/lib/guests/storage';
+import { getRuntimeKey, subscribeRuntimeEndpointChanged } from '@/lib/runtime-switch';
 import { openExternalUrl } from '@/lib/url';
 import { cn } from '@/lib/utils';
 import { closeGuestTabsEverywhere } from '@/lib/guests/tabs';
@@ -206,7 +212,7 @@ export const PluginPane: React.FC<PluginPaneProps> = ({
   // scoped to the guest's files and short-lived, so it is never reused.
   // The attach dialog may load its own page; the rail always loads panel.entry.
   // A page-less guest has no entry and never gets a frame.
-  const guestEntry = guest ? (surface === 'dialog' && guest.attachEntry ? guest.attachEntry : guest.entry ?? null) : null;
+  const guestEntry = guest ? (surface === 'page' ? guest.pageEntry ?? null : surface === 'dialog' && guest.attachEntry ? guest.attachEntry : guest.entry ?? null) : null;
   const [src, setSrc] = React.useState('');
   React.useEffect(() => {
     if (!guestEntry) {
@@ -327,22 +333,55 @@ export const PluginPane: React.FC<PluginPaneProps> = ({
   // element without changing `src`, so a captured contentWindow would go stale.
 
   React.useEffect(() => {
+    const subscriptions = new Map<string, () => void>();
+    let disposed = false;
+    const runtimeKey = getRuntimeKey();
+    const requestingGuestId = guestIdRef.current;
+    const currentGuest = () => useGuestsStore.getState().guests.find((entry) => entry.id === requestingGuestId) ?? null;
+    const clearSubscriptions = () => { for (const unsubscribe of subscriptions.values()) unsubscribe(); subscriptions.clear(); };
+    const runtimeUnsubscribe = subscribeRuntimeEndpointChanged(() => { disposed = true; clearSubscriptions(); });
+    const requireSessions = () => {
+      if (!guestMay(currentGuest(), 'sessions')) throw new HostRequestError('NOT_GRANTED', NOT_GRANTED_MESSAGE);
+    };
     const onMessage = (event: MessageEvent) => {
       const frame = iframeRef.current;
       if (!frame || event.source !== frame.contentWindow) return;
       const parsed = guestMessageSchema.safeParse(event.data);
       if (!parsed.success) return;
+      if (disposed || getRuntimeKey() !== runtimeKey) return;
       // The frame's identity is the guest id; a payload naming another
       // provider would attach or link under a different guest's name.
       const message = withOwnProviderId(parsed.data, guestIdRef.current);
+      const activeGuest = currentGuest();
+      if (!activeGuest || !isGuestActive(activeGuest)) {
+        clearSubscriptions();
+        if ('id' in message) postToGuest({ channel: OPENCHAMBER_SDK_CHANNEL, v: OPENCHAMBER_SDK_API_VERSION,
+          type: 'result', id: message.id, ok: false, error: 'Extension is unavailable.', code: 'DISABLED' });
+        return;
+      }
 
       if (message.type === 'hello') {
+        clearSubscriptions();
         pushHostState();
         registerResolver();
         return;
       }
 
       void answerGuestMessage(message, {
+        workspaceRead: (query) => { requireSessions(); return readGuestWorkspace(query, guestIdRef.current); },
+        workspaceSubscribe: ({ subscriptionId, query }) => {
+          requireSessions();
+          subscriptions.get(subscriptionId)?.();
+          subscriptions.delete(subscriptionId);
+          if (subscriptions.size >= 32) throw new HostRequestError('HOST_REJECTED', 'At most 32 workspace subscriptions per frame.');
+          subscriptions.set(subscriptionId, observeGuestWorkspace(query, guestIdRef.current, (snapshot) => {
+            if (!disposed && guestMay(guestRef.current, 'sessions')) postToGuest({ channel: OPENCHAMBER_SDK_CHANNEL, v: OPENCHAMBER_SDK_API_VERSION,
+              type: 'workspace', payload: { subscriptionId, snapshot } });
+          }));
+        },
+        workspaceUnsubscribe: (id) => { subscriptions.get(id)?.(); subscriptions.delete(id); },
+        storage: (request) => guestStorageOperation(guestIdRef.current, request),
+        openSession: (id) => { requireSessions(); openGuestSession(id); },
         toast: (kind, toastMessage) => {
           // Full pause: a disabled guest must not spam host toasts while the frame tears down.
           if (!guestEnabledRef.current) return;
@@ -377,8 +416,12 @@ export const PluginPane: React.FC<PluginPaneProps> = ({
             request,
             directory: directoryRef.current || null,
             t: translateRef.current,
+            assertAuthorized: () => {
+              requireSessions();
+              if (request.text && !guestMay(currentGuest(), 'prompt')) throw new HostRequestError('NOT_GRANTED', NOT_GRANTED_MESSAGE);
+            },
           });
-          if (started) {
+          if (started?.sessionId && request.navigation === 'open') {
             onSessionStartedRef.current?.();
             onDismissRef.current?.();
           }
@@ -519,15 +562,18 @@ export const PluginPane: React.FC<PluginPaneProps> = ({
           waiter({ ok: true, item: payload.item });
         },
       }).then((reply) => {
-        if (reply) postToGuest(reply);
+        if (reply && !disposed && frame === iframeRef.current && getRuntimeKey() === runtimeKey) postToGuest(reply);
       });
     };
 
     window.addEventListener('message', onMessage);
     return () => {
+      disposed = true;
+      clearSubscriptions();
+      runtimeUnsubscribe();
       window.removeEventListener('message', onMessage);
     };
-  }, [frameKey, postToGuest, pushHostState, refreshOauth, registerResolver, setOauthStatus, src, stopOauthPoll]);
+  }, [frameKey, guestEnabled, postToGuest, pushHostState, refreshOauth, registerResolver, setOauthStatus, src, stopOauthPoll]);
 
   // The OAuth poll outlives listener re-attachment: it only stops when the
   // frame goes away, otherwise a parent re-render mid-authorization would

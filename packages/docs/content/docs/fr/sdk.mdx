@@ -57,6 +57,7 @@ Vous pouvez aussi ajouter un `.zip` local ou un lien https vers un dépôt git o
         "entry": "panel/index.html"
       },
       "attach": "dialog",
+      "page": true,
       "capabilities": ["prompt", "sessions"],
       "integration": {
         "name": "Acme",
@@ -88,7 +89,11 @@ Vous pouvez aussi ajouter un `.zip` local ou un lien https vers un dépôt git o
 - `{ "mode": "dialog", "entry": "panel/attach.html" }` ouvre dans la fenêtre une page séparée à vous, pour que le sélecteur n'ait pas à partager de code avec le panneau de la barre latérale
 - sans cette clé, l'extension n'apparaît pas dans ce menu
 
-Votre page sait dans lequel des deux elle se trouve grâce à `ctx.surface` (`panel` ou `dialog`). Quand l'utilisateur clique sur un élément que vous avez attaché plus tôt, la même surface s'ouvre à nouveau avec `ctx.item` pointant sur cet élément, y compris les `data` que vous y avez stockées, vous pouvez donc afficher ses détails au lieu de la liste. Depuis le menu + ou l'icône de la barre latérale, `ctx.item` vaut `null`.
+`ctx.surface` vaut `panel`, `dialog` ou `page`. Un clic sur un élément attaché place ses données dans `ctx.item`, sinon cette valeur est `null`.
+
+`contributes.page: true` propose votre panneau en plein écran dans le menu Pages des extensions au-dessus des sessions. `{ "entry": "panel/page.html", "title": "Board" }` utilise un HTML distinct et un titre facultatif. `panel.entry` reste obligatoire, avec le même bac à sable et les mêmes permissions. Seul l'utilisateur ouvre la page. Recharger, mettre en pause, supprimer ou changer de serveur la ferme.
+
+Pour un tableau, utilisez `host.storage` et les listes de projets, worktrees et sessions avec leurs états en direct. `startSession` peut viser un autre projet sans fermer le tableau. Voir [Host API](/sdk/host/).
 
 `contributes.integration` est optionnel. Il ajoute une carte dans Paramètres → Intégrations où l'utilisateur connecte un compte. Voir [Comptes et réseau](#comptes-et-réseau).
 
@@ -101,7 +106,7 @@ Dessiner un panneau et lire la session en cours ne demandent aucune permission. 
 | Capacité | Ce qu'elle autorise |
 | --- | --- |
 | `prompt` | envoyer des messages dans la session de l'utilisateur (`prompt({ send: true })`, `startSession` avec `text`) |
-| `sessions` | créer des sessions et des worktrees (`startSession`) |
+| `sessions` | lister les projets, worktrees et états des sessions ; créer et ouvrir des sessions dans les projets enregistrés |
 | `files` | lire et écrire des fichiers dans le projet ouvert (`readFile`, `writeFile`, `listDir`, `stat` avec un chemin relatif) |
 | `model` | génération de texte ponctuelle avec le Small Model de l'utilisateur (`generate`), en dehors de toute session |
 

@@ -57,6 +57,7 @@ También puedes añadir un `.zip` local o un enlace https a un repositorio de gi
         "entry": "panel/index.html"
       },
       "attach": "dialog",
+      "page": true,
       "capabilities": ["prompt", "sessions"],
       "integration": {
         "name": "Acme",
@@ -88,7 +89,11 @@ También puedes añadir un `.zip` local o un enlace https a un repositorio de gi
 - `{ "mode": "dialog", "entry": "panel/attach.html" }` abre en la ventana una página aparte tuya, para que el selector no tenga que compartir código con el panel de la barra lateral
 - si lo omites, la extensión no aparece en ese menú
 
-Tu página puede saber en cuál de los dos está gracias a `ctx.surface` (`panel` o `dialog`). Cuando el usuario hace clic en un elemento que adjuntaste antes, la misma superficie se abre de nuevo con `ctx.item` apuntando a ese elemento, incluidos los `data` que guardaste en él, así que puedes mostrar sus detalles en lugar de la lista. Desde el menú + o el icono de la barra lateral, `ctx.item` es `null`.
+`ctx.surface` es `panel`, `dialog` o `page`. Al pulsar un elemento adjunto, `ctx.item` contiene sus datos; en los demás casos es `null`.
+
+`contributes.page: true` ofrece el panel a pantalla completa en el menú Páginas de extensiones, encima de las sesiones. `{ "entry": "panel/page.html", "title": "Board" }` usa otro HTML y un título opcional. Sigue necesitando `panel.entry` y usa el mismo aislamiento y permisos. Solo el usuario abre la página. Se cierra al recargar, pausar, eliminar o cambiar de servidor.
+
+Para un tablero, usa `host.storage` y las listas de proyectos, worktrees y sesiones con estados en directo. `startSession` puede apuntar a otro proyecto sin cerrar el tablero. Consulta [Host API](/sdk/host/).
 
 `contributes.integration` es opcional. Añade una tarjeta en Ajustes → Integraciones donde el usuario conecta una cuenta. Consulta [Cuentas y red](#cuentas-y-red).
 
@@ -101,7 +106,7 @@ Dibujar un panel y leer la sesión actual no requiere permisos. Todo lo que act�
 | Capacidad | Qué permite |
 | --- | --- |
 | `prompt` | enviar mensajes a la sesión del usuario (`prompt({ send: true })`, `startSession` con `text`) |
-| `sessions` | crear sesiones y worktrees (`startSession`) |
+| `sessions` | listar proyectos, worktrees y estados de sesiones; crear y abrir sesiones en proyectos registrados |
 | `files` | leer y escribir archivos dentro del proyecto abierto (`readFile`, `writeFile`, `listDir`, `stat` con una ruta relativa) |
 | `model` | generación de texto puntual con el Small Model del usuario (`generate`), fuera de cualquier sesión |
 

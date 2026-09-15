@@ -5,6 +5,10 @@ description: Instala extensiones de terceros en OpenChamber, aprueba lo que pued
 
 # Extensiones
 
+Una extensión puede ofrecer una página a pantalla completa, como un tablero de tareas. Ábrela desde Páginas de extensiones, encima de las sesiones. El menú solo aparece para páginas habilitadas y aprobadas. Elegir un chat, recargar, pausar, eliminar o cambiar de servidor cierra la página. La extensión no puede abrirla por su cuenta.
+
+Sus propios datos se guardan en el servidor conectado y se borran al eliminar la extensión. Un tablero puede seguir sesiones de varios proyectos y worktrees sin crear archivos en tu proyecto.
+
 Usa **Configuración → Extensiones** para añadir a OpenChamber paneles hechos por otras personas. Una extensión es una página pequeña que se coloca en la barra derecha, junto a los paneles integrados. Puede mostrarte datos de otro servicio, adjuntar una tarea al chat y, si se lo permites, iniciar sesiones, enviar prompts o leer archivos.
 
 Las extensiones funcionan en OpenChamber web y de escritorio. VS Code y la app móvil todavía no las cargan. No son lo mismo que los plugins de OpenCode.
@@ -29,7 +33,7 @@ Una instalación desde carpeta se ejecuta directamente desde esa carpeta, así q
 Mostrar un panel y leer qué proyecto y sesión están abiertos no necesita permiso. Todo lo que actúa en tu nombre sí lo necesita, y ves la lista completa una sola vez, al instalar:
 
 - **Enviar mensajes en tus sesiones**: escribe y envía prompts al modelo, lo que gasta tokens y puede ejecutar herramientas.
-- **Crear sesiones y worktrees**: en el proyecto actual.
+- **Acceder a proyectos y sesiones**: listar proyectos, worktrees y estados de sesiones, y crear y abrir sesiones en proyectos registrados. El contenido de las conversaciones sigue siendo privado.
 - **Leer y escribir archivos del proyecto**: cualquier archivo del proyecto abierto.
 - **Leer y escribir archivos fuera del proyecto**: solo las ubicaciones enumeradas en el diálogo.
 - **Usar tu Small Model**: generación de texto puntual fuera de tus sesiones, con el modelo de Configuración → Sesiones → Small Model. Gasta tokens.

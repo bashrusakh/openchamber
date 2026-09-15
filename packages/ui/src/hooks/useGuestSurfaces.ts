@@ -52,6 +52,14 @@ export const useGuestSurfaces = (): ContextSurfaceDescriptor[] => {
   }, [guests, runtimeKey]);
 };
 
+export const useGuestPages = () => {
+  const guests = useGuestsStore((state) => state.guests);
+  return React.useMemo(() => {
+    if (isVSCodeRuntime() || isMobileSurfaceRuntime()) return [];
+    return guests.filter((guest) => guest.pageEntry && isGuestActive(guest));
+  }, [guests]);
+};
+
 /**
  * Message and session menu entries from active guests. Empty on VS Code and
  * mobile, which never mount guests. Reads the store only: every transcript

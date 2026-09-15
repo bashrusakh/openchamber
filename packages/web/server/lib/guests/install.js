@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { removeGuestStorage } from './storage.js';
 import https from 'node:https';
 import path from 'node:path';
 import { z } from 'zod';
@@ -387,6 +388,7 @@ export const uninstallGuest = async (id, persistPath) => {
     return { paths: kept, sources, gitOrigins, capabilityGrants, capabilityScopes, disabledGuests, serviceSocketOverrides };
   });
   await stopGuestService(id);
+  await removeGuestStorage(persistPath, id);
   if (removedRoot && isCopiedGuestRoot(removedRoot, persistPath)) {
     await fs.rm(removedRoot, { recursive: true, force: true });
   }

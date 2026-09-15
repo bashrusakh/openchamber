@@ -26,7 +26,7 @@ const host = connectHost();
 | `locale` | le tag de langue de l'application |
 | `directory` | le dossier du projet en cours, ou `null` |
 | `session` | `{ id, title, busy }` ou `null`. Le titre retombe sur l'id de session. `busy` est le statut en direct. `model` et `agent` (l'agent OpenCode) apparaissent quand la session les a. |
-| `surface` | `panel` dans la barre latérale, `dialog` dans la fenêtre d'attache |
+| `surface` | `panel` dans la barre latérale, `dialog` dans la fenêtre d'attache, `page` en plein écran |
 | `item` | ce pour quoi cette surface a été ouverte, ou `null` : l'élément attaché sur lequel l'utilisateur a cliqué (les mêmes champs que vous avez passés à `attach`, y compris `data`), un message (`kind: "message"`) ou une session (`kind: "session"`) venant d'une de vos actions déclarées. Voir [Actions](/sdk/#actions-commandes-et-le-badge). |
 | `connection` | `{ connected, account }` pour votre intégration |
 | `settings` | les valeurs des champs déclarés dans `integration.settings` |
@@ -98,7 +98,9 @@ await host.startSession({
 
 `providerId` est l'id de votre panneau ; OpenChamber l'écrase de toute façon avec votre id. `id` est votre propre identifiant pour l'élément. `kind` est `issue` (par défaut) ou `pull`. `text` est un contexte optionnel pour le modèle, 1 à 16000 caractères après trim. `data` est un JSON optionnel à vous (statut, commentaires, n'importe quoi), jusqu'à 16000 caractères une fois sérialisé. OpenChamber le stocke avec la puce et vous le rend tel quel dans `ctx.item` quand l'utilisateur clique sur la puce ; il n'atteint jamais le modèle.
 
-`startSession` crée une session dans le projet en cours. Avec `worktree: true`, OpenChamber crée d'abord un worktree git et y ouvre la session. Quand `text` est défini et qu'un modèle est sélectionné, il est envoyé comme premier message. Le résultat est `{ sessionId, sent }`, où `sent` vaut `sent`, `no-model`, `skipped` ou `failed`. La session existe même après `no-model` et `failed`. Pas de projet ouvert, un worktree en échec ou une création de session en échec donnent une erreur `HOST_REJECTED`.
+`startSession` accepte `projectId` sans changer le projet actif. Omettez `worktree` pour le dossier cible, utilisez `true` pour un worktree généré, `{ kind: "existing", directory }` pour un existant ou `{ kind: "new", name?, baseBranch? }` pour un nouveau. Le nom désigne la branche et le worktree. `navigation` vaut `"preserve"` par défaut ; `"open"` ouvre le nouveau chat. Le modèle, l'agent et la variante du premier message sont capturés au démarrage.
+
+Le résultat contient `sessionId`, `directory`, `sent`, `linked` et éventuellement `worktree`. `sent` vaut `sent`, `no-model`, `skipped` ou `failed` ; `linked: false` indique que l'élément n'a pas été enregistré. Si un worktree reste après un échec de préparation ou de création de session, `sessionId` vaut `null` et `failure` vaut `bootstrap-failed` ou `session-create-failed`. Vérifiez ce résultat avant de réessayer. Le délai maximal est de 180 secondes ; une expiration ne prouve pas une annulation.
 
 `sessionLink` attache l'élément à la session ouverte en ce moment. Pas de projet ou pas de session donne une erreur `NO_SESSION`.
 
@@ -128,6 +130,16 @@ host.onSessionLifecycle((event) => {
 Sans `send`, `prompt` remplace le texte de la zone de chat. Avec `send: true`, il envoie le message avec le modèle et l'agent choisis par l'utilisateur. L'extension ne les choisit jamais. Pas de session ouverte donne `NO_SESSION`. Envoyer pendant que la session est occupée donne `SESSION_BUSY` ; écrire dans la zone fonctionne même quand elle est occupée. Le résultat est `{ sent }` avec les mêmes valeurs que `startSession`.
 
 `onSessionLifecycle` vous dit ce que fait la session. `phase` est `started` pendant que le modèle travaille, `completed` quand elle redevient inactive, et `failure` sur un statut inattendu. Un écouteur tardif reçoit tout de suite la phase courante.
+
+## Projets, sessions en direct et stockage
+
+`listProjects()`, `listWorktrees(projectId)` et `listSessions(projectId)` utilisent la permission `sessions` et les stores partagés, sans parcours Git par appel ni contenu des conversations. Les projets exposent ID, nom et dossier ; les worktrees ajoutent branche et disponibilité. Les sessions incluent métadonnées, dates, parent, worktree et seulement les éléments attachés par cette extension. Les sessions archivées connues sont incluses.
+
+`await onProjects(listener)`, `await onWorktrees(projectId, listener)` et `await onSessions(projectId, listener)` renvoient une fonction de désabonnement. Interceptez les erreurs d'inscription. Un premier instantané précède les changements. Maximum 32 abonnements par cadre ; `dispose()`, fermeture, pause, suppression et changement de serveur les libèrent. `state` vaut `loading`, `ready` ou `error`, avec `coverage` par dossier pour les sessions. Une erreur conserve les données disponibles. Seul `ready` confirme une liste vide complète.
+
+`activity` vaut `unknown`, `idle`, `running`, `retrying`, `waiting-permission` ou `waiting-question`. `outcome` vaut `completed`, `failed` ou `null`, uniquement d'après les événements observés, en mémoire pour 2 000 sessions au maximum. Idle après une erreur conserve cet échec jusqu'au prochain lancement. Cela ne termine pas votre tâche. `openSession(sessionId)` ouvre explicitement le chat.
+
+`host.storage.get(key)`, `set(key, value)`, `delete(key)` et `keys()` conservent votre JSON sans permission supplémentaire. Une clé absente donne `undefined`, null enregistré reste null. Clés de 1 à 128 caractères, valeur de 64 KiB UTF-8 maximum, ensemble de 2 MiB et 2 000 clés maximum. Incluez l'ID du projet dans la clé pour des données propres à un projet. Les écritures sont sérialisées et atomiques ; les erreurs préservent les données. La désinstallation supprime ce stockage sur le serveur connecté.
 
 ## request
 

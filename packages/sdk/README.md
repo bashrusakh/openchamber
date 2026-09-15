@@ -14,6 +14,18 @@ npm install @openchamber/sdk
 
 The package ships compiled JavaScript with type declarations, so any bundler works. Its version matches the OpenChamber release it shipped with, so `@openchamber/sdk@1.24.0` is the contract of OpenChamber 1.24.0.
 
+## Preview builds
+
+Preview packages are for testing unreleased SDK changes against a matching development build of OpenChamber. They do not imply compatibility with the published app of the same base version.
+
+```bash
+npm install @openchamber/sdk@preview
+```
+
+Maintainers can run **Publish SDK preview** in GitHub Actions, select the source branch, and enter a positive preview number. For example, `1` publishes `1.23.2-preview.1` under the `preview` npm tag. Each publication needs an unused number. The workflow uses the existing `NPM_TOKEN` secret and publishes only the SDK. It changes the version in its temporary checkout, without creating commits or release tags or changing `latest`.
+
+The workflow must exist on the default branch before GitHub exposes its manual trigger. Once it does, select `bohdan/dev` to publish that branch's SDK. Enable `dry_run` to validate without publishing. Validation installs the packed SDK in an isolated project and checks its imports, TypeScript declarations, and extension bundler before publishing that same archive.
+
 ## What you ship
 
 A folder with three files:
@@ -84,6 +96,12 @@ A complete three-file example is on the [Build an extension](https://openchamber
 - `service` is optional. It declares a local process OpenChamber starts next to the extension. It runs with the user's full access and no sandbox, so declare one only when the page cannot do the job. See [GUEST_SERVICES.md](./GUEST_SERVICES.md).
 
 ## In the page
+
+For a full-screen board, add `"page": true` under `contributes`, or `"page": { "entry": "panel/page.html", "title": "Board" }` for separate HTML. Users open it from the Extension pages menu above the session list. `ctx.surface` is `"page"`. The extension cannot open the page itself.
+
+With `sessions` approved, use `listProjects()`, `listWorktrees(projectId)`, and `listSessions(projectId)`. Subscribe through `await onProjects(listener)`, `await onWorktrees(projectId, listener)`, or `await onSessions(projectId, listener)` and retain the returned unsubscribe function. Snapshots distinguish loading, ready, and error; session activity and observed turn outcomes are separate from your task status.
+
+`startSession` accepts `projectId` and `worktree: { kind: "new", name: "fix-login", baseBranch: "main" }` or `{ kind: "existing", directory }`. It preserves the current screen by default. `openSession(sessionId)` explicitly opens the chat. `host.storage.get/set/delete/keys` stores your own JSON on the connected server without a file-access grant. See [API.md](./API.md) for limits and partial results. The `tasks-demo` page exercises these methods together.
 
 ```ts
 import { connectHost, HostRequestError } from '@openchamber/sdk';

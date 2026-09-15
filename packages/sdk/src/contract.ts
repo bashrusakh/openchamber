@@ -1,5 +1,6 @@
 
 import { OPENCHAMBER_SDK_API_VERSION, OPENCHAMBER_SDK_CHANNEL } from './api-version.ts';
+import type { GuestSessionWorktree, GuestStorageRequest, GuestStorageResult, GuestWorkspaceQuery, GuestWorkspaceSnapshot, GuestWorkspaceSubscription, GuestWorkspaceUpdate, GuestWorktree } from './workspace.ts';
 
 export type HostThemeMode = 'light' | 'dark';
 
@@ -52,7 +53,7 @@ export type SessionSnapshot = {
 };
 
 /** Which host chrome mounted this iframe. Not `openSurface`. */
-export type GuestHostSurface = 'panel' | 'dialog';
+export type GuestHostSurface = 'panel' | 'dialog' | 'page';
 
 export type GuestConnection = {
   connected: boolean;
@@ -78,6 +79,15 @@ export type GuestRequestResult = {
 export type StartSessionResult = {
   sessionId: string;
   sent: StartSessionSent;
+  directory?: string;
+  worktree?: GuestWorktree;
+  linked?: boolean;
+} | {
+  sessionId: null;
+  sent: 'skipped';
+  directory: string;
+  worktree: GuestWorktree;
+  failure: 'bootstrap-failed' | 'session-create-failed';
 };
 
 export type PromptRequest = {
@@ -142,6 +152,8 @@ export type GenerateRequest = {
 export type GenerateResult = { text: string };
 
 export type HostResultPayload =
+  | GuestStorageResult
+  | GuestWorkspaceSnapshot
   | GuestRequestResult
   | StartSessionResult
   | PromptResult
@@ -293,7 +305,10 @@ export type AttachIssueRequest = {
 };
 
 export type StartSessionRequest = AttachIssueRequest & {
-  worktree?: boolean;
+  projectId?: string;
+  worktree?: GuestSessionWorktree;
+  /** Preserve the current page/chat by default. */
+  navigation?: 'preserve' | 'open';
 };
 
 export const GUEST_TOAST_MAX = 500;
@@ -438,8 +453,10 @@ export const clampAttachRequest = (request: AttachIssueRequest): AttachIssueRequ
 /** Same attach clamp. `worktree` stays only when the guest asked for one. */
 export const clampStartSessionRequest = (request: StartSessionRequest): StartSessionRequest => {
   const next: StartSessionRequest = clampAttachRequest(request);
+  if (request.projectId) next.projectId = request.projectId;
+  if (request.navigation) next.navigation = request.navigation;
   if (request.worktree) {
-    next.worktree = true;
+    next.worktree = request.worktree;
   }
   return next;
 };
@@ -520,6 +537,7 @@ export type HostResultMessage = Envelope & { type: 'result'; id: string } & (
 );
 
 export type HostMessage =
+  | (Envelope & { type: 'workspace'; payload: GuestWorkspaceUpdate })
   | HostReadyMessage
   | HostDirectoryMessage
   | HostSessionMessage
@@ -560,6 +578,11 @@ export type GuestBadgeMessage = GuestCall<'badge', BadgeRequest>;
 export type GuestResolveResultMessage = Envelope & { type: 'resolve-result'; id: string; payload: ResolveResultPayload };
 
 export type GuestMessage =
+  | GuestCall<'workspace-read', GuestWorkspaceQuery>
+  | GuestCall<'workspace-subscribe', GuestWorkspaceSubscription>
+  | GuestCall<'workspace-unsubscribe', { subscriptionId: string }>
+  | GuestCall<'storage', GuestStorageRequest>
+  | GuestCall<'open-session', { sessionId: string }>
   | GuestHelloMessage
   | GuestToastMessage
   | GuestOpenUrlMessage
@@ -619,6 +642,7 @@ export const isGenerateResult = (
 ): value is GenerateResult => Boolean(value && 'text' in value && String(value.text) === value.text && !('status' in value));
 
 const HOST_PUSH_TYPES: ReadonlySet<string> = new Set([
+  'workspace',
   'ready', 'directory', 'session', 'connection', 'settings', 'session-lifecycle', 'item', 'resolve',
 ]);
 

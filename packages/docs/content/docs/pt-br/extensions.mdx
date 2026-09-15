@@ -5,6 +5,10 @@ description: Instale extensões de terceiros no OpenChamber, aprove o que elas p
 
 # Extensões
 
+Uma extensão pode oferecer uma página em tela cheia, como um quadro de tarefas. Abra pelo menu Páginas de extensões acima das sessões. O menu só aparece para páginas ativadas e aprovadas. Escolher um chat, recarregar, pausar, remover ou trocar de servidor fecha a página. A extensão não pode abri-la sozinha.
+
+Os dados próprios da extensão ficam no servidor conectado e são apagados ao removê-la. Um quadro pode acompanhar sessões de vários projetos e worktrees sem criar arquivos no seu projeto.
+
 Use **Configurações → Extensões** para adicionar ao OpenChamber painéis feitos por outras pessoas. Uma extensão é uma página pequena que fica na barra da direita, ao lado dos painéis integrados. Ela pode mostrar dados de outro serviço, anexar uma tarefa ao chat e, se você permitir, iniciar sessões, enviar prompts ou ler arquivos.
 
 As extensões funcionam no OpenChamber web e desktop. O VS Code e o app móvel ainda não as carregam. Elas não são a mesma coisa que plugins do OpenCode.
@@ -29,7 +33,7 @@ Uma instalação por pasta roda direto daquela pasta, então quem desenvolve uma
 Mostrar um painel e ler qual projeto e sessão estão abertos não precisa de permissão. Tudo que age em seu nome precisa, e você vê a lista inteira uma vez, na instalação:
 
 - **Enviar mensagens nas suas sessões**: escreve e envia prompts ao modelo, o que gasta tokens e pode executar ferramentas.
-- **Criar sessões e worktrees**: no projeto atual.
+- **Acessar projetos e sessões**: listar projetos, worktrees e estados de sessões, além de criar e abrir sessões em projetos registrados. O conteúdo das conversas permanece privado.
 - **Ler e gravar arquivos do projeto**: qualquer arquivo do projeto aberto.
 - **Ler e gravar arquivos fora do projeto**: só os locais listados no diálogo.
 - **Usar seu Small Model**: geração de texto avulsa fora das suas sessões, com o modelo de Configurações → Sessões → Small Model. Custa tokens.

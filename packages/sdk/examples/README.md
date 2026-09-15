@@ -15,6 +15,8 @@ below when you change one.
 
 ## Install
 
+`tasks-demo` also declares a full-screen Tasks board. Open it from the Extension pages menu above the session list. It reads registered projects and worktrees, starts sessions without closing the board, shows live session states, opens selected chats, and saves board notes with `host.storage`. An idle session does not mark a task Done.
+
 1. Run the app: `bun run dev` from the repo root, open the URL it prints.
 2. Settings → Extensions → paste the absolute path of a folder below → Add:
    - `<repo>/packages/sdk/examples/hello-kit`
@@ -35,4 +37,5 @@ bun packages/sdk/scripts/bundle-guest.ts --node packages/sdk/examples/service-ec
 bun packages/sdk/scripts/bundle-guest.ts packages/sdk/examples/config-editor/panel/main.ts packages/sdk/examples/config-editor/panel/main.js
 bun packages/sdk/scripts/bundle-guest.ts packages/sdk/examples/tasks-demo/panel/main.ts packages/sdk/examples/tasks-demo/panel/main.js
 bun packages/sdk/scripts/bundle-guest.ts packages/sdk/examples/tasks-demo/panel/attach.ts packages/sdk/examples/tasks-demo/panel/attach.js
+bun packages/sdk/scripts/bundle-guest.ts packages/sdk/examples/tasks-demo/panel/page.ts packages/sdk/examples/tasks-demo/panel/page.js
 ```

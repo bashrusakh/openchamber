@@ -26,7 +26,7 @@ const host = connectHost();
 | `locale` | the app language tag |
 | `directory` | current project directory, or `null` |
 | `session` | `{ id, title, busy }` or `null`. Title falls back to the session id. `busy` is the live status. `model` and `agent` (the OpenCode agent) appear when the session has them. |
-| `surface` | `panel` on the rail, `dialog` in the attach window |
+| `surface` | `panel` on the rail, `dialog` in the attach window, `page` full-screen |
 | `item` | what this surface was opened for, or `null`: the attached item the user clicked (the same fields you passed to `attach`, including `data`), a message (`kind: "message"`), or a session (`kind: "session"`) from one of your declared actions. See [Actions](/sdk/#actions-commands-and-the-badge). |
 | `connection` | `{ connected, account }` for your integration |
 | `settings` | values of the fields you declared in `integration.settings` |
@@ -98,7 +98,9 @@ await host.startSession({
 
 `providerId` is your panel id; OpenChamber overwrites it with your id anyway. `id` is your own identifier for the item. `kind` is `issue` (default) or `pull`. `text` is optional context for the model, 1 to 16000 characters after trim. `data` is optional JSON of your own (status, comments, anything), up to 16000 characters when serialized. OpenChamber stores it with the chip and hands it back unchanged in `ctx.item` when the user clicks the chip; it never reaches the model.
 
-`startSession` creates a session in the current project. With `worktree: true` OpenChamber creates a git worktree first and opens the session there. When `text` is set and a model is selected, it is sent as the first message. The result is `{ sessionId, sent }`, where `sent` is `sent`, `no-model`, `skipped`, or `failed`. The session exists even after `no-model` and `failed`. No open project, a failed worktree, or a failed session create is a `HOST_REJECTED` error.
+`startSession` accepts `projectId` without switching the current project. Omit `worktree` for the target directory, use `true` for a generated worktree, `{ kind: "existing", directory }` for a known worktree, or `{ kind: "new", name?, baseBranch? }` for a named new one. The name sets both branch and worktree. `navigation` defaults to `"preserve"`; use `"open"` to select the new chat. The first-message model, agent, and variant are captured when creation starts.
+
+The result includes `sessionId`, `directory`, `sent`, `linked`, and optional `worktree`. `sent` is `sent`, `no-model`, `skipped`, or `failed`; `linked: false` means the item was not saved on the created session. A worktree left after bootstrap or session creation fails returns `sessionId: null` and `failure: "bootstrap-failed" | "session-create-failed"`, plus its directory/worktree. Inspect that result before retrying. The call waits up to 180 seconds; a timeout does not mean creation was rolled back.
 
 `sessionLink` attaches the item to the session that is open now. No project or no session is a `NO_SESSION` error.
 
@@ -128,6 +130,40 @@ host.onSessionLifecycle((event) => {
 Without `send`, `prompt` replaces the chat box text. With `send: true` it sends the message using the model and agent the user has selected. The extension never picks them. No open session is `NO_SESSION`. Sending while the session is busy is `SESSION_BUSY`; writing into the box works while busy. The result is `{ sent }` with the same values as `startSession`.
 
 `onSessionLifecycle` tells you what the session is doing. `phase` is `started` while the model works, `completed` when it goes idle, and `failure` on an unexpected status. A late listener gets the current phase right away.
+
+## Projects, worktrees, and live sessions
+
+These methods use the existing `sessions` permission and the app's shared stores. They do not run a git scan for each request or expose conversation content.
+
+```ts
+const projects = await host.listProjects();
+const projectId = projects.projects[0]?.id;
+if (projectId) {
+  const worktrees = await host.listWorktrees(projectId);
+  const sessions = await host.listSessions(projectId);
+  const stop = await host.onSessions(projectId, (snapshot) => {
+    renderSessions(snapshot.sessions, snapshot.state);
+  });
+  // Call stop() when this view closes.
+}
+```
+
+`onProjects(listener)` and `onWorktrees(projectId, listener)` work the same way. Await registration to catch permission errors; the result is an unsubscribe function. Each sends an initial snapshot followed by changes. `dispose()` releases all subscriptions. The host allows at most 32 per frame and clears them on unmount, pause, removal, or server switch.
+
+Snapshots have `state: "loading" | "ready" | "error"`. Loading/error may retain data; only ready establishes complete empty success. Session snapshots include per-directory `coverage` and known archived sessions. Projects expose ID, name, and directory; worktrees expose directory, name, branch, and availability. Sessions include their project/directory/worktree, timestamps, parent ID, and this extension's attached item IDs/data.
+
+Session `activity` is `unknown`, `idle`, `running`, `retrying`, `waiting-permission`, or `waiting-question`. `outcome` is an observed `completed`/`failed` turn or `null`. It is not reconstructed from history and is retained in memory for at most 2,000 observed sessions. Idle after an error keeps the failed outcome until another run starts. Neither idle nor completed marks your task Done. Use `host.openSession(sessionId)` for an explicit transition from a card to its chat.
+
+## Persistent extension data
+
+```ts
+await host.storage.set("board", { columns: ["Todo", "Review"] });
+const board = await host.storage.get("board");
+const keys = await host.storage.keys();
+await host.storage.delete("board");
+```
+
+No extra permission is needed. Storage belongs to this extension on the connected server, survives reloads, and is removed on uninstall. `get` returns `undefined` for a missing key; stored JSON null stays null. Keys have 1 to 128 characters. Each serialized JSON value is at most 64 KiB UTF-8, and the namespace is at most 2 MiB or 2,000 keys. Use a project ID in the key for project-specific data. Writes serialize and are atomic; failures preserve existing data.
 
 ## request
 

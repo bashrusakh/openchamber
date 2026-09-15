@@ -5,6 +5,10 @@ description: Zainstaluj rozszerzenia innych autorów w OpenChamber, zdecyduj, co
 
 # Rozszerzenia
 
+Rozszerzenie może oferować stronę pełnoekranową, na przykład tablicę zadań. Otworzysz ją w menu Strony rozszerzeń nad listą sesji. Menu pojawia się tylko dla włączonych i zatwierdzonych stron. Wybór czatu, przeładowanie, wstrzymanie, usunięcie lub zmiana serwera zamyka stronę. Rozszerzenie nie może samo jej otworzyć.
+
+Własne dane rozszerzenia są przechowywane na połączonym serwerze i usuwane wraz z rozszerzeniem. Tablica może śledzić sesje wielu projektów i worktree bez tworzenia plików w Twoim projekcie.
+
 W **Ustawienia → Rozszerzenia** dodasz do OpenChamber panele zrobione przez inne osoby. Rozszerzenie to mała strona na prawym pasku, obok wbudowanych paneli. Może pokazywać dane z innej usługi, dołączać zadanie do czatu, a jeśli na to pozwolisz, uruchamiać sesje, wysyłać prompty lub czytać pliki.
 
 Rozszerzenia działają w OpenChamber w wersji web i desktop. VS Code i aplikacja mobilna jeszcze ich nie ładują. To nie to samo co wtyczki OpenCode.
@@ -29,7 +33,7 @@ Instalacja z folderu działa bezpośrednio z tego folderu, więc ktoś, kto twor
 Pokazywanie panelu i odczyt, który projekt i sesja są otwarte, nie wymaga uprawnień. Wszystko, co działa w Twoim imieniu, wymaga, a całą listę widzisz raz, przy instalacji:
 
 - **Wysyłanie wiadomości w Twoich sesjach**: pisze i wysyła prompty do modelu, co kosztuje tokeny i może uruchamiać narzędzia.
-- **Tworzenie sesji i worktree**: w bieżącym projekcie.
+- **Dostęp do projektów i sesji**: listy projektów, worktree i stanów sesji oraz tworzenie i otwieranie sesji w zarejestrowanych projektach. Treść rozmów pozostaje prywatna.
 - **Odczyt i zapis plików projektu**: dowolny plik w otwartym projekcie.
 - **Odczyt i zapis plików poza projektem**: tylko lokalizacje wymienione w oknie dialogowym.
 - **Używanie twojego Small Model**: jednorazowe generowanie tekstu poza Twoimi sesjami, z modelem z Ustawienia → Sesje → Small Model. Kosztuje tokeny.

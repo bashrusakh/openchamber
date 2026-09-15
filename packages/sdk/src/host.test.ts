@@ -87,6 +87,28 @@ const demoItem = {
 };
 
 describe('connectHost', () => {
+  test('workspace subscriptions deliver an initial snapshot, unsubscribe, and propagate refusals', async () => {
+    const guest = createFrame();
+    const host = connectHost({ target: guest, acceptSource: () => true });
+    const seen: string[] = [];
+    const subscription = host.onProjects((snapshot) => seen.push(snapshot.state));
+    const call = guest.posted.at(-1);
+    if (call?.type !== 'workspace-subscribe') throw new Error('Expected subscription');
+    guest.dispatch(new MessageEvent('message', { data: { channel: OPENCHAMBER_SDK_CHANNEL, v: 1, type: 'workspace',
+      payload: { subscriptionId: call.payload.subscriptionId, snapshot: { kind: 'projects', state: 'loading', projects: [] } } } }));
+    guest.dispatch(new MessageEvent('message', { data: { channel: OPENCHAMBER_SDK_CHANNEL, v: 1, type: 'result', id: call.id, ok: true } }));
+    const stop = await subscription;
+    expect(seen).toEqual(['loading']);
+    stop();
+    expect(guest.posted.at(-1)?.type).toBe('workspace-unsubscribe');
+    const refused = host.onSessions('project', () => {});
+    const next = guest.posted.at(-1);
+    if (next?.type !== 'workspace-subscribe') throw new Error('Expected subscription');
+    guest.dispatch(new MessageEvent('message', { data: { channel: OPENCHAMBER_SDK_CHANNEL, v: 1, type: 'result', id: next.id, ok: false, code: 'NOT_GRANTED', error: 'Not allowed' } }));
+    await expect(refused).rejects.toMatchObject({ code: 'NOT_GRANTED' });
+    host.dispose();
+    await expect(host.listProjects()).rejects.toMatchObject({ code: 'HOST_UNAVAILABLE' });
+  });
   test('sends hello and delivers ready from the parent frame only', () => {
     const parent = createFrame();
     const guest = createFrame();

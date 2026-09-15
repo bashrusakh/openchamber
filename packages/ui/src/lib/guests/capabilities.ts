@@ -14,5 +14,5 @@ export const isGuestActive = (guest: InstalledGuest): boolean => (
 export const guestNeedsApproval = (guest: InstalledGuest): boolean => !isGuestApproved(guest.capabilities);
 
 export const guestMay = (guest: InstalledGuest | null, capability: GuestCapability): boolean => (
-  guest !== null && hasGuestCapability(guest.capabilities, capability)
+  guest !== null && isGuestActive(guest) && hasGuestCapability(guest.capabilities, capability)
 );

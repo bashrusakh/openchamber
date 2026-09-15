@@ -1,4 +1,6 @@
 import { OPENCHAMBER_SDK_API_VERSION, OPENCHAMBER_SDK_CHANNEL } from './api-version.ts';
+import { GUEST_STORAGE_KEY_MAX, GUEST_STORAGE_VALUE_BYTES, type GuestProjectsSnapshot, type GuestWorktreesSnapshot, type GuestSessionsSnapshot, type GuestWorkspaceQuery, type GuestWorkspaceSnapshot, type GuestStorageRequest, type GuestStorageResult } from './workspace.ts';
+import type { JsonValue } from './contract.ts';
 import {
   GUEST_FILE_CONTENT_MAX,
   GUEST_FILE_PATH_MAX,
@@ -46,6 +48,7 @@ import {
   isFileListResult,
   isFileReadResult,
   isFileStatResult,
+  isJsonValue,
   isFileWriteResult,
   isServiceStatusResult,
   isGuestRequestResult,
@@ -71,6 +74,19 @@ export type HostClientOptions = {
 };
 
 export type HostClient = {
+  listProjects: () => Promise<GuestProjectsSnapshot>;
+  listWorktrees: (projectId: string) => Promise<GuestWorktreesSnapshot>;
+  listSessions: (projectId: string) => Promise<GuestSessionsSnapshot>;
+  onProjects: (listener: (snapshot: GuestProjectsSnapshot) => void) => Promise<() => void>;
+  onWorktrees: (projectId: string, listener: (snapshot: GuestWorktreesSnapshot) => void) => Promise<() => void>;
+  onSessions: (projectId: string, listener: (snapshot: GuestSessionsSnapshot) => void) => Promise<() => void>;
+  openSession: (sessionId: string) => Promise<void>;
+  storage: {
+    get: (key: string) => Promise<JsonValue | undefined>;
+    set: (key: string, value: JsonValue) => Promise<void>;
+    delete: (key: string) => Promise<void>;
+    keys: () => Promise<string[]>;
+  };
   onReady: (listener: (context: HostReadyContext) => void) => () => void;
   onDirectory: (listener: (directory: string | null) => void) => () => void;
   onSession: (listener: (session: SessionSnapshot | null) => void) => () => void;
@@ -184,6 +200,8 @@ export const connectHost = (options: HostClientOptions = {}): HostClient => {
   const itemListeners = new Set<(item: GuestItem | null) => void>();
   let resolveHandler: ((request: ResolveRequest) => Promise<AttachIssueRequest | null> | AttachIssueRequest | null) | null = null;
   const pending = new Map<string, Pending>();
+  const workspaceListeners = new Map<string, (snapshot: GuestWorkspaceSnapshot) => void>();
+  let disposed = false;
   const ids = { value: 0 };
   let lastReady: HostReadyContext | null = null;
   let lastLifecycle: SessionLifecycleEvent | null = null;
@@ -217,6 +235,11 @@ export const connectHost = (options: HostClientOptions = {}): HostClient => {
     if (!acceptSource(event.source)) return;
     const message = readHostMessage(event.data);
     if (!message) return;
+    if (message.type === 'workspace') {
+      const listener = workspaceListeners.get(message.payload.subscriptionId);
+      if (listener) emit([listener], message.payload.snapshot);
+      return;
+    }
 
     if (message.type === 'ready') {
       lastReady = message.payload;
@@ -333,7 +356,7 @@ export const connectHost = (options: HostClientOptions = {}): HostClient => {
     message: Exclude<GuestMessage, { type: 'hello' }>,
     timeoutMs: number = requestTimeoutMs,
   ): Promise<HostResultPayload | undefined> => {
-    if (target.parent === target) {
+    if (disposed || target.parent === target) {
       return Promise.reject(new HostRequestError('HOST_UNAVAILABLE', 'No host frame. This page is not in an iframe.'));
     }
     return new Promise((resolve, reject) => {
@@ -350,7 +373,85 @@ export const connectHost = (options: HostClientOptions = {}): HostClient => {
     send(message).then(() => undefined)
   );
 
+  const envelope: Pick<GuestMessage, 'channel' | 'v'> = { channel: OPENCHAMBER_SDK_CHANNEL, v: OPENCHAMBER_SDK_API_VERSION };
+  const requireIdentity = (value: string, maximum = 1024): void => {
+    if (!value.trim() || value.length > maximum) throw new HostRequestError('HOST_REJECTED', `Identity must contain 1 to ${maximum} characters.`);
+  };
+  const readWorkspace = async (query: GuestWorkspaceQuery): Promise<GuestWorkspaceSnapshot> => {
+    if (query.kind !== 'projects') requireIdentity(query.projectId);
+    const result = await send({ ...envelope, type: 'workspace-read', id: nextId(ids), payload: query });
+    if (!result || !('kind' in result) || !('state' in result) || result.kind !== query.kind) {
+      throw new HostRequestError('HOST_REJECTED', 'Host did not return workspace data.');
+    }
+    return result;
+  };
+  const subscribeWorkspace = async (query: GuestWorkspaceQuery, listener: (snapshot: GuestWorkspaceSnapshot) => void): Promise<() => void> => {
+    if (query.kind !== 'projects') requireIdentity(query.projectId);
+    const subscriptionId = nextId(ids);
+    workspaceListeners.set(subscriptionId, listener);
+    try {
+      await request({ ...envelope, type: 'workspace-subscribe', id: nextId(ids), payload: { subscriptionId, query } });
+    } catch (error) {
+      workspaceListeners.delete(subscriptionId);
+      if (!disposed) post({ ...envelope, type: 'workspace-unsubscribe', id: nextId(ids), payload: { subscriptionId } });
+      throw error;
+    }
+    return () => {
+      if (!workspaceListeners.delete(subscriptionId) || disposed) return;
+      post({ ...envelope, type: 'workspace-unsubscribe', id: nextId(ids), payload: { subscriptionId } });
+    };
+  };
+  const storage = async (payload: GuestStorageRequest): Promise<GuestStorageResult> => {
+    if ('key' in payload && (payload.key.length === 0 || payload.key.length > GUEST_STORAGE_KEY_MAX)) {
+      throw new HostRequestError('HOST_REJECTED', 'Storage key must contain 1 to 128 characters.');
+    }
+    if (payload.op === 'set' && !isJsonValue(payload.value)) {
+      throw new HostRequestError('HOST_REJECTED', 'Storage values must be JSON.');
+    }
+    if (payload.op === 'set' && new TextEncoder().encode(JSON.stringify(payload.value)).length > GUEST_STORAGE_VALUE_BYTES) {
+      throw new HostRequestError('HOST_REJECTED', 'Storage value exceeds 64 KiB.');
+    }
+    const result = await send({ ...envelope, type: 'storage', id: nextId(ids), payload });
+    if (!result || !('storage' in result) || result.op !== payload.op) throw new HostRequestError('HOST_REJECTED', 'Host did not return storage data.');
+    return result;
+  };
+
   return {
+    listProjects: async () => {
+      const result = await readWorkspace({ kind: 'projects' });
+      if (result.kind !== 'projects') throw new HostRequestError('HOST_REJECTED', 'Expected projects.');
+      return result;
+    },
+    listWorktrees: async (projectId) => {
+      const result = await readWorkspace({ kind: 'worktrees', projectId });
+      if (result.kind !== 'worktrees') throw new HostRequestError('HOST_REJECTED', 'Expected worktrees.');
+      return result;
+    },
+    listSessions: async (projectId) => {
+      const result = await readWorkspace({ kind: 'sessions', projectId });
+      if (result.kind !== 'sessions') throw new HostRequestError('HOST_REJECTED', 'Expected sessions.');
+      return result;
+    },
+    onProjects: (listener) => subscribeWorkspace({ kind: 'projects' }, (snapshot) => { if (snapshot.kind === 'projects') listener(snapshot); }),
+    onWorktrees: (projectId, listener) => subscribeWorkspace({ kind: 'worktrees', projectId }, (snapshot) => { if (snapshot.kind === 'worktrees') listener(snapshot); }),
+    onSessions: (projectId, listener) => subscribeWorkspace({ kind: 'sessions', projectId }, (snapshot) => { if (snapshot.kind === 'sessions') listener(snapshot); }),
+    openSession: async (sessionId) => {
+      requireIdentity(sessionId);
+      await request({ ...envelope, type: 'open-session', id: nextId(ids), payload: { sessionId } });
+    },
+    storage: {
+      get: async (key) => {
+        const result = await storage({ op: 'get', key });
+        return result.op === 'get' && result.found ? result.value : undefined;
+      },
+      set: async (key, value) => { await storage({ op: 'set', key, value }); },
+      delete: async (key) => { await storage({ op: 'delete', key }); },
+      keys: async () => {
+        const result = await storage({ op: 'keys' });
+        if (result.op !== 'keys') throw new HostRequestError('HOST_REJECTED', 'Expected storage keys.');
+        return result.keys;
+      },
+    },
     onReady: (listener) => {
       readyListeners.add(listener);
       if (lastReady) listener(lastReady);
@@ -448,18 +549,28 @@ export const connectHost = (options: HostClientOptions = {}): HostClient => {
       id: nextId(ids),
       payload: clampAttachRequest(payload),
     }),
-    startSession: (payload) => send({
+    startSession: async (payload) => {
+      if (payload.projectId !== undefined) requireIdentity(payload.projectId);
+      const worktree = payload.worktree;
+      if (worktree && worktree !== true) {
+        if (worktree.kind === 'existing') requireIdentity(worktree.directory);
+        else {
+          if (worktree.name !== undefined) requireIdentity(worktree.name, 200);
+          if (worktree.baseBranch !== undefined) requireIdentity(worktree.baseBranch, 200);
+        }
+      }
+      const result = await send({
       channel: OPENCHAMBER_SDK_CHANNEL,
       v: OPENCHAMBER_SDK_API_VERSION,
       type: 'start-session',
       id: nextId(ids),
       payload: clampStartSessionRequest(payload),
-    }).then((result) => {
+    }, options.requestTimeoutMs ?? 180_000);
       if (!isStartSessionResult(result)) {
         throw new HostRequestError('HOST_REJECTED', 'Host did not return a session.');
       }
       return result;
-    }),
+    },
     prompt: (payload) => send({
       channel: OPENCHAMBER_SDK_CHANNEL,
       v: OPENCHAMBER_SDK_API_VERSION,
@@ -628,6 +739,11 @@ export const connectHost = (options: HostClientOptions = {}): HostClient => {
       payload: { count: clampBadgeCount(count) },
     }),
     dispose: () => {
+      for (const subscriptionId of workspaceListeners.keys()) {
+        post({ ...envelope, type: 'workspace-unsubscribe', id: nextId(ids), payload: { subscriptionId } });
+      }
+      workspaceListeners.clear();
+      disposed = true;
       resolveHandler = null;
       target.removeEventListener('message', onMessage);
       for (const waiter of pending.values()) {

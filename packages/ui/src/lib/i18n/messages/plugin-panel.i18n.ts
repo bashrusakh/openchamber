@@ -1,6 +1,8 @@
 /** Guest panel strings — merged into each locale's main dictionary. */
 export const pluginPanelI18n = {
   en: {
+    'header.mainSurface.backToChat': 'Back to chat',
+    'sessions.sidebar.header.actions.extensionPages': 'Extension pages',
     'contextRail.surface.plugin': 'Panel',
     'contextRail.surface.plugin.description': 'Installed panel',
     'contextPanel.plugin.loadFailed': 'This panel failed to load.',
@@ -35,6 +37,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': 'This extension is not available here. Open it on OpenChamber web or desktop.',
   },
   de: {
+    'header.mainSurface.backToChat': 'Zurück zum Chat',
+    'sessions.sidebar.header.actions.extensionPages': 'Erweiterungsseiten',
     'contextRail.surface.plugin': 'Panel',
     'contextRail.surface.plugin.description': 'Installiertes Panel',
     'contextPanel.plugin.loadFailed': 'Dieses Panel konnte nicht geladen werden.',
@@ -69,6 +73,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': 'Diese Erweiterung ist hier nicht verfügbar. Öffne sie in OpenChamber Web oder Desktop.',
   },
   fr: {
+    'header.mainSurface.backToChat': 'Retour au chat',
+    'sessions.sidebar.header.actions.extensionPages': 'Pages des extensions',
     'contextRail.surface.plugin': 'Panneau',
     'contextRail.surface.plugin.description': 'Panneau installé',
     'contextPanel.plugin.loadFailed': 'Ce panneau n’a pas pu être chargé.',
@@ -103,6 +109,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': 'Cette extension n’est pas disponible ici. Ouvrez-la dans OpenChamber web ou desktop.',
   },
   es: {
+    'header.mainSurface.backToChat': 'Volver al chat',
+    'sessions.sidebar.header.actions.extensionPages': 'Páginas de extensiones',
     'contextRail.surface.plugin': 'Panel',
     'contextRail.surface.plugin.description': 'Panel instalado',
     'contextPanel.plugin.loadFailed': 'No se pudo cargar este panel.',
@@ -137,6 +145,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': 'Esta extensión no está disponible aquí. Ábrela en OpenChamber web o escritorio.',
   },
   ja: {
+    'header.mainSurface.backToChat': 'チャットに戻る',
+    'sessions.sidebar.header.actions.extensionPages': '拡張機能のページ',
     'contextRail.surface.plugin': 'パネル',
     'contextRail.surface.plugin.description': 'インストール済みパネル',
     'contextPanel.plugin.loadFailed': 'このパネルを読み込めませんでした。',
@@ -171,6 +181,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': 'この拡張機能はここでは利用できません。OpenChamber のウェブ版かデスクトップ版で開いてください。',
   },
   ko: {
+    'header.mainSurface.backToChat': '채팅으로 돌아가기',
+    'sessions.sidebar.header.actions.extensionPages': '확장 프로그램 페이지',
     'contextRail.surface.plugin': '패널',
     'contextRail.surface.plugin.description': '설치된 패널',
     'contextPanel.plugin.loadFailed': '이 패널을 불러오지 못했습니다.',
@@ -205,6 +217,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': '이 확장은 여기에서 사용할 수 없습니다. OpenChamber 웹 또는 데스크톱에서 여세요.',
   },
   pl: {
+    'header.mainSurface.backToChat': 'Wróć do czatu',
+    'sessions.sidebar.header.actions.extensionPages': 'Strony rozszerzeń',
     'contextRail.surface.plugin': 'Panel',
     'contextRail.surface.plugin.description': 'Zainstalowany panel',
     'contextPanel.plugin.loadFailed': 'Nie udało się wczytać tego panelu.',
@@ -239,6 +253,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': 'To rozszerzenie nie jest tu dostępne. Otwórz je w OpenChamber web lub na desktopie.',
   },
   'pt-BR': {
+    'header.mainSurface.backToChat': 'Voltar ao chat',
+    'sessions.sidebar.header.actions.extensionPages': 'Páginas de extensões',
     'contextRail.surface.plugin': 'Painel',
     'contextRail.surface.plugin.description': 'Painel instalado',
     'contextPanel.plugin.loadFailed': 'Não foi possível carregar este painel.',
@@ -273,6 +289,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': 'Esta extensão não está disponível aqui. Abra no OpenChamber web ou desktop.',
   },
   uk: {
+    'header.mainSurface.backToChat': 'Назад до чату',
+    'sessions.sidebar.header.actions.extensionPages': 'Сторінки розширень',
     'contextRail.surface.plugin': 'Панель',
     'contextRail.surface.plugin.description': 'Встановлена панель',
     'contextPanel.plugin.loadFailed': 'Цю панель не вдалося завантажити.',
@@ -307,6 +325,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': 'Це розширення тут недоступне. Відкрийте його в OpenChamber web або на десктопі.',
   },
   'zh-CN': {
+    'header.mainSurface.backToChat': '返回聊天',
+    'sessions.sidebar.header.actions.extensionPages': '扩展页面',
     'contextRail.surface.plugin': '面板',
     'contextRail.surface.plugin.description': '已安装的面板',
     'contextPanel.plugin.loadFailed': '无法加载此面板。',
@@ -341,6 +361,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': '此扩展在此处不可用。请在 OpenChamber 网页版或桌面版中打开。',
   },
   'zh-TW': {
+    'header.mainSurface.backToChat': '返回聊天',
+    'sessions.sidebar.header.actions.extensionPages': '擴充功能頁面',
     'contextRail.surface.plugin': '面板',
     'contextRail.surface.plugin.description': '已安裝的面板',
     'contextPanel.plugin.loadFailed': '無法載入此面板。',
@@ -375,6 +397,8 @@ export const pluginPanelI18n = {
     'chat.chatInput.toast.guestUnavailableHere': '此擴充功能在此處無法使用。請在 OpenChamber 網頁版或桌面版中開啟。',
   },
   tr: {
+    'header.mainSurface.backToChat': 'Sohbete dön',
+    'sessions.sidebar.header.actions.extensionPages': 'Uzantı sayfaları',
     'contextRail.surface.plugin': 'Panel',
     'contextRail.surface.plugin.description': 'Yüklü panel',
     'contextPanel.plugin.loadFailed': 'Bu panel yüklenemedi.',

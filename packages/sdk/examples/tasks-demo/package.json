@@ -15,6 +15,7 @@
         "mode": "dialog",
         "entry": "panel/attach.html"
       },
+      "page": { "entry": "panel/page.html", "title": "Tasks board" },
       "capabilities": [
         "prompt",
         "sessions",

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { hasGuestPage, requestedGuestCapabilities, resolveAttachEntry, resolveAttachMode, toPublicService, toPublicIntegration, hostMeetsOpenChamberEngine, openChamberEngineMinimum } from '@openchamber/sdk';
+import { hasGuestPage, requestedGuestCapabilities, resolveAttachEntry, resolveAttachMode, resolvePageEntry, toPublicService, toPublicIntegration, hostMeetsOpenChamberEngine, openChamberEngineMinimum } from '@openchamber/sdk';
 import { parseManifestJson } from '@openchamber/sdk/schemas';
 
 import { listRelativeGuestScriptHrefs, resolveGuestHtmlRelativePath } from './html-tokens.js';
@@ -206,6 +206,18 @@ export const inspectGuestPackage = async (packageRoot, { openchamberVersion, ski
     }
     guest.attachEntry = attachEntry;
   }
+  const pageEntry = resolvePageEntry(parsed.manifest.contributes);
+  if (pageEntry) {
+    if (!await resolveGuestAssetPath(packageRoot, pageEntry)) {
+      return { ok: false, code: 'invalid-manifest' };
+    }
+    if (!await guestBuiltScriptsReady(packageRoot, pageEntry)) {
+      return { ok: false, code: 'missing-build' };
+    }
+    guest.pageEntry = pageEntry;
+    const page = parsed.manifest.contributes.page;
+    if (page !== true && page?.title) guest.pageTitle = page.title;
+  }
   if (parsed.manifest.contributes.capabilities?.length) {
     guest.capabilities = [...parsed.manifest.contributes.capabilities];
   }
@@ -272,6 +284,8 @@ export const toPublicGuest = (guest) => {
     row.update = { version: guest.update.version };
   }
   const attach = resolveAttachMode(guest.attach);
+  if (guest.pageEntry) row.pageEntry = guest.pageEntry;
+  if (guest.pageTitle) row.pageTitle = guest.pageTitle;
   if (attach) {
     row.attach = attach;
   }

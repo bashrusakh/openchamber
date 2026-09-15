@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { guestSessionWorktreeSchema, guestStorageRequestSchema, guestStorageResultSchema, guestWorkspaceQuerySchema, guestWorkspaceSnapshotSchema } from './workspace-schemas.ts';
 
 import { OPENCHAMBER_SDK_API_VERSION, OPENCHAMBER_SDK_CHANNEL } from './api-version.ts';
 import {
@@ -97,10 +98,12 @@ const requestResultPayloadSchema = z.object({
   body: z.string().max(GUEST_REQUEST_RESPONSE_MAX),
 });
 
-const startSessionResultPayloadSchema = z.object({
+const resultWorktree = z.object({ directory: z.string(), name: z.string(), branch: z.string(), status: z.enum(['ready', 'pending', 'invalid', 'missing']) });
+const startSessionResultPayloadSchema = z.union([z.object({
   sessionId: z.string().min(1),
   sent: z.enum(START_SESSION_SENT),
-});
+  directory: z.string().optional(), worktree: resultWorktree.optional(), linked: z.boolean().optional(),
+}), z.object({ sessionId: z.null(), sent: z.literal('skipped'), directory: z.string(), worktree: resultWorktree, failure: z.enum(['bootstrap-failed', 'session-create-failed']) })]);
 
 const promptResultPayloadSchema = z.object({
   sent: z.enum(START_SESSION_SENT),
@@ -136,6 +139,8 @@ const generateResultPayloadSchema = z.object({
 });
 
 const hostResultPayloadSchema = z.union([
+  guestStorageResultSchema,
+  guestWorkspaceSnapshotSchema,
   startSessionResultPayloadSchema,
   requestResultPayloadSchema,
   promptResultPayloadSchema,
@@ -202,7 +207,7 @@ const readyPayloadSchema = z.object({
   locale: z.string().min(1),
   directory: z.string().nullable(),
   session: sessionSnapshotSchema,
-  surface: z.enum(['panel', 'dialog']),
+  surface: z.enum(['panel', 'dialog', 'page']),
   connection: guestConnectionSchema,
   settings: guestSettingsSchema,
   item: guestItemSchema,
@@ -252,6 +257,7 @@ const hostResultSchema = z.object({
 });
 
 export const hostMessageSchema = z.union([
+  z.object({ ...envelope, type: z.literal('workspace'), payload: z.object({ subscriptionId: z.string().min(1).max(128), snapshot: guestWorkspaceSnapshotSchema }) }),
   z.object({
     ...envelope,
     type: z.literal('ready'),
@@ -315,6 +321,11 @@ export const hostMessageSchema = z.union([
 const filePathSchema = z.string().min(1).max(GUEST_FILE_PATH_MAX).refine(isGuestFilePath);
 
 export const guestMessageSchema = z.discriminatedUnion('type', [
+  z.object({ ...envelope, type: z.literal('workspace-read'), id: z.string().min(1), payload: guestWorkspaceQuerySchema }),
+  z.object({ ...envelope, type: z.literal('workspace-subscribe'), id: z.string().min(1), payload: z.object({ subscriptionId: z.string().min(1).max(128), query: guestWorkspaceQuerySchema }) }),
+  z.object({ ...envelope, type: z.literal('workspace-unsubscribe'), id: z.string().min(1), payload: z.object({ subscriptionId: z.string().min(1).max(128) }) }),
+  z.object({ ...envelope, type: z.literal('storage'), id: z.string().min(1), payload: guestStorageRequestSchema }),
+  z.object({ ...envelope, type: z.literal('open-session'), id: z.string().min(1), payload: z.object({ sessionId: z.string().min(1).max(1024) }) }),
   z.object({
     ...envelope,
     type: z.literal('hello'),
@@ -372,7 +383,9 @@ export const guestMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('start-session'),
     id: z.string().min(1),
     payload: attachPayloadSchema.extend({
-      worktree: z.boolean().optional(),
+      worktree: guestSessionWorktreeSchema.optional(),
+      projectId: z.string().trim().min(1).max(1024).optional(),
+      navigation: z.enum(['preserve', 'open']).optional(),
     }),
   }),
   z.object({

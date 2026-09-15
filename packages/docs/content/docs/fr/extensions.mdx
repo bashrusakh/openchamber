@@ -5,6 +5,10 @@ description: Installe des extensions tierces dans OpenChamber, approuve ce qu'el
 
 # Extensions
 
+Une extension peut proposer une page plein écran, par exemple un tableau de tâches. Ouvre-la depuis Pages des extensions au-dessus des sessions. Le menu apparaît uniquement pour les pages activées et approuvées. Choisir un chat, recharger, mettre en pause, supprimer ou changer de serveur ferme la page. L'extension ne peut pas l'ouvrir elle-même.
+
+Ses propres données restent sur le serveur connecté et sont supprimées au retrait de l'extension. Un tableau peut suivre les sessions de plusieurs projets et worktrees sans créer de fichiers dans ton projet.
+
 Utilise **Paramètres → Extensions** pour ajouter à OpenChamber des panneaux créés par d'autres personnes. Une extension est une petite page placée dans la barre de droite, à côté des panneaux intégrés. Elle peut t'afficher des données d'un autre service, attacher une tâche au chat et, si tu l'autorises, démarrer des sessions, envoyer des prompts ou lire des fichiers.
 
 Les extensions fonctionnent dans OpenChamber web et desktop. VS Code et l'app mobile ne les chargent pas encore. Ce n'est pas la même chose que les plugins OpenCode.
@@ -29,7 +33,7 @@ Une installation depuis un dossier s'exécute directement depuis ce dossier, don
 Afficher un panneau et lire quel projet et quelle session sont ouverts ne demande aucune autorisation. Tout ce qui agit en ton nom en demande une, et tu vois toute la liste une seule fois, à l'installation :
 
 - **Envoyer des messages dans tes sessions** : écrit et envoie des prompts au modèle, ce qui coûte des jetons et peut lancer des outils.
-- **Créer des sessions et des worktrees** : dans le projet courant.
+- **Accéder aux projets et sessions** : lister les projets, worktrees et états des sessions, puis créer et ouvrir des sessions dans les projets enregistrés. Le contenu des conversations reste privé.
 - **Lire et écrire les fichiers du projet** : n'importe quel fichier du projet ouvert.
 - **Lire et écrire des fichiers hors du projet** : seulement les emplacements listés dans la boîte de dialogue.
 - **Utiliser ton Small Model** : génération de texte ponctuelle en dehors de tes sessions, avec le modèle défini dans Paramètres → Sessions → Small Model. Coûte des tokens.

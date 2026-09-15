@@ -6,15 +6,24 @@ import type {
   PromptResult,
   StartSessionRequest,
   StartSessionResult,
+  GuestWorktree,
 } from '@openchamber/sdk';
-import { clampPromptRequest, clampStartSessionRequest } from '@openchamber/sdk';
+import { HostRequestError, clampPromptRequest, clampStartSessionRequest } from '@openchamber/sdk';
 
 import type { I18nKey, I18nParams } from '@/lib/i18n';
 import { generateBranchSlug } from '@/lib/git/branchNameGenerator';
 import { buildLinkedGuestIssue, type LinkedGuestIssue } from '@/lib/linkedIssues';
 import { parseModelIdentifier } from '@/lib/modelIdentifier';
 import { modelVariantNames } from '@/lib/modelVariants';
-import { createWorktreeSessionForNewBranch } from '@/lib/worktreeSessionCreator';
+import { resolveProjectRef } from '@/lib/worktreeSessionCreator';
+import { createWorktreeWithDefaults } from '@/lib/worktrees/worktreeCreate';
+import { waitForWorktreeBootstrap } from '@/lib/worktrees/worktreeBootstrap';
+import { getWorktreeSetupWaitEnabled } from '@/lib/openchamberConfig';
+import { resolveWorktreeSetupCommands } from '@/lib/sharedTrustConfirmation';
+import { guestProject, guestProjectWorktrees } from './workspace';
+import { normalizePath } from '@/lib/pathNormalization';
+import { subscribeRuntimeEndpointChanged } from '@/lib/runtime-switch';
+import type { WorktreeMetadata } from '@/types/worktree';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useSelectionStore } from '@/sync/selection-store';
@@ -169,11 +178,7 @@ const resolveDefaultVariant = (providerID: string, modelID: string): string | un
   return undefined;
 };
 
-const sendGuestFirstMessage = async (
-  sessionId: string,
-  directory: string,
-  text: string,
-): Promise<'sent' | 'no-model' | 'failed'> => {
+const captureGuestSendSelection = () => {
   const configState = useConfigStore.getState();
   const lastUsedProvider = useSelectionStore.getState().lastUsedProvider;
   const defaultModel = resolveDefaultModelSelection();
@@ -181,18 +186,28 @@ const sendGuestFirstMessage = async (
   const modelID = defaultModel?.modelID || configState.currentModelId || lastUsedProvider?.modelID;
   const agentName = resolveDefaultAgentName() || configState.currentAgentName || undefined;
   if (!providerID || !modelID) {
-    return 'no-model';
+    return null;
   }
+  return { providerID, modelID, agentName, variant: resolveDefaultVariant(providerID, modelID) };
+};
+
+const sendGuestFirstMessage = async (
+  sessionId: string,
+  directory: string,
+  text: string,
+  selection = captureGuestSendSelection(),
+): Promise<'sent' | 'no-model' | 'failed'> => {
+  if (!selection) return 'no-model';
   try {
     await useSessionUIStore.getState().sendMessage(
       text,
-      providerID,
-      modelID,
-      agentName,
+      selection.providerID,
+      selection.modelID,
+      selection.agentName,
       undefined,
       undefined,
       undefined,
-      resolveDefaultVariant(providerID, modelID),
+      selection.variant,
       undefined,
       { sessionId, directory },
     );
@@ -343,60 +358,115 @@ export const startGuestSession = async (args: {
   request: StartSessionRequest;
   directory: string | null;
   t: TranslateFn;
+  assertAuthorized: () => void;
 }): Promise<StartSessionResult | null> => {
-  const plan = planStartGuestSession(args.request, args.directory, Date.now());
+  args.assertAuthorized();
+  const project = args.request.projectId ? guestProject(args.request.projectId) : args.directory ? resolveProjectRef(args.directory) : null;
+  const target = args.request.worktree;
+  let directory = args.request.projectId ? project?.path ?? null : args.directory;
+  let metadata: WorktreeMetadata | undefined;
+  if (target && target !== true && target.kind === 'existing') {
+    if (!project) throw new HostRequestError('NO_DIRECTORY', 'Project is not registered.');
+    metadata = guestProjectWorktrees(project.path).find((entry) => normalizePath(entry.path) === normalizePath(target.directory));
+    if (!metadata) throw new HostRequestError('NOT_FOUND', 'Worktree does not belong to this project or has not loaded yet.');
+    if (metadata.worktreeStatus === 'missing' || metadata.worktreeStatus === 'invalid' || metadata.worktreeStatus === 'not-a-repo') throw new HostRequestError('HOST_REJECTED', 'Worktree is unavailable.');
+    directory = metadata.path;
+  }
+  const createNew = target === true || Boolean(target && target.kind === 'new');
+  const plan = planStartGuestSession({ ...args.request, worktree: createNew }, directory, Date.now());
   if (!plan.ok) {
     toast.error(args.t('contextPanel.plugin.startSession.noProject'));
     return null;
   }
 
-  const result = await runStartGuestSession(plan, {
-    createSession: async (title, directory) => {
-      const session = await sessionActions.createSession(title, directory, null);
-      if (!session?.id) {
-        return null;
-      }
-      return { id: session.id, directory: session.directory ?? directory };
-    },
-    createWorktree: async (directory, branch, kind) => {
-      const created = await createWorktreeSessionForNewBranch(
-        directory,
-        `${branch}-${generateBranchSlug()}`,
-        undefined,
-        { kind, returnAfterDirectoryCreated: true },
-      );
-      if (!created?.id) {
-        return null;
-      }
-      return { id: created.id, directory: created.path };
-    },
-    initializeSession: (sessionId) => {
-      void sessionActions.updateSessionTitle(sessionId, plan.title).catch(() => undefined);
-      try {
+  const navigation = args.request.navigation ?? 'preserve';
+  const sendSelection = captureGuestSendSelection();
+  let cancelled = false;
+  const unsubscribe = subscribeRuntimeEndpointChanged(() => { cancelled = true; });
+  const assertCurrent = () => {
+    if (cancelled) throw new HostRequestError('DISCONNECTED', 'The connected server changed.');
+    args.assertAuthorized();
+  };
+  let failure: 'bootstrap-failed' | 'session-create-failed' = 'session-create-failed';
+  let linked = true;
+  let createdDirectory = directory ?? '';
+  const worktreeResult = (): GuestWorktree | undefined => {
+    if (!metadata) return undefined;
+    const latest = project ? guestProjectWorktrees(project.path).find((entry) => entry.path === metadata?.path) ?? metadata : metadata;
+    return { directory: latest.path, name: latest.name ?? latest.label, branch: latest.branch,
+      status: latest.worktreeStatus === 'not-a-repo' ? 'invalid' : latest.worktreeStatus ?? 'ready' };
+  };
+  const createTargetSession = async (title: string, directory: string): Promise<CreatedSession | null> => {
+    if (metadata && project) {
+      failure = 'bootstrap-failed';
+      const wait = await getWorktreeSetupWaitEnabled(project);
+      assertCurrent();
+      if (wait) await waitForWorktreeBootstrap(metadata.path);
+    }
+    assertCurrent();
+    failure = 'session-create-failed';
+    const session = await sessionActions.createSession(title, directory, null, undefined, undefined, navigation);
+    assertCurrent();
+    if (!session) return null;
+    createdDirectory = session.directory ?? directory;
+    if (metadata) {
+      const latest = project ? guestProjectWorktrees(project.path).find((entry) => entry.path === metadata?.path) : undefined;
+      metadata = { ...metadata, worktreeStatus: latest?.worktreeStatus ?? metadata.worktreeStatus };
+      useSessionUIStore.getState().setWorktreeMetadata(session.id, metadata);
+    }
+    return { id: session.id, directory: createdDirectory };
+  };
+  try {
+    const result = await runStartGuestSession(plan, {
+      createSession: createTargetSession,
+      createWorktree: async (_directory, branch, kind) => {
+        if (!project) throw new HostRequestError('NO_DIRECTORY', 'Project is not registered.');
+        const custom = target && target !== true && target.kind === 'new' ? target : undefined;
+        const name = custom?.name ?? `${branch}-${generateBranchSlug()}`;
+        const setupCommands = await resolveWorktreeSetupCommands(project);
+        assertCurrent();
+        metadata = await createWorktreeWithDefaults(project, {
+          preferredName: name, mode: 'new', branchName: name, worktreeName: name,
+          startRef: custom?.baseBranch, setupCommands, returnAfterDirectoryCreated: true,
+        });
+        assertCurrent();
+        metadata = { ...metadata, kind, createdFromBranch: custom?.baseBranch };
+        return createTargetSession(plan.title, metadata.path);
+      },
+      initializeSession: (sessionId) => {
         useSessionUIStore.getState().initializeNewOpenChamberSession(sessionId, useConfigStore.getState().agents);
-      } catch {
-        // ignore
-      }
-    },
-    setLinkedIssue: async (sessionId, directory, issue) => {
-      await sessionActions.setLinkedIssue(sessionId, directory, issue, true).catch(() => undefined);
-    },
-    sendFirstMessage: sendGuestFirstMessage,
-    closeSurfaces: () => {
-      useUIStore.getState().closeMainSurfaces();
-    },
-  });
+      },
+      setLinkedIssue: async (sessionId, directory, issue) => {
+        assertCurrent();
+        await sessionActions.setLinkedIssue(sessionId, directory, issue, true).catch(() => { linked = false; });
+        assertCurrent();
+      },
+      sendFirstMessage: (sessionId, directory, text) => {
+        assertCurrent();
+        return sendGuestFirstMessage(sessionId, directory, text, sendSelection);
+      },
+      closeSurfaces: () => {
+        if (navigation === 'open') useUIStore.getState().closeMainSurfaces();
+      },
+    });
 
-  if (!result.ok) {
-    toast.error(args.t('contextPanel.plugin.startSession.failed'));
-    return null;
+    assertCurrent();
+    if (!result.ok) {
+      const worktree = worktreeResult();
+      if (worktree) return { sessionId: null, sent: 'skipped', directory: worktree.directory, worktree, failure };
+      toast.error(args.t('contextPanel.plugin.startSession.failed'));
+      return null;
+    }
+    if (result.sent === 'no-model') toast.error(args.t('contextPanel.plugin.startSession.noModel'));
+    else if (result.sent === 'failed') toast.error(args.t('contextPanel.plugin.startSession.sendFailed'));
+    else toast.success(args.t('contextPanel.plugin.startSession.created'));
+    return { sessionId: result.sessionId, sent: result.sent, directory: createdDirectory, worktree: worktreeResult(), linked };
+  } catch (error) {
+    assertCurrent();
+    const worktree = worktreeResult();
+    if (worktree) return { sessionId: null, sent: 'skipped', directory: worktree.directory, worktree, failure };
+    throw error;
+  } finally {
+    unsubscribe();
   }
-  if (result.sent === 'no-model') {
-    toast.error(args.t('contextPanel.plugin.startSession.noModel'));
-  } else if (result.sent === 'failed') {
-    toast.error(args.t('contextPanel.plugin.startSession.sendFailed'));
-  } else {
-    toast.success(args.t('contextPanel.plugin.startSession.created'));
-  }
-  return { sessionId: result.sessionId, sent: result.sent };
 };

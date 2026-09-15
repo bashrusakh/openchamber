@@ -168,7 +168,43 @@ Access tokens never appear in `ready` or in request results.
 
 `data` is plain JSON (`string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }`). It is stored with the chip and the session snapshot and returned unchanged when the user clicks the chip. `JSON.stringify(data).length` must stay within `GUEST_ATTACH_DATA_MAX` (16 000): `clampAttachRequest` silently drops a larger `data`, and the host schema refuses the whole message if it arrives over the limit.
 
-`StartSessionRequest` = attach fields + optional `worktree?: boolean`.
+`StartSessionRequest` adds `projectId?`, `navigation?: 'preserve' | 'open'`, and `worktree?` to the attach fields. Navigation defaults to `preserve`. Without `projectId`, the current directory is used. With one, creation targets that registered project without switching the app first.
+
+`worktree` is `false` or omitted for the target directory, `true` for a generated new worktree, `{ kind: 'existing', directory }` for a known worktree belonging to the project, or `{ kind: 'new', name?, baseBranch? }`. `name` names both the branch and worktree. Omitted name/base use the host's normal defaults. First-message model/agent/variant selection is captured when the call starts.
+
+A created session returns `{ sessionId, directory, sent, linked, worktree? }`. `linked: false` means the session exists but saving the attached item failed. If a worktree was created but bootstrap or session creation failed, the result is `{ sessionId: null, sent: 'skipped', directory, worktree, failure }`, where `failure` is `bootstrap-failed` or `session-create-failed`. The worktree is retained. Inspect the result before offering Retry, which would otherwise create another worktree. The call waits up to 180 seconds; a timeout does not prove the server rolled back.
+
+### Workspace lists and subscriptions
+
+These methods extend the existing `sessions` capability. They expose registered projects on the connected server, session metadata and live state, and known worktrees. They do not grant conversation content or file access.
+
+| Method | Result |
+| --- | --- |
+| `listProjects()` | `Promise<GuestProjectsSnapshot>` |
+| `listWorktrees(projectId)` | `Promise<GuestWorktreesSnapshot>` |
+| `listSessions(projectId)` | `Promise<GuestSessionsSnapshot>` including known archived sessions |
+| `onProjects(listener)` | `Promise<() => void>` |
+| `onWorktrees(projectId, listener)` | `Promise<() => void>` |
+| `onSessions(projectId, listener)` | `Promise<() => void>` |
+| `openSession(sessionId)` | `Promise<void>`, explicitly opens the chat and closes the page |
+
+Await subscription registration to handle refusal, then retain its returned unsubscribe function. Each subscription sends an initial snapshot, then changes. At most 32 subscriptions per iframe. `dispose()` releases them all. Unmount, disable, uninstall and runtime switch also release host subscriptions.
+
+Snapshots carry `state: 'loading' | 'ready' | 'error'`; session snapshots also carry per-directory `coverage`. Loading/error may retain data. Only `ready` establishes complete empty success. Reads use existing shared stores and hydration, never a git scan per extension request.
+
+Projects contain `id`, `name`, `directory`. Worktrees contain `directory`, `name`, `branch`, and `status: 'ready' | 'pending' | 'invalid' | 'missing'`. Session records contain `id`, `title`, `projectId`, `directory`, `parentId`, `createdAt`, `updatedAt`, `archivedAt`, `worktree`, `activity`, `outcome`, and `items`. Item references contain only this extension's `id` and optional `data`.
+
+`activity` is `unknown`, `idle`, `running`, `retrying`, `waiting-permission`, or `waiting-question`. `outcome` is the last observed `completed` or `failed` turn, or `null` when unknown or working. Outcomes are in memory for the latest 2,000 observed sessions, reset on runtime switch, and are not reconstructed from persisted history. A later idle event preserves an observed failure until another run starts. `completed` never means the extension's task is Done. Blocking-request contents and approve/reply actions are not exposed.
+
+### Extension storage
+
+`host.storage.get(key)` returns JSON or `undefined` for a missing key. JSON `null` is a stored value. `set(key, value)` and `delete(key)` return `Promise<void>`; `keys()` returns `Promise<string[]>` in sorted order.
+
+Storage belongs to the extension on the connected server and needs no extra capability. Keys contain 1 to 128 characters, each serialized value is at most 64 KiB UTF-8, and the complete namespace is at most 2 MiB and 2,000 keys. Use a project ID in your key when data belongs to one project. Concurrent operations serialize on the server, writes are atomic, and read/write failures preserve existing data. Uninstall deletes the namespace, including for folder installs.
+
+### Full-screen pages
+
+`contributes.page: true` reuses `panel.entry`; `{ entry: 'panel/page.html', title?: 'Board' }` uses separate package HTML. It requires `panel.entry` and the same installed/approved/enabled state as the panel. The sidebar's Extension pages menu is the only page opener; `openSurface` does not open it. `ctx.surface` is `page`, `close()` closes it, and reload or runtime switch returns to chat. Pages use the existing sandbox and capabilities on web/desktop. VS Code and mobile remain unsupported.
 
 `sent` **values** (`startSession` / `prompt`): `sent` | `no-model` | `skipped` | `failed`. After `no-model` / `failed` on `startSession`, the session still exists.
 
@@ -490,5 +526,4 @@ host.onConnection(async (connection) => {
 | [GUEST_SERVICES.md](https://github.com/openchamber/openchamber/blob/main/packages/sdk/GUEST_SERVICES.md)                                                                                                                                                                                                                       | Local service contract              |
 | [src/ui/DOCUMENTATION.md](https://github.com/openchamber/openchamber/blob/main/packages/sdk/src/ui/DOCUMENTATION.md)                                                                                                                                                                                                       | UI kit invariants                 |
 | [sdk.mdx](https://github.com/openchamber/openchamber/blob/main/packages/docs/content/docs/sdk.mdx) / [sdk/host.mdx](https://github.com/openchamber/openchamber/blob/main/packages/docs/content/docs/sdk/host.mdx) / [sdk/ui.mdx](https://github.com/openchamber/openchamber/blob/main/packages/docs/content/docs/sdk/ui.mdx) | Author-facing website pages       |
-
 

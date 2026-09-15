@@ -1,4 +1,10 @@
 import {
+  HostRequestError,
+  type GuestStorageRequest,
+  type GuestStorageResult,
+  type GuestWorkspaceQuery,
+  type GuestWorkspaceSnapshot,
+  type GuestWorkspaceSubscription,
   GUEST_SESSION_AGENT_MAX,
   GUEST_SESSION_MODEL_MAX,
   OPENCHAMBER_SDK_API_VERSION,
@@ -32,6 +38,11 @@ import type { GuestRequestProxyResult } from '@/lib/guests/oauth';
 import { isContextPanelMode, type ContextPanelMode } from '@/lib/surfaces/modes';
 
 type HostBridgeEffects = {
+  workspaceRead: (query: GuestWorkspaceQuery) => GuestWorkspaceSnapshot;
+  workspaceSubscribe: (subscription: GuestWorkspaceSubscription) => void;
+  workspaceUnsubscribe: (subscriptionId: string) => void;
+  storage: (request: GuestStorageRequest) => Promise<GuestStorageResult>;
+  openSession: (sessionId: string) => void;
   toast: (kind: ToastKind, message: string) => void;
   openUrl: (url: string) => Promise<boolean>;
   openSurface: (mode: ContextPanelMode) => void;
@@ -223,7 +234,13 @@ export const answerGuestMessage = async (
   message: GuestMessage,
   effects: HostBridgeEffects,
 ): Promise<HostMessage | null> => {
+  try {
   switch (message.type) {
+    case 'workspace-read': return okResult(message.id, effects.workspaceRead(message.payload));
+    case 'workspace-subscribe': effects.workspaceSubscribe(message.payload); return okResult(message.id);
+    case 'workspace-unsubscribe': effects.workspaceUnsubscribe(message.payload.subscriptionId); return okResult(message.id);
+    case 'storage': return okResult(message.id, await effects.storage(message.payload));
+    case 'open-session': effects.openSession(message.payload.sessionId); return okResult(message.id);
     case 'hello':
       return null;
     case 'toast':
@@ -340,5 +357,9 @@ export const answerGuestMessage = async (
     case 'resolve-result':
       effects.resolveResult(message.id, message.payload);
       return null;
+  }
+  } catch (error) {
+    if (message.type === 'hello') return null;
+    return errorResult(message.id, error instanceof HostRequestError ? error.message : 'Extension operation failed.', error instanceof HostRequestError ? error.code : 'HOST_REJECTED');
   }
 };

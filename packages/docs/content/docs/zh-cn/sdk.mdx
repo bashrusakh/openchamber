@@ -57,6 +57,7 @@ OpenChamber 会读取清单，并弹出一个对话框列出扩展所请求的�
         "entry": "panel/index.html"
       },
       "attach": "dialog",
+      "page": true,
       "capabilities": ["prompt", "sessions"],
       "integration": {
         "name": "Acme",
@@ -88,7 +89,11 @@ OpenChamber 会读取清单，并弹出一个对话框列出扩展所请求的�
 - `{ "mode": "dialog", "entry": "panel/attach.html" }` 在窗口中打开你的另一个页面，这样选择器就不必和侧栏面板共用代码
 - 省略它，扩展就不会出现在该菜单中
 
-你的页面可以通过 `ctx.surface`（`panel` 或 `dialog`）判断自己在哪里。当用户点击你之前附加的条目时，同一界面会再次打开，`ctx.item` 指向该条目（包括你存在上面的任何 `data`），因此你可以显示它的详情而不是列表。从 + 菜单或侧栏图标打开时，`ctx.item` 为 `null`。
+`ctx.surface` 为 `panel`、`dialog` 或 `page`。点击附加条目时，`ctx.item` 包含其数据；其他情况下为 `null`。
+
+`contributes.page: true` 将面板作为全屏页面加入会话列表上方的扩展页面菜单。`{ "entry": "panel/page.html", "title": "Board" }` 使用独立 HTML 和可选标题。仍需 `panel.entry`，并使用相同沙箱和权限。只有用户可以打开页面。重新加载、暂停、移除或切换服务器时会关闭页面。
+
+看板可以使用 `host.storage`，以及项目、worktree、会话列表和实时状态。`startSession` 可以选择其他项目而不关闭看板。详见 [Host API](/sdk/host/)。
 
 `contributes.integration` 可选。它会在 设置 → 集成 中添加一张卡片，用户在那里连接账户。见[账户与网络](#账户与网络)。
 
@@ -101,7 +106,7 @@ OpenChamber 会读取清单，并弹出一个对话框列出扩展所请求的�
 | 能力 | 允许的操作 |
 | --- | --- |
 | `prompt` | 向用户的会话发送消息（`prompt({ send: true })`、带 `text` 的 `startSession`） |
-| `sessions` | 创建会话和 worktree（`startSession`） |
+| `sessions` | 列出项目、worktree 和会话状态；在已添加的项目中创建和打开会话 |
 | `files` | 读写打开项目中的文件（使用相对路径的 `readFile`、`writeFile`、`listDir`、`stat`） |
 | `model` | 使用用户的 Small Model 进行一次性文本生成（`generate`），不在任何会话中 |
 
