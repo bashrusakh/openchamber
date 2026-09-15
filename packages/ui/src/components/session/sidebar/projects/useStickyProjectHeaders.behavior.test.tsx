@@ -356,11 +356,14 @@ describe('sticky sentinel observer lifecycle', () => {
     }
   });
 
-  test('chooses the latest above-root project in resolver order, not observer callback order', async () => {
+  test('chooses the latest above-root project in current DOM order, not resolver or callback order', async () => {
     const fixture = makeFixture();
     const projectA = makeSentinel();
     const projectB = makeSentinel();
     const projectC = makeSentinel();
+    projectA.dataset.projectId = 'project-a';
+    projectB.dataset.projectId = 'project-b';
+    projectC.dataset.projectId = 'project-c';
     fixture.targetsRef.current.set('project-a', projectA);
     fixture.targetsRef.current.set('project-b', projectB);
     fixture.targetsRef.current.set('project-c', projectC);
@@ -376,13 +379,18 @@ describe('sticky sentinel observer lifecycle', () => {
       ));
       const intersectionObserver = latestIntersectionObserver();
 
+      fixture.scrollRoot.append(projectC, projectA, projectB);
+      expect([...fixture.targetsRef.current.keys()]).toEqual(['project-a', 'project-b', 'project-c']);
+      expect([...fixture.scrollRoot.querySelectorAll<HTMLElement>('[data-project-id]')]
+        .map((element) => element.dataset.projectId))
+        .toEqual(['project-c', 'project-a', 'project-b']);
       await act(async () => intersectionObserver.emitEntries([
-        { element: projectC, isIntersecting: false, top: 70 },
-        { element: projectA, isIntersecting: false, top: 20 },
-        { element: projectB, isIntersecting: false, top: 45 },
+        { element: projectB, isIntersecting: false, top: 50 },
+        { element: projectA, isIntersecting: false, top: 50 },
+        { element: projectC, isIntersecting: false, top: 50 },
       ]));
 
-      expect(stickyKeys(fixture.host)).toEqual(['project-c']);
+      expect(stickyKeys(fixture.host)).toEqual(['project-b']);
     } finally {
       await unmountFixture(fixture);
     }

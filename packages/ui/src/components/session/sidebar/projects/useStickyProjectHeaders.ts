@@ -32,13 +32,23 @@ const compareStickySentinels = (
   first: StickySentinelObservation,
   second: StickySentinelObservation,
 ): number => {
-  // The resolver order is the document order for the project row model. The
-  // geometry and key tie-breakers keep selection deterministic for resolvers
-  // that cannot distinguish two candidates by order.
+  // The current DOM order is authoritative for sentinels rendered in the
+  // stable scrolling root. Geometry and key tie-breakers keep selection
+  // deterministic for sentinels that need the resolver-order fallback.
   if (first.order !== second.order) return first.order - second.order;
   if (first.top !== second.top) return first.top - second.top;
   if (first.key === second.key) return 0;
   return first.key < second.key ? -1 : 1;
+};
+
+const STICKY_SENTINEL_SELECTOR = '[data-project-id], [data-sidebar-activity-start]';
+
+const getCurrentSentinelDomOrder = (root: HTMLElement): ReadonlyMap<Element, number> => {
+  const order = new Map<Element, number>();
+  root.querySelectorAll<HTMLElement>(STICKY_SENTINEL_SELECTOR).forEach((element, index) => {
+    order.set(element, index);
+  });
+  return order;
 };
 
 const selectLatestStuckHeader = (
@@ -97,10 +107,13 @@ export const useStickySentinelObserver = (args: StickySentinelObserverArgs): Set
 
     const resolveCurrentSentinels = (): Map<Element, { key: string; order: number }> => {
       const currentSentinels = new Map<Element, { key: string; order: number }>();
-      let order = 0;
+      const currentDomOrder = getCurrentSentinelDomOrder(root);
+      let fallbackOrder = currentDomOrder.size;
       for (const [key, element] of resolveSentinels()) {
-        if (element && root.contains(element)) currentSentinels.set(element, { key, order });
-        order += 1;
+        if (element && root.contains(element)) {
+          const order = currentDomOrder.get(element) ?? fallbackOrder++;
+          currentSentinels.set(element, { key, order });
+        }
       }
       return currentSentinels;
     };
