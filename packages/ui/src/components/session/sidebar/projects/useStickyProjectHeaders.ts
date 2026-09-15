@@ -36,14 +36,13 @@ export const useStickySentinelObserver = (args: StickySentinelObserverArgs): Set
   const [stuckHeaders, setStuckHeaders] = React.useState<Set<string>>(new Set());
 
   React.useEffect(() => {
+    clearStickyHeaders(setStuckHeaders);
     if (!enabled) {
-      clearStickyHeaders(setStuckHeaders);
       return;
     }
 
     const root = rootRef.current;
     if (!root) {
-      clearStickyHeaders(setStuckHeaders);
       return;
     }
 
@@ -74,24 +73,33 @@ export const useStickySentinelObserver = (args: StickySentinelObserverArgs): Set
 
     const syncObservedSentinels = (): void => {
       if (disposed) return;
+      if (rootRef.current !== root) {
+        observedSentinels = new Map();
+        clearStickyHeaders(setStuckHeaders);
+        return;
+      }
 
       const currentSentinels = new Map<Element, string>();
-      const currentKeys = new Set<string>();
       for (const [key, element] of resolveSentinels()) {
         if (element && root.contains(element)) {
           currentSentinels.set(element, key);
-          currentKeys.add(key);
         }
       }
 
+      const replacedKeys = new Set<string>();
       for (const [element, key] of observedSentinels) {
-        if (currentSentinels.get(element) !== key) intersectionObserver?.unobserve(element);
+        const currentKey = currentSentinels.get(element);
+        if (currentKey === key) continue;
+        intersectionObserver?.unobserve(element);
+        // An element reused for another key is a real key replacement. A key
+        // whose virtual element simply disappeared is handled below as an
+        // eviction and keeps its last known sticky state.
+        if (currentKey !== undefined) replacedKeys.add(key);
       }
       for (const [element, key] of currentSentinels) {
         if (observedSentinels.get(element) !== key) intersectionObserver?.observe(element);
       }
 
-      const replacedKeys = new Set<string>();
       const initiallyStuckKeys = new Set<string>();
       let rootTop: number | null = null;
       for (const [element, key] of currentSentinels) {
@@ -104,10 +112,8 @@ export const useStickySentinelObserver = (args: StickySentinelObserverArgs): Set
       setStuckHeaders((previous) => {
         let changed = false;
         const next = new Set(previous);
-        for (const key of previous) {
-          if (currentKeys.has(key) && !replacedKeys.has(key)) continue;
-          next.delete(key);
-          changed = true;
+        for (const key of replacedKeys) {
+          if (next.delete(key)) changed = true;
         }
         for (const key of initiallyStuckKeys) {
           if (next.has(key)) continue;
@@ -133,6 +139,7 @@ export const useStickySentinelObserver = (args: StickySentinelObserverArgs): Set
       disposed = true;
       mutationObserver?.disconnect();
       intersectionObserver?.disconnect();
+      clearStickyHeaders(setStuckHeaders);
     };
   }, [enabled, refreshKey, resolveSentinels, rootRef]);
 

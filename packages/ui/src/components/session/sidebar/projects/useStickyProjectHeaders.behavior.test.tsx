@@ -113,6 +113,33 @@ const ActivityObserverHarness: React.FC<ObserverHarnessProps> = ({ rootRef, enab
   return <output data-sticky-state={[...stuckHeaders].join(',')} />;
 };
 
+type AttachedRootObserverHarnessProps = {
+  rootRef: React.MutableRefObject<HTMLElement | null>;
+  enabled: boolean;
+};
+
+const AttachedRootObserverHarness: React.FC<AttachedRootObserverHarnessProps> = ({ rootRef, enabled }) => {
+  const resolveSentinels = React.useCallback((): ReadonlyMap<string, HTMLElement | null> => {
+    const activeNowSentinel = rootRef.current?.querySelector<HTMLElement>('[data-sidebar-activity-start="active-now"]');
+    return activeNowSentinel
+      ? new Map([['active-now', activeNowSentinel]])
+      : new Map<string, HTMLElement | null>();
+  }, [rootRef]);
+  const stuckHeaders = useStickySentinelObserver({
+    enabled,
+    rootRef,
+    resolveSentinels,
+  });
+  return (
+    <>
+      <div ref={(element) => { rootRef.current = element; }}>
+        <div data-sidebar-activity-start="active-now" />
+      </div>
+      <output data-sticky-state={[...stuckHeaders].join(',')} />
+    </>
+  );
+};
+
 type ProjectObserverHarnessProps = ObserverHarnessProps & {
   targetsRef: React.MutableRefObject<Map<string, HTMLDivElement | null>>;
   isDesktopShellRuntime: boolean;
@@ -221,6 +248,33 @@ describe('sticky sentinel observer lifecycle', () => {
     }
   });
 
+  test('reads a scroll root ref attached during commit', async () => {
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    const rootRef: React.MutableRefObject<HTMLElement | null> = { current: null };
+    document.body.append(host);
+    try {
+      await act(async () => root.render(
+        <AttachedRootObserverHarness
+          rootRef={rootRef}
+          enabled
+        />,
+      ));
+
+      const intersectionObserver = latestIntersectionObserver();
+      const scrollRoot = rootRef.current;
+      if (!scrollRoot) throw new Error('Scroll root was not attached');
+      const sentinel = scrollRoot.querySelector<HTMLElement>('[data-sidebar-activity-start="active-now"]');
+      if (!sentinel) throw new Error('Activity sentinel was not rendered');
+      expect(intersectionObserver.observed.has(sentinel)).toBe(true);
+      await act(async () => intersectionObserver.emit(sentinel, false, 50));
+      expect(stickyState(host)).toBe('active-now');
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   test('observes active-now after it mounts behind a long prefix', async () => {
     const fixture = makeFixture();
     try {
@@ -242,6 +296,87 @@ describe('sticky sentinel observer lifecycle', () => {
 
       expect(intersectionObserver.observed.has(activeNowSentinel)).toBe(true);
       await act(async () => intersectionObserver.emit(activeNowSentinel, false, 50));
+      expect(stickyState(fixture.host)).toBe('active-now');
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+
+  test('retains a stuck project while virtualization evicts and replaces other sentinels', async () => {
+    const fixture = makeFixture();
+    const projectA = makeSentinel();
+    const projectB = makeSentinel();
+    fixture.targetsRef.current.set('project-a', projectA);
+    fixture.targetsRef.current.set('project-b', projectB);
+    fixture.scrollRoot.append(projectA, projectB);
+    try {
+      await act(async () => fixture.root.render(
+        <ProjectObserverHarness
+          rootRef={fixture.rootRef}
+          targetsRef={fixture.targetsRef}
+          enabled
+          isDesktopShellRuntime
+        />,
+      ));
+      const intersectionObserver = latestIntersectionObserver();
+      expect(intersectionObserver.observed.size).toBe(2);
+
+      await act(async () => intersectionObserver.emit(projectA, false, 50));
+      expect(stickyState(fixture.host)).toBe('project-a');
+
+      fixture.targetsRef.current.delete('project-a');
+      projectA.remove();
+      await act(async () => latestMutationObserver().trigger());
+
+      expect(intersectionObserver.observed.has(projectA)).toBe(false);
+      expect(intersectionObserver.observed.has(projectB)).toBe(true);
+      expect(stickyState(fixture.host)).toBe('project-a');
+
+      const replacementB = makeSentinel();
+      fixture.targetsRef.current.set('project-b', replacementB);
+      projectB.remove();
+      fixture.scrollRoot.append(replacementB);
+      await act(async () => latestMutationObserver().trigger());
+
+      expect(intersectionObserver.observed.has(projectB)).toBe(false);
+      expect(intersectionObserver.observed.has(replacementB)).toBe(true);
+      expect(stickyState(fixture.host)).toBe('project-a');
+
+      const replacementA = makeSentinel();
+      fixture.targetsRef.current.set('project-a', replacementA);
+      fixture.scrollRoot.append(replacementA);
+      await act(async () => latestMutationObserver().trigger());
+
+      expect(intersectionObserver.observed.has(replacementA)).toBe(true);
+      expect(stickyState(fixture.host)).toBe('');
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+
+  test('retains an activity header after virtualization evicts it behind a long prefix', async () => {
+    const fixture = makeFixture();
+    for (let index = 0; index < 40; index += 1) fixture.scrollRoot.append(document.createElement('div'));
+    try {
+      await act(async () => fixture.root.render(
+        <ActivityObserverHarness
+          rootRef={fixture.rootRef}
+          enabled
+        />,
+      ));
+
+      const intersectionObserver = latestIntersectionObserver();
+      const activeNowSentinel = makeSentinel();
+      activeNowSentinel.setAttribute('data-sidebar-activity-start', 'active-now');
+      fixture.scrollRoot.append(activeNowSentinel);
+      await act(async () => latestMutationObserver().trigger());
+      await act(async () => intersectionObserver.emit(activeNowSentinel, false, 50));
+      expect(stickyState(fixture.host)).toBe('active-now');
+
+      activeNowSentinel.remove();
+      await act(async () => latestMutationObserver().trigger());
+
+      expect(intersectionObserver.observed.has(activeNowSentinel)).toBe(false);
       expect(stickyState(fixture.host)).toBe('active-now');
     } finally {
       await unmountFixture(fixture);
