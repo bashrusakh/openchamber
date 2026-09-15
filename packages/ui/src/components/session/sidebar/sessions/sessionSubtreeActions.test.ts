@@ -13,6 +13,7 @@ const session = (id: string): Session => ({
   directory: '/workspace',
   time: { created: 1, updated: 1 },
 });
+
 const t = (key: I18nKey) => key;
 
 type Call = { method: keyof SessionSubtreeStore; ids: string[] };
@@ -157,3 +158,4 @@ describe('collectSessionSubtreeIds', () => {
     expect(collectSessionSubtreeIds('root', ['live-child', 'cached-child'], false)).toEqual(['live-child', 'cached-child']);
   });
 });
+
