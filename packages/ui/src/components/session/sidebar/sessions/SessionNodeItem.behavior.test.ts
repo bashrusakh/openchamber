@@ -59,6 +59,9 @@ mock.module('@/components/icons/FusionIcon', () => ({ FusionIcon: () => null }))
 mock.module('../folders/sessionFolderDnd', () => ({ DraggableSessionRow: passthrough }));
 mock.module('../sessions/DirectoryActionIndicator', () => ({ DirectoryActionIndicator: () => null }));
 mock.module('@/components/session/SessionAiRenameMenuItem', () => ({ SessionAiRenameMenuItem: () => null }));
+// Guest actions are outside this comparator and store-subscription test. Keep
+// the lightweight DOM fixture independent from browser-only runtime detection.
+mock.module('@/hooks/useGuestSurfaces', () => ({ useGuestActions: () => [] }));
 
 type MockProjectsState = { projects: ProjectEntry[] };
 const mockProjectsState: MockProjectsState = { projects: [] };

@@ -2,6 +2,7 @@ import type { I18nKey } from './en';
 import { settingsDict } from './ja.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict: Record<I18nKey, string> = {
   'sessions.aiRename.action': 'AIで名前を変更',
@@ -30,6 +31,7 @@ export const dict: Record<I18nKey, string> = {
   ...settingsDict,
   ...linearIssuePickerI18n.ja,
   ...linearPanelI18n.ja,
+  ...pluginPanelI18n.ja,
   'terminalView.actions.attachSelection': '選択した出力を添付',
   'terminalView.actions.copySelection': '選択した出力をコピー',
   'terminalView.toast.selectionCopied': '出力をコピーしました',
@@ -2462,6 +2464,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.toolOutputDialog.noOutputProduced': '出力は生成されませんでした',
   'chat.toolPart.lspErrors': 'LSPエラー',
   'chat.toolPart.moreErrors': '+{count}件のエラー',
+  'chat.toolPart.moreRows': '+{count}行',
   'chat.toolPart.error': 'エラー:',
   'chat.toolPart.awaitingResponse': '応答を待機中...',
   'chat.toolPart.noOutputProduced': '出力は生成されませんでした',

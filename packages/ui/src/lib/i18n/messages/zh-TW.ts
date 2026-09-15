@@ -2,6 +2,7 @@ import type { I18nKey } from './en';
 import { settingsDict } from './zh-TW.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict: Record<I18nKey, string> = {
   'sessions.aiRename.action': '使用 AI 重新命名',
@@ -30,6 +31,7 @@ export const dict: Record<I18nKey, string> = {
   ...settingsDict,
   ...linearIssuePickerI18n['zh-TW'],
   ...linearPanelI18n['zh-TW'],
+  ...pluginPanelI18n['zh-TW'],
   'terminalView.actions.attachSelection': '附加所選輸出',
   'terminalView.actions.copySelection': '複製所選輸出',
   'terminalView.toast.selectionCopied': '已複製輸出',
@@ -2433,6 +2435,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.toolOutputDialog.noOutputProduced': '沒有產生輸出',
   'chat.toolPart.lspErrors': 'LSP 錯誤',
   'chat.toolPart.moreErrors': '+{count} 個更多錯誤',
+  'chat.toolPart.moreRows': '+{count} 行更多',
   'chat.toolPart.error': '錯誤：',
   'chat.toolPart.awaitingResponse': '等待回應...',
   'chat.toolPart.noOutputProduced': '未產生輸出',

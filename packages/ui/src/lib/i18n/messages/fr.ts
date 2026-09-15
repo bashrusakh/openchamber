@@ -1,6 +1,7 @@
 import { settingsDict } from './fr.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict = {
   'sessions.aiRename.action': 'Renommer avec l’IA',
@@ -29,6 +30,7 @@ export const dict = {
   ...settingsDict,
   ...linearIssuePickerI18n.fr,
   ...linearPanelI18n.fr,
+  ...pluginPanelI18n.fr,
   'terminalView.actions.attachSelection': 'Joindre la sortie sélectionnée',
   'terminalView.actions.copySelection': 'Copier la sortie sélectionnée',
   'terminalView.toast.selectionCopied': 'Sortie copiée',
@@ -2170,6 +2172,7 @@ export const dict = {
   'chat.toolOutputDialog.noOutputProduced': 'Aucune sortie n\'a été produite',
   'chat.toolPart.lspErrors': 'Erreurs LSP',
   'chat.toolPart.moreErrors': '+{count} plus d\'erreurs',
+  'chat.toolPart.moreRows': '+{count} lignes de plus',
   'chat.toolPart.error': 'Erreur:',
   'chat.toolPart.awaitingResponse': 'En attente de réponse...',
   'chat.toolPart.noOutputProduced': 'Aucune sortie produite',
