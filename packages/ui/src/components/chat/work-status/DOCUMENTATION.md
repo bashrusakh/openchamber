@@ -445,6 +445,12 @@ change.
 
 ### These readouts belong to the connected instance
 
+Same-origin web pages and Electron's Vite proxy initialize a runtime identity
+even when the API base is empty. Requests stay relative to the page origin.
+Electron dev uses `local`; hosted pages use their HTTP origin. Without this,
+the quota loader treats a working proxy as a transient disconnected runtime
+and skips the initial load.
+
 Quotas, MCP status, skills, agent memory and the Linear/GitHub logins are all
 served by whichever OpenChamber instance is connected, and each was cached
 globally or by directory alone — which two instances can share. A switch left

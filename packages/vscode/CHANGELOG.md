@@ -1,3 +1,23 @@
+## [1.23.2] - 2026-09-14
+
+### New
+
+- Chat: Arrange work status sections in your preferred order.
+
+### Improvements
+
+- **Performance:** The extension becomes ready to use sooner, with faster project and worktree session lists and less background work competing with opening a chat.
+- Sessions: Sidebar search runs when you press Enter, keeping typing responsive in large lists. Clearing the field resets results immediately.
+
+### Fixes
+
+- Sessions: Empty worktrees finish loading even when workspace setup is still running.
+- Sessions: Archived subagents no longer reappear as active after an older refresh completes (thanks to @yulia-ivashko and @alexandrereyes).
+- Settings/Projects: Project names keep the letters you type, and renaming preserves the default model and thinking setting (thanks to @yulia-ivashko).
+- Settings/Usage: A failing provider no longer puts its error on another provider's page. Balance-only cards show their value without an empty usage bar (thanks to @yulia-ivashko).
+- Chat: Turn stats no longer display implausibly high token speeds from unreliable timing measurements (thanks to @yulia-ivashko).
+- Chat: The dictation overlay hides the message box's text and buttons underneath it.
+
 ## [1.23.1] - 2026-09-11
 
 ### New

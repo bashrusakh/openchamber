@@ -137,8 +137,8 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
   const { getOrderedGroups, setGroupOrderByProject, toggleGroup, toggleProject } = projectViewActions;
   const collection = useSessionProjectCollection({ knownDirectories: topology.knownDirectories, isVSCode: topology.isVSCode, isVisible: true });
   const [visibleSessionCountByGroup, setVisibleSessionCountByGroup] = React.useState<Map<string, number>>(new Map());
-  const showMoreGroupSessions = React.useCallback((groupId: string, currentVisibleCount: number) => {
-    setVisibleSessionCountByGroup((current) => new Map(current).set(groupId, currentVisibleCount + 7));
+  const showMoreGroupSessions = React.useCallback((groupId: string, currentVisibleCount: number, increment = 7) => {
+    setVisibleSessionCountByGroup((current) => new Map(current).set(groupId, currentVisibleCount + increment));
   }, []);
   const resetGroupSessionLimit = React.useCallback((groupId: string) => {
     setVisibleSessionCountByGroup((current) => {
@@ -524,12 +524,13 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
       projectId={null}
       hideGroupLabel
       rowOrderBase={0}
+      visibleSessionCount={visibleSessionCountByGroup.get('managed-chats')}
       sessionBatchSize={20}
       scrollContainerRef={undefined}
       openSidebarMenuKey={openSidebarMenuKey}
       setOpenSidebarMenuKey={setOpenSidebarMenuKey}
     />;
-  }, [chatGroup, groupActions, groupProps, openSidebarMenuKey]);
+  }, [chatGroup, groupActions, groupProps, openSidebarMenuKey, visibleSessionCountByGroup]);
   const handleOpenNewChat = React.useCallback(() => {
     useUIStore.getState().closeMainSurfaces();
     if (view.mobileVariant) scrollerActions.setSessionSwitcherOpen(false);

@@ -331,6 +331,12 @@ const projectEntrySchema = z.object({
   addedAt: nonNegativeFinite.optional().catch(undefined),
   lastOpenedAt: nonNegativeFinite.optional().catch(undefined),
   sidebarCollapsed: z.boolean().optional().catch(undefined),
+  // Per-project model defaults. Leaving them out of the schema stripped them
+  // from every settings response, so the store saw a different project list
+  // after each save and replaced it, which reset the rename form mid-typing
+  // and dropped the defaults themselves (#3552).
+  defaultModel: nonEmptyTrimmed.optional().catch(undefined),
+  defaultVariant: nonEmptyTrimmed.optional().catch(undefined),
 });
 
 export const parseProjects = fromSchema(
@@ -356,6 +362,8 @@ export const parseProjects = fromSchema(
       if (parsed.data.iconBackground !== undefined) project.iconBackground = parsed.data.iconBackground;
       if (parsed.data.addedAt !== undefined) project.addedAt = parsed.data.addedAt;
       if (parsed.data.lastOpenedAt !== undefined) project.lastOpenedAt = parsed.data.lastOpenedAt;
+      if (parsed.data.defaultModel) project.defaultModel = parsed.data.defaultModel;
+      if (parsed.data.defaultVariant) project.defaultVariant = parsed.data.defaultVariant;
       if (parsed.data.sidebarCollapsed !== undefined) project.sidebarCollapsed = parsed.data.sidebarCollapsed;
       result.push(project);
     }
