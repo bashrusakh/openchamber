@@ -6,6 +6,7 @@ import { SidebarActivitySections } from './SidebarActivitySections';
 import { deriveRecentActivitySections } from './activitySections';
 import { buildRecentSessionLocations } from './recentSessionLocations';
 import type { ActivityItem } from './SidebarActivitySections';
+import { buildActiveSessionNode } from '../list/sessionCollection';
 import type { SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import type { SessionNode } from '../types';
 import { getSessionSelectionScopeKey } from '../sessions/sessionFolderIdentity';
@@ -79,15 +80,7 @@ export const RecentSessionSection: React.FC<Props> = (props) => {
     [sessionLocationById],
   );
   const getSessionNode = React.useCallback(
-    (session: Session): SessionNode => ({
-      session,
-      children: (childrenMap.get(session.id) ?? []).filter((child) => !child.time?.archived).map((child) => ({
-        session: child,
-        children: [],
-        worktree: null,
-      })),
-      worktree: null,
-    }),
+    (session: Session): SessionNode => buildActiveSessionNode(childrenMap, session),
     [childrenMap],
   );
   const recentSections = React.useMemo(() => deriveRecentActivitySections({

@@ -11,7 +11,7 @@ import type { SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import { useArchivedAutoFolders } from '../folders/useArchivedAutoFolders';
 import { ProjectSessionSelectionEffect } from '../projects/useProjectSessionSelection';
 import type { WorktreeMetadata } from '@/types/worktree';
-import { useRecentSessionCollection, useSessionProjectCollection } from './sessionCollection';
+import { buildActiveSessionNode, useRecentSessionCollection, useSessionProjectCollection } from './sessionCollection';
 import { buildSessionBootstrapDemands } from './sessionBootstrapDemands';
 import { useChildStoreManager } from '@/sync/sync-context';
 import { createSessionOwnershipIndex } from '../sessions/sessionOwnership';
@@ -179,15 +179,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
       homeDirectory: view.homeDirectory,
     });
     const getSessionLocation = (sessionId: string) => sessionLocationById.get(sessionId) ?? null;
-    const getSessionNode = (session: Session) => ({
-      session,
-      children: (collection.childrenMap.get(session.id) ?? []).filter((child) => !child.time?.archived).map((child) => ({
-        session: child,
-        children: [],
-        worktree: null,
-      })),
-      worktree: null,
-    });
+    const getSessionNode = (session: Session) => buildActiveSessionNode(collection.childrenMap, session);
     return deriveRecentActivitySections({
       sessions: recentSessions,
       getSessionLocation,
@@ -255,7 +247,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
       draftTarget: 'chat',
       sessions: collection.chatSessions
         .filter((session) => !session.time?.archived && isRootSession(session))
-        .map((session) => ({ session, children: (collection.childrenMap.get(session.id) ?? []).filter((child) => !child.time?.archived).map((child) => ({ session: child, children: [], worktree: null })), worktree: null })),
+        .map((session) => buildActiveSessionNode(collection.childrenMap, session)),
     };
   }, [collection.chatSessions, collection.childrenMap, topology.isVSCode, view.homeDirectory]);
   const standaloneGroups = React.useMemo<SessionGroup[]>(

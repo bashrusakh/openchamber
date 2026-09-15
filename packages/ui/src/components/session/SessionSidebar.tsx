@@ -13,7 +13,6 @@ import { getDeferredSafeStorage } from '@/stores/utils/safeStorage';
 import { useGitStore, useGitAllBranches, useGitRepoStatusMap } from '@/stores/useGitStore';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { NewWorktreeDialog } from './NewWorktreeDialog';
-import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useSessionSearchEffects } from './sidebar/shell/useSessionSearchEffects';
 import { useSessionProjectViewState } from './sidebar/projects/useSessionProjectViewState';
 import { useProjectRepoStatus } from './sidebar/projects/useProjectRepoStatus';
@@ -145,10 +144,9 @@ const SessionSidebarComponent: React.FC<SessionSidebarProps> = ({
   const openMultiRunLauncher = useUIStore((state) => state.openMultiRunLauncher);
   const notifyOnSubtasks = useUIStore((state) => state.notifyOnSubtasks);
 
-  const debouncedSessionSearchQuery = useDebouncedValue(sessionSearchQuery, 120);
   const normalizedSessionSearchQuery = React.useMemo(
-    () => debouncedSessionSearchQuery.trim().toLowerCase(),
-    [debouncedSessionSearchQuery],
+    () => sessionSearchQuery.trim().toLowerCase(),
+    [sessionSearchQuery],
   );
 
   const hasSessionSearchQuery = normalizedSessionSearchQuery.length > 0;

@@ -3373,6 +3373,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 <div
                     // Desktop: layout-transparent. Mobile: positioning host for
                     // the wrapper-level dictation overlay across pill/full states.
+                    data-dictation-host="true"
                     className={cn(
                         !isMobile && 'contents',
                         isMobile && 'relative',

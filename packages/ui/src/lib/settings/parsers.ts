@@ -13,6 +13,7 @@ import { z, type ZodType } from 'zod';
 
 import type { ProjectEntry } from '@/lib/api/types';
 import { createProjectIdFromPath } from '@/lib/projectId';
+import { normalizePath } from '@/lib/pathNormalization';
 
 /**
  * `raw` is the whole untrusted document, for the few legacy keys whose value
@@ -340,8 +341,7 @@ export const parseProjects = fromSchema(
     for (const entry of entries) {
       const parsed = projectEntrySchema.safeParse(entry);
       if (!parsed.success) continue;
-      const rawPath = parsed.data.path;
-      const normalizedPath = rawPath === '/' ? rawPath : rawPath.replace(/\\/g, '/').replace(/\/+$/, '');
+      const normalizedPath = normalizePath(parsed.data.path);
       if (!normalizedPath) continue;
       const id = createProjectIdFromPath(normalizedPath);
       if (!id || seenIds.has(id) || seenPaths.has(normalizedPath)) continue;
