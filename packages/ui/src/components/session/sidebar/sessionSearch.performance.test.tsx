@@ -191,6 +191,7 @@ const useWiredSearchState = ({
     recentSections: [],
     pinnedSessionIds: EMPTY_PINNED,
     sessionOrderIndex: EMPTY_SESSION_ORDER,
+    activeFolderScopesByOwner: new Map(),
   }), [normalizedSessionSearchQuery, sections.groupSearchDataByGroup, sections.sectionsForRender]);
   const actions = useSessionActions({
     mobileVariant: false,

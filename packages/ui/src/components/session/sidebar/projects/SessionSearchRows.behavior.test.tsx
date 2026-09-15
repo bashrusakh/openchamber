@@ -7,11 +7,16 @@ import type { SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import { SessionRowOrderProvider, useSessionRowOrderRegistry, type SessionRowOrderRegistry } from '../sessions/sessionRowOrder';
 import { installHookTestDom } from '../test-utils/testDom';
 import type { SessionSearchRowsProps } from './SessionSearchRows';
-import type { SessionSearchRowModel } from './sessionSearchRowModel';
+import type { SessionSearchFolderRow, SessionSearchRowModel } from './sessionSearchRowModel';
 import { I18nProvider } from '@/lib/i18n';
+import { useSessionFoldersStore, type SessionFoldersMap } from '@/stores/useSessionFoldersStore';
 
 const renderedRows: SessionTreeItemProps[] = [];
 type RegistryCapture = { current: SessionRowOrderRegistry | null };
+type SearchFolderDropTarget = { folderId: string; scopeKey: string; ownerKey: string };
+type SearchFolderDropHandler = (sessionId: string, target: SearchFolderDropTarget, sourceOwnerKey: string) => void;
+let searchFolderDropHandler: SearchFolderDropHandler | null = null;
+const droppableStates: Array<{ folderId: string; scopeKey: string; disabled: boolean }> = [];
 
 const installRealTestDom = () => {
   const browser = new Window({ url: 'http://localhost' });
@@ -59,8 +64,26 @@ mock.module('../sessions/SessionTreeItem', () => ({
 }));
 
 mock.module('../folders/sessionFolderDnd', () => ({
-  DroppableFolderWrapper: ({ children }: { children: (ref: () => void, isOver: boolean) => React.ReactNode }) => <>{children(() => undefined, false)}</>,
-  SessionFolderDndScope: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  DroppableFolderWrapper: ({ folderId, scopeKey, disabled, children }: {
+    folderId: string;
+    scopeKey: string;
+    disabled?: boolean;
+    children: (ref: () => void, isOver: boolean) => React.ReactNode;
+  }) => {
+    droppableStates.push({ folderId, scopeKey, disabled: disabled === true });
+    return <>{children(() => undefined, false)}</>;
+  },
+  SessionFolderDndScope: ({ children, onSessionDroppedOnFolder }: {
+    children: React.ReactNode;
+    onSessionDroppedOnFolder: SearchFolderDropHandler;
+  }) => {
+    searchFolderDropHandler = onSessionDroppedOnFolder;
+    return <>{children}</>;
+  },
+}));
+
+mock.module('../../SessionFolderItem', () => ({
+  SessionFolderItem: () => <div data-session-folder />,
 }));
 
 mock.module('./sortableItems', () => ({
@@ -107,7 +130,62 @@ const makeModel = (count: number): SessionSearchRowModel => {
     hasRecentRows: false,
     folderRows: [],
     searchMatchCount: count,
+    activeFolderScopesByOwner: new Map(),
   };
+};
+
+const makeFolderRow = (
+  scopeKey: string,
+  ownerKey: string,
+  folder: SessionSearchFolderRow['folder'],
+  archivedBucket = false,
+): SessionSearchFolderRow => ({
+  kind: 'folder',
+  key: `folder:${scopeKey}:${folder.id}`,
+  folder,
+  group: {
+    id: 'main',
+    label: 'Project',
+    branch: null,
+    description: null,
+    isMain: true,
+    worktree: null,
+    directory: scopeKey,
+    folderScopeKey: scopeKey,
+    sessions: [],
+  },
+  displayName: folder.name,
+  scopeKey,
+  scopeDirectory: scopeKey,
+  folderOwnerKey: ownerKey,
+  nodes: [],
+  projectId: 'project',
+  groupDirectory: scopeKey,
+  archivedBucket,
+  isCollapsed: false,
+  deleteSessions: [],
+  subFolderCount: 0,
+});
+
+const makeFolderModel = (
+  row: SessionSearchFolderRow,
+  activeFolderScopesByOwner: SessionSearchRowModel['activeFolderScopesByOwner'],
+): SessionSearchRowModel => ({
+  rows: [row],
+  entries: [],
+  projectSections: [],
+  hasResults: true,
+  hasRecentRows: false,
+  folderRows: [row],
+  searchMatchCount: 0,
+  activeFolderScopesByOwner,
+});
+
+const prepareSearchViewport = (container: HTMLElement): void => {
+  container.className = 'overlay-scrollbar-container';
+  Object.defineProperty(container, 'offsetHeight', { configurable: true, value: 96 });
+  Object.defineProperty(container, 'offsetWidth', { configurable: true, value: 320 });
+  container.getBoundingClientRect = () => new window.DOMRect(0, 0, 320, 96);
 };
 
 const makeScanCountingModel = (count: number) => {
@@ -317,6 +395,7 @@ describe('SessionSearchRows public behavior', () => {
       hasRecentRows: true,
       folderRows: [],
       searchMatchCount: 1,
+      activeFolderScopesByOwner: new Map(),
     };
 
     try {
@@ -368,6 +447,7 @@ describe('SessionSearchRows public behavior', () => {
       hasRecentRows: true,
       folderRows: [],
       searchMatchCount: 1,
+      activeFolderScopesByOwner: new Map(),
     };
     const intervalCallbacks: Array<() => void> = [];
     const originalSetInterval = window.setInterval;
@@ -423,6 +503,7 @@ describe('SessionSearchRows public behavior', () => {
       hasRecentRows: false,
       folderRows: [],
       searchMatchCount: 0,
+      activeFolderScopesByOwner: new Map(),
     };
 
     try {
@@ -436,6 +517,145 @@ describe('SessionSearchRows public behavior', () => {
     } finally {
       await act(async () => root.unmount());
       renderedRows.length = 0;
+      await dom.restore();
+    }
+  });
+
+  test('cleans hidden active scopes while leaving archived scope membership unchanged', async () => {
+    const dom = installRealTestDom();
+    prepareSearchViewport(dom.container);
+    const root = createRoot(dom.container);
+    const ownerKey = 'project';
+    const projectRoot = '/repo/project';
+    const worktreeRoot = '/repo/project-worktree';
+    const archivedScope = `__archived__:${projectRoot}`;
+    const targetFolder = { id: 'target-folder', name: 'Target', sessionIds: [], createdAt: 1 };
+    const hiddenFolder = { id: 'hidden-folder', name: 'Hidden', sessionIds: ['ses_move'], createdAt: 1 };
+    const archivedFolder = { id: 'archived-folder', name: 'Archived', sessionIds: ['ses_move'], createdAt: 1 };
+    const row = makeFolderRow(projectRoot, ownerKey, targetFolder);
+    const archivedRow = makeFolderRow(archivedScope, ownerKey, archivedFolder, true);
+    const model = {
+      ...makeFolderModel(row, new Map([[ownerKey, {
+        scopeKeys: [projectRoot, worktreeRoot],
+        complete: true,
+      }]])),
+      rows: [row, archivedRow],
+      folderRows: [row, archivedRow],
+    } satisfies SessionSearchRowModel;
+    const originalFoldersMap = useSessionFoldersStore.getState().foldersMap;
+    const foldersMap: SessionFoldersMap = {
+      [projectRoot]: [targetFolder],
+      [worktreeRoot]: [hiddenFolder],
+      [archivedScope]: [archivedFolder],
+    };
+
+    try {
+      useSessionFoldersStore.setState({ foldersMap });
+      await act(async () => root.render(
+        <I18nProvider><SessionSearchRows {...makeProps(model, { current: dom.container })} /></I18nProvider>,
+      ));
+
+      expect(droppableStates.find((state) => state.folderId === targetFolder.id)).toEqual({
+        folderId: targetFolder.id,
+        scopeKey: projectRoot,
+        disabled: false,
+      });
+      expect(droppableStates.find((state) => state.folderId === archivedFolder.id)?.disabled).toBe(true);
+      await act(async () => searchFolderDropHandler?.('ses_move', {
+        folderId: targetFolder.id,
+        scopeKey: projectRoot,
+        ownerKey,
+      }, ownerKey));
+
+      const updated = useSessionFoldersStore.getState().foldersMap;
+      expect(updated[projectRoot]?.[0]?.sessionIds).toEqual(['ses_move']);
+      expect(updated[worktreeRoot]?.[0]?.sessionIds).toEqual([]);
+      expect(updated[archivedScope]?.[0]?.sessionIds).toEqual(['ses_move']);
+    } finally {
+      await act(async () => root.unmount());
+      useSessionFoldersStore.setState({ foldersMap: originalFoldersMap });
+      searchFolderDropHandler = null;
+      droppableStates.length = 0;
+      await dom.restore();
+    }
+  });
+
+  test('disables and ignores drops for incomplete owner scope authority', async () => {
+    const dom = installRealTestDom();
+    prepareSearchViewport(dom.container);
+    const root = createRoot(dom.container);
+    const ownerKey = 'project';
+    const projectRoot = '/repo/project';
+    const targetFolder = { id: 'target-folder', name: 'Target', sessionIds: [], createdAt: 1 };
+    const hiddenFolder = { id: 'hidden-folder', name: 'Hidden', sessionIds: ['ses_move'], createdAt: 1 };
+    const row = makeFolderRow(projectRoot, ownerKey, targetFolder);
+    const model = makeFolderModel(row, new Map([[ownerKey, {
+      scopeKeys: [],
+      complete: false,
+    }]]));
+    const originalFoldersMap = useSessionFoldersStore.getState().foldersMap;
+    const foldersMap: SessionFoldersMap = {
+      [projectRoot]: [targetFolder],
+      ['/repo/project-worktree']: [hiddenFolder],
+    };
+
+    try {
+      useSessionFoldersStore.setState({ foldersMap });
+      await act(async () => root.render(
+        <I18nProvider><SessionSearchRows {...makeProps(model, { current: dom.container })} /></I18nProvider>,
+      ));
+
+      expect(droppableStates.at(-1)?.disabled).toBe(true);
+      await act(async () => searchFolderDropHandler?.('ses_move', {
+        folderId: targetFolder.id,
+        scopeKey: projectRoot,
+        ownerKey,
+      }, ownerKey));
+
+      expect(useSessionFoldersStore.getState().foldersMap).toEqual(foldersMap);
+    } finally {
+      await act(async () => root.unmount());
+      useSessionFoldersStore.setState({ foldersMap: originalFoldersMap });
+      searchFolderDropHandler = null;
+      droppableStates.length = 0;
+      await dom.restore();
+    }
+  });
+
+  test('rejects a target that is not a visible search folder row', async () => {
+    const dom = installRealTestDom();
+    prepareSearchViewport(dom.container);
+    const root = createRoot(dom.container);
+    const ownerKey = 'project';
+    const projectRoot = '/repo/project';
+    const visibleFolder = { id: 'visible-folder', name: 'Visible', sessionIds: [], createdAt: 1 };
+    const hiddenFolder = { id: 'hidden-folder', name: 'Hidden', sessionIds: ['ses_move'], createdAt: 1 };
+    const row = makeFolderRow(projectRoot, ownerKey, visibleFolder);
+    const model = makeFolderModel(row, new Map([[ownerKey, {
+      scopeKeys: [projectRoot],
+      complete: true,
+    }]]));
+    const originalFoldersMap = useSessionFoldersStore.getState().foldersMap;
+    const foldersMap: SessionFoldersMap = { [projectRoot]: [visibleFolder, hiddenFolder] };
+
+    try {
+      useSessionFoldersStore.setState({ foldersMap });
+      await act(async () => root.render(
+        <I18nProvider><SessionSearchRows {...makeProps(model, { current: dom.container })} /></I18nProvider>,
+      ));
+
+      await act(async () => searchFolderDropHandler?.('ses_move', {
+        folderId: hiddenFolder.id,
+        scopeKey: projectRoot,
+        ownerKey,
+      }, ownerKey));
+
+      expect(useSessionFoldersStore.getState().foldersMap).toEqual(foldersMap);
+    } finally {
+      await act(async () => root.unmount());
+      useSessionFoldersStore.setState({ foldersMap: originalFoldersMap });
+      searchFolderDropHandler = null;
+      droppableStates.length = 0;
       await dom.restore();
     }
   });

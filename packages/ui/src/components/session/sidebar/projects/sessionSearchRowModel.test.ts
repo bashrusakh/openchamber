@@ -64,6 +64,7 @@ const baseArgs = (): Omit<SessionSearchRowModelArgs, 'sections' | 'groupSearchDa
   recentSections: [],
   pinnedSessionIds: new Set(),
   sessionOrderIndex: new Map(),
+  activeFolderScopesByOwner: new Map(),
 });
 
 describe('buildSessionSearchRowModel', () => {
@@ -80,7 +81,9 @@ describe('buildSessionSearchRowModel', () => {
     const sessionRows = model.rows.filter((row) => row.kind === 'session');
     expect(sessionRows).toHaveLength(250);
     expect(model.searchMatchCount).toBe(250);
-    expect(model.entries.map((entry) => entry.id)).toEqual(nodes.map((node) => node.session.id));
+    expect(model.entries.map((entry) => entry.id)).toEqual(
+      nodes.map((node) => node.session.id).sort((left, right) => left.localeCompare(right)),
+    );
     expect(model.rows.some((row) => row.kind === 'project-header')).toBe(true);
   });
 
@@ -349,6 +352,33 @@ describe('buildSessionSearchRowModel', () => {
     expect(model.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.id)).toEqual([
       pinned.session.id,
       unpinned.session.id,
+    ]);
+  });
+
+  test('orders unpinned archived sessions by newest lifecycle fallback', () => {
+    const oldest = makeNode({
+      ...makeSession('ses_oldest', 'Release oldest'),
+      time: { created: 10, updated: 20, archived: 30 },
+    });
+    const newest = makeNode({
+      ...makeSession('ses_newest', 'Release newest'),
+      time: { created: 11, updated: 40, archived: 50 },
+    });
+    const group = makeGroup('archived', [oldest, newest], {
+      directory: null,
+      folderScopeKey: `__archived__:${PROJECT_ROOT}`,
+      isArchivedBucket: true,
+    });
+    const model = buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      groupSearchDataByGroup: searchDataFor(group),
+    });
+
+    expect(model.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.id)).toEqual([
+      newest.session.id,
+      oldest.session.id,
     ]);
   });
 

@@ -30,16 +30,21 @@ import {
   computeNodeStructureKey,
   resolveMenuOpenSessionId,
 } from '../sessions/sessionNodeItemUtils';
-import { getSessionFolderOwnerKey, getSessionFolderScopes } from '../sessions/sessionFolderIdentity';
 import type { SessionNodeRenderExtras } from '../sessions/sessionNodeItemUtils';
 import { useRegisterSessionRowOrder } from '../sessions/sessionRowOrder';
 
 const ROW_ESTIMATE_PX = 32;
+const ARCHIVED_FOLDER_SCOPE_PREFIX = '__archived__:';
 const EMPTY_SESSION_RENDER_EXTRAS: SessionNodeRenderExtras = {
   subtreeContainsEditing: new Set<string>(),
   menuOpenSessionId: null,
   nodeStructureKey: '',
 };
+
+const isArchivedFolderScope = (scopeKey: string): boolean => (
+  scopeKey.startsWith(ARCHIVED_FOLDER_SCOPE_PREFIX)
+  && scopeKey.length > ARCHIVED_FOLDER_SCOPE_PREFIX.length
+);
 
 const findSearchScrollElement = (content: HTMLElement | null): HTMLElement | null => {
   let ancestor = content?.parentElement ?? null;
@@ -421,6 +426,13 @@ const SearchFolderRow: React.FC<{
   const [deleteConfirm, setDeleteConfirm] = React.useState<DeleteFolderConfirmState>(null);
   const isRenaming = props.sessionProps.folderRename?.folderId === row.folder.id
     && props.sessionProps.folderRename.scopeKey === row.scopeKey;
+  const ownerScopeAuthority = row.folderOwnerKey
+    ? props.model.activeFolderScopesByOwner.get(row.folderOwnerKey)
+    : undefined;
+  const folderDropEnabled = !row.archivedBucket
+    && !isArchivedFolderScope(row.scopeKey)
+    && ownerScopeAuthority?.complete === true
+    && ownerScopeAuthority.scopeKeys.includes(row.scopeKey);
   const handleDelete = React.useCallback(() => {
     if (row.archivedBucket) {
       sessionEvents.requestDelete({ sessions: [...row.deleteSessions], mode: 'session' });
@@ -444,6 +456,7 @@ const SearchFolderRow: React.FC<{
         folderId={row.folder.id}
         scopeKey={row.scopeKey}
         ownerKey={row.folderOwnerKey}
+        disabled={!folderDropEnabled}
       >
         {(droppableRef, isDropTarget) => (
           <SessionFolderItem
@@ -641,37 +654,26 @@ export const SessionSearchRows: React.FC<SessionSearchRowsProps> = (props) => {
 
   const handleSessionDroppedOnFolder = React.useCallback((sessionId: string, target: SessionFolderDropTarget, sourceOwnerKey: string) => {
     if (sourceOwnerKey !== target.ownerKey) return;
+    if (isArchivedFolderScope(target.scopeKey)) return;
+    const ownerScopeAuthority = model.activeFolderScopesByOwner.get(sourceOwnerKey);
+    if (ownerScopeAuthority?.complete !== true || !ownerScopeAuthority.scopeKeys.includes(target.scopeKey)) return;
     const targetRows = folderRows.filter((row) => (
       row.scopeKey === target.scopeKey
       && row.folder.id === target.folderId
       && row.folderOwnerKey === target.ownerKey
     ));
     if (targetRows.length !== 1) return;
-     const targetRow = targetRows[0];
-     if (!targetRow) return;
-     const foldersStore = useSessionFoldersStore.getState();
-     const currentTargetFolders = foldersStore.foldersMap[targetRow.scopeKey] ?? [];
-     if (currentTargetFolders.filter((folder) => folder.id === targetRow.folder.id).length !== 1) return;
-     const ownerScopeKeys = new Set<string>();
-     model.projectSections.forEach((section) => {
-       section.groups.forEach((group) => {
-         if (getSessionFolderOwnerKey(section.project.id, group.directory) !== target.ownerKey) return;
-         getSessionFolderScopes(group).forEach(({ scopeKey }) => ownerScopeKeys.add(scopeKey));
-       });
-     });
-    folderRows.forEach((row) => {
-      if (row.folderOwnerKey !== target.ownerKey) return;
-      getSessionFolderScopes(row.group).forEach(({ scopeKey }) => ownerScopeKeys.add(scopeKey));
-    });
-    if (ownerScopeKeys.size === 0) ownerScopeKeys.add(target.scopeKey);
-    for (const scopeKey of ownerScopeKeys) {
+    const targetRow = targetRows[0];
+    if (!targetRow || targetRow.archivedBucket) return;
+    const foldersStore = useSessionFoldersStore.getState();
+    const currentTargetFolders = foldersStore.foldersMap[targetRow.scopeKey] ?? [];
+    if (currentTargetFolders.filter((folder) => folder.id === targetRow.folder.id).length !== 1) return;
+    for (const scopeKey of ownerScopeAuthority.scopeKeys) {
       if (scopeKey === target.scopeKey) continue;
-      if (foldersStore.getSessionFolderId(scopeKey, sessionId)) {
-        foldersStore.removeSessionFromFolder(scopeKey, sessionId);
-      }
+      foldersStore.removeSessionFromFolder(scopeKey, sessionId);
     }
     foldersStore.addSessionToFolder(targetRow.scopeKey, targetRow.folder.id, sessionId);
-  }, [folderRows, model.projectSections]);
+  }, [folderRows, model.activeFolderScopesByOwner]);
 
   const renderRow = React.useCallback((row: SessionSearchRow): React.ReactNode => {
     switch (row.kind) {

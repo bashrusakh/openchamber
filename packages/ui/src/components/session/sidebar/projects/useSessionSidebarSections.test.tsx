@@ -64,6 +64,7 @@ const buildSearchRowModel = (
   recentSections: [],
   pinnedSessionIds: new Set(),
   sessionOrderIndex: new Map(),
+  activeFolderScopesByOwner: new Map(),
 });
 
 const getFinalSearchMatchCount = (

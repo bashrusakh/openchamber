@@ -37,7 +37,14 @@ import { SessionRowOrderProvider } from '../sessions/sessionRowOrder';
 import { CHAT_DRAFT_PROJECT_ID, getChatsRootForHome, getChatsRootFromDirectory } from '@/lib/chatDirectories';
 import { getProjectFolderScopesFromTopology, getSessionFolderOwnerKey, getSessionFolderScopes } from '../sessions/sessionFolderIdentity';
 import { isCapacitorApp } from '@/lib/platform';
-import { buildSessionSearchRowModel, type SessionSearchActivitySection, type SessionSearchRowModel } from '../projects/sessionSearchRowModel';
+import type { ProjectSection } from '../projects/sessionProjectRender';
+import {
+  buildSessionSearchRowModel,
+  type SessionSearchActivitySection,
+  type SessionSearchOwnerScopeAuthority,
+  type SessionSearchOwnerScopeMap,
+  type SessionSearchRowModel,
+} from '../projects/sessionSearchRowModel';
 
 const PR_NO_PR_RETRY_MS = 5 * 60_000;
 
@@ -49,6 +56,56 @@ const isRootSession = (session: Session): boolean => {
   // SAFETY: OpenCode attaches parentID to hierarchical session records,
   // although the SDK's base Session type does not currently declare it.
   return !(session as Session & { parentID?: string | null }).parentID;
+};
+
+const ARCHIVED_FOLDER_SCOPE_PREFIX = '__archived__:';
+
+const getActiveFolderScopeKeys = (
+  scopes: readonly { scopeKey: string }[],
+): readonly string[] => Object.freeze([...new Set(
+  scopes
+    .map((scope) => scope.scopeKey)
+    .filter((scopeKey) => scopeKey.length > 0 && !scopeKey.startsWith(ARCHIVED_FOLDER_SCOPE_PREFIX)),
+)]);
+
+const buildActiveFolderScopesByOwner = ({
+  projectSections,
+  chatGroup,
+  isWorktreeTopologyLoading,
+  unresolvedWorktreeProjectPaths,
+}: {
+  projectSections: readonly ProjectSection[];
+  chatGroup: SessionGroup | null;
+  isWorktreeTopologyLoading: boolean;
+  unresolvedWorktreeProjectPaths: ReadonlySet<string>;
+}): SessionSearchOwnerScopeMap => {
+  const unresolvedPaths = new Set(
+    [...unresolvedWorktreeProjectPaths].map((path) => normalizePath(path) ?? path),
+  );
+  const scopesByOwner = new Map<string, SessionSearchOwnerScopeAuthority>();
+
+  for (const section of projectSections) {
+    const ownerKey = getSessionFolderOwnerKey(section.project.id, section.project.normalizedPath);
+    if (!ownerKey) continue;
+    const projectPath = normalizePath(section.project.normalizedPath);
+    const incomplete = isWorktreeTopologyLoading || (projectPath !== null && unresolvedPaths.has(projectPath));
+    const scopeKeys = incomplete
+      ? Object.freeze([])
+      : getActiveFolderScopeKeys(getProjectFolderScopesFromTopology(projectSections, ownerKey));
+    scopesByOwner.set(ownerKey, { scopeKeys, complete: !incomplete });
+  }
+
+  if (chatGroup) {
+    const ownerKey = getSessionFolderOwnerKey(null, chatGroup.directory);
+    if (ownerKey) {
+      scopesByOwner.set(ownerKey, {
+        scopeKeys: getActiveFolderScopeKeys(getSessionFolderScopes(chatGroup)),
+        complete: true,
+      });
+    }
+  }
+
+  return scopesByOwner;
 };
 
 type Project = {
@@ -271,6 +328,15 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
     foldersMap,
     standaloneGroups,
   });
+  const activeFolderScopesByOwner = React.useMemo(
+    () => buildActiveFolderScopesByOwner({
+      projectSections,
+      chatGroup,
+      isWorktreeTopologyLoading: view.isWorktreeTopologyLoading,
+      unresolvedWorktreeProjectPaths: view.unresolvedWorktreeProjectPaths,
+    }),
+    [chatGroup, projectSections, view.isWorktreeTopologyLoading, view.unresolvedWorktreeProjectPaths],
+  );
 
   const onSearchMatchCountChange = view.onSearchMatchCountChange;
 
@@ -390,6 +456,7 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
         hasRecentRows: false,
         folderRows: [],
         searchMatchCount: 0,
+        activeFolderScopesByOwner,
       };
     }
     return buildSessionSearchRowModel({
@@ -408,11 +475,13 @@ const VisibleSessionProjects: React.FC<SessionProjectCollectionProps> = ({ topol
       recentSections: recentActivitySectionsForSearch,
       pinnedSessionIds: collection.pinnedSessionIds,
       sessionOrderIndex,
+      activeFolderScopesByOwner,
     });
   }, [
     chatGroup,
     collection.pinnedSessionIds,
     collapsedSearchActivitySections,
+    activeFolderScopesByOwner,
     foldersMap,
     groupSearchDataByGroup,
     orderedSectionsForRender,

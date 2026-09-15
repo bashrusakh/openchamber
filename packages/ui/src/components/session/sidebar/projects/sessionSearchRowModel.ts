@@ -1,7 +1,6 @@
 import type { Session } from '@opencode-ai/sdk/v2';
-import { getRuntimeKey } from '@/lib/runtime-switch';
 import type { SessionFolder, SessionFoldersMap } from '@/stores/useSessionFoldersStore';
-import { getPinnedSessionKey } from '@/stores/useSessionPinnedStore';
+import { compareSessionsByLifecycleOrder, EMPTY_SESSION_ORDER_RANKS } from '@/sync/session-ordering';
 import type {
   GroupSearchData,
   SessionGroup,
@@ -109,6 +108,15 @@ export type SessionSearchRow =
   | SessionSearchSessionRow
   | SessionSearchEmptyRow;
 
+export type SessionSearchOwnerScopeAuthority = {
+  /** Active folder scope keys owned by this owner. */
+  readonly scopeKeys: readonly string[];
+  /** False means destructive folder cleanup must not run for this owner. */
+  readonly complete: boolean;
+};
+
+export type SessionSearchOwnerScopeMap = ReadonlyMap<string, SessionSearchOwnerScopeAuthority>;
+
 export type SessionSearchRowModel = {
   rows: readonly SessionSearchRow[];
   entries: readonly SessionRowOrderEntry[];
@@ -120,6 +128,8 @@ export type SessionSearchRowModel = {
   folderRows: readonly SessionSearchFolderRow[];
   /** Number of unique session ids in the final rendered projection. */
   searchMatchCount: number;
+  /** Complete active folder ownership, independent of search filtering. */
+  activeFolderScopesByOwner: SessionSearchOwnerScopeMap;
 };
 
 type SearchFolderEntry = {
@@ -154,6 +164,8 @@ export type SessionSearchRowModelArgs = {
   recentSections: readonly SessionSearchActivitySection[];
   pinnedSessionIds: ReadonlySet<string>;
   sessionOrderIndex: ReadonlyMap<string, number>;
+  /** Complete active folder ownership, independent of search filtering. */
+  activeFolderScopesByOwner: SessionSearchOwnerScopeMap;
 };
 
 type AppendSessionOptions = {
@@ -184,24 +196,15 @@ const countRenderedSessions = (rows: readonly SessionSearchRow[], normalizedQuer
   return sessionIds.size;
 };
 
-const isNodePinned = (
-  node: SessionNode,
-  fallbackDirectory: string | null,
-  pinnedSessionIds: ReadonlySet<string>,
-  runtimeKey: string,
-): boolean => {
-  const directory = normalizePath(node.session.directory ?? null) ?? normalizePath(fallbackDirectory ?? null);
-  const key = directory ? getPinnedSessionKey(runtimeKey, directory, node.session.id) : null;
-  return key ? pinnedSessionIds.has(key) : false;
-};
+const toMutablePinnedSessionIds = (pinnedSessionIds: ReadonlySet<string>): Set<string> => (
+  pinnedSessionIds instanceof Set ? pinnedSessionIds : new Set(pinnedSessionIds)
+);
 
 const compareNodes = (
   a: SessionNode,
   b: SessionNode,
-  pinnedSessionIds: ReadonlySet<string>,
+  pinnedSessionIds: Set<string>,
   sessionOrderIndex: ReadonlyMap<string, number>,
-  fallbackDirectory: string | null,
-  runtimeKey: string,
 ): number => {
   const aIndex = sessionOrderIndex.get(a.session.id);
   const bIndex = sessionOrderIndex.get(b.session.id);
@@ -211,13 +214,7 @@ const compareNodes = (
     if (aIndex !== bIndex) return aIndex - bIndex;
   }
 
-  // The grouped data is already lifecycle ordered. This stable tie breaker is
-  // enough for search projection work and keeps a pinned replacement in the
-  // same order as the existing sidebar rows.
-  const aPinned = isNodePinned(a, fallbackDirectory, pinnedSessionIds, runtimeKey);
-  const bPinned = isNodePinned(b, fallbackDirectory, pinnedSessionIds, runtimeKey);
-  if (aPinned !== bPinned) return aPinned ? -1 : 1;
-  return 0;
+  return compareSessionsByLifecycleOrder(a.session, b.session, pinnedSessionIds, EMPTY_SESSION_ORDER_RANKS);
 };
 
 const collectNodesById = (nodes: readonly SessionNode[]): Map<string, SessionNode> => {
@@ -240,9 +237,9 @@ const projectGroup = (
   sessionOrderIndex: ReadonlyMap<string, number>,
 ): SearchGroupProjection => {
   const folderOwnerKey = getSessionFolderOwnerKey(projectId, group.directory);
-  const runtimeKey = getRuntimeKey();
+  const comparablePinnedSessionIds = toMutablePinnedSessionIds(pinnedSessionIds);
   const sourceNodes = [...(searchData?.filteredNodes ?? [])]
-    .sort((a, b) => compareNodes(a, b, pinnedSessionIds, sessionOrderIndex, group.directory, runtimeKey));
+    .sort((a, b) => compareNodes(a, b, comparablePinnedSessionIds, sessionOrderIndex));
   const nodeBySessionId = collectNodesById(sourceNodes);
   const folderEntriesBase = getSessionFolderScopes(group).flatMap(({ scopeKey, directory }) => {
     const folders = foldersMap[scopeKey] ?? EMPTY_FOLDERS;
@@ -252,7 +249,7 @@ const projectGroup = (
       scopeDirectory: directory,
       folderOwnerKey,
       nodes: selectFolderRootNodes(folder.sessionIds, nodeBySessionId)
-        .sort((a, b) => compareNodes(a, b, pinnedSessionIds, sessionOrderIndex, directory, runtimeKey)),
+        .sort((a, b) => compareNodes(a, b, comparablePinnedSessionIds, sessionOrderIndex)),
     }));
   });
   const visibleFolderKeys = selectFolderIdsForProjection(
@@ -623,7 +620,16 @@ export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): Ses
   const hasChatResults = chatSearchData?.hasMatch === true;
   const hasResults = hasProjectResults || hasRecentResults || hasChatResults;
   if (!hasResults) {
-    return { rows, entries, projectSections, hasResults: false, hasRecentRows, folderRows, searchMatchCount: 0 };
+    return {
+      rows,
+      entries,
+      projectSections,
+      hasResults: false,
+      hasRecentRows,
+      folderRows,
+      searchMatchCount: 0,
+      activeFolderScopesByOwner: args.activeFolderScopesByOwner,
+    };
   }
 
   if (args.chatGroup) {
@@ -687,5 +693,6 @@ export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): Ses
     hasRecentRows,
     folderRows,
     searchMatchCount: countRenderedSessions(rows, args.normalizedQuery),
+    activeFolderScopesByOwner: args.activeFolderScopesByOwner,
   };
 };
