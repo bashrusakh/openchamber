@@ -53,7 +53,9 @@ const scriptedEnhancePrompt: EnhancePromptImpl = async (_draft, _context, signal
   return step.text;
 };
 // A test may swap the scripted transport entirely (e.g. a raw abort that
-// rejects independently of the signal); the default is restored after.
+// rejects independently of the signal, or a never-settling request that
+// proves a new operation does not wait for the old transport); the default
+// is restored after.
 let enhancePromptImpl: EnhancePromptImpl = scriptedEnhancePrompt;
 const mockEnhancePromptImplementation = (impl: EnhancePromptImpl): void => {
   enhancePromptImpl = impl;
@@ -94,27 +96,52 @@ interface Harness {
   /** Starts an enhance without awaiting; resolves the hook's raw promise. */
   startEnhance: (draft: string) => Promise<EnhanceOutcome>;
   cancel: () => void;
+  /** Reports a draft change to the hook, as ChatInput's change handler does. */
+  noteDraftChanged: (liveDraft: string) => void;
   unmount: () => void;
   /** Swaps the language context the hook is rendered with, as a re-render would. */
   setLanguageContext: (next: ComposerLanguageContext) => void;
+  /** Swaps the draft scope key the hook is rendered with, as a session switch would. */
+  setScopeKey: (next: string | null) => void;
 }
 
-function renderHarness(initialContext: ComposerLanguageContext = languageContext): Harness {
+function renderHarness(
+  initialContext: ComposerLanguageContext = languageContext,
+  initialScopeKey: string | null = 'scope-a',
+): Harness {
   const container = document.createElement('div');
   const root = createRoot(container);
   let captured: {
     isEnhancing: boolean;
     enhance: (draft: string, context: typeof enhanceContext) => Promise<EnhanceOutcome>;
     cancel: () => void;
+    noteDraftChanged: (liveDraft: string) => void;
   } | null = null;
   // Read at render time so tests can swap the context the way ChatInput does:
   // its languageContext memo returns a fresh object whenever its inputs
   // recompute, so a re-render can hand the hook a rebuilt object.
   let currentContext = initialContext;
+  let currentScopeKey = initialScopeKey;
+  // The harness has no editor, so this stands in for the composer's live
+  // document: noteDraftChanged is what moves it, exactly as a keystroke does
+  // through ChatInput's change handler.
+  let liveDraft = '';
 
   function Probe() {
-    const hook = usePromptEnhancer(currentContext);
-    captured = { isEnhancing: hook.isEnhancing, enhance: hook.enhance, cancel: hook.cancel };
+    const hook = usePromptEnhancer({
+      languageContext: currentContext,
+      scopeKey: currentScopeKey,
+      // ChatInput's seam: the live editor value wins over the effect-synced
+      // ref. The harness has no editor, so the ref value IS the live value;
+      // tests drive it through noteDraftChanged the way edits do.
+      getLiveDraft: () => liveDraft,
+    });
+    captured = {
+      isEnhancing: hook.isEnhancing,
+      enhance: hook.enhance,
+      cancel: hook.cancel,
+      noteDraftChanged: hook.noteDraftChanged,
+    };
     return null;
   }
 
@@ -138,9 +165,17 @@ function renderHarness(initialContext: ComposerLanguageContext = languageContext
     },
     startEnhance: (draft: string) => getEnhance()(draft, enhanceContext),
     cancel: () => { act(() => { captured?.cancel(); }); },
+    noteDraftChanged: (nextDraft: string) => {
+      liveDraft = nextDraft;
+      act(() => { captured?.noteDraftChanged(nextDraft); });
+    },
     unmount: () => { act(() => { root.unmount(); }); },
     setLanguageContext: (next: ComposerLanguageContext) => {
       currentContext = next;
+      act(() => { root.render(React.createElement(Probe)); });
+    },
+    setScopeKey: (next: string | null) => {
+      currentScopeKey = next;
       act(() => { root.render(React.createElement(Probe)); });
     },
   };
@@ -201,7 +236,9 @@ describe('usePromptEnhancer', () => {
 
   test('a response landing after a materially changed context stays stale', async () => {
     // A registry change (here: shell mode) between request and response means
-    // the rewrite answered for a different composer language — stale.
+    // the rewrite answered for a different composer language — stale. The
+    // context change alone must NOT cancel the op: only scope and draft do,
+    // so the promise still resolves through the normal response path.
     script = [{ text: 'improved draft', delayMs: 30 }];
     const harness = renderHarness();
     try {
@@ -353,6 +390,227 @@ describe('usePromptEnhancer', () => {
       expect(result.outcome).toBe('stale');
     } finally {
       // Idempotent for the already-unmounted root.
+      harness.unmount();
+    }
+  });
+
+  test('a scope switch invalidates the running enhance and the new scope enhances immediately', async () => {
+    // Session switch A→B while A's transport is still settling: A's operation
+    // is invalidated at once, B's enhance starts immediately, and A's late
+    // response is ignored. A's finally must not clear B's busy state — B
+    // runs on a transport that never settles on its own, so isEnhancing only
+    // drops when B is cancelled.
+    // A transport that never resolves on its own but honors abort — proving
+    // the busy state survives the old op's cleanup until B itself settles.
+    const neverSettlingAbortAware = (_draft: string, _context: PromptEnhanceContext, signal: AbortSignal) =>
+      new Promise<string>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          const abortError = new Error('The operation was aborted.');
+          abortError.name = 'AbortError';
+          reject(abortError);
+        }, { once: true });
+      });
+    script = [
+      { text: 'late rewrite for A', delayMs: 30 },
+      { text: 'rewrite for B' },
+    ];
+    const harness = renderHarness(languageContext, 'session-a');
+    try {
+      const firstPromise = harness.startEnhance('draft A');
+      // Flush the setIsEnhancing(true) render before asserting.
+      await act(async () => {});
+      expect(harness.isEnhancing()).toBe(true);
+
+      // Switch scope while A is still in flight.
+      harness.setScopeKey('session-b');
+      expect(harness.isEnhancing()).toBe(false);
+
+      // B starts immediately on the never-settling transport.
+      mockEnhancePromptImplementation(neverSettlingAbortAware);
+      const secondPromise = harness.startEnhance('draft B');
+      // Let A's aborted transport settle and its finally fire; flush B's
+      // busy-state render in the same pass.
+      await act(async () => {});
+      const first = await firstPromise;
+      expect(first.outcome).toBe('stale');
+      // A's cleanup must not have released B's spinner.
+      expect(harness.isEnhancing()).toBe(true);
+
+      // Cancel B and verify the spinner finally settles.
+      harness.cancel();
+      const second = await secondPromise;
+      expect(second.outcome).toBe('stale');
+      await act(async () => {});
+      expect(harness.isEnhancing()).toBe(false);
+    } finally {
+      harness.unmount();
+      restoreEnhancePromptImplementation();
+    }
+  });
+
+  test('switching back to the previous scope starts clean (no spinner, enhance works)', async () => {
+    // A→B→A: when returning to A the op started under A was already
+    // invalidated, so no spinner survives the round trip and a new enhance
+    // in A works normally. The first scripted step is the one A's request
+    // consumed before the switch discarded it.
+    script = [
+      { text: 'discarded rewrite for A', delayMs: 30 },
+      { text: 'rewrite for A again' },
+    ];
+    const harness = renderHarness(languageContext, 'session-a');
+    try {
+      const firstPromise = harness.startEnhance('draft A');
+      await act(async () => {});
+      expect(harness.isEnhancing()).toBe(true);
+
+      harness.setScopeKey('session-b');
+      const first = await firstPromise;
+      expect(first.outcome).toBe('stale');
+      expect(harness.isEnhancing()).toBe(false);
+
+      harness.setScopeKey('session-a');
+      expect(harness.isEnhancing()).toBe(false);
+      const result = await harness.enhance('draft A again');
+      expect(result.outcome).toBe('applied');
+      if (result.outcome === 'applied') {
+        expect(result.text).toBe('rewrite for A again');
+      }
+      expect(harness.isEnhancing()).toBe(false);
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  test('a draft edit while enhancing cancels the op promptly; the late result is ignored and a new enhance starts', async () => {
+    // Enhance("draft 1") → noteDraftChanged("draft 2"): the op settles as
+    // cancelled without awaiting its response, the late "draft 1" rewrite is
+    // not applied, and a new enhance for "draft 2" starts immediately — the
+    // old op's finally cannot clear the new op's busy state.
+    const neverSettlingAbortAware = (_draft: string, _context: PromptEnhanceContext, signal: AbortSignal) =>
+      new Promise<string>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          const abortError = new Error('The operation was aborted.');
+          abortError.name = 'AbortError';
+          reject(abortError);
+        }, { once: true });
+      });
+    mockEnhancePromptImplementation(neverSettlingAbortAware);
+    const harness = renderHarness();
+    try {
+      const firstPromise = harness.startEnhance('draft 1');
+      await act(async () => {});
+      expect(harness.isEnhancing()).toBe(true);
+
+      // The draft changed → the op is invalidated synchronously, without
+      // awaiting its response.
+      harness.noteDraftChanged('draft 2');
+      expect(harness.isEnhancing()).toBe(false);
+
+      // A new enhance for the new draft starts immediately even though the
+      // old transport never settles on its own.
+      const secondPromise = harness.startEnhance('draft 2');
+      await act(async () => {});
+      const first = await firstPromise;
+      expect(first.outcome).toBe('stale');
+      // The old op's cleanup must not clear the new op's spinner.
+      expect(harness.isEnhancing()).toBe(true);
+
+      // Cancel the new op and verify the spinner settles.
+      harness.cancel();
+      const second = await secondPromise;
+      expect(second.outcome).toBe('stale');
+      await act(async () => {});
+      expect(harness.isEnhancing()).toBe(false);
+    } finally {
+      harness.unmount();
+      restoreEnhancePromptImplementation();
+    }
+  });
+
+  test('an equal draft notification is a no-op while enhancing', async () => {
+    // noteDraftChanged with the same text must not cancel the running op —
+    // ordinary change events that do not move the draft stay harmless.
+    script = [{ text: 'improved draft', delayMs: 30 }];
+    const harness = renderHarness();
+    try {
+      const promise = harness.startEnhance('my draft');
+      harness.noteDraftChanged('my draft');
+      const result = await promise;
+      expect(result.outcome).toBe('applied');
+      await act(async () => {});
+      expect(harness.isEnhancing()).toBe(false);
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  test('a scope-key change is ignored while nothing is active', async () => {
+    // The invalidation effect must be a no-op when no op is running: switching
+    // scope with nothing in flight does not spin anything up or corrupt state,
+    // and the next enhance in the new scope works.
+    script = [{ text: 'rewrite in scope b' }];
+    const harness = renderHarness(languageContext, 'session-a');
+    try {
+      harness.setScopeKey('session-b');
+      expect(harness.isEnhancing()).toBe(false);
+      const result = await harness.enhance('my draft');
+      expect(result.outcome).toBe('applied');
+      if (result.outcome === 'applied') {
+        expect(result.text).toBe('rewrite in scope b');
+      }
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  test('unmount during flight cancels the transport (no late landings after remount)', async () => {
+    // Unmount bumps the generation and aborts; a fresh mount afterwards must
+    // start with no spinner and a working enhance — the old op's late
+    // rejection resolves stale against the new generation.
+    script = [{ text: 'late rewrite', delayMs: 30 }];
+    const first = renderHarness();
+    const firstPromise = first.startEnhance('my draft');
+    first.unmount();
+    const firstResult = await firstPromise;
+    expect(firstResult.outcome).toBe('stale');
+
+    // Fresh mount: clean state, new enhance works.
+    script = [{ text: 'fresh rewrite' }];
+    const harness = renderHarness();
+    try {
+      expect(harness.isEnhancing()).toBe(false);
+      const result = await harness.enhance('my draft');
+      expect(result.outcome).toBe('applied');
+      if (result.outcome === 'applied') {
+        expect(result.text).toBe('fresh rewrite');
+      }
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  test('success after an explicit cancel: a new enhance applies normally', async () => {
+    // cancel() → silent stale → the next enhance is a fresh authoritative op
+    // that applies.
+    script = [
+      { text: 'late rewrite', delayMs: 30 },
+      { text: 'second rewrite' },
+    ];
+    const harness = renderHarness();
+    try {
+      const firstPromise = harness.startEnhance('my draft');
+      harness.cancel();
+      const first = await firstPromise;
+      expect(first.outcome).toBe('stale');
+      expect(harness.isEnhancing()).toBe(false);
+
+      const second = await harness.enhance('my draft');
+      expect(second.outcome).toBe('applied');
+      if (second.outcome === 'applied') {
+        expect(second.text).toBe('second rewrite');
+      }
+      expect(harness.isEnhancing()).toBe(false);
+    } finally {
       harness.unmount();
     }
   });

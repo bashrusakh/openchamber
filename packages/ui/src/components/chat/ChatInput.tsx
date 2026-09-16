@@ -1208,8 +1208,21 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     // is the seam: decide whether an enhance may run, hand it the same
     // context the send path would use, apply the rewrite to the unchanged
     // draft (the controlled writeback produces the native undo entry), and
-    // map the few reasons that need their own copy to toasts.
-    const { isEnhancing, enhance, cancel: cancelEnhance } = usePromptEnhancer(languageContext);
+    // map the few reasons that need their own copy to toasts. The operation
+    // is scoped: it is invalidated when the draft identity moves (session/
+    // directory/runtime switch) or the draft itself is edited, so it always
+    // settles promptly and the new scope can enhance immediately.
+    const { isEnhancing, enhance, cancel: cancelEnhance, noteDraftChanged } = usePromptEnhancer({
+        languageContext,
+        // The draft identity string is the enhance's scope key: identical
+        // scope → same draft the apply-side backstop compares against; a
+        // different scope cannot share a rewrite.
+        scopeKey: chatDraftIdentity ? getChatDraftIdentityKey(chatDraftIdentity) : null,
+        // The same live-draft precedence the apply path uses: the editor
+        // document wins over the effect-synced ref, so a keystroke that has
+        // not reached the ref yet still counts as the composer's content.
+        getLiveDraft: () => composerRef.current?.getValue() ?? messageRef.current,
+    });
     // The session's last assistant model is the authoritative provider when
     // one is known (same resolution as summarizeSelectionForNotes); the
     // composer picker serves as the fallback.
@@ -2525,9 +2538,16 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     }, []);
 
     const handleComposerChange = ({ value, selection, fromPaste, insertedText }: ComposerChange) => {
+        // Scoped-enhance notification: a draft edit invalidates the running
+        // Enhance operation (the rewrite would answer for a draft that no
+        // longer exists). Cheap and unconditional — the hook itself ignores
+        // the notification when nothing is active or the text still matches
+        // the draft the operation was started from. Every branch that applies
+        // a value notifies with that same value.
         if (shellTriggerNormalizationRef.current) {
             shellTriggerNormalizationRef.current = false;
             setMessage(value);
+            noteDraftChanged(value);
             return;
         }
 
@@ -2569,6 +2589,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
 
         setMessage(value);
         updateAutocompleteState(value, selection.start, inputSource, pastedInsertedText);
+        noteDraftChanged(value);
     };
 
     React.useEffect(() => {

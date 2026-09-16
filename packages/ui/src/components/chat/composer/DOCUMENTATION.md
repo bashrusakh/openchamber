@@ -342,10 +342,14 @@ dressing, checked by the protected-token guard, and written back through
 The invariants that hold wherever the button is mounted:
 
 - Enhance never sends. It only replaces the draft; the user still sends.
-- A stale response never overwrites newer text. `usePromptEnhancer` counts
-  generations and compares the language context; ChatInput applies a result
-  only when the draft is byte-identical to the snapshot the request started
-  from and the draft identity has not moved.
+- A stale response never overwrites newer text. `usePromptEnhancer` tracks one
+  authoritative operation (a generation id) and compares the language context;
+  ChatInput applies a result only when the draft is byte-identical to the
+  snapshot the request started from and the draft identity has not moved. An
+  operation is also invalidated outright — settling silently as obsolete —
+  when the draft is edited or the draft identity (runtime, directory, session)
+  switches, so the outcome settles promptly and the new draft or scope can
+  enhance again immediately.
 - A failure never touches the draft. Failures map to toasts: unavailable,
   context-too-small, empty-result, invalid-result, and timed-out get
   Enhance-specific copy; provider-failed uses the request layer's generic
@@ -356,6 +360,15 @@ The invariants that hold wherever the button is mounted:
   rejection of their own; a fired deadline toasts `timed-out` instead of
   spinning forever. While the request runs, the same button is the cancel
   control, so the user is never trapped on the spinner.
+- The instructions fetch has two lifetimes. The shared `/api/magic-prompts`
+  overrides request is coalesced across all consumers and carries its own
+  internal 20s deadline — Enhance's own 90s budget is not spent waiting on a
+  fetch that should take seconds, and a hung shared request clears so the
+  next caller retries. Each caller races that shared request with its own
+  signals (scope/cancellation/deadline) and stops waiting early without
+  aborting the shared transport; a caller's cancellation or deadline is
+  abort-named and mapped by `enhancePrompt` (`aborted` vs `timed-out`),
+  while genuine transport failures still fall back to the default template.
 - The request refuses truncation: `onOverflow: 'error'` turns an
   over-budget draft into a 413 error instead of a silently clipped rewrite.
 - The guard rejects corruption, not creativity: a rewrite that loses a

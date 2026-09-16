@@ -1098,6 +1098,12 @@ const LEGACY_PROMPT_KEY_MAP: Record<string, { visible: MagicPromptId; instructio
 let cachedOverrides: Record<string, string> | null = null;
 let inFlightOverridesRequest: Promise<Record<string, string>> | null = null;
 
+/** Resets the cached/in-flight overrides state. Intended for tests. */
+export const resetMagicPromptOverridesForTests = (): void => {
+  cachedOverrides = null;
+  inFlightOverridesRequest = null;
+};
+
 const replaceTemplateVariables = (template: string, variables: Record<string, string>) => {
   return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, key: string) => {
     if (!Object.prototype.hasOwnProperty.call(variables, key)) {
@@ -1142,16 +1148,30 @@ const normalizeOverridesPayload = (payload: unknown): Record<string, string> => 
   return result;
 };
 
-const requestMagicPromptOverrides = (signal?: AbortSignal): Promise<Record<string, string>> => {
+/**
+ * Deadline for the one shared overrides fetch. The transports give a lost
+ * response frame no rejection of their own, so without it a hung `/api/`
+ * read would pend every magic-prompt consumer forever (the Enhance deadline
+ * would then eat the whole 90s budget on a fetch that should take seconds).
+ * 20s sits with the project's read-fetch deadlines (`pullRequestDiff` uses
+ * 30s for heavier reads; relay probes use 8s) — a fresh, local JSON read
+ * should finish well inside it, and a fired deadline is recoverable: the
+ * in-flight request is cleared and the next caller starts a new one.
+ */
+const MAGIC_PROMPTS_FETCH_TIMEOUT_MS = 20_000;
+
+/**
+ * The shared in-flight request runs on its own internally-deadlined transport
+ * signal — no caller signal ever reaches it, so one caller's cancellation or
+ * deadline can never cancel the shared fetch for the others.
+ */
+const requestMagicPromptOverrides = (transportSignal?: AbortSignal): Promise<Record<string, string>> => {
   const init: RuntimeFetchOptions = {
     method: 'GET',
     headers: { Accept: 'application/json' },
   };
-  if (signal) {
-    // A signaled request opts out of runtime-fetch's read coalescing —
-    // acceptable: one caller's deadline must never cancel the shared fetch
-    // for the others.
-    init.signal = signal;
+  if (transportSignal) {
+    init.signal = transportSignal;
   }
   return runtimeFetch(API_ENDPOINT, init).then(async (response) => {
     if (!response.ok) {
@@ -1164,6 +1184,49 @@ const requestMagicPromptOverrides = (signal?: AbortSignal): Promise<Record<strin
   });
 };
 
+/**
+ * Waits on the shared in-flight promise until the caller's own signals say
+ * to stop — without ever aborting the shared transport or touching the
+ * cache. The caller signals here are wait-scoped: the enhance deadline (the
+ * `AbortSignal.any` composition of the caller signal and the 90s enhance
+ * deadline) and, in principle, a caller's plain cancellation signal.
+ *
+ * The rejection is always abort-named (the fired signal's own reason when
+ * there is one, a synthesized `AbortError` otherwise), so
+ * `enhancePrompt`'s catch reads it as a deadline/cancellation, never as a
+ * transport failure. A plain cancellation fires the composed deadline too —
+ * but the service reads `signal.aborted` first, so it still maps to
+ * `aborted` rather than `timed-out`.
+ */
+const awaitSharedUntilCallerSignal = <T>(
+  shared: Promise<T>,
+  callerSignal?: AbortSignal,
+): Promise<T> => {
+  if (!callerSignal) {
+    return shared;
+  }
+  if (callerSignal.aborted) {
+    // Mirror fetch semantics: an already-aborted signal rejects immediately.
+    void shared.catch(() => undefined);
+    return Promise.reject(callerSignal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+  }
+  let onAbort: EventListener = () => {
+    // The abandoned shared branch must not become an unhandled rejection
+    // when it later settles (e.g. its own timeout fires after we left).
+    void shared.catch(() => undefined);
+    callerSignal.removeEventListener('abort', onAbort);
+    rejectSharedWait(callerSignal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+  };
+  let rejectSharedWait: (error: unknown) => void = () => {};
+  const left = new Promise<never>((_resolve, reject) => {
+    rejectSharedWait = reject;
+  });
+  callerSignal.addEventListener('abort', onAbort, { once: true });
+  return Promise.race([shared, left]).finally(() => {
+    callerSignal.removeEventListener('abort', onAbort);
+  });
+};
+
 export const fetchMagicPromptOverrides = async (
   options: { signal?: AbortSignal } = {},
 ): Promise<Record<string, string>> => {
@@ -1171,20 +1234,23 @@ export const fetchMagicPromptOverrides = async (
     return cachedOverrides;
   }
 
-  // A signaled caller cannot join the shared in-flight request: that promise
-  // may be unsigned (started by a caller without a deadline), and attaching a
-  // deadline to a fetch that never sees the signal would never fire.
-  if (options.signal) {
-    return requestMagicPromptOverrides(options.signal);
+  // An already-aborted caller never consumes the result, so it must not spin
+  // up (or be counted on to spin up) the shared request — mirror fetch's
+  // immediate-rejection semantics for pre-aborted signals.
+  if (options.signal?.aborted) {
+    return Promise.reject(options.signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
   }
 
   if (!inFlightOverridesRequest) {
-    inFlightOverridesRequest = requestMagicPromptOverrides().finally(() => {
-      inFlightOverridesRequest = null;
-    });
+    inFlightOverridesRequest = requestMagicPromptOverrides(AbortSignal.timeout(MAGIC_PROMPTS_FETCH_TIMEOUT_MS))
+      .finally(() => {
+        inFlightOverridesRequest = null;
+      });
   }
 
-  return inFlightOverridesRequest;
+  // The caller's signal bounds only its own wait on the shared request;
+  // the shared transport (and the cache it fills) is untouched by callers.
+  return awaitSharedUntilCallerSignal(inFlightOverridesRequest, options.signal);
 };
 
 export const getMagicPromptDefinition = (id: MagicPromptId): MagicPromptDefinition => {
@@ -1203,7 +1269,17 @@ const getEffectiveMagicPromptTemplate = async (
   id: MagicPromptId,
   options: { signal?: AbortSignal } = {},
 ): Promise<string> => {
-  const overrides = await fetchMagicPromptOverrides(options).catch((): Record<string, string> => ({}));
+  const overrides = await fetchMagicPromptOverrides(options).catch((error: unknown): Record<string, string> => {
+    // A caller's cancellation or deadline is the caller giving up on THIS
+    // render, not a reason to silently fall back: the composed deadline's
+    // owner (e.g. the enhancer) reads the abort to map its failure reason,
+    // and proceeding on an aborted deadline would start a doomed request.
+    // Transport failures still resolve to the default template.
+    if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+      throw error;
+    }
+    return {};
+  });
   const override = overrides[id];
   if (typeof override === 'string') {
     return override;

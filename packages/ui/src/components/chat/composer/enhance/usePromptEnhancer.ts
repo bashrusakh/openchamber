@@ -1,16 +1,31 @@
 /**
- * The composer's Enhance Prompt state machine: one generation counter, one
- * AbortController, and the protected-token gate between the Small Model's
+ * The composer's Enhance Prompt state machine: one authoritative operation,
+ * one AbortController, and the protected-token gate between the Small Model's
  * rewrite and the draft it would replace.
+ *
+ * The operation is scoped. It runs for the exact draft it was started from
+ * and for the current draft scope (`scopeKey` — the runtime/directory/session
+ * identity ChatInput derives), and it always settles promptly into one of the
+ * terminal outcomes idle → running → applied | failed | cancelled |
+ * timed-out | obsolete:
+ *
+ * - `applied` / `failed` — the rewrite landed (protected-token violations
+ *   fail loudly) or a request failure surfaced; ChatInput maps the reasons
+ *   that need their own copy to toasts.
+ * - `cancelled` — the user tapped cancel; silent.
+ * - `timed-out` — the client deadline fired before any usable response;
+ *   surfaced as a toast.
+ * - `obsolete` — the operation's premise disappeared before it settled: a
+ *   newer enhance started, the draft was edited (`noteDraftChanged`), the
+ *   scope moved (session/directory/runtime switch), or the composer
+ *   unmounted. Late/obsolete outcomes are swallowed silently and their
+ *   cleanup is forbidden from touching the busy state, so the spinner always
+ *   settles promptly and the new scope/draft can enhance again immediately.
  *
  * The hook owns everything ChatInput should not: request generations, stale
  * responses, cancellation, and validation. ChatInput only decides whether an
- * enhance may start, applies the returned text to the exact draft the request
+ * enhance may run, applies the returned text to the exact draft the request
  * was started from, and maps failure reasons to toasts.
- *
- * Stale responses (the user typed on, a second enhance started, the composer's
- * language context materially changed) are swallowed silently — a rewrite
- * answering after the draft moved on is not an error, it is nothing.
  *
  * "Materially changed" means the registry behind the language context changed
  * — compared by value via `sameLanguageContext`, not by object identity. The
@@ -89,27 +104,76 @@ function sameLanguageContext(
         && a.attachmentFilenames.every((name, index) => name === b.attachmentFilenames[index]);
 }
 
-export function usePromptEnhancer(languageContext: ComposerLanguageContext) {
+export interface PromptEnhancerInput {
+    /**
+     * The composer's language context. Read through a ref so a registry
+     * change does not re-create the callbacks, and a response is validated
+     * against the values the request was started with (a materially changed
+     * context marks the response stale).
+     */
+    languageContext: ComposerLanguageContext;
+    /**
+     * Identity of the draft scope the enhance runs in — the runtime,
+     * directory, and session ChatInput derives from the chat draft identity.
+     * A change invalidates the active operation: its outcome becomes
+     * obsolete and the new scope can enhance immediately.
+     */
+    scopeKey: string | null;
+    /**
+     * Reads the composer's live draft. ChatInput pushes draft changes
+     * eagerly through `noteDraftChanged`; this reader is the hook's own
+     * window onto the same document the apply-side backstop compares
+     * against.
+     */
+    getLiveDraft: () => string;
+}
+
+export function usePromptEnhancer(input: PromptEnhancerInput) {
     const [isEnhancing, setIsEnhancing] = React.useState(false);
-    const pendingCountRef = React.useRef(0);
-    // Monotonically increasing id of the latest request; any response from an
-    // older generation is stale and must not touch anything.
+    // Monotonically increasing id of the latest authoritative operation; any
+    // response from an older generation is stale and must not touch anything.
+    // This ref is the single authority for "which enhance is current" — no
+    // pending-count bookkeeping exists because exactly one operation is
+    // authoritative at a time, and an older operation's cleanup observes a
+    // generation mismatch and becomes a no-op.
     const generationRef = React.useRef(0);
     const abortRef = React.useRef<AbortController | null>(null);
+    // The draft the authoritative operation was started from, or null while
+    // none is active. Draft-change notifications compare against this.
+    const activeSourceRef = React.useRef<string | null>(null);
     // Read through a ref so a registry change does not re-create the callback,
     // and a response is validated against the values the request was started
     // with (a materially changed context marks the response stale).
-    const languageContextRef = React.useRef(languageContext);
-    languageContextRef.current = languageContext;
-
-    const settle = React.useCallback(() => {
-        pendingCountRef.current = Math.max(0, pendingCountRef.current - 1);
-        if (pendingCountRef.current === 0) setIsEnhancing(false);
-    }, []);
+    const languageContextRef = React.useRef(input.languageContext);
+    languageContextRef.current = input.languageContext;
+    const getLiveDraftRef = React.useRef(input.getLiveDraft);
+    getLiveDraftRef.current = input.getLiveDraft;
 
     const cancel = React.useCallback(() => {
         abortRef.current?.abort();
     }, []);
+
+    // Ends the active operation without waiting for its transport: the
+    // generation bump makes its outcome obsolete, the abort stops the network
+    // work, and the spinner is released at once. A no-op when nothing is
+    // active — callers may notify unconditionally.
+    const invalidateActive = React.useCallback(() => {
+        if (activeSourceRef.current === null) return;
+        activeSourceRef.current = null;
+        generationRef.current += 1;
+        abortRef.current?.abort();
+        setIsEnhancing(false);
+    }, []);
+
+    // Draft-change notification from the composer's change handler: cheap by
+    // design — a no-op while no operation is active or the draft still matches
+    // the one the operation was started from. Once the draft moved, the
+    // rewrite would answer for a draft that no longer exists, so the operation
+    // is invalidated here instead of being raced against the response path.
+    const noteDraftChanged = React.useCallback((liveDraft: string) => {
+        if (activeSourceRef.current === null || liveDraft === activeSourceRef.current) return;
+        invalidateActive();
+    }, [invalidateActive]);
 
     const enhance = React.useCallback(async (
         draft: string,
@@ -122,7 +186,7 @@ export function usePromptEnhancer(languageContext: ComposerLanguageContext) {
         const controller = new AbortController();
         abortRef.current = controller;
         const requestLanguageContext = languageContextRef.current;
-        pendingCountRef.current += 1;
+        activeSourceRef.current = draft;
         setIsEnhancing(true);
         try {
             const cleaned = await enhancePrompt(draft, context, controller.signal);
@@ -155,9 +219,31 @@ export function usePromptEnhancer(languageContext: ComposerLanguageContext) {
             const reason = error instanceof PromptEnhanceError ? error.reason : 'provider-failed';
             return { outcome: 'failed', reason };
         } finally {
-            settle();
+            // Only the authoritative operation releases the busy state: an
+            // older operation's cleanup observes a generation mismatch and
+            // becomes a no-op, so it can never clear a newer operation's
+            // spinner. With a single authoritative operation there is no
+            // concurrency to count — no pending-request bookkeeping needed.
+            if (generationRef.current === requestId) {
+                activeSourceRef.current = null;
+                setIsEnhancing(false);
+            }
         }
-    }, [settle]);
+    }, []);
+
+    // Scope invalidation: a session/directory/runtime switch moves the draft
+    // scope, so an operation started for the previous scope can no longer land
+    // anywhere meaningful — invalidate it and let the new scope enhance
+    // immediately. Skipped on first mount (nothing can be active yet, tracked
+    // via an undefined sentinel) and when the key is unchanged (ordinary
+    // re-renders pass an equal key).
+    const prevScopeKeyRef = React.useRef<string | null | undefined>(undefined);
+    React.useEffect(() => {
+        const previous = prevScopeKeyRef.current;
+        prevScopeKeyRef.current = input.scopeKey;
+        if (previous === undefined || previous === input.scopeKey) return;
+        invalidateActive();
+    }, [input.scopeKey, invalidateActive]);
 
     React.useEffect(() => () => {
         // Unmount invalidates every in-flight request and stops its network work.
@@ -165,5 +251,5 @@ export function usePromptEnhancer(languageContext: ComposerLanguageContext) {
         abortRef.current?.abort();
     }, []);
 
-    return { isEnhancing, enhance, cancel };
+    return { isEnhancing, enhance, cancel, noteDraftChanged };
 }
