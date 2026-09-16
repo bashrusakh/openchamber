@@ -42,7 +42,7 @@ describe('built-in extension build', () => {
     expect(manifest.version).toBe(app.version);
     expect(manifest.openchamber.contributes.capabilities).toEqual(['sessions', 'files']);
     expect((await fs.stat(path.join(demo, 'panel/main.js'))).size).toBeGreaterThan(0);
-    expect(await fs.readdir(path.join(demo, 'panel'))).toEqual(['index.html', 'main.js']);
+    expect((await fs.readdir(path.join(demo, 'panel'))).sort()).toEqual(['index.html', 'main.js']);
     expect(Object.keys(result.extensions[0]).sort()).toEqual(['directory', 'id']);
     await buildBuiltInExtensions({ sourceRoot, outDir: `${outDir}${path.sep}` });
     expect((await readBuiltInRegistry(outDir)).extensions).toEqual(result.extensions);
