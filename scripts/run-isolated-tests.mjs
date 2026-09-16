@@ -46,13 +46,10 @@ const resolveCommand = (file) => {
   // TypeScript goes to Bun even when the file imports `node:test`, which Bun
   // implements. Node's ESM loader cannot resolve the extensionless local
   // specifiers these files use (`./sseProxy`), so it never ran them at all.
-  // `require(...)` files may also name their framework in CJS form.
-  const usesBunTest = /from\s+['"]bun:test['"]|require\(['"]bun:test['"]\)/.test(source);
-  const usesNodeTest = /from\s+['"]node:test['"]|require\(['"]node:test['"]\)/.test(source);
-  if (isTypeScript || usesBunTest) {
+  if (isTypeScript || /(?:from\s+|require\(\s*)['"]bun:test['"]/.test(source)) {
     return { label: 'bun', command: bunExecutable, args: ['test', file] };
   }
-  if (usesNodeTest) {
+  if (/(?:from\s+|require\(\s*)['"]node:test['"]/.test(source)) {
     return { label: 'node', command: 'node', args: ['--test', file] };
   }
   return null;

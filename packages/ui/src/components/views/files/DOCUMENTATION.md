@@ -14,7 +14,7 @@ rebuild the Git index.
 
 Desktop `FilesView` in editor-only mode neither loads nor constructs its unused
 tree. Mobile retains its tree. The context panel passes actual visibility,
-including both the panel's open state and its active tab, to each file surface.
+including the panel's open state, its active tab, and the editor toggle, to each file surface.
 Hidden surfaces retain drafts, loaded content and scroll state. They stop
 directory and file metadata polling; reopening checks freshness once before
 normal polling resumes. Autosave is independent of visibility.

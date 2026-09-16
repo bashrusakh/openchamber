@@ -2,7 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { resolveBunExecutable } from '../../../../../scripts/lib/bun-executable.mjs';
 
 import { cloneGitRepository, parseGitInstallUrl, prepareGuestGitNetwork } from './clone.js';
 import { installGuestFromGitSource, parseInstallRequest } from './install.js';
@@ -12,6 +14,8 @@ import { checkGuestUpdate, updateGuest } from './updates.js';
 
 const lookup = async () => [{ address: '93.184.216.34', family: 4 }];
 const source = 'git@github.com:acme/fixture.git';
+const testPath = fileURLToPath(import.meta.url);
+const bunExecutable = resolveBunExecutable();
 const savedEnv = new Map();
 let root;
 let repo;
@@ -41,7 +45,7 @@ const sshCalls = async () => (await fs.readFile(logPath, 'utf8')).trim().split('
 if (!process.env.GUEST_SSH_TEST_HOME) {
   test('SSH integration suite uses an isolated server home', async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), 'guest-ssh-test-'));
-    const protectedPaths = [path.join(os.homedir(), '.gitconfig'), path.resolve(import.meta.dir, '../../../../../.git/config')];
+    const protectedPaths = [path.join(os.homedir(), '.gitconfig'), path.resolve(path.dirname(testPath), '../../../../../.git/config')];
     const readProtected = async (file) => {
       try { return await fs.readFile(file); }
       catch (error) {
@@ -62,14 +66,14 @@ if (!process.env.GUEST_SSH_TEST_HOME) {
       GUEST_SSH_TEST_HOME: home,
     });
     try {
-      const refused = spawnSync(process.execPath, ['test', import.meta.path], {
+      const refused = spawnSync(bunExecutable, ['test', testPath], {
         env, cwd: path.dirname(home), stdio: 'pipe', timeout: 60_000,
       });
       expect(refused.status).not.toBe(0);
       expect(refused.stderr.toString()).toContain('SSH fixture refused to run without an isolated home');
       // Bun's default child-process environment can ignore late process.env
       // edits. Establish isolation at process startup and always pass env/cwd.
-      execFileSync(process.execPath, ['test', import.meta.path], {
+      execFileSync(bunExecutable, ['test', testPath], {
         env, cwd: home, stdio: 'pipe', timeout: 60_000,
       });
     } finally {

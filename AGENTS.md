@@ -48,7 +48,6 @@ Shared contracts must define intentional behavior for every applicable runtime: 
 - Enforce security and correctness in core/runtime logic, not only UI visibility or prompts.
 - Keep entrypoints and bridges thin; place domain logic in focused owning modules.
 - Update owning documentation when module ownership, contracts, or invariants change.
-- A new workspace needs its manifest in the Dockerfile `deps` stage: the image installs from a pruned checkout, and a workspace something present depends on has to be there or the frozen install fails.
 
 ## Correctness Invariants
 

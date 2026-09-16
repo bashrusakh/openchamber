@@ -917,18 +917,17 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
             ? latestLoadedUserChoice.variant
             : undefined;
         const restoreAgentName = latestLoadedUserChoice.agent || currentAgentName || undefined;
-        // A message carrying no effort is not evidence that the user has none:
-        // a send under an explicit "Default" carries none either, and the echo
-        // of that very send arrives here. Keep what the session already
-        // recorded, and let a concrete historical effort replace it.
-        const restoredVariant = historicalVariant ?? (currentSessionId && restoreAgentName
+        // A saved choice may be newer than the last sent message, including an
+        // explicit Default. Reloading history must not replace that choice.
+        const savedVariant = currentSessionId && restoreAgentName
             ? getAgentModelVariantForSession(
                 currentSessionId,
                 restoreAgentName,
                 latestLoadedUserChoice.providerID,
                 latestLoadedUserChoice.modelID,
             )
-            : undefined);
+            : undefined;
+        const restoredVariant = savedVariant !== undefined ? savedVariant : historicalVariant;
         const applyResult = applyModelSelectionWithVariant(
             latestLoadedUserChoice.providerID,
             latestLoadedUserChoice.modelID,
@@ -990,9 +989,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                         }
                         return 'resolved';
                     }
-                    if (result === 'provider-missing') {
-                        return 'waiting';
-                    }
+                    return 'waiting';
                 } else if (currentAgentName !== savedAgentName) {
                     setAgent(savedAgentName);
                 }
@@ -1006,9 +1003,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                     }
                     return 'resolved';
                 }
-                if (result === 'provider-missing') {
-                    return 'waiting';
-                }
+                return 'waiting';
             }
 
             for (const agent of agents) {
@@ -1028,9 +1023,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                     }
                     return 'resolved';
                 }
-                if (result === 'provider-missing') {
-                    return 'waiting';
-                }
+                return 'waiting';
             }
 
             return 'continue';
@@ -1197,10 +1190,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
         // user selection while drafting.
         if (!currentSessionId) {
             if (currentVariantSelection.override === undefined && !manualVariantSelectionRef.current) {
-                const desired = settingsDefaultVariant && availableVariants.includes(settingsDefaultVariant)
-                    ? settingsDefaultVariant
-                    : undefined;
-                setCurrentVariantOverride(desired ?? null, desired);
+                const desired = resolveInheritedVariantForModel(currentProviderId, currentModelId);
+                setCurrentVariantOverride(undefined, desired);
             }
             return;
         }
