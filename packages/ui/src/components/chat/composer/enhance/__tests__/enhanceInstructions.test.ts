@@ -38,10 +38,12 @@ describe('enhance instructions default template contract', () => {
   });
 
   test('preserves the action ceiling across understand and modification intent', () => {
-    // Understanding intent must not become modification authorization…
-    expect(template).toMatch(/must not silently become authorization to modify it/i);
-    // …while authorized modification may include the necessary understanding,
+    // Authorization must be bounded by the complete meaning of the draft…
+    expect(template).toMatch(/Do not authorize any action beyond what the complete meaning of the draft supports/i);
+    // …and an information-seeking request must not become a change request,
+    // while authorized modification may include the necessary understanding,
     // but never unrelated work.
+    expect(template).toMatch(/into a request to change that target/i);
     expect(template).toMatch(/must not expand into unrelated work/i);
   });
 

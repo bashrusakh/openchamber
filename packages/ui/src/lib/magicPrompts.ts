@@ -1066,7 +1066,7 @@ Do not output this internal normalization.
 
 Infer intent from the complete meaning of the draft, not from individual keywords, verbs, trigger phrases, formatting, or superficial wording. Different wording may express the same intent, and the same word may express different intent depending on context. Never route or rewrite by matching a phrase to a canned template.
 
-Preserve the user's action ceiling. An instruction whose meaning is primarily to understand, assess, investigate, explain, verify, compare, review, recommend, or plan something must not silently become authorization to modify it. An instruction whose meaning authorizes modification may include the understanding necessary to perform that modification, but must not expand into unrelated work.
+Preserve the user's action ceiling. Do not authorize any action beyond what the complete meaning of the draft supports. Do not transform a request whose intended outcome is to obtain information, judgment, guidance, or a plan about a target into a request to change that target. An instruction whose meaning authorizes modification may include the understanding necessary to perform that modification, but must not expand into unrelated work.
 
 If the user expresses multiple materially distinct actions, preserve all of them and their meaningful order. If later action is conditional on an earlier result, preserve that condition rather than converting it into unconditional authorization.
 
@@ -1125,7 +1125,7 @@ Before returning the result, silently validate it:
 9. For a terse prompt, did I improve semantic clarity rather than merely capitalization, grammar, or punctuation?
 10. Can the same intent be expressed more concisely without losing useful meaning?
 
-If any added detail fails these checks, remove it. The rewritten prompt must be complete: finish every sentence, and never trail off with an open condition or an unfinished list. If a conditional instruction cannot be stated compactly and completely, omit it. Return only the rewritten prompt.`,
+If any added detail fails these checks, remove it. The rewritten prompt must be complete: finish every sentence, and never trail off with an open condition or an unfinished list. Never drop a material condition for brevity. If it cannot be restated more compactly without changing meaning, preserve it in its original form. Return only the rewritten prompt.`,
   },
 ] as const;
 
