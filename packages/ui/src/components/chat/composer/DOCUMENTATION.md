@@ -352,10 +352,10 @@ The invariants that hold wherever the button is mounted:
   aborts and stale responses stay silent.
 - The request refuses truncation: `onOverflow: 'error'` turns an
   over-budget draft into a 413 error instead of a silently clipped rewrite.
-- The guard rejects corruption, not creativity: a rewrite that loses an
-  `@`/`#` token the user typed, or invents one, fails validation. Slash
-  tokens are the exception — a rewrite may name a command the source did
-  not use.
+- The guard rejects corruption, not creativity: a rewrite that loses a
+  token the user typed — `@` mention, `/` command, or `#` snippet — fails
+  validation, and so does one that invents a token of any kind the source
+  did not use.
 
 All logic lives in `enhance/`: `promptEnhancer.ts` (request, cleaning, typed
 `PromptEnhanceError`), `protectedTokens.ts` (the guard), and
