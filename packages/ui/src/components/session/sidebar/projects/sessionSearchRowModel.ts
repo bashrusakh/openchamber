@@ -126,7 +126,11 @@ export type SessionSearchRowModel = {
   hasRecentRows: boolean;
   /** The folder rows in `rows`, retained for search DnD without a render scan. */
   folderRows: readonly SessionSearchFolderRow[];
-  /** Number of unique session ids in the final rendered projection. */
+  /**
+   * Sidebar header count: session matches + folder-name matches + one per
+   * matching group, plus rendered Recent rows. Occurrences are counted, not
+   * unique session ids.
+   */
   searchMatchCount: number;
   /** Complete active folder ownership, independent of search filtering. */
   activeFolderScopesByOwner: SessionSearchOwnerScopeMap;
@@ -184,16 +188,35 @@ type AppendSessionOptions = {
 
 const EMPTY_FOLDERS: readonly SessionFolder[] = [];
 
-const countRenderedSessions = (rows: readonly SessionSearchRow[], normalizedQuery: string): number => {
+/**
+ * Header count, restoring the base per-group semantics the flat row model
+ * replaced: every group whose rows appear in the model contributes its search
+ * data triple (`matchedSessionCount + folderNameMatchCount + one per matching
+ * group`), plus one per rendered Recent session row — exact ID matches only
+ * for `ses_` queries, matching how `deriveRecentActivitySections` filters.
+ * Occurrences are counted, not unique session ids.
+ */
+const computeSearchMatchCount = (
+  contributingGroups: readonly SessionGroup[],
+  groupSearchDataByGroup: SessionSearchRowModelArgs['groupSearchDataByGroup'],
+  rows: readonly SessionSearchRow[],
+  normalizedQuery: string,
+): number => {
   const query = normalizedQuery.trim().toLowerCase();
   const isIdQuery = query.startsWith('ses_');
-  const sessionIds = new Set<string>();
+  const contributing = new Set(contributingGroups);
+  let count = 0;
+  for (const group of contributing) {
+    const data = groupSearchDataByGroup.get(group);
+    if (!data) continue;
+    count += data.matchedSessionCount + data.folderNameMatchCount + (data.groupMatches ? 1 : 0);
+  }
   rows.forEach((row) => {
-    if (row.kind !== 'session') return;
+    if (row.kind !== 'session' || row.renderContext !== 'recent') return;
     if (isIdQuery && row.node.session.id.toLowerCase() !== query) return;
-    sessionIds.add(row.node.session.id);
+    count += 1;
   });
-  return sessionIds.size;
+  return count;
 };
 
 const toMutablePinnedSessionIds = (pinnedSessionIds: ReadonlySet<string>): Set<string> => (
@@ -464,6 +487,7 @@ const appendGroup = ({
   rows,
   entries,
   folderRows,
+  contributingGroups,
 }: {
   group: SessionGroup;
   groupKey: string;
@@ -474,6 +498,7 @@ const appendGroup = ({
   rows: SessionSearchRow[];
   entries: SessionRowOrderEntry[];
   folderRows: SessionSearchFolderRow[];
+  contributingGroups: Set<SessionGroup>;
 }): void => {
   const projection = projectGroup(
     group,
@@ -484,6 +509,7 @@ const appendGroup = ({
     args.pinnedSessionIds,
     args.sessionOrderIndex,
   );
+  contributingGroups.add(group);
   const allGroupSessions: Session[] = [];
   const collect = (nodes: readonly SessionNode[]): void => {
     nodes.forEach((node) => {
@@ -532,6 +558,7 @@ const appendProject = (
   rows: SessionSearchRow[],
   entries: SessionRowOrderEntry[],
   folderRows: SessionSearchFolderRow[],
+  contributingGroups: Set<SessionGroup>,
 ): void => {
   const projectId = section.project.id;
   const isCollapsed = !args.singleProjectMode && !args.showOnlyMainWorkspace
@@ -567,6 +594,7 @@ const appendProject = (
     rows,
     entries,
     folderRows,
+    contributingGroups,
   }));
 };
 
@@ -576,6 +604,7 @@ const appendChatGroup = (
   rows: SessionSearchRow[],
   entries: SessionRowOrderEntry[],
   folderRows: SessionSearchFolderRow[],
+  contributingGroups: Set<SessionGroup>,
 ): void => {
   const projection = projectGroup(
     group,
@@ -586,6 +615,7 @@ const appendChatGroup = (
     args.pinnedSessionIds,
     args.sessionOrderIndex,
   );
+  contributingGroups.add(group);
   const groupKey = 'activity:chats';
   const hasBody = appendGroupBody({
     group,
@@ -610,6 +640,7 @@ export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): Ses
   const rows: SessionSearchRow[] = [];
   const entries: SessionRowOrderEntry[] = [];
   const folderRows: SessionSearchFolderRow[] = [];
+  const contributingGroups = new Set<SessionGroup>();
   const projectSections = args.singleProjectMode
     ? args.sections.filter((section) => section.project.id === args.singleProjectId)
     : args.sections;
@@ -641,7 +672,7 @@ export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): Ses
       isCollapsed: args.collapsedActivitySections.has('chats'),
     });
     if (!args.collapsedActivitySections.has('chats') && hasChatResults) {
-       appendChatGroup(args.chatGroup, args, rows, entries, folderRows);
+       appendChatGroup(args.chatGroup, args, rows, entries, folderRows, contributingGroups);
     }
   }
 
@@ -680,9 +711,9 @@ export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): Ses
 
   if (args.showOnlyMainWorkspace) {
     const activeSection = projectSections.find((section) => section.project.id === args.activeProjectId) ?? projectSections[0];
-    if (activeSection) appendProject(activeSection, args, rows, entries, folderRows);
+    if (activeSection) appendProject(activeSection, args, rows, entries, folderRows, contributingGroups);
   } else {
-    projectSections.forEach((section) => appendProject(section, args, rows, entries, folderRows));
+    projectSections.forEach((section) => appendProject(section, args, rows, entries, folderRows, contributingGroups));
   }
 
   return {
@@ -692,7 +723,12 @@ export const buildSessionSearchRowModel = (args: SessionSearchRowModelArgs): Ses
     hasResults: rows.length > 0,
     hasRecentRows,
     folderRows,
-    searchMatchCount: countRenderedSessions(rows, args.normalizedQuery),
+    searchMatchCount: computeSearchMatchCount(
+      [...contributingGroups],
+      args.groupSearchDataByGroup,
+      rows,
+      args.normalizedQuery,
+    ),
     activeFolderScopesByOwner: args.activeFolderScopesByOwner,
   };
 };

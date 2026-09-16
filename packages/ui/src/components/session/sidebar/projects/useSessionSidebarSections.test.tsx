@@ -258,7 +258,7 @@ describe('sidebar search over standalone groups', () => {
     expect(data?.groupMatches).toBe(true);
     expect(data?.folderNameMatchCount).toBe(1);
     expect(data?.hasMatch).toBe(true);
-     expect(sections.searchMatchCount).toBe(0);
+     expect(sections.searchMatchCount).toBe(2);
   });
 });
 
@@ -519,8 +519,11 @@ describe('sidebar search live updates while a query is active', () => {
       const updatedRows = getFlatSearchRowModel(updated, 'release', updatedFolders);
       expect(updatedRows.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.id)).toEqual(['ses_a']);
       expect(updatedRows.rows.filter((row) => row.kind === 'folder').map((row) => row.displayName)).toEqual(['Release plans']);
-      expect(updatedRows.searchMatchCount).toBe(1);
-      expect(updated.searchMatchCount).toBe(1);
+      // The renamed folder matches too, so the group's triple contributes
+      // session match + folder-name match — the same count for grouped and
+      // flat display, matching base header semantics.
+      expect(updatedRows.searchMatchCount).toBe(2);
+      expect(updated.searchMatchCount).toBe(2);
     } finally {
       await harness.unmount();
     }
@@ -670,7 +673,7 @@ describe('sidebar search parity: groups, folders, and display projections', () =
     expect(data?.folderNameMatchCount).toBe(0);
     expect(data?.hasMatch).toBe(true);
     expect(nodeIds(groupNodes(sections, worktreeGroup))).toEqual([]);
-     expect(sections.searchMatchCount).toBe(0);
+     expect(sections.searchMatchCount).toBe(1);
 
     // Grouped display keeps the matching worktree group; flat display merges
     // the (empty) non-archived result into a single flat group.
@@ -748,6 +751,6 @@ describe('sidebar search parity: groups, folders, and display projections', () =
     expect(data?.folderNameMatchCount).toBe(1);
     expect(data?.hasMatch).toBe(true);
     expect(nodeIds(groupNodes(sections, rootGroup))).toEqual([]);
-     expect(sections.searchMatchCount).toBe(0);
+     expect(sections.searchMatchCount).toBe(1);
   });
 });

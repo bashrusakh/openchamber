@@ -43,10 +43,11 @@ export type GroupSearchData = {
 };
 
 /**
- * One search pass over a group's session nodes. `matchedCount` is the number
- * the header and the flat-display merge consume: every node of the filtered
- * tree for a text query, exact ID matches only for a `ses_` query, and the
- * whole tree for an empty query.
+ * One search pass over a group's session nodes. `matchedCount` is the
+ * per-group session-node match count the flat-display merge sums and the
+ * search row model counts toward the header: matched text nodes count
+ * themselves plus their kept descendants, exact ID matches only for a `ses_`
+ * query, and the whole tree for an empty query.
  */
 export type SessionNodeSearchResult = {
   nodes: SessionNode[];

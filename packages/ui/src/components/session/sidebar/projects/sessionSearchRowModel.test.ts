@@ -112,6 +112,107 @@ describe('buildSessionSearchRowModel', () => {
     expect(model.searchMatchCount).toBe(1);
   });
 
+  test('counts a folder-name-only match in the header', () => {
+    const group = makeGroup('main', []);
+    const model = buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      groupSearchDataByGroup: new WeakMap([[group, {
+        filteredNodes: [],
+        matchedSessionCount: 0,
+        folderNameMatchCount: 1,
+        groupMatches: false,
+        hasMatch: true,
+      }]]),
+    });
+
+    expect(model.rows.filter((row) => row.kind === 'session')).toHaveLength(0);
+    expect(model.searchMatchCount).toBe(1);
+  });
+
+  test('counts a group-name-only match in the header', () => {
+    const group = makeGroup('main', []);
+    const model = buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      groupSearchDataByGroup: new WeakMap([[group, {
+        filteredNodes: [],
+        matchedSessionCount: 0,
+        folderNameMatchCount: 0,
+        groupMatches: true,
+        hasMatch: true,
+      }]]),
+    });
+
+    expect(model.rows.filter((row) => row.kind === 'session')).toHaveLength(0);
+    expect(model.searchMatchCount).toBe(1);
+  });
+
+  test('sums session, folder, and group matches of one group into the header count', () => {
+    const nodes = [makeNode(makeSession('ses_a', 'Release a')), makeNode(makeSession('ses_b', 'Release b'))];
+    const group = makeGroup('main', nodes);
+    const model = buildSessionSearchRowModel({
+      ...baseArgs(),
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      groupSearchDataByGroup: new WeakMap([[group, {
+        filteredNodes: nodes,
+        matchedSessionCount: 2,
+        folderNameMatchCount: 3,
+        groupMatches: true,
+        hasMatch: true,
+      }]]),
+    });
+
+    expect(model.rows.filter((row) => row.kind === 'session').map((row) => row.node.session.id)).toEqual(['ses_a', 'ses_b']);
+    expect(model.searchMatchCount).toBe(6);
+  });
+
+  test('does not count folder names for an exact-id search', () => {
+    const group = makeGroup('main', []);
+    const model = buildSessionSearchRowModel({
+      ...baseArgs(),
+      normalizedQuery: 'ses_target',
+      sections: [makeProjectSection([group])],
+      chatGroup: null,
+      groupSearchDataByGroup: new WeakMap([[group, {
+        filteredNodes: [],
+        matchedSessionCount: 0,
+        // The data path forces folder matches to 0 for id queries; the model
+        // count must still reflect exactly what the group contributes.
+        folderNameMatchCount: 0,
+        groupMatches: false,
+        hasMatch: true,
+      }]]),
+    });
+
+    expect(model.searchMatchCount).toBe(0);
+  });
+
+  test('counts every rendered recent row, including exact-id matches only for ses_ queries', () => {
+    const recentItem = {
+      node: makeNode(makeSession('ses_recent', 'Release recent')),
+      projectId: 'project',
+      groupDirectory: PROJECT_ROOT,
+      secondaryMeta: null,
+    };
+    const buildRecentModel = (normalizedQuery: string) => buildSessionSearchRowModel({
+      ...baseArgs(),
+      normalizedQuery,
+      sections: [],
+      chatGroup: null,
+      showRecentSection: true,
+      recentSections: [{ key: 'active-now', items: [recentItem] }],
+      groupSearchDataByGroup: new WeakMap(),
+    });
+
+    expect(buildRecentModel('release').searchMatchCount).toBe(1);
+    expect(buildRecentModel('ses_recent').searchMatchCount).toBe(1);
+    expect(buildRecentModel('ses_other').searchMatchCount).toBe(0);
+  });
+
   test('flattens folder subtrees before ungrouped sessions and preserves row-order entries', () => {
     const parent = makeNode(makeSession('ses_parent', 'Release parent'));
     const child = makeNode(makeSession('ses_child', 'Release child'));
@@ -476,7 +577,9 @@ describe('buildSessionSearchRowModel', () => {
       'project-header',
       'ses_duplicate',
     ]);
-    expect(model.searchMatchCount).toBe(2);
+    // Occurrences, not unique ids: the project row, the chat row, and the
+    // Recent occurrence of the duplicated id each count.
+    expect(model.searchMatchCount).toBe(3);
     expect(model.entries.map((entry) => entry.id)).toEqual(['ses_chat', 'ses_duplicate', 'ses_duplicate']);
     expect(model.entries[1]?.rowKey).not.toBe(model.entries[2]?.rowKey);
     expect(model.hasRecentRows).toBe(true);
