@@ -2,6 +2,7 @@ import type { I18nKey } from './en';
 import { settingsDict } from './ja.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict: Record<I18nKey, string> = {
   'sessions.aiRename.action': 'AIで名前を変更',
@@ -30,10 +31,14 @@ export const dict: Record<I18nKey, string> = {
   ...settingsDict,
   ...linearIssuePickerI18n.ja,
   ...linearPanelI18n.ja,
+  ...pluginPanelI18n.ja,
   'terminalView.actions.attachSelection': '選択した出力を添付',
   'terminalView.actions.copySelection': '選択した出力をコピー',
   'terminalView.toast.selectionCopied': '出力をコピーしました',
   'terminalView.toast.copyFailed': 'コピーに失敗しました',
+  'terminalView.actions.copy': 'コピー',
+  'terminalView.actions.paste': '貼り付け',
+  'terminalView.toast.pasteFailed': 'クリップボードを読み取れませんでした。貼り付けのキーボードショートカットを使用してください。',
   'terminalView.actions.restart': 'ターミナルを再起動',
   'chat.message.terminalContext': '{terminal}、{start}〜{end}行',
   'chat.message.context.codeComment': '{file} の {start}〜{end} 行へのコメント',
@@ -143,6 +148,7 @@ export const dict: Record<I18nKey, string> = {
   'mobile.instances.cancelDeleteAria': '{label} を残す',
   'mobile.surface.closeAria': '閉じる',
   'mobile.header.openWorkspaceAria': 'ワークスペースパネルを開く',
+  'mobile.header.openWorkspaceWithChangesAria': 'ワークスペースパネルを開く、未コミットの変更あり',
   'mobile.header.openMetadataAria': 'セッションメタデータを開く',
   'mobile.header.metadata.context': 'コンテキスト',
   'mobile.header.metadata.usage': '使用量',
@@ -2122,9 +2128,6 @@ export const dict: Record<I18nKey, string> = {
   'chat.fileAttachment.activeEditor.pinSelection': '選択範囲をコンテキストに固定',
   'chat.fileAttachment.activeEditor.remove': 'コンテキストから削除',
   'chat.fileAttachment.openInDiagram': 'ダイアグラムビューで開く',
-  'chat.pendingChanges.fileCountSingle': '{count}ファイル',
-  'chat.pendingChanges.fileCountPlural': '{count}ファイル',
-  'chat.pendingChanges.changedInWorkspace': 'ワークスペースで変更',
   'chat.changedFiles.title': '変更されたファイル',
   'chat.changedFiles.actions.openFileTitle': '{path}を開く',
   'chat.changedFiles.actions.showMore': 'さらに表示（{count}）',
@@ -2270,6 +2273,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.container.sessionLoadError.retry': '再試行',
   'sessions.sidebar.group.empty.loadingSessions': 'セッションを読み込んでいます…',
   'sessions.sidebar.group.empty.loadFailed': 'セッションを更新できませんでした。',
+  'sessions.sidebar.group.empty.initializationFailed': 'ワークスペースを初期化できませんでした。',
+  'sessions.search.submitHint': 'Enter キーを押して検索',
   'sessions.sidebar.group.empty.retry': '再試行',
   'sessions.sidebar.group.empty.permissionDenied': 'フォルダへのアクセスが必要です。',
   'sessions.sidebar.group.empty.grantAccess': 'アクセスを許可',
@@ -2461,6 +2466,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.toolOutputDialog.noOutputProduced': '出力は生成されませんでした',
   'chat.toolPart.lspErrors': 'LSPエラー',
   'chat.toolPart.moreErrors': '+{count}件のエラー',
+  'chat.toolPart.moreRows': '+{count}行',
   'chat.toolPart.error': 'エラー:',
   'chat.toolPart.awaitingResponse': '応答を待機中...',
   'chat.toolPart.noOutputProduced': '出力は生成されませんでした',
@@ -3341,6 +3347,10 @@ export const dict: Record<I18nKey, string> = {
   'chat.workStatus.breakdown.mcpCountPlural': 'MCP {count} 個',
   'chat.workStatus.sections.open': 'セクションを選択',
   'chat.workStatus.sections.dialogTitle': 'パネルのセクション',
+  'chat.workStatus.sections.reorder': '{label}をドラッグして並び替え',
+  'chat.workStatus.sections.dragInstructions': 'スペースキーでセクションを選択し、矢印キーで移動し、スペースキーで確定します。Escapeキーでキャンセルします。',
+  'chat.workStatus.sections.position': '{label}、{count}個中{position}番目。',
+  'chat.workStatus.sections.dragCancelled': '並び替えをキャンセルしました。',
   'chat.workStatus.sections.dialogDescription': '作業状況パネルに表示する内容を選びます。非表示のセクションもデータは保持され、表示されないだけです。',
   'chat.workStatus.sections.allHidden': 'セクションが選択されていません',
   'chat.workStatus.sections.showAll': 'すべて表示',

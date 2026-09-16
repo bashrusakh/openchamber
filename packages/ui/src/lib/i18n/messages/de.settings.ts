@@ -1,3 +1,5 @@
+import { extensionsSettingsI18n } from './extensions.settings.i18n';
+import { guestIntegrationsI18n } from './guest-integrations.i18n';
 import { linearIntegrationI18n } from './linear-integration.i18n';
 export const settingsDict = {
   'settings.openchamber.visual.field.alwaysShowScrollbars': 'Bildlaufleisten immer anzeigen',
@@ -934,7 +936,10 @@ export const settingsDict = {
   'settings.openchamber.passkeys.toast.removeFailed': 'Konnte Passkey nicht entfernen.',
   'settings.openchamber.passkeys.toast.clearAuthFailed': 'Konnte gespeicherte Authentifizierung nicht löschen.',
   'settings.openchamber.sessionRetention.title': 'Sitzungsaufbewahrung',
-  'settings.openchamber.sessionRetention.tooltip': 'Automatisches Archivieren oder Löschen inaktiver Sitzungen basierend auf letzter Aktivität. Behält die 5 neuesten Sitzungen bei.',
+  'settings.openchamber.sessionRetention.field.onlyArchived': 'Nur archivierte Sitzungen',
+  'settings.openchamber.sessionRetention.field.onlyArchivedDescription': 'Verwendet Löschen und zählt die Aufbewahrungsdauer ab der Archivierung. Nicht archivierte Sitzungen bleiben erhalten.',
+  'settings.openchamber.sessionRetention.archivedTooltip': 'Löscht archivierte Sitzungen nach Ablauf der Aufbewahrungsdauer. Behält die 5 zuletzt archivierten Sitzungen, die geöffnete Sitzung sowie laufende und geteilte Sitzungen. Eine übergeordnete Sitzung bleibt erhalten, wenn ihre Löschung auch eine geschützte untergeordnete Sitzung löschen würde.',
+  'settings.openchamber.sessionRetention.tooltip': 'Archiviert oder löscht nicht archivierte Sitzungen anhand ihrer letzten Aktivität. Behält die 5 neuesten Sitzungen, die geöffnete Sitzung sowie laufende und geteilte Sitzungen. Archivierte Sitzungen bleiben erhalten. Eine übergeordnete Sitzung bleibt erhalten, wenn ihre Löschung auch eine geschützte untergeordnete Sitzung löschen würde.',
   'settings.openchamber.sessionRetention.field.enableAutoCleanupAria': 'Automatische Bereinigung aktivieren',
   'settings.openchamber.sessionRetention.field.enableAutoCleanup': 'Automatische Bereinigung aktivieren',
   'settings.openchamber.sessionRetention.field.retentionPeriod': 'Aufbewahrungszeitraum',
@@ -2271,6 +2276,8 @@ export const settingsDict = {
   'settings.openchamber.visual.option.themeMode.dark.description': 'Immer dunkles Erscheinungsbild verwenden',
   'chat.message.userText.collapseAria': 'Benutzernachricht einklappen',
   ...linearIntegrationI18n.de,
+  ...guestIntegrationsI18n.de,
+  ...extensionsSettingsI18n.de,
   'settings.page.integrations.title': 'Integrationen',
   'settings.page.integrations.description': 'Verbinde GitHub und Linear, damit OpenChamber mit deinen Issues und Pull Requests arbeiten kann.',
 };

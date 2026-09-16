@@ -447,6 +447,13 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['retention', 'archive', 'delete'],
   },
   {
+    id: 'sessions.retention-only-archived',
+    page: 'sessions',
+    titleKey: 'settings.openchamber.sessionRetention.field.onlyArchived',
+    descriptionKey: 'settings.openchamber.sessionRetention.field.onlyArchivedDescription',
+    keywords: ['archive', 'archived', 'only', 'delete', 'cleanup', 'retention'],
+  },
+  {
     id: 'sessions.retention-period',
     page: 'sessions',
     titleKey: 'settings.openchamber.sessionRetention.field.retentionPeriod',
@@ -1071,6 +1078,29 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     descriptionKey: 'settings.integrations.linear.mapping.defaultProject.info',
     keywords: ['linear', 'project', 'team', 'map', 'workspace', 'directory'],
     isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
+    id: 'integrations.guests',
+    page: 'integrations',
+    titleKey: 'settings.integrations.guests.title',
+    descriptionKey: 'settings.integrations.guests.info',
+    keywords: ['guest', 'extension', 'oauth', 'clickup', 'gitlab', 'panel', 'connect'],
+    isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
+    id: 'extensions.add',
+    page: 'extensions',
+    titleKey: 'settings.extensions.add.label',
+    descriptionKey: 'settings.extensions.add.info',
+    keywords: ['folder', 'path', 'zip', 'git', 'url', 'install', 'guest', 'panel'],
+    isAvailable: (ctx) => !ctx.isVSCode && !ctx.isMobile,
+  },
+  {
+    id: 'extensions.updates.check',
+    page: 'extensions',
+    titleKey: 'settings.extensions.updates.check',
+    keywords: ['update', 'upgrade', 'version', 'git', 'extension', 'guest', 'refresh'],
+    isAvailable: (ctx) => !ctx.isVSCode && !ctx.isMobile,
   },
 ] as const;
 

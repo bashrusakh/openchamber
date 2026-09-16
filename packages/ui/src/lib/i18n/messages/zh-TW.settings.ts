@@ -1,3 +1,5 @@
+import { extensionsSettingsI18n } from './extensions.settings.i18n';
+import { guestIntegrationsI18n } from './guest-integrations.i18n';
 import { linearIntegrationI18n } from './linear-integration.i18n';
 export const settingsDict = {
   'settings.openchamber.visual.field.alwaysShowScrollbars': '一律顯示捲軸',
@@ -953,7 +955,10 @@ export const settingsDict = {
   'settings.openchamber.passkeys.toast.removeFailed': '無法移除 passkey。',
   'settings.openchamber.passkeys.toast.clearAuthFailed': '無法清除已儲存的驗證資訊。',
   'settings.openchamber.sessionRetention.title': '工作階段保留',
-  'settings.openchamber.sessionRetention.tooltip': '根據最後活動時間自動封存或刪除閒置工作階段。會保留最近 5 個工作階段。',
+  'settings.openchamber.sessionRetention.field.onlyArchived': '僅已封存的工作階段',
+  'settings.openchamber.sessionRetention.field.onlyArchivedDescription': '使用刪除操作，並從封存時開始計算保留期限。未封存的工作階段會保留。',
+  'settings.openchamber.sessionRetention.archivedTooltip': '刪除超過保留期限的已封存工作階段。保留最近封存的 5 個工作階段、目前開啟的工作階段、執行中的工作階段及已分享的工作階段。如果刪除父工作階段會同時刪除受保護的子工作階段，則保留父工作階段。',
+  'settings.openchamber.sessionRetention.tooltip': '根據最後活動時間封存或刪除未封存的工作階段。保留最近 5 個工作階段、目前開啟的工作階段、執行中的工作階段及已分享的工作階段。已封存的工作階段會保留。如果刪除父工作階段會同時刪除受保護的子工作階段，則保留父工作階段。',
   'settings.openchamber.sessionRetention.field.enableAutoCleanupAria': '啟用自動清理',
   'settings.openchamber.sessionRetention.field.enableAutoCleanup': '啟用自動清理',
   'settings.openchamber.sessionRetention.field.retentionPeriod': '保留時長',
@@ -2280,6 +2285,8 @@ export const settingsDict = {
   'settings.openchamber.visual.option.enterToSend.enter.label': '按 Enter 傳送',
   'settings.openchamber.visual.option.enterToSend.modifier.label': '按 Ctrl/Cmd+Enter 傳送',
   ...linearIntegrationI18n['zh-TW'],
+  ...guestIntegrationsI18n['zh-TW'],
+  ...extensionsSettingsI18n['zh-TW'],
   'settings.page.integrations.title': '整合',
   'settings.page.integrations.description': '連接 GitHub 和 Linear，讓 OpenChamber 可以處理你的 issue 和 pull request。',
 } as const;

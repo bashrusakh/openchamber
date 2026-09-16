@@ -1,3 +1,5 @@
+import { extensionsSettingsI18n } from './extensions.settings.i18n';
+import { guestIntegrationsI18n } from './guest-integrations.i18n';
 import { linearIntegrationI18n } from './linear-integration.i18n';
 export const settingsDict = {
   'settings.openchamber.visual.field.alwaysShowScrollbars': 'スクロールバーを常に表示',
@@ -989,7 +991,10 @@ export const settingsDict = {
   'settings.openchamber.passkeys.toast.removeFailed': 'パスキーを削除できませんでした。',
   'settings.openchamber.passkeys.toast.clearAuthFailed': '保存された認証情報をクリアできませんでした。',
   'settings.openchamber.sessionRetention.title': 'Session 保持',
-  'settings.openchamber.sessionRetention.tooltip': '最終アクティビティに基づいて非アクティブな Session を自動的にアーカイブまたは削除します。最新5件の Session は保持されます。',
+  'settings.openchamber.sessionRetention.field.onlyArchived': 'アーカイブ済みのセッションのみ',
+  'settings.openchamber.sessionRetention.field.onlyArchivedDescription': '削除を選択し、アーカイブ時点から保持期間を数えます。未アーカイブのセッションは保持されます。',
+  'settings.openchamber.sessionRetention.archivedTooltip': '保持期間を過ぎたアーカイブ済みのセッションを削除します。最後にアーカイブされた5件、開いているセッション、実行中および共有中のセッションは保持されます。保護された子セッションまで削除される場合、親セッションは削除されません。',
+  'settings.openchamber.sessionRetention.tooltip': '最終アクティビティに基づいて未アーカイブのセッションをアーカイブまたは削除します。最新5件、開いているセッション、実行中および共有中のセッションは保持されます。アーカイブ済みのセッションも保持されます。保護された子セッションまで削除される場合、親セッションは削除されません。',
   'settings.openchamber.sessionRetention.field.enableAutoCleanupAria': '自動クリーンアップを有効化',
   'settings.openchamber.sessionRetention.field.enableAutoCleanup': '自動クリーンアップを有効化',
   'settings.openchamber.sessionRetention.field.retentionPeriod': '保持期間',
@@ -2280,6 +2285,8 @@ export const settingsDict = {
   'settings.openchamber.visual.option.enterToSend.enter.label': 'Enter で送信',
   'settings.openchamber.visual.option.enterToSend.modifier.label': 'Ctrl/Cmd+Enter で送信',
   ...linearIntegrationI18n.ja,
+  ...guestIntegrationsI18n.ja,
+  ...extensionsSettingsI18n.ja,
   'settings.page.integrations.title': '連携',
   'settings.page.integrations.description': 'GitHub と Linear を接続すると、OpenChamber が Issue やプルリクエストを扱えるようになります。',
 } as const;

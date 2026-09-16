@@ -1,6 +1,7 @@
 import { settingsDict } from './de.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict = {
   'sessions.aiRename.action': 'Mit KI umbenennen',
@@ -29,6 +30,7 @@ export const dict = {
   ...settingsDict,
   ...linearIssuePickerI18n.de,
   ...linearPanelI18n.de,
+  ...pluginPanelI18n.de,
   'common.language.german': 'Deutsch',
   'common.loading': 'Wird geladen...',
   'common.unavailable': 'Nicht verfügbar',
@@ -1923,9 +1925,6 @@ export const dict = {
   'chat.fileAttachment.activeEditor.pinSelection': 'Auswahl zum Kontext hinzufügen',
   'chat.fileAttachment.activeEditor.remove': 'Aus Kontext entfernen',
   'chat.fileAttachment.openInDiagram': 'In Diagrammansicht öffnen',
-  'chat.pendingChanges.fileCountSingle': '{count} Datei',
-  'chat.pendingChanges.fileCountPlural': '{count} Dateien',
-  'chat.pendingChanges.changedInWorkspace': 'im Workspace geändert',
   'chat.changedFiles.title': 'Geänderte Dateien',
   'chat.changedFiles.actions.openFileTitle': '{path} öffnen',
   'chat.changedFiles.actions.showMore': 'Mehr anzeigen ({count})',
@@ -2242,6 +2241,7 @@ export const dict = {
   'chat.toolOutputDialog.noOutputProduced': 'Keine Ausgabe erzeugt',
   'chat.toolPart.lspErrors': 'LSP-Fehler',
   'chat.toolPart.moreErrors': '+{count} weitere Fehler',
+  'chat.toolPart.moreRows': '+{count} weitere Zeilen',
   'chat.toolPart.error': 'Fehler:',
   'chat.toolPart.awaitingResponse': 'Warte auf Antwort...',
   'chat.toolPart.noOutputProduced': 'Keine Ausgabe erzeugt',
@@ -3031,6 +3031,9 @@ export const dict = {
   'terminalView.actions.copySelection': 'Ausgewählte Ausgabe kopieren',
   'terminalView.toast.selectionCopied': 'Ausgabe kopiert',
   'terminalView.toast.copyFailed': 'Kopieren fehlgeschlagen',
+  'terminalView.actions.copy': 'Kopieren',
+  'terminalView.actions.paste': 'Einfügen',
+  'terminalView.toast.pasteFailed': 'Die Zwischenablage konnte nicht gelesen werden. Verwende die Tastenkombination zum Einfügen.',
   'terminalView.actions.restart': 'Terminal neu starten',
   'chat.message.terminalContext': '{terminal}, Zeilen {start}-{end}',
   'chat.message.context.codeComment': 'Kommentar zu {file}, Zeilen {start}-{end}',
@@ -3056,6 +3059,7 @@ export const dict = {
   'mobile.connect.notice.authExpired': 'Der Zugriff auf {label} ist abgelaufen oder wurde widerrufen. Melden Sie sich erneut an.',
   'mobile.connect.recovery.description': 'Verbindung mit dem gespeicherten Server nicht möglich. Prüfen Sie, ob er läuft, oder wählen Sie eine andere Instanz.',
   'mobile.header.openWorkspaceAria': 'Arbeitsbereich öffnen',
+  'mobile.header.openWorkspaceWithChangesAria': 'Arbeitsbereich öffnen, nicht committete Änderungen',
   'mobile.menu.terminal': 'Terminal',
   'mobile.sessions.renameSessionAria': '{title} umbenennen',
   'mobile.sessions.renameError': 'Sitzung konnte nicht umbenannt werden',
@@ -3237,6 +3241,8 @@ export const dict = {
   'chat.container.sessionLoadError.retry': 'Erneut versuchen',
   'sessions.sidebar.group.empty.loadingSessions': 'Sitzungen werden geladen...',
   'sessions.sidebar.group.empty.loadFailed': 'Sitzungen konnten nicht geladen werden',
+  'sessions.sidebar.group.empty.initializationFailed': 'Arbeitsbereich konnte nicht initialisiert werden.',
+  'sessions.search.submitHint': 'Zum Suchen die Eingabetaste drücken',
   'sessions.sidebar.group.empty.retry': 'Erneut versuchen',
   'sessions.sidebar.group.empty.permissionDenied': 'Ordnerzugriff ist erforderlich.',
   'sessions.sidebar.group.empty.grantAccess': 'Zugriff gewähren',
@@ -3339,6 +3345,10 @@ export const dict = {
   'chat.workStatus.breakdown.mcpCountPlural': '{count} MCP',
   'chat.workStatus.sections.open': 'Abschnitte wählen',
   'chat.workStatus.sections.dialogTitle': 'Panel-Abschnitte',
+  'chat.workStatus.sections.reorder': '{label} ziehen, um neu anzuordnen',
+  'chat.workStatus.sections.dragInstructions': 'Drücke die Leertaste, um einen Abschnitt aufzunehmen, verschiebe ihn mit den Pfeiltasten und drücke die Leertaste zum Ablegen. Escape bricht ab.',
+  'chat.workStatus.sections.position': '{label}, Position {position} von {count}.',
+  'chat.workStatus.sections.dragCancelled': 'Neuanordnung abgebrochen.',
   'chat.workStatus.sections.dialogDescription': 'Wähle, was das Arbeitsstatus-Panel zeigt. Ausgeblendete Abschnitte behalten ihre Daten und werden nur nicht angezeigt.',
   'chat.workStatus.sections.allHidden': 'Keine Abschnitte ausgewählt',
   'chat.workStatus.sections.showAll': 'Alle anzeigen',

@@ -1,6 +1,7 @@
 import { settingsDict } from './en.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict = {
   'sessions.aiRename.action': 'Rename with AI',
@@ -29,10 +30,14 @@ export const dict = {
   ...settingsDict,
   ...linearIssuePickerI18n.en,
   ...linearPanelI18n.en,
+  ...pluginPanelI18n.en,
   'terminalView.actions.attachSelection': 'Attach selected output',
   'terminalView.actions.copySelection': 'Copy selected output',
   'terminalView.toast.selectionCopied': 'Output copied',
   'terminalView.toast.copyFailed': 'Copy failed',
+  'terminalView.actions.copy': 'Copy',
+  'terminalView.actions.paste': 'Paste',
+  'terminalView.toast.pasteFailed': 'Could not read the clipboard. Use the paste keyboard shortcut.',
   'terminalView.actions.restart': 'Restart terminal',
   'chat.message.terminalContext': '{terminal}, lines {start}-{end}',
   'chat.message.context.codeComment': 'Comment on {file}, lines {start}-{end}',
@@ -141,6 +146,7 @@ export const dict = {
   'mobile.nav.settings': 'Settings',
   'mobile.surface.closeAria': 'Close',
   'mobile.header.openWorkspaceAria': 'Open workspace panel',
+  'mobile.header.openWorkspaceWithChangesAria': 'Open workspace panel, uncommitted changes',
   'mobile.header.openMetadataAria': 'Open session metadata',
   'mobile.header.metadata.context': 'Context',
   'mobile.header.metadata.usage': 'Usage',
@@ -2126,9 +2132,6 @@ export const dict = {
   'chat.fileAttachment.activeEditor.pinSelection': 'Pin selection to context',
   'chat.fileAttachment.activeEditor.remove': 'Remove from context',
   'chat.fileAttachment.openInDiagram': 'Open in diagram view',
-  'chat.pendingChanges.fileCountSingle': '{count} file',
-  'chat.pendingChanges.fileCountPlural': '{count} files',
-  'chat.pendingChanges.changedInWorkspace': 'changed in workspace',
   'chat.changedFiles.title': 'Changed files',
   'chat.changedFiles.actions.openFileTitle': 'Open {path}',
   'chat.changedFiles.actions.showMore': 'Show more ({count})',
@@ -2274,6 +2277,8 @@ export const dict = {
   'chat.container.sessionLoadError.retry': 'Try again',
   'sessions.sidebar.group.empty.loadingSessions': 'Loading sessions…',
   'sessions.sidebar.group.empty.loadFailed': 'Could not refresh sessions.',
+  'sessions.sidebar.group.empty.initializationFailed': 'Could not initialize workspace.',
+  'sessions.search.submitHint': 'Press Enter to search',
   'sessions.sidebar.group.empty.retry': 'Try again',
   'sessions.sidebar.group.empty.permissionDenied': 'Folder access is required.',
   'sessions.sidebar.group.empty.grantAccess': 'Grant access',
@@ -2462,6 +2467,7 @@ export const dict = {
   'chat.toolOutputDialog.noOutputProduced': 'No output was produced',
   'chat.toolPart.lspErrors': 'LSP errors',
   'chat.toolPart.moreErrors': '+{count} more errors',
+  'chat.toolPart.moreRows': '+{count} more rows',
   'chat.toolPart.error': 'Error:',
   'chat.toolPart.awaitingResponse': 'Awaiting response...',
   'chat.toolPart.noOutputProduced': 'No output produced',
@@ -3341,6 +3347,10 @@ export const dict = {
   'chat.workStatus.breakdown.mcpCountPlural': '{count} MCP',
   'chat.workStatus.sections.open': 'Choose sections',
   'chat.workStatus.sections.dialogTitle': 'Panel sections',
+  'chat.workStatus.sections.reorder': 'Drag {label} to reorder',
+  'chat.workStatus.sections.dragInstructions': 'Press Space to pick up a section, use the arrow keys to move it, and press Space to drop. Press Escape to cancel.',
+  'chat.workStatus.sections.position': '{label}, position {position} of {count}.',
+  'chat.workStatus.sections.dragCancelled': 'Reordering cancelled.',
   'chat.workStatus.sections.dialogDescription': 'Choose what the work-status panel shows. Hidden sections keep their data — they are only left out of the panel.',
   'chat.workStatus.sections.allHidden': 'No sections selected',
   'chat.workStatus.sections.showAll': 'Show all',

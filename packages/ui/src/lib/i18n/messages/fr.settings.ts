@@ -1,3 +1,5 @@
+import { extensionsSettingsI18n } from './extensions.settings.i18n';
+import { guestIntegrationsI18n } from './guest-integrations.i18n';
 import { linearIntegrationI18n } from './linear-integration.i18n';
 export const settingsDict = {
   'settings.openchamber.visual.field.alwaysShowScrollbars': 'Toujours afficher les barres de défilement',
@@ -874,7 +876,10 @@ export const settingsDict = {
   'settings.openchamber.passkeys.toast.removeFailed': 'Impossible de supprimer le mot de passe.',
   'settings.openchamber.passkeys.toast.clearAuthFailed': 'Impossible d\'effacer l\'authentification enregistrée.',
   'settings.openchamber.sessionRetention.title': 'Rétention de session',
-  'settings.openchamber.sessionRetention.tooltip': 'Archivez ou supprimez automatiquement les sessions inactives en fonction de la dernière activité. Conserve les 5 sessions les plus récentes.',
+  'settings.openchamber.sessionRetention.field.onlyArchived': 'Uniquement les sessions archivées',
+  'settings.openchamber.sessionRetention.field.onlyArchivedDescription': 'Utilise Supprimer et compte la période de conservation depuis l\'archivage. Les sessions non archivées sont conservées.',
+  'settings.openchamber.sessionRetention.archivedTooltip': 'Supprime les sessions archivées dont la période de conservation a expiré. Conserve les 5 sessions archivées le plus récemment, la session ouverte, les sessions en cours et les sessions partagées. Une session parente est conservée si sa suppression supprimerait aussi une session enfant protégée.',
+  'settings.openchamber.sessionRetention.tooltip': 'Archive ou supprime les sessions non archivées selon leur dernière activité. Conserve les 5 sessions les plus récentes, la session ouverte, les sessions en cours et les sessions partagées. Les sessions archivées sont conservées. Une session parente est conservée si sa suppression supprimerait aussi une session enfant protégée.',
   'settings.openchamber.sessionRetention.field.enableAutoCleanupAria': 'Activer le nettoyage automatique',
   'settings.openchamber.sessionRetention.field.enableAutoCleanup': 'Activer le nettoyage automatique',
   'settings.openchamber.sessionRetention.field.retentionPeriod': 'Période de conservation',
@@ -2280,6 +2285,9 @@ export const settingsDict = {
   'settings.openchamber.visual.option.enterToSend.enter.label': 'Envoyer avec Entrée',
   'settings.openchamber.visual.option.enterToSend.modifier.label': 'Envoyer avec Ctrl/Cmd+Entrée',
   ...linearIntegrationI18n.fr,
+  ...guestIntegrationsI18n.fr,
+  ...extensionsSettingsI18n.fr,
   'settings.page.integrations.title': 'Intégrations',
   'settings.page.integrations.description': 'Connectez GitHub et Linear pour qu’OpenChamber puisse travailler avec vos issues et pull requests.',
+
 } as const;

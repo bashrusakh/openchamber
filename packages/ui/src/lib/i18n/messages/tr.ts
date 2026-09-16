@@ -1,6 +1,7 @@
 import { settingsDict } from './tr.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict = {
   'sessions.aiRename.action': 'Yapay zekâ ile yeniden adlandır',
@@ -29,10 +30,14 @@ export const dict = {
   ...settingsDict,
   ...linearIssuePickerI18n.tr,
   ...linearPanelI18n.tr,
+  ...pluginPanelI18n.tr,
   'terminalView.actions.attachSelection': 'Seçili çıktıyı ekle',
   'terminalView.actions.copySelection': 'Seçili çıktıyı kopyala',
   'terminalView.toast.selectionCopied': 'Çıktı kopyalandı',
   'terminalView.toast.copyFailed': 'Kopyalama başarısız',
+  'terminalView.actions.copy': 'Kopyala',
+  'terminalView.actions.paste': 'Yapıştır',
+  'terminalView.toast.pasteFailed': 'Pano okunamadı. Yapıştırmak için klavye kısayolunu kullanın.',
   'terminalView.actions.restart': 'Terminali yeniden başlat',
   'chat.message.terminalContext': '{terminal}, {start}-{end}. satırlar',
   'chat.chatInput.terminalContext': '{terminal}, {start}-{end}. satırlar',
@@ -128,6 +133,7 @@ export const dict = {
   'mobile.nav.settings': 'Ayarlar',
   'mobile.surface.closeAria': 'Kapat',
   'mobile.header.openWorkspaceAria': 'Çalışma alanı panelini aç',
+  'mobile.header.openWorkspaceWithChangesAria': 'Çalışma alanı panelini aç, kaydedilmemiş değişiklikler var',
   'mobile.header.openMetadataAria': 'Session meta verisini aç',
   'mobile.header.metadata.context': 'Bağlam',
   'mobile.header.metadata.usage': 'Kullanım',
@@ -2086,9 +2092,6 @@ export const dict = {
   'chat.fileAttachment.activeEditor.pinSelection': 'Seçimi bağlama sabitle',
   'chat.fileAttachment.activeEditor.remove': 'Bağlamdan kaldır',
   'chat.fileAttachment.openInDiagram': 'Diyagram görünümünde aç',
-  'chat.pendingChanges.fileCountSingle': '{count} dosya',
-  'chat.pendingChanges.fileCountPlural': '{count} dosya',
-  'chat.pendingChanges.changedInWorkspace': 'çalışma alanında değişti',
   'chat.changedFiles.title': 'Değişen dosyalar',
   'chat.changedFiles.actions.openFileTitle': '{path} dosyasını aç',
   'chat.changedFiles.actions.showMore': 'Daha fazla göster ({count})',
@@ -2218,6 +2221,8 @@ export const dict = {
   'chat.container.sessionLoadError.retry': 'Yeniden dene',
   'sessions.sidebar.group.empty.loadingSessions': 'Session\'lar yükleniyor…',
   'sessions.sidebar.group.empty.loadFailed': 'Session\'lar yenilenemedi.',
+  'sessions.sidebar.group.empty.initializationFailed': 'Çalışma alanı başlatılamadı.',
+  'sessions.search.submitHint': 'Aramak için Enter tuşuna basın',
   'sessions.sidebar.group.empty.retry': 'Yeniden dene',
   'sessions.sidebar.group.empty.permissionDenied': 'Klasör erişimi gerekiyor.',
   'sessions.sidebar.group.empty.grantAccess': 'Erişim ver',
@@ -2398,6 +2403,7 @@ export const dict = {
   'chat.toolOutputDialog.noOutputProduced': 'Çıktı üretilmedi',
   'chat.toolPart.lspErrors': 'LSP hataları',
   'chat.toolPart.moreErrors': '+{count} hata daha',
+  'chat.toolPart.moreRows': '+{count} satır daha',
   'chat.toolPart.error': 'Hata:',
   'chat.toolPart.awaitingResponse': 'Yanıt bekleniyor...',
   'chat.toolPart.noOutputProduced': 'Çıktı üretilmedi',
@@ -3252,6 +3258,10 @@ export const dict = {
   'chat.workStatus.breakdown.mcpCountPlural': '{count} MCP',
   'chat.workStatus.sections.open': 'Bölümleri seç',
   'chat.workStatus.sections.dialogTitle': 'Panel bölümleri',
+  'chat.workStatus.sections.reorder': '{label} öğesini yeniden sıralamak için sürükleyin',
+  'chat.workStatus.sections.dragInstructions': 'Bir bölümü seçmek için Boşluk tuşuna basın, ok tuşlarıyla taşıyın ve bırakmak için Boşluk tuşuna basın. İptal etmek için Escape tuşuna basın.',
+  'chat.workStatus.sections.position': '{label}, {count} bölüm içinde {position}. konum.',
+  'chat.workStatus.sections.dragCancelled': 'Yeniden sıralama iptal edildi.',
   'chat.workStatus.sections.dialogDescription': 'Çalışma durumu panelinin neler göstereceğini seç. Gizli bölümler verilerini korur — yalnızca panelde gösterilmez.',
   'chat.workStatus.sections.allHidden': 'Hiçbir bölüm seçilmedi',
   'chat.workStatus.sections.showAll': 'Tümünü göster',

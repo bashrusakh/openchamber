@@ -34,8 +34,7 @@ This module provides OpenCode server integration utilities for the web server ru
 - `packages/web/server/lib/opencode/startup-performance.js`: opt-in startup phase diagnostics with fixed labels and numeric metadata allowlists.
 - `packages/web/server/lib/agent-tool/runtime.js`: managed OpenCode custom-tool materialization, environment injection, loopback authentication, and fixed CLI action dispatch.
 - `packages/web/server/lib/system-prompt/runtime.js`: opt-in managed OpenCode system-prompt optimizer materialization and plugin injection.
-- `packages/web/server/lib/mcp-reconnect/runtime.js`: always-on managed OpenCode plugin that reconnects MCP servers OpenCode marked `failed`, with per-server backoff.
-- `packages/web/server/lib/opencode/managed-plugin-config.js`: the one `OPENCODE_CONFIG_CONTENT` merge every managed plugin (agent tools, system prompt optimizer, MCP reconnect) appends itself through.
+- `packages/web/server/lib/opencode/managed-plugin-config.js`: the one `OPENCODE_CONFIG_CONTENT` merge every managed plugin (agent tools, system prompt optimizer) appends itself through.
 - `packages/web/server/lib/opencode/server-utils-runtime.js`: shared server runtime utilities for OpenCode proxy wiring, OpenCode port/readiness helpers, and snapshot fetchers.
 - `packages/web/server/lib/opencode/openchamber-routes.js`: OpenChamber update and models metadata route registration.
 - `packages/web/server/lib/opencode/pwa-manifest-routes.js`: PWA manifest route registration with recent-session shortcut resolution and short-lived caching.
@@ -132,8 +131,12 @@ The runtime maintains active-session count incrementally from idempotent activit
   - `killProcessOnPort(port)`
 
 Managed OpenCode launch also merges the environment returned by the agent-tool
-runtime, the opt-in system prompt optimizer, and the always-on MCP reconnect
-plugin, each appending its `file://` entry to the previous one's config. PATH and `OPENCODE_SERVER_PASSWORD` remain lifecycle-owned and cannot
+runtime and the opt-in system prompt optimizer, each appending its `file://`
+entry to the previous one's config. OpenChamber adds no automatic MCP reconnect
+loop; recovery after a failed connection is manual for both local and remote
+servers. Previously generated reconnect plugin files are inert because managed
+launch no longer registers them. User-configured plugins remain user-owned.
+PATH and `OPENCODE_SERVER_PASSWORD` remain lifecycle-owned and cannot
 be replaced by injected values. External OpenCode processes receive no
 OpenChamber tool injection. Managed launch env strips AppImage `ARGV0` before
 spawn so zsh-backed OpenCode tools do not rewrite child argv[0] to the AppImage
@@ -152,6 +155,23 @@ macOS `say` voice enumeration starts concurrently with server composition. The s
 Transport-triggered health checks share the periodic monitor's failure accounting interval. Rapid WS reconnect callbacks therefore cannot exhaust the managed-process restart threshold using one cached unhealthy result; an exited managed process still restarts immediately.
 
 Managed health failures are classified as `timeout`, `connection_refused`, `connection_reset`, `invalid_response`, or `error`. The lifecycle retains the latest counted failure with a bounded detail string and source. Managed process wrappers continue capturing a sanitized, bounded stderr tail after readiness and retain exit code/signal. Before replacing a managed process, lifecycle snapshots the reason, latest health failure, process diagnostics/aliveness, busy-session count, and timestamp into `lastOpenCodeRestartDiagnostics`; successful startup does not clear this snapshot, and `/health` exposes it for post-restart diagnosis without process environment or credentials.
+
+Managed process ownership starts at spawn. The registry and runtime process
+handle include children that have not announced readiness yet, so shutdown can
+stop an in-flight startup. Readiness timeout, malformed startup output, and
+health-probe errors close that child before retrying. Shutdown cancels further
+startup attempts. Closing a process is single-flight and unregisters it only
+after it exits.
+
+On Windows, managed teardown invokes the existing tree termination command
+before terminating the root. Calling `child.kill()` first loses the ancestry
+needed to find Git, shell, and MCP descendants. On POSIX, the managed child
+starts in its own process group and teardown escalates against that group even
+if the root has already exited. A tool ignoring SIGTERM must not survive just
+because the server closed its own pipes. The
+`lifecycle-process.test.js` regressions launch real parent/child fixtures and
+check PID exit plus registry cleanup. macOS results do not validate Windows
+ConPTY or Console Window Host behavior.
 
 ## Public exports (env-runtime.js)
 - `createOpenCodeEnvRuntime(dependencies)`: creates runtime that owns OpenCode CLI environment and binary discovery state.
@@ -329,6 +349,7 @@ Managed health failures are classified as `timeout`, `connection_refused`, `conn
 
 ## Public exports (shutdown-runtime.js)
 - `createGracefulShutdownRuntime(dependencies)`: creates graceful shutdown runtime for managed OpenCode and web server teardown sequencing.
+- After stopping owned runtimes and OpenCode, HTTP shutdown closes active connections as well as the listener. A remaining SSE response must not hold Desktop open until its fallback deadline. Upgraded sockets remain the responsibility of their owning runtime.
 - Returned API:
   - `gracefulShutdown(options?)`
 
@@ -386,6 +407,20 @@ within a ten-minute overall deadline.
     - Foreground servers running under a systemd user unit queue installation in
       a separate transient unit and restart the configured service afterwards.
       `OPENCHAMBER_SYSTEMD_UNIT` overrides the default `openchamber.service`.
+    - On Windows the install-and-restart script is written to
+      `<data dir>/update-install.cmd` before the response and run with
+      `cmd.exe /c <file>`. A newline ends a `cmd.exe /c` command line, so the
+      same script passed as an argument ran nothing and exited 0; the batch
+      file keeps every line. The package-manager line is `call`ed because
+      npm, pnpm and yarn are `.cmd` shims that would otherwise end the script,
+      the pre-install pause is a loopback `ping` because `timeout` rejects a
+      detached child's stdin, and the file deletes itself on its last line
+      because the restart command carries the server's flags. If the file
+      cannot be written the route answers 500 and the server keeps running.
+      The listener is closed before the batch is spawned: on Windows the
+      detached child inherits the listening socket and would hold the port
+      for the whole batch, so the restart inside it failed with "port already
+      in use" and the update ended with no server.
   - `GET /api/openchamber/models-metadata`
   - `GET /api/zen/models`
 

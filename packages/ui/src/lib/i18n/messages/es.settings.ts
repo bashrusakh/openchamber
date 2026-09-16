@@ -1,3 +1,5 @@
+import { extensionsSettingsI18n } from './extensions.settings.i18n';
+import { guestIntegrationsI18n } from './guest-integrations.i18n';
 import { linearIntegrationI18n } from './linear-integration.i18n';
 export const settingsDict = {
   'settings.openchamber.visual.field.alwaysShowScrollbars': 'Mostrar siempre las barras de desplazamiento',
@@ -956,7 +958,10 @@ export const settingsDict = {
   "settings.openchamber.passkeys.toast.removeFailed": "No se pudo eliminar la clave de paso.",
   "settings.openchamber.passkeys.toast.clearAuthFailed": "No se pudo limpiar la autenticación guardada.",
   "settings.openchamber.sessionRetention.title": "Retención de sesiones",
-  "settings.openchamber.sessionRetention.tooltip": "Archivar o eliminar automáticamente sesiones inactivas según la última actividad. Mantiene las 5 sesiones más recientes.",
+  "settings.openchamber.sessionRetention.field.onlyArchived": "Solo sesiones archivadas",
+  "settings.openchamber.sessionRetention.field.onlyArchivedDescription": "Usa Eliminar y cuenta el periodo de retención desde el archivado. Las sesiones no archivadas se conservan.",
+  "settings.openchamber.sessionRetention.archivedTooltip": "Elimina sesiones archivadas cuyo periodo de retención ha vencido. Conserva las 5 sesiones archivadas más recientemente, la sesión abierta, las sesiones en ejecución y las compartidas. Una sesión principal se conserva si eliminarla también eliminaría una sesión secundaria protegida.",
+  "settings.openchamber.sessionRetention.tooltip": "Archiva o elimina sesiones no archivadas según su última actividad. Conserva las 5 sesiones más recientes, la sesión abierta, las sesiones en ejecución y las compartidas. Las sesiones archivadas se conservan. Una sesión principal se conserva si eliminarla también eliminaría una sesión secundaria protegida.",
   "settings.openchamber.sessionRetention.field.enableAutoCleanupAria": "Habilitar limpieza automática",
   "settings.openchamber.sessionRetention.field.enableAutoCleanup": "Habilitar limpieza automática",
   "settings.openchamber.sessionRetention.field.retentionPeriod": "Periodo de retención",
@@ -2280,6 +2285,8 @@ export const settingsDict = {
   "settings.openchamber.visual.option.enterToSend.enter.label": "Enviar con Intro",
   "settings.openchamber.visual.option.enterToSend.modifier.label": "Enviar con Ctrl/Cmd+Intro",
   ...linearIntegrationI18n.es,
+  ...guestIntegrationsI18n.es,
+  ...extensionsSettingsI18n.es,
   'settings.page.integrations.title': 'Integraciones',
   'settings.page.integrations.description': 'Conecta GitHub y Linear para que OpenChamber pueda trabajar con tus issues y pull requests.',
 } as const;

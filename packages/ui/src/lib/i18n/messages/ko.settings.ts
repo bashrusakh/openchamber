@@ -1,3 +1,5 @@
+import { extensionsSettingsI18n } from './extensions.settings.i18n';
+import { guestIntegrationsI18n } from './guest-integrations.i18n';
 import { linearIntegrationI18n } from './linear-integration.i18n';
 export const settingsDict = {
   'settings.openchamber.visual.field.alwaysShowScrollbars': '스크롤바 항상 표시',
@@ -956,7 +958,10 @@ export const settingsDict = {
   'settings.openchamber.passkeys.toast.removeFailed': 'Passkey를 제거할 수 없습니다.',
   'settings.openchamber.passkeys.toast.clearAuthFailed': '저장된 인증을 지울 수 없습니다.',
   'settings.openchamber.sessionRetention.title': '세션 보존',
-  'settings.openchamber.sessionRetention.tooltip': '마지막 활동 기준으로 비활성 세션을 자동 보관하거나 삭제합니다. 가장 최근 세션 5개는 유지됩니다.',
+  'settings.openchamber.sessionRetention.field.onlyArchived': '보관된 세션만',
+  'settings.openchamber.sessionRetention.field.onlyArchivedDescription': '삭제를 사용하며 보관 시점부터 보존 기간을 계산합니다. 보관되지 않은 세션은 유지됩니다.',
+  'settings.openchamber.sessionRetention.archivedTooltip': '보존 기간이 지난 보관된 세션을 삭제합니다. 가장 최근에 보관된 세션 5개, 열려 있는 세션, 실행 중인 세션과 공유된 세션은 유지됩니다. 상위 세션을 삭제하면 보호된 하위 세션도 삭제되는 경우 상위 세션을 유지합니다.',
+  'settings.openchamber.sessionRetention.tooltip': '마지막 활동을 기준으로 보관되지 않은 세션을 보관하거나 삭제합니다. 최근 세션 5개, 열려 있는 세션, 실행 중인 세션과 공유된 세션은 유지됩니다. 보관된 세션도 유지됩니다. 상위 세션을 삭제하면 보호된 하위 세션도 삭제되는 경우 상위 세션을 유지합니다.',
   'settings.openchamber.sessionRetention.field.enableAutoCleanupAria': '자동 정리 활성화',
   'settings.openchamber.sessionRetention.field.enableAutoCleanup': '자동 정리 활성화',
   'settings.openchamber.sessionRetention.field.retentionPeriod': '보존 기간',
@@ -2280,6 +2285,8 @@ export const settingsDict = {
   'settings.openchamber.visual.option.enterToSend.enter.label': 'Enter로 전송',
   'settings.openchamber.visual.option.enterToSend.modifier.label': 'Ctrl/Cmd+Enter로 전송',
   ...linearIntegrationI18n.ko,
+  ...guestIntegrationsI18n.ko,
+  ...extensionsSettingsI18n.ko,
   'settings.page.integrations.title': '통합',
   'settings.page.integrations.description': 'GitHub와 Linear를 연결하면 OpenChamber가 이슈와 풀 리퀘스트를 다룰 수 있습니다.',
 } as const;

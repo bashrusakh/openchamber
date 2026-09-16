@@ -136,6 +136,9 @@
     "autoDeleteAfterDays": {
       "scope": "instance"
     },
+    "sessionRetentionOnlyArchived": {
+      "scope": "instance"
+    },
     "sessionRetentionAction": {
       "scope": "instance"
     },
@@ -212,6 +215,9 @@
       "scope": "profile"
     },
     "sidebarShowRecentSection": {
+      "scope": "profile"
+    },
+    "workStatusSectionOrder": {
       "scope": "profile"
     },
     "workStatusPanelEnabled": {

@@ -1,0 +1,24 @@
+{
+  "name": "@openchamber/example-tools-only",
+  "version": "1.0.0",
+  "private": true,
+  "openchamber": {
+    "apiVersion": 1,
+    "contributes": {
+      "panel": {
+        "id": "tools-only",
+        "name": "Tools Only",
+        "icon": "tools"
+      },
+      "tools": [
+        {
+          "match": "mcp.*",
+          "output": "json"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "@openchamber/sdk": "workspace:*"
+  }
+}

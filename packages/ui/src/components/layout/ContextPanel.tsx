@@ -49,7 +49,11 @@ import {
   type EmbeddedSessionChatURLCacheEntry,
   type EmbeddedSessionRuntimeBootstrap,
 } from './contextPanelEmbeddedChat';
+const PluginPane = React.lazy(() => import('./PluginPane').then((module) => ({ default: module.PluginPane })));
+import { useGuestsStore } from '@/lib/guests/store';
+import { isPluginContextPanelMode, pluginIdFromMode } from '@/lib/surfaces/modes';
 import { getContextSurfaceWidthFraction } from '@/lib/surfaces/registry';
+import { isVimEditorEventTarget } from '@/lib/editorFocus';
 import { isTerminalEventTarget } from '@/lib/terminalFocus';
 
 const CONTEXT_PANEL_MIN_WIDTH = 320;
@@ -125,6 +129,10 @@ const getModeLabel = (
   if (mode === 'linear') return t('contextPanel.mode.linear');
   if (mode === 'notes') return t('contextRail.surface.notes');
   if (mode === 'terminal') return t('layout.mainTab.terminal');
+  if (isPluginContextPanelMode(mode)) {
+    const guest = useGuestsStore.getState().guests.find((entry) => entry.id === pluginIdFromMode(mode));
+    return guest?.name ?? t('contextRail.surface.plugin');
+  }
   return t('contextPanel.mode.context');
 };
 
@@ -239,6 +247,10 @@ const getTabIcon = (
 
   if (tab.mode === 'chat') {
     return <Icon name="chat-4" className="h-3.5 w-3.5" />;
+  }
+
+  if (isPluginContextPanelMode(tab.mode)) {
+    return <Icon name="window" className="h-3.5 w-3.5" />;
   }
 
   if (tab.mode === 'browser') {
@@ -696,6 +708,11 @@ export const ContextPanel: React.FC = () => {
     if (isTerminalEventTarget(event.target)) {
       return;
     }
+    // Same for the file editor on the Vim keymap: Escape leaves INSERT mode
+    // there, and CodeMirror only sees it if this handler stays out of the way.
+    if (isVimEditorEventTarget(event.target)) {
+      return;
+    }
 
     event.preventDefault();
     event.stopPropagation();
@@ -988,6 +1005,10 @@ export const ContextPanel: React.FC = () => {
   // a remount would silently throw away.
   const hasWalkthroughTab = React.useMemo(
     () => tabs.some((tab) => tab.mode === 'walkthrough'),
+    [tabs],
+  );
+  const pluginTabs = React.useMemo(
+    () => tabs.filter((tab) => isPluginContextPanelMode(tab.mode)),
     [tabs],
   );
   const hasFileTabs = React.useMemo(
@@ -1307,7 +1328,20 @@ export const ContextPanel: React.FC = () => {
             </React.Suspense>
           </div>
         ) : null}
-        {activeTab?.mode !== 'chat' && !isFileTabActive && activeTab?.mode !== 'browser' && activeTab?.mode !== 'diff' && activeTab?.mode !== 'terminal' && activeTab?.mode !== 'walkthrough' ? activeNonChatContent : null}
+        {pluginTabs.map((tab) => {
+          if (!isPluginContextPanelMode(tab.mode)) return null;
+          return (
+            <div
+              key={tab.id}
+              className={cn('absolute inset-0', activeTab?.id === tab.id ? 'block' : 'hidden')}
+            >
+              <React.Suspense fallback={null}>
+                <PluginPane mode={tab.mode} />
+              </React.Suspense>
+            </div>
+          );
+        })}
+        {activeTab?.mode !== 'chat' && !isFileTabActive && activeTab?.mode !== 'browser' && activeTab?.mode !== 'diff' && activeTab?.mode !== 'terminal' && activeTab?.mode !== 'walkthrough' && !(activeTab && isPluginContextPanelMode(activeTab.mode)) ? activeNonChatContent : null}
       </div>
       </div>
     </aside>

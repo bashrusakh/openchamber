@@ -2,6 +2,7 @@ import type { I18nKey } from './en';
 import { settingsDict } from './pt-BR.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict: Record<I18nKey, string> = {
   'sessions.aiRename.action': 'Renomear com IA',
@@ -30,10 +31,14 @@ export const dict: Record<I18nKey, string> = {
   ...settingsDict,
   ...linearIssuePickerI18n['pt-BR'],
   ...linearPanelI18n['pt-BR'],
+  ...pluginPanelI18n['pt-BR'],
   'terminalView.actions.attachSelection': 'Anexar saída selecionada',
   'terminalView.actions.copySelection': 'Copiar saída selecionada',
   'terminalView.toast.selectionCopied': 'Saída copiada',
   'terminalView.toast.copyFailed': 'Falha ao copiar',
+  'terminalView.actions.copy': 'Copiar',
+  'terminalView.actions.paste': 'Colar',
+  'terminalView.toast.pasteFailed': 'Não foi possível ler a área de transferência. Use o atalho de teclado para colar.',
   'terminalView.actions.restart': 'Reiniciar terminal',
   'chat.message.terminalContext': '{terminal}, linhas {start}-{end}',
   'chat.message.context.codeComment': 'Comentário em {file}, linhas {start}-{end}',
@@ -142,6 +147,7 @@ export const dict: Record<I18nKey, string> = {
   "mobile.nav.settings": "Configurações",
   "mobile.surface.closeAria": "Fechar",
   "mobile.header.openWorkspaceAria": "Abrir painel de trabalho",
+  "mobile.header.openWorkspaceWithChangesAria": "Abrir painel do workspace, alterações não confirmadas",
   "mobile.header.openMetadataAria": "Abrir metadados da sessão",
   "mobile.header.metadata.context": "Contexto",
   "mobile.header.metadata.usage": "Uso",
@@ -2104,9 +2110,6 @@ export const dict: Record<I18nKey, string> = {
   "chat.fileAttachment.activeEditor.pinSelection": "Fixar seleção no contexto",
   "chat.fileAttachment.activeEditor.remove": "Remover do contexto",
   "chat.fileAttachment.openInDiagram": "Abrir na visualização de diagrama",
-  "chat.pendingChanges.fileCountSingle": "{count} arquivo",
-  "chat.pendingChanges.fileCountPlural": "{count} arquivos",
-  "chat.pendingChanges.changedInWorkspace": "modificado no workspace",
   "chat.changedFiles.title": "Arquivos modificados",
   "chat.changedFiles.actions.openFileTitle": "Abrir {path}",
   "chat.changedFiles.actions.showMore": "Mostrar mais ({count})",
@@ -2254,6 +2257,8 @@ export const dict: Record<I18nKey, string> = {
   "chat.container.sessionLoadError.retry": "Tentar novamente",
   "sessions.sidebar.group.empty.loadingSessions": "Carregando sessões…",
   "sessions.sidebar.group.empty.loadFailed": "Não foi possível atualizar as sessões.",
+  "sessions.sidebar.group.empty.initializationFailed": "Não foi possível inicializar o espaço de trabalho.",
+  "sessions.search.submitHint": "Pressione Enter para pesquisar",
   "sessions.sidebar.group.empty.retry": "Tentar novamente",
   "sessions.sidebar.group.empty.permissionDenied": "É necessário acesso à pasta.",
   "sessions.sidebar.group.empty.grantAccess": "Conceder acesso",
@@ -2428,6 +2433,7 @@ export const dict: Record<I18nKey, string> = {
   "chat.toolOutputDialog.noOutputProduced": "Nenhuma saída produzida",
   "chat.toolPart.lspErrors": "Erros LSP",
   "chat.toolPart.moreErrors": "+{count} erros a mais",
+  "chat.toolPart.moreRows": "+{count} linhas a mais",
   "chat.toolPart.error": "Erro:",
   "chat.toolPart.awaitingResponse": "Aguardando resposta...",
   "chat.toolPart.noOutputProduced": "Nenhuma saída produzida",
@@ -3342,6 +3348,10 @@ export const dict: Record<I18nKey, string> = {
   'chat.workStatus.breakdown.mcpCountPlural': '{count} MCP',
   'chat.workStatus.sections.open': 'Escolher seções',
   'chat.workStatus.sections.dialogTitle': 'Seções do painel',
+  'chat.workStatus.sections.reorder': 'Arraste {label} para reordenar',
+  'chat.workStatus.sections.dragInstructions': 'Pressione Espaço para selecionar uma seção, use as setas para movê-la e pressione Espaço para soltar. Pressione Escape para cancelar.',
+  'chat.workStatus.sections.position': '{label}, posição {position} de {count}.',
+  'chat.workStatus.sections.dragCancelled': 'Reordenação cancelada.',
   'chat.workStatus.sections.dialogDescription': 'Escolha o que o painel de status mostra. Seções ocultas mantêm seus dados — apenas não aparecem no painel.',
   'chat.workStatus.sections.allHidden': 'Nenhuma seção selecionada',
   'chat.workStatus.sections.showAll': 'Mostrar todas',

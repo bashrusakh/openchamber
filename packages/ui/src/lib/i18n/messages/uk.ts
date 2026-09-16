@@ -2,6 +2,7 @@ import type { I18nKey } from './en';
 import { settingsDict } from './uk.settings';
 import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
+import { pluginPanelI18n } from './plugin-panel.i18n';
 
 export const dict: Record<I18nKey, string> = {
   'sessions.aiRename.action': 'Перейменувати за допомогою ШІ',
@@ -30,10 +31,14 @@ export const dict: Record<I18nKey, string> = {
   ...settingsDict,
   ...linearIssuePickerI18n.uk,
   ...linearPanelI18n.uk,
+  ...pluginPanelI18n.uk,
   'terminalView.actions.attachSelection': 'Прикріпити вибраний вивід',
   'terminalView.actions.copySelection': 'Скопіювати вибраний вивід',
   'terminalView.toast.selectionCopied': 'Вивід скопійовано',
   'terminalView.toast.copyFailed': 'Не вдалося скопіювати',
+  'terminalView.actions.copy': 'Копіювати',
+  'terminalView.actions.paste': 'Вставити',
+  'terminalView.toast.pasteFailed': 'Не вдалося прочитати буфер обміну. Скористайтеся комбінацією клавіш для вставлення.',
   'terminalView.actions.restart': 'Перезапустити термінал',
   'chat.message.terminalContext': '{terminal}, рядки {start}-{end}',
   'chat.message.context.codeComment': 'Коментар до {file}, рядки {start}-{end}',
@@ -142,6 +147,7 @@ export const dict: Record<I18nKey, string> = {
   "mobile.nav.settings": "Налаштування",
   "mobile.surface.closeAria": "Закрити",
   "mobile.header.openWorkspaceAria": "Відкрити робочу панель",
+  "mobile.header.openWorkspaceWithChangesAria": "Відкрити панель робочого простору, є незакомічені зміни",
   "mobile.header.openMetadataAria": "Відкрити метадані сесії",
   "mobile.header.metadata.context": "Контекст",
   "mobile.header.metadata.usage": "Використання",
@@ -2104,9 +2110,6 @@ export const dict: Record<I18nKey, string> = {
   "chat.fileAttachment.activeEditor.pinSelection": "Прикріпити вибір у контексті",
   "chat.fileAttachment.activeEditor.remove": "Видалити з контексту",
   "chat.fileAttachment.openInDiagram": "Відкрити в перегляді діаграми",
-  "chat.pendingChanges.fileCountSingle": "Файл: {count}",
-  "chat.pendingChanges.fileCountPlural": "Файлів: {count}",
-  "chat.pendingChanges.changedInWorkspace": "змінено в гілці",
   "chat.changedFiles.title": "Змінені файли",
   "chat.changedFiles.actions.openFileTitle": "Відкрити {path}",
   "chat.changedFiles.actions.showMore": "Показати ще ({count})",
@@ -2252,6 +2255,8 @@ export const dict: Record<I18nKey, string> = {
   "chat.container.sessionLoadError.retry": "Спробувати знову",
   "sessions.sidebar.group.empty.loadingSessions": "Завантаження сесій…",
   "sessions.sidebar.group.empty.loadFailed": "Не вдалося оновити сесії.",
+  "sessions.sidebar.group.empty.initializationFailed": "Не вдалося підготувати робочий простір.",
+  "sessions.search.submitHint": "Натисніть Enter для пошуку",
   "sessions.sidebar.group.empty.retry": "Спробувати знову",
   "sessions.sidebar.group.empty.permissionDenied": "Потрібен доступ до папки.",
   "sessions.sidebar.group.empty.grantAccess": "Надати доступ",
@@ -2428,6 +2433,7 @@ export const dict: Record<I18nKey, string> = {
   "chat.toolOutputDialog.noOutputProduced": "Вивід відсутній",
   "chat.toolPart.lspErrors": "LSP помилки",
   "chat.toolPart.moreErrors": "+ ще помилок: {count}",
+  "chat.toolPart.moreRows": "+ ще рядків: {count}",
   "chat.toolPart.error": "Помилка:",
   "chat.toolPart.awaitingResponse": "Очікування відповіді...",
   "chat.toolPart.noOutputProduced": "Вивід відсутній",
@@ -3342,6 +3348,10 @@ export const dict: Record<I18nKey, string> = {
   'chat.workStatus.breakdown.mcpCountPlural': '{count} MCP',
   'chat.workStatus.sections.open': 'Обрати секції',
   'chat.workStatus.sections.dialogTitle': 'Секції панелі',
+  'chat.workStatus.sections.reorder': 'Перетягніть {label}, щоб змінити порядок',
+  'chat.workStatus.sections.dragInstructions': 'Натисніть пробіл, щоб підняти секцію, перемістіть її стрілками й натисніть пробіл, щоб відпустити. Escape скасовує переміщення.',
+  'chat.workStatus.sections.position': '{label}, позиція {position} із {count}.',
+  'chat.workStatus.sections.dragCancelled': 'Зміну порядку скасовано.',
   'chat.workStatus.sections.dialogDescription': 'Обери, що показує панель стану роботи. Приховані секції зберігають свої дані — вони просто не відображаються.',
   'chat.workStatus.sections.allHidden': 'Жодної секції не вибрано',
   'chat.workStatus.sections.showAll': 'Показати всі',

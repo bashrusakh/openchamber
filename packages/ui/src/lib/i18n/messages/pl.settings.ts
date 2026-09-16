@@ -1,3 +1,5 @@
+import { extensionsSettingsI18n } from './extensions.settings.i18n';
+import { guestIntegrationsI18n } from './guest-integrations.i18n';
 import { linearIntegrationI18n } from './linear-integration.i18n';
 export const settingsDict = {
   'settings.openchamber.visual.field.alwaysShowScrollbars': 'Zawsze pokazuj paski przewijania',
@@ -938,13 +940,16 @@ export const settingsDict = {
   'settings.openchamber.sessionRetention.manualCleanup.eligibleDeleteNow': 'Kwalifikuje się do usunięcia teraz: {count}',
   'settings.openchamber.sessionRetention.manualCleanup.title': 'Ręczne czyszczenie',
   'settings.openchamber.sessionRetention.title': 'Przechowywanie sesji',
+  'settings.openchamber.sessionRetention.field.onlyArchived': 'Tylko zarchiwizowane sesje',
+  'settings.openchamber.sessionRetention.field.onlyArchivedDescription': 'Używa opcji Usuń i liczy okres przechowywania od archiwizacji. Niezarchiwizowane sesje pozostają zachowane.',
+  'settings.openchamber.sessionRetention.archivedTooltip': 'Usuwa zarchiwizowane sesje po upływie okresu przechowywania. Zachowuje 5 ostatnio zarchiwizowanych sesji, otwartą sesję oraz sesje działające i udostępnione. Sesja nadrzędna pozostaje, jeśli jej usunięcie usunęłoby też chronioną sesję podrzędną.',
   'settings.openchamber.sessionRetention.toast.archivedCount': 'Zarchiwizowano {count} sesji',
   'settings.openchamber.sessionRetention.toast.deletedCount': 'Usunięto {count} sesji',
   'settings.openchamber.sessionRetention.toast.failedArchiveCount': 'Nie udało się zarchiwizować {count} sesji',
   'settings.openchamber.sessionRetention.toast.failedDeleteCount': 'Nie udało się usunąć {count} sesji',
   'settings.openchamber.sessionRetention.toast.noneEligibleArchive': 'Brak sesji kwalifikujących się do archiwizacji',
   'settings.openchamber.sessionRetention.toast.noneEligibleDelete': 'Brak sesji kwalifikujących się do usunięcia',
-  'settings.openchamber.sessionRetention.tooltip': 'Automatycznie archiwizuje lub usuwa nieaktywne sesje na podstawie ostatniej aktywności. Zachowuje 5 najnowszych sesji.',
+  'settings.openchamber.sessionRetention.tooltip': 'Archiwizuje lub usuwa niezarchiwizowane sesje na podstawie ostatniej aktywności. Zachowuje 5 najnowszych sesji, otwartą sesję oraz sesje działające i udostępnione. Sesje zarchiwizowane pozostają zachowane. Sesja nadrzędna pozostaje, jeśli jej usunięcie usunęłoby też chronioną sesję podrzędną.',
   'settings.openchamber.tunnel.actions.browseConfigFileAria': 'Przeglądaj plik konfiguracyjny',
   'settings.openchamber.tunnel.actions.clearConfigFileAria': 'Wyczyść plik konfiguracyjny',
   'settings.openchamber.tunnel.actions.copied': 'Skopiowano',
@@ -2273,6 +2278,8 @@ export const settingsDict = {
   'settings.openchamber.visual.option.enterToSend.enter.label': 'Wyślij klawiszem Enter',
   'settings.openchamber.visual.option.enterToSend.modifier.label': 'Wyślij klawiszami Ctrl/Cmd+Enter',
   ...linearIntegrationI18n.pl,
+  ...guestIntegrationsI18n.pl,
+  ...extensionsSettingsI18n.pl,
   'settings.page.integrations.title': 'Integracje',
   'settings.page.integrations.description': 'Połącz GitHub i Linear, aby OpenChamber mógł pracować z Twoimi issue i pull requestami.',
 };

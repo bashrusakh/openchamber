@@ -1,3 +1,5 @@
+import { extensionsSettingsI18n } from './extensions.settings.i18n';
+import { guestIntegrationsI18n } from './guest-integrations.i18n';
 import { linearIntegrationI18n } from './linear-integration.i18n';
 export const settingsDict = {
   'settings.openchamber.visual.field.alwaysShowScrollbars': 'Завжди показувати смуги прокручування',
@@ -956,7 +958,10 @@ export const settingsDict = {
   "settings.openchamber.passkeys.toast.removeFailed": "Не вдалося видалити ключ доступу.",
   "settings.openchamber.passkeys.toast.clearAuthFailed": "Не вдалося очистити збережену автентифікацію.",
   "settings.openchamber.sessionRetention.title": "Зберігання сесій",
-  "settings.openchamber.sessionRetention.tooltip": "Автоматично архівуйте або видаляйте неактивні сесії на основі останньої активності. Останні 5 сесій завжди зберігаються.",
+  "settings.openchamber.sessionRetention.field.onlyArchived": "Лише архівні сесії",
+  "settings.openchamber.sessionRetention.field.onlyArchivedDescription": "Використовує видалення та рахує період зберігання від архівації. Неархівовані сесії зберігаються.",
+  "settings.openchamber.sessionRetention.archivedTooltip": "Видаляє архівні сесії після завершення періоду зберігання. Зберігає 5 останніх архівованих сесій, відкриту сесію, сесії в роботі та сесії з публічним посиланням. Батьківська сесія залишається, якщо її видалення зачепить захищену дочірню.",
+  "settings.openchamber.sessionRetention.tooltip": "Архівує або видаляє неархівовані сесії за часом останньої активності. Зберігає 5 найновіших сесій, відкриту сесію, сесії в роботі та сесії з публічним посиланням. Архівні сесії зберігаються. Батьківська сесія залишається, якщо її видалення зачепить захищену дочірню.",
   "settings.openchamber.sessionRetention.field.enableAutoCleanupAria": "Увімкнути автоматичне очищення",
   "settings.openchamber.sessionRetention.field.enableAutoCleanup": "Увімкнути автоматичне очищення",
   "settings.openchamber.sessionRetention.field.retentionPeriod": "Період зберігання",
@@ -2280,6 +2285,8 @@ export const settingsDict = {
   "settings.openchamber.visual.option.enterToSend.enter.label": "Надсилати клавішею Enter",
   "settings.openchamber.visual.option.enterToSend.modifier.label": "Надсилати за допомогою Ctrl/Cmd+Enter",
   ...linearIntegrationI18n.uk,
+  ...guestIntegrationsI18n.uk,
+  ...extensionsSettingsI18n.uk,
   'settings.page.integrations.title': 'Інтеграції',
   'settings.page.integrations.description': 'Підключіть GitHub і Linear, щоб OpenChamber міг працювати з вашими задачами та pull request-ами.',
 } as const;

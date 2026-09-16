@@ -356,6 +356,7 @@ export type SessionUIState = {
   worktreeMetadata: Map<string, WorktreeMetadata>
   availableWorktrees: WorktreeMetadata[]
   availableWorktreesByProject: Map<string, WorktreeMetadata[]>
+  worktreeDiscoveryByProject: ReadonlyMap<string, 'loading' | 'ready' | 'error'>
   webUICreatedSessions: Set<string>
   sessionAbortFlags: Map<string, { timestamp: number; acknowledged: boolean }>
   abortControllers: Map<string, AbortController>
@@ -367,8 +368,6 @@ export type SessionUIState = {
   isSessionPlanAvailable: (sessionId: string) => boolean
 
   // Non-Git mode: dismissed signature hash per session, hides bar until new turn arrives
-  pendingChangesBarDismissed: Map<string, string>
-  dismissPendingChangesBar: (sessionId: string, signature: string | null) => void
 
   // Actions — UI state management
   setCurrentSession: (
@@ -994,13 +993,13 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
   worktreeMetadata: new Map(),
   availableWorktrees: flattenWorktreeMap(PERSISTED_WORKTREE_MAP),
   availableWorktreesByProject: PERSISTED_WORKTREE_MAP,
+  worktreeDiscoveryByProject: new Map(),
   webUICreatedSessions: new Set(),
   sessionAbortFlags: new Map(),
   abortControllers: new Map(),
   isLoading: false,
   lastLoadedDirectory: null,
   sessionPlanAvailable: new Map(),
-  pendingChangesBarDismissed: new Map(),
 
   // ---------------------------------------------------------------------------
   // setCurrentSession
@@ -1164,8 +1163,7 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       availableWorktrees: flattenWorktreeMap(availableWorktreesByProject),
       availableWorktreesByProject,
       sessionAbortFlags: new Map(),
-      pendingChangesBarDismissed: new Map(),
-    })
+        })
     if (restoredSessionId) {
       setActiveSession(restoredDirectory ?? opencodeClient.getDirectory() ?? "", restoredSessionId)
     } else {
@@ -1314,12 +1312,24 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     // the project's config instead so the default cascade matches app startup, then re-apply it
     // (a fresh draft must start from defaults, not inherit the previous session's selection).
     const configDirectory = normalizePath(selectedProject?.path ?? null) ?? directory
-    void activateConfigForDirectory(configDirectory).then(() => {
+    const runtimeKey = getRuntimeKey()
+    const activation = activateConfigForDirectory(configDirectory)
+    const applyDraftDefaults = () => {
+      const current = get()
+      if (getRuntimeKey() !== runtimeKey || current.currentSessionId
+        || current.newSessionDraft !== nextDraft || useConfigStore.getState().selectionSource === 'manual') return
       useConfigStore.getState().applyDefaultModelAgentSelection({
         projectDefaultModel: selectedProject?.defaultModel,
         projectDefaultVariant: selectedProject?.defaultVariant,
       })
+    }
+    // Paint the configured identifier immediately. Discovery fills its metadata
+    // later; it must not turn a new draft into an unrelated fallback model.
+    useConfigStore.getState().applyDefaultModelAgentSelection({
+      projectDefaultModel: selectedProject?.defaultModel,
+      projectDefaultVariant: selectedProject?.defaultVariant,
     })
+    void activation.then(applyDraftDefaults)
 
     if (directory && directory !== useDirectoryStore.getState().currentDirectory) {
       useDirectoryStore.getState().setDirectory(directory)
@@ -1612,16 +1622,6 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
 
   getWorktreeMetadata: (sessionId) => get().worktreeMetadata.get(sessionId),
 
-  dismissPendingChangesBar: (sessionId, signature) => {
-    const map = new Map(get().pendingChangesBarDismissed);
-    if (signature === null) {
-      map.delete(sessionId);
-    } else {
-      map.set(sessionId, signature);
-    }
-    set({ pendingChangesBarDismissed: map });
-  },
-
   // ---------------------------------------------------------------------------
   // sendMessage — calls SDK, reads domain data from sync
   // ---------------------------------------------------------------------------
@@ -1644,14 +1644,6 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
     const capturedRuntimeKey = capturedTarget?.runtimeKey ?? getRuntimeKey()
     if (capturedTarget && capturedTarget.runtimeKey !== getRuntimeKey()) {
       throw new Error("Message was not sent because the runtime changed.")
-    }
-
-    // Clear non-Git changed-files bar on new user message for current session
-    const sid = capturedTarget?.sessionId ?? options?.sessionId ?? get().currentSessionId;
-    if (sid) {
-      const map = new Map(get().pendingChangesBarDismissed);
-      map.delete(sid);
-      set({ pendingChangesBarDismissed: map });
     }
 
     const draft = options?.draftSnapshot ?? get().newSessionDraft

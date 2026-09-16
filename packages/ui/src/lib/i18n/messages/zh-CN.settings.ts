@@ -1,3 +1,5 @@
+import { extensionsSettingsI18n } from './extensions.settings.i18n';
+import { guestIntegrationsI18n } from './guest-integrations.i18n';
 import { linearIntegrationI18n } from './linear-integration.i18n';
 export const settingsDict = {
   'settings.openchamber.visual.field.alwaysShowScrollbars': '始终显示滚动条',
@@ -956,7 +958,10 @@ export const settingsDict = {
   'settings.openchamber.passkeys.toast.removeFailed': '无法移除 passkey。',
   'settings.openchamber.passkeys.toast.clearAuthFailed': '无法清除已保存的认证信息。',
   'settings.openchamber.sessionRetention.title': '会话保留',
-  'settings.openchamber.sessionRetention.tooltip': '根据最后活动时间自动归档或删除不活跃会话。会保留最近 5 个会话。',
+  'settings.openchamber.sessionRetention.field.onlyArchived': '仅已归档的会话',
+  'settings.openchamber.sessionRetention.field.onlyArchivedDescription': '使用删除操作，并从归档时开始计算保留期限。未归档的会话会保留。',
+  'settings.openchamber.sessionRetention.archivedTooltip': '删除超过保留期限的已归档会话。保留最近归档的 5 个会话、当前打开的会话、运行中的会话和已分享的会话。如果删除父会话会同时删除受保护的子会话，则保留父会话。',
+  'settings.openchamber.sessionRetention.tooltip': '根据最后活动时间归档或删除未归档的会话。保留最近 5 个会话、当前打开的会话、运行中的会话和已分享的会话。已归档的会话会保留。如果删除父会话会同时删除受保护的子会话，则保留父会话。',
   'settings.openchamber.sessionRetention.field.enableAutoCleanupAria': '启用自动清理',
   'settings.openchamber.sessionRetention.field.enableAutoCleanup': '启用自动清理',
   'settings.openchamber.sessionRetention.field.retentionPeriod': '保留时长',
@@ -2280,6 +2285,8 @@ export const settingsDict = {
   'settings.openchamber.visual.option.enterToSend.enter.label': '按 Enter 发送',
   'settings.openchamber.visual.option.enterToSend.modifier.label': '按 Ctrl/Cmd+Enter 发送',
   ...linearIntegrationI18n['zh-CN'],
+  ...guestIntegrationsI18n['zh-CN'],
+  ...extensionsSettingsI18n['zh-CN'],
   'settings.page.integrations.title': '集成',
   'settings.page.integrations.description': '连接 GitHub 和 Linear，让 OpenChamber 可以处理你的 issue 和拉取请求。',
 } as const;
