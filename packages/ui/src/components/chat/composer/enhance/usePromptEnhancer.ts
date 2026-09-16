@@ -22,6 +22,14 @@
  *   cleanup is forbidden from touching the busy state, so the spinner always
  *   settles promptly and the new scope/draft can enhance again immediately.
  *
+ * Busy-ness is derived, not stored: the active operation carries its scope,
+ * and `isEnhancing` is computed during render as "an operation is active and
+ * belongs to the current scope". A scope switch therefore paints the new
+ * scope non-busy in the very render that saw the switch — before any effect,
+ * before paint. The scope `useEffect` only does transport-side cleanup: it
+ * aborts and formally invalidates an operation that still belongs to the
+ * previous scope.
+ *
  * The hook owns everything ChatInput should not: request generations, stale
  * responses, cancellation, and validation. ChatInput only decides whether an
  * enhance may run, applies the returned text to the exact draft the request
@@ -127,7 +135,11 @@ export interface PromptEnhancerInput {
 }
 
 export function usePromptEnhancer(input: PromptEnhancerInput) {
-    const [isEnhancing, setIsEnhancing] = React.useState(false);
+    // The authoritative operation, if any. State is the reactive truth; the
+    // ref mirror gives callbacks/effect synchronous reads.
+    const [activeOp, setActiveOp] = React.useState<{ scopeKey: string | null; source: string } | null>(null);
+    const activeOpRef = React.useRef(activeOp);
+    activeOpRef.current = activeOp;
     // Monotonically increasing id of the latest authoritative operation; any
     // response from an older generation is stale and must not touch anything.
     // This ref is the single authority for "which enhance is current" — no
@@ -136,14 +148,18 @@ export function usePromptEnhancer(input: PromptEnhancerInput) {
     // generation mismatch and becomes a no-op.
     const generationRef = React.useRef(0);
     const abortRef = React.useRef<AbortController | null>(null);
-    // The draft the authoritative operation was started from, or null while
-    // none is active. Draft-change notifications compare against this.
-    const activeSourceRef = React.useRef<string | null>(null);
     // Read through a ref so a registry change does not re-create the callback,
     // and a response is validated against the values the request was started
     // with (a materially changed context marks the response stale).
     const languageContextRef = React.useRef(input.languageContext);
     languageContextRef.current = input.languageContext;
+    const scopeKeyRef = React.useRef(input.scopeKey);
+    scopeKeyRef.current = input.scopeKey;
+
+    // Derived, synchronous: a scope switch makes the previous scope's
+    // operation non-busy for the new scope in the very render that saw the
+    // switch — before any effect, before paint.
+    const isEnhancing = activeOp !== null && activeOp.scopeKey === input.scopeKey;
 
     const cancel = React.useCallback(() => {
         abortRef.current?.abort();
@@ -154,11 +170,11 @@ export function usePromptEnhancer(input: PromptEnhancerInput) {
     // work, and the spinner is released at once. A no-op when nothing is
     // active — callers may notify unconditionally.
     const invalidateActive = React.useCallback(() => {
-        if (activeSourceRef.current === null) return;
-        activeSourceRef.current = null;
+        if (activeOpRef.current === null) return;
+        activeOpRef.current = null;
         generationRef.current += 1;
         abortRef.current?.abort();
-        setIsEnhancing(false);
+        setActiveOp(null);
     }, []);
 
     // Draft-change notification from the composer's change handler: cheap by
@@ -167,7 +183,8 @@ export function usePromptEnhancer(input: PromptEnhancerInput) {
     // rewrite would answer for a draft that no longer exists, so the operation
     // is invalidated here instead of being raced against the response path.
     const noteDraftChanged = React.useCallback((liveDraft: string) => {
-        if (activeSourceRef.current === null || liveDraft === activeSourceRef.current) return;
+        const op = activeOpRef.current;
+        if (!op || liveDraft === op.source) return;
         invalidateActive();
     }, [invalidateActive]);
 
@@ -182,8 +199,13 @@ export function usePromptEnhancer(input: PromptEnhancerInput) {
         const controller = new AbortController();
         abortRef.current = controller;
         const requestLanguageContext = languageContextRef.current;
-        activeSourceRef.current = draft;
-        setIsEnhancing(true);
+        // Overwrite — a newer op always wins, even if it belongs to a
+        // different scope (the scope effect's guard keeps that op alive).
+        // The ref mirrors the new op synchronously so a passive effect that
+        // runs before the next render (the scope effect) already sees it.
+        const nextOp = { scopeKey: scopeKeyRef.current, source: draft };
+        activeOpRef.current = nextOp;
+        setActiveOp(nextOp);
         try {
             const cleaned = await enhancePrompt(draft, context, controller.signal);
             if (
@@ -218,26 +240,33 @@ export function usePromptEnhancer(input: PromptEnhancerInput) {
             // Only the authoritative operation releases the busy state: an
             // older operation's cleanup observes a generation mismatch and
             // becomes a no-op, so it can never clear a newer operation's
-            // spinner. With a single authoritative operation there is no
-            // concurrency to count — no pending-request bookkeeping needed.
+            // spinner. With derivation, it also cannot make a newer-scope
+            // operation look busy: busy-ness is re-evaluated against the
+            // current scope on every render. With a single authoritative
+            // operation there is no concurrency to count — no pending-request
+            // bookkeeping needed.
             if (generationRef.current === requestId) {
-                activeSourceRef.current = null;
-                setIsEnhancing(false);
+                setActiveOp(null);
             }
         }
     }, []);
 
-    // Scope invalidation: a session/directory/runtime switch moves the draft
-    // scope, so an operation started for the previous scope can no longer land
-    // anywhere meaningful — invalidate it and let the new scope enhance
-    // immediately. Skipped on first mount (nothing can be active yet, tracked
-    // via an undefined sentinel) and when the key is unchanged (ordinary
-    // re-renders pass an equal key).
+    // Transport-side scope cleanup: a session/directory/runtime switch moves
+    // the draft scope, so an operation started for the previous scope can no
+    // longer land anywhere meaningful — abort and invalidate it. The spinner
+    // itself needs no work: busy-ness was already derived false for the new
+    // scope in the render that saw the switch. Skipped on first mount
+    // (nothing can be active yet, tracked via an undefined sentinel) and when
+    // the key is unchanged (ordinary re-renders pass an equal key).
     const prevScopeKeyRef = React.useRef<string | null | undefined>(undefined);
     React.useEffect(() => {
         const previous = prevScopeKeyRef.current;
         prevScopeKeyRef.current = input.scopeKey;
         if (previous === undefined || previous === input.scopeKey) return;
+        // A newer operation may already have started for the new scope (its
+        // enhance overwrote activeOp before this effect ran); only invalidate
+        // an operation that actually belongs to the previous scope.
+        if (activeOpRef.current?.scopeKey !== previous) return;
         invalidateActive();
     }, [input.scopeKey, invalidateActive]);
 

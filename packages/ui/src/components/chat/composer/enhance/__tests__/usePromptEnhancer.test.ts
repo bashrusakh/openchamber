@@ -103,6 +103,23 @@ interface Harness {
   setLanguageContext: (next: ComposerLanguageContext) => void;
   /** Swaps the draft scope key the hook is rendered with, as a session switch would. */
   setScopeKey: (next: string | null) => void;
+  /**
+   * Per-render (scopeKey, isEnhancing) log in render order. The entry for the
+   * first render carrying a new scopeKey isolates the render-phase
+   * derivation: React renders before passive effects, so the scope effect
+   * has not run for that render yet.
+   */
+  renderLog: () => ReadonlyArray<{ scopeKey: string | null; isEnhancing: boolean }>;
+  /**
+   * Arms an enhance that starts from a useLayoutEffect on the next commit.
+   * React runs layout effects before passive effects within the same commit,
+   * so the armed enhance overwrites the hook's active operation BEFORE the
+   * hook's passive scope effect runs — the "user clicks enhance in the new
+   * scope before the scope effect ran" interleaving, made deterministic.
+   */
+  armEnhanceOnScopeSwitch: (draft: string) => void;
+  /** The armed enhance's promise (null when the layout effect never started one). */
+  armedEnhance: () => Promise<EnhanceOutcome>;
 }
 
 function renderHarness(
@@ -122,6 +139,9 @@ function renderHarness(
   // recompute, so a re-render can hand the hook a rebuilt object.
   let currentContext = initialContext;
   let currentScopeKey = initialScopeKey;
+  const renderLog: Array<{ scopeKey: string | null; isEnhancing: boolean }> = [];
+  let scheduledEnhanceDraft: string | null = null;
+  let scheduledEnhancePromise: Promise<EnhanceOutcome> | null = null;
 
   function Probe() {
     const hook = usePromptEnhancer({
@@ -134,6 +154,16 @@ function renderHarness(
       cancel: hook.cancel,
       noteDraftChanged: hook.noteDraftChanged,
     };
+    renderLog.push({ scopeKey: currentScopeKey, isEnhancing: hook.isEnhancing });
+    // Runs on every commit; only an armed draft starts an enhance. Layout
+    // effects fire before passive effects in the same commit, so this
+    // intercepts the hook's scope effect deterministically.
+    React.useLayoutEffect(() => {
+      if (scheduledEnhanceDraft === null) return;
+      const draft = scheduledEnhanceDraft;
+      scheduledEnhanceDraft = null;
+      scheduledEnhancePromise = hook.enhance(draft, enhanceContext);
+    });
     return null;
   }
 
@@ -168,6 +198,14 @@ function renderHarness(
     setScopeKey: (next: string | null) => {
       currentScopeKey = next;
       act(() => { root.render(React.createElement(Probe)); });
+    },
+    renderLog: () => renderLog,
+    armEnhanceOnScopeSwitch: (draft: string) => {
+      scheduledEnhanceDraft = draft;
+    },
+    armedEnhance: () => {
+      if (!scheduledEnhancePromise) throw new Error('armed enhance never started');
+      return scheduledEnhancePromise;
     },
   };
 }
@@ -466,6 +504,88 @@ describe('usePromptEnhancer', () => {
       if (result.outcome === 'applied') {
         expect(result.text).toBe('rewrite for A again');
       }
+      expect(harness.isEnhancing()).toBe(false);
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  test('a scope switch renders B non-busy in that very render, before the scope effect runs', async () => {
+    // The busy state is DERIVED against the current scope during render, not
+    // stored and cleared by an effect: the first render carrying session B
+    // must already report isEnhancing=false while A's operation is still the
+    // hook's active one. Render order proves the derivation is what is under
+    // test: React renders before passive effects, so the log entry for B's
+    // first render was written before the scope effect could have invalidated
+    // anything.
+    script = [{ text: 'late rewrite for A', delayMs: 30 }];
+    const harness = renderHarness(languageContext, 'session-a');
+    try {
+      const firstPromise = harness.startEnhance('draft A');
+      await act(async () => {});
+      expect(harness.isEnhancing()).toBe(true);
+      const rendersBeforeSwitch = harness.renderLog().length;
+
+      // Switch scope while A is still in flight.
+      harness.setScopeKey('session-b');
+      expect(harness.isEnhancing()).toBe(false);
+
+      // The very first B render — written before any effect could flush —
+      // already saw B as non-busy even though A's operation was still active.
+      const bRenders = harness.renderLog().slice(rendersBeforeSwitch);
+      expect(bRenders.length).toBeGreaterThan(0);
+      expect(bRenders[0]).toEqual({ scopeKey: 'session-b', isEnhancing: false });
+
+      // And A's transport really was still live across that render: its late
+      // response settles stale only through the effect-side invalidation.
+      const first = await firstPromise;
+      expect(first.outcome).toBe('stale');
+      expect(harness.isEnhancing()).toBe(false);
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  test('an enhance started in B before the scope effect ran survives that effect and owns the op', async () => {
+    // Theoretical-but-proven interleaving: A runs, the scope switches to B,
+    // and an enhance for B starts BEFORE the hook's passive scope effect ran
+    // (here via a layout effect, which React runs before passive effects in
+    // the same commit — a stronger ordering than any real user event, which
+    // effects always precede). The B enhance overwrites the active operation
+    // with B's scope; the scope effect must then NOT invalidate it (it only
+    // cleans up an op belonging to the previous scope), A's late finally is a
+    // no-op on the generation mismatch, and B stays busy until it settles.
+    script = [
+      { text: 'late rewrite for A', delayMs: 30 },
+      { text: 'rewrite for B' },
+    ];
+    const harness = renderHarness(languageContext, 'session-a');
+    try {
+      const firstPromise = harness.startEnhance('draft A');
+      await act(async () => {});
+      expect(harness.isEnhancing()).toBe(true);
+
+      // Arm B's enhance so the scope-switch commit starts it from a layout
+      // effect — before the hook's passive scope effect runs.
+      harness.armEnhanceOnScopeSwitch('draft B');
+      harness.setScopeKey('session-b');
+      const secondPromise = harness.armedEnhance();
+
+      // B's op survived the scope effect (its generation still settles
+      // 'applied' — A's invalidation would have made it stale) and B is busy.
+      const second = await secondPromise;
+      expect(second.outcome).toBe('applied');
+      if (second.outcome === 'applied') {
+        expect(second.text).toBe('rewrite for B');
+      }
+      // settle() flips the derived state outside act (the promise resolves
+      // before React flushes), so flush once before asserting the spinner.
+      await act(async () => {});
+      expect(harness.isEnhancing()).toBe(false);
+
+      // A stayed stale: B's overwrite bumped the generation before A settled.
+      const first = await firstPromise;
+      expect(first.outcome).toBe('stale');
       expect(harness.isEnhancing()).toBe(false);
     } finally {
       harness.unmount();
