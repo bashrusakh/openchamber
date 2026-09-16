@@ -153,6 +153,14 @@ describe('enhancePrompt — request shape', () => {
     await enhancePrompt('draft', context(), new AbortController().signal).catch(() => undefined);
     expect(requestSmallModelCalls.at(-1)?.options?.silentStatuses).toContain(404);
   });
+
+  test('413 responses request silence from the shared toast too', async () => {
+    scriptedResponse = jsonResponse({ error: 'Input is too large' }, 413);
+    await enhancePrompt('draft', context(), new AbortController().signal).catch(() => undefined);
+    const silentStatuses = requestSmallModelCalls.at(-1)?.options?.silentStatuses;
+    expect(silentStatuses).toContain(404);
+    expect(silentStatuses).toContain(413);
+  });
 });
 
 describe('enhancePrompt — response cleaning', () => {
@@ -238,7 +246,7 @@ describe('enhancePrompt — failure mapping', () => {
 describe('enhancePrompt — empty instructions guard', () => {
   test('an override rendering to whitespace fails before any request', async () => {
     overrideText = '   ';
-    await expectFailure(enhancePrompt('draft', context(), new AbortController().signal), 'provider-failed');
+    await expectFailure(enhancePrompt('draft', context(), new AbortController().signal), 'empty-result');
     expect(requestSmallModelCalls).toHaveLength(0);
   });
 });

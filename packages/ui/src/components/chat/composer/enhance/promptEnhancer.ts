@@ -167,9 +167,11 @@ export const enhancePrompt = async (
 ): Promise<string> => {
   const instructions = await renderMagicPrompt(ENHANCE_INSTRUCTIONS_ID);
   if (!instructions.trim()) {
-    // The default template is never empty; an override that lands here must
-    // stop the request rather than send bare instructions.
-    throw new PromptEnhanceError('provider-failed', 'The prompt enhancer instructions are empty.');
+    // The default template is never empty; an override that lands here
+    // produces nothing the request could use, so it stops before sending.
+    // `empty-result` carries the Enhance-specific toast copy for a result
+    // that has nothing usable in it.
+    throw new PromptEnhanceError('empty-result', 'The prompt enhancer instructions are empty.');
   }
 
   let response: Response;
@@ -181,10 +183,11 @@ export const enhancePrompt = async (
         signal,
         body: JSON.stringify(buildEnhanceRequestBody(draft, instructions, context)),
       },
-      // 404 means "no small model available". Enhance surfaces its own copy
-      // from the thrown error, so the automatic notification is silenced for
-      // that status only — the toast dedupes by id regardless.
-      { silentStatuses: [404] },
+      // 404 ("no small model available") and 413 (draft over the context
+      // budget) are Enhance-specific failures whose copy comes from the
+      // thrown error, so the shared toast is silenced for both statuses —
+      // the toast dedupes by id regardless.
+      { silentStatuses: [404, 413] },
     );
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {

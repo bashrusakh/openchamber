@@ -1231,33 +1231,43 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         && !isBtwActive
         && !isLocalCommandDraft,
     );
-    const handleEnhance = React.useCallback(async () => {
-        const draft = messageRef.current;
-        if (!draft.trim() || isEnhancing) return;
-        const directory = currentSessionDirectoryForSync ?? currentDirectory ?? '';
-        if (!directory) return;
-        const targetSessionId = isBtwActive ? btwComposerSessionId : currentSessionId;
-        const result = await enhance(draft, {
-            directory,
-            sessionId: targetSessionId ?? null,
-            preferredProviderId,
-            preferredModelId,
-        });
-        if (result.outcome === 'applied') {
-            // Apply only to the exact draft the request was started from: a
-            // response may land after the user typed on or the draft identity
-            // moved. The controlled writeback below produces the native
-            // undo entry (Cmd/Ctrl+Z restores the pre-enhance draft).
-            if (result.sourceSnapshot === messageRef.current && chatDraftIdentity === currentChatDraftIdentityRef.current) {
-                setMessage(result.text);
+    const handleEnhance = React.useCallback(() => {
+        const runEnhance = async () => {
+            const draft = messageRef.current;
+            if (!draft.trim() || isEnhancing) return;
+            const directory = currentSessionDirectoryForSync ?? currentDirectory ?? '';
+            if (!directory) return;
+            const targetSessionId = isBtwActive ? btwComposerSessionId : currentSessionId;
+            const result = await enhance(draft, {
+                directory,
+                sessionId: targetSessionId ?? null,
+                preferredProviderId,
+                preferredModelId,
+            });
+            if (result.outcome === 'applied') {
+                // Apply only to the exact draft the request was started from: a
+                // response may land after the user typed on or the draft identity
+                // moved. Read the live editor document (the same precedence
+                // getCurrentInputSnapshot uses) rather than the effect-synced
+                // ref, so a keystroke that has not reached the ref yet still
+                // counts. The controlled writeback below produces the native
+                // undo entry (Cmd/Ctrl+Z restores the pre-enhance draft).
+                const liveDraft = composerRef.current?.getValue() ?? messageRef.current;
+                if (result.sourceSnapshot === liveDraft && chatDraftIdentity === currentChatDraftIdentityRef.current) {
+                    setMessage(result.text);
+                }
+                return;
             }
-            return;
-        }
-        if (result.outcome === 'stale') return;
-        const toastKey = ENHANCE_FAILURE_TOAST_KEYS[result.reason] ?? undefined;
-        if (toastKey) {
-            toast.error(t(toastKey));
-        }
+            if (result.outcome === 'stale') return;
+            const toastKey = ENHANCE_FAILURE_TOAST_KEYS[result.reason] ?? undefined;
+            if (toastKey) {
+                toast.error(t(toastKey));
+            }
+        };
+        // A void-returning callback keeps the prop identity stable for the
+        // memoized footer and mobile pill (same shape as handleAbort); the
+        // promise is swallowed here.
+        void runEnhance();
     }, [
         btwComposerSessionId,
         chatDraftIdentity,
@@ -3725,7 +3735,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         bottomRow={mobileModelAgentRow}
                         canEnhance={canEnhance}
                         isEnhancing={isEnhancing}
-                        onEnhance={() => { void handleEnhance(); }}
+                        onEnhance={handleEnhance}
                         onExpand={mobileShell.expand}
                         onPrimaryAction={handlePrimaryAction}
                         onQueueMessage={() => { void handleQueueMessage(); }}
@@ -3908,7 +3918,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         dictationActive={mobileShell.dictationActive}
                         canEnhance={canEnhance}
                         isEnhancing={isEnhancing}
-                        onEnhance={() => { void handleEnhance(); }}
+                        onEnhance={handleEnhance}
                         onOpenSettings={onOpenSettings}
                         onPickLocalFiles={handlePickLocalFiles}
                         onOpenIssuePicker={openIssuePicker}

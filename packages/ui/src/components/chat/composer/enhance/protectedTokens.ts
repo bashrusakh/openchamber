@@ -8,10 +8,10 @@
  *
  * The guard protects corruption, not creativity. A model that drops a token
  * the user typed has corrupted a reference the send path would silently
- * mis-resolve; a model that invents `@file` or `#snippet` references out of
- * thin air would land them in the prompt as if the user had written them.
- * Both fail validation. Slash tokens are the one exception: when the source
- * names no command, the rewrite may name one. The model may rephrase
+ * mis-resolve; a model that invents `@file`, `/command` or `#snippet`
+ * references out of thin air would land them in the prompt as if the user had
+ * written them. The whole guard is one policy: every source token must
+ * survive, and no token of any kind may be invented. The model may rephrase
  * everything around the tokens and move them anywhere in the text — position
  * and order are unconstrained.
  *
@@ -25,31 +25,27 @@ import { scanPrefixTokens, type TokenPrefix } from '../language/prefixTokens';
 import type { ComposerLanguageContext } from '../language/tokenize';
 
 export interface ProtectedTokens {
-  /** Raw `@` tokens, e.g. `@path/to/file.ts` or `@AgentName`. */
+  /** `@` mention names, e.g. `path/to/file.ts` or `AgentName` — the punctuation-brushed core, without `@`. */
   mentions: string[];
-  /** Raw `/` tokens — commands and skills. */
+  /** `@`-free `/` tokens with the sigil — commands and skills, e.g. `/review`. */
   slash: string[];
-  /** Raw `#` tokens — snippets. */
+  /** `@`-free `#` tokens with the sigil — snippets, e.g. `#notes`. */
   snippets: string[];
 }
 
 interface ProtectedTokenRule {
   /** Compare token text case-insensitively (mirrors `filterKnownTokens`'s default). */
   caseInsensitive: boolean;
-  /**
-   * A result token of this kind is corruption when the source had none. True
-   * for mentions and snippets: the model inventing `@file` or `#snippet` out
-   * of thin air would fabricate a reference. False for slash tokens: a
-   * rewritten prompt may name a command when the source did not use any, but
-   * once the source names commands the result must not add others.
-   */
-  forbidNewTokensWhenSourceEmpty: boolean;
 }
 
+/**
+ * Every kind shares one policy — source tokens must survive, none may be
+ * invented — so the only per-kind difference left is case sensitivity.
+ */
 const RULES = {
-  mention: { caseInsensitive: false, forbidNewTokensWhenSourceEmpty: true },
-  '/': { caseInsensitive: true, forbidNewTokensWhenSourceEmpty: false },
-  '#': { caseInsensitive: false, forbidNewTokensWhenSourceEmpty: true },
+  mention: { caseInsensitive: false },
+  '/': { caseInsensitive: true },
+  '#': { caseInsensitive: false },
 } as const satisfies Record<TokenPrefix | 'mention', ProtectedTokenRule>;
 
 /**
@@ -64,7 +60,11 @@ const RULES = {
 // callers pass the same context object the editor already holds.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export function extractProtectedTokens(text: string, _context: ComposerLanguageContext): ProtectedTokens {
-  const mentions = [...new Set(scanMentions(text).map((token) => token.raw))];
+  // Mentions compare by `name` — the punctuation-brushed core the editor
+  // resolves — not `raw`: the model's rewrite legitimately re-punctuates
+  // around a mention ("@src/app.ts," → "@src/app.ts"), and comparing raw
+  // spans would read that drift as a lost token.
+  const mentions = [...new Set(scanMentions(text).map((token) => token.name))];
   const slash = [...new Set(scanPrefixTokens(text, '/').map((token) => text.slice(token.start, token.end)))];
   const snippets = [...new Set(scanPrefixTokens(text, '#').map((token) => text.slice(token.start, token.end)))];
   return { mentions, slash, snippets };
@@ -76,10 +76,10 @@ const normalizeKey = (token: string, caseInsensitive: boolean): string =>
 /**
  * True when the rewrite preserved every protected token.
  *
- * For each list, the source tokens must all appear in the result, and the
- * result must not introduce tokens the source did not have — except a slash
- * token when the source named none (see the header). A list the source does
- * not use imposes no preservation requirement on it.
+ * The policy is identical for all three kinds: the source tokens must all
+ * appear in the result, and the result must not introduce tokens the source
+ * did not have. A list the source does not use imposes no preservation
+ * requirement on it, but the result may not add tokens to it either.
  */
 export function validateProtectedTokensPreserved(
   source: string,
@@ -103,13 +103,9 @@ export function validateProtectedTokensPreserved(
       }
     }
     if (actual.length > expected.length) {
-      // Deduplicated lists, so any surplus is a token kind the source did not
-      // have. Forbidden for every kind once the source used the kind at all;
-      // for a source that used none, only the forbidNewTokensWhenSourceEmpty
-      // kinds reject.
-      if (expected.length > 0 || rule.forbidNewTokensWhenSourceEmpty) {
-        return false;
-      }
+      // Deduplicated lists, so any surplus is a token the source did not
+      // have — invented, and forbidden for every kind.
+      return false;
     }
   }
 

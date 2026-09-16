@@ -18,9 +18,16 @@ const preserved = (source: string, result: string) =>
 describe('extractProtectedTokens', () => {
     test('collects mentions, slash tokens and snippets', () => {
         const tokens = extractProtectedTokens('use @src/app.ts with /review and #notes', context());
-        expect(tokens.mentions).toEqual(['@src/app.ts']);
+        expect(tokens.mentions).toEqual(['src/app.ts']);
         expect(tokens.slash).toEqual(['/review']);
         expect(tokens.snippets).toEqual(['#notes']);
+    });
+
+    test('mentions are the punctuation-brushed name the editor resolves', () => {
+        // A comma brushing against the mention is sentence punctuation, not
+        // part of the reference — the same cleanup the editor applies.
+        const tokens = extractProtectedTokens('check @src/app.ts, then deploy', context());
+        expect(tokens.mentions).toEqual(['src/app.ts']);
     });
 
     test('deduplicates repeated tokens', () => {
@@ -37,6 +44,17 @@ describe('extractProtectedTokens', () => {
 describe('validateProtectedTokensPreserved — surviving tokens', () => {
     test('a mention present in both source and result passes', () => {
         expect(preserved('check @src/app.ts please', 'please check @src/app.ts now')).toBe(true);
+    });
+
+    test('a mention whose trailing punctuation was rewritten away passes', () => {
+        // The editor resolves "@src/app.ts," to the same mention as
+        // "@src/app.ts" — re-punctuating the sentence around the reference is
+        // not losing it.
+        expect(preserved('check @src/app.ts, then deploy', 'check the app, @src/app.ts')).toBe(true);
+    });
+
+    test('a rewrite that actually drops the mention still fails', () => {
+        expect(preserved('check @src/app.ts, then deploy', 'check the app, then deploy')).toBe(false);
     });
 
     test('a snippet present in both passes even when moved', () => {
@@ -91,10 +109,10 @@ describe('validateProtectedTokensPreserved — invented tokens', () => {
         expect(preserved('run /review', 'run /review then /debug')).toBe(false);
     });
 
-    test('a new slash token passes when the source used no slash token', () => {
-        // Slash is the one kind allowed to appear fresh: the rewritten prompt
-        // may name a command even though the source did not.
-        expect(preserved('plain prose', 'prose with /debug inside')).toBe(true);
+    test('a slash token invented by the rewrite fails even when the source used none', () => {
+        // No kind may be invented: with the source naming no command, the
+        // model must not introduce one of its own.
+        expect(preserved('plain prose', 'prose with /debug inside')).toBe(false);
     });
 });
 
