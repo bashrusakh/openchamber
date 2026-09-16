@@ -342,7 +342,7 @@ export function GitHubPrPickerDialog({
             <div className="text-center text-muted-foreground py-8 break-words">{error}</div>
           ) : null}
 
-          {prs.length === 0 && !isLoading && connected && github && projectDirectory ? (
+          {prs.length === 0 && !isLoading && !error && connected && github && projectDirectory ? (
             <div className="text-center text-muted-foreground py-8">{debouncedQuery.trim() ? t('session.githubPrPicker.empty.noPullRequestsFound') : t('session.githubPrPicker.empty.noOpenPullRequestsFound')}</div>
           ) : null}
 

@@ -538,7 +538,7 @@ export function GitHubIssuePickerDialog({
             <div className="text-center text-muted-foreground py-8 break-words">{error}</div>
           ) : null}
 
-          {issues.length === 0 && !isLoading && connected && github && projectDirectory ? (
+          {issues.length === 0 && !isLoading && !error && connected && github && projectDirectory ? (
             <div className="text-center text-muted-foreground py-8">{debouncedQuery.trim() ? t('session.githubIssuePicker.empty.noIssuesFound') : t('session.githubIssuePicker.empty.noOpenIssuesFound')}</div>
           ) : null}
 
