@@ -95,9 +95,11 @@ interface Harness {
   startEnhance: (draft: string) => Promise<EnhanceOutcome>;
   cancel: () => void;
   unmount: () => void;
+  /** Swaps the language context the hook is rendered with, as a re-render would. */
+  setLanguageContext: (next: ComposerLanguageContext) => void;
 }
 
-function renderHarness(): Harness {
+function renderHarness(initialContext: ComposerLanguageContext = languageContext): Harness {
   const container = document.createElement('div');
   const root = createRoot(container);
   let captured: {
@@ -105,9 +107,13 @@ function renderHarness(): Harness {
     enhance: (draft: string, context: typeof enhanceContext) => Promise<EnhanceOutcome>;
     cancel: () => void;
   } | null = null;
+  // Read at render time so tests can swap the context the way ChatInput does:
+  // its languageContext memo returns a fresh object whenever its inputs
+  // recompute, so a re-render can hand the hook a rebuilt object.
+  let currentContext = initialContext;
 
   function Probe() {
-    const hook = usePromptEnhancer(languageContext);
+    const hook = usePromptEnhancer(currentContext);
     captured = { isEnhancing: hook.isEnhancing, enhance: hook.enhance, cancel: hook.cancel };
     return null;
   }
@@ -133,6 +139,10 @@ function renderHarness(): Harness {
     startEnhance: (draft: string) => getEnhance()(draft, enhanceContext),
     cancel: () => { act(() => { captured?.cancel(); }); },
     unmount: () => { act(() => { root.unmount(); }); },
+    setLanguageContext: (next: ComposerLanguageContext) => {
+      currentContext = next;
+      act(() => { root.render(React.createElement(Probe)); });
+    },
   };
 }
 
@@ -151,6 +161,62 @@ describe('usePromptEnhancer', () => {
         expect(result.text).toBe('improved draft');
         expect(result.sourceSnapshot).toBe('my draft');
       }
+      expect(harness.isEnhancing()).toBe(false);
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  test('a response landing after a rebuilt-but-equal context still applies', async () => {
+    // ChatInput rebuilds its languageContext memo whenever its inputs
+    // recompute — including the setIsEnhancing(true) render that starts the
+    // request. Staleness is judged by the registry values, not object
+    // identity, so this response must apply.
+    script = [{ text: 'improved draft', delayMs: 30 }];
+    const harness = renderHarness();
+    try {
+      const promise = harness.startEnhance('my draft');
+      harness.setLanguageContext({
+        inputMode: 'normal',
+        knownAgentNames: new Set(),
+        confirmedMentions: new Set(),
+        knownSlashNames: new Set(),
+        knownSnippetTriggers: new Set(),
+        attachmentFilenames: [],
+      });
+      const result = await promise;
+      // settle() flips isEnhancing outside act (the promise resolves before
+      // React flushes), so flush once before asserting the spinner state.
+      await act(async () => {});
+      expect(result.outcome).toBe('applied');
+      if (result.outcome === 'applied') {
+        expect(result.text).toBe('improved draft');
+        expect(result.sourceSnapshot).toBe('my draft');
+      }
+      expect(harness.isEnhancing()).toBe(false);
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  test('a response landing after a materially changed context stays stale', async () => {
+    // A registry change (here: shell mode) between request and response means
+    // the rewrite answered for a different composer language — stale.
+    script = [{ text: 'improved draft', delayMs: 30 }];
+    const harness = renderHarness();
+    try {
+      const promise = harness.startEnhance('my draft');
+      harness.setLanguageContext({
+        inputMode: 'shell',
+        knownAgentNames: new Set(),
+        confirmedMentions: new Set(),
+        knownSlashNames: new Set(),
+        knownSnippetTriggers: new Set(),
+        attachmentFilenames: [],
+      });
+      const result = await promise;
+      await act(async () => {});
+      expect(result.outcome).toBe('stale');
       expect(harness.isEnhancing()).toBe(false);
     } finally {
       harness.unmount();

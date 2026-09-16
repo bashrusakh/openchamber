@@ -9,8 +9,14 @@
  * was started from, and maps failure reasons to toasts.
  *
  * Stale responses (the user typed on, a second enhance started, the composer's
- * language context was rebuilt) are swallowed silently — a rewrite answering
- * after the draft moved on is not an error, it is nothing.
+ * language context materially changed) are swallowed silently — a rewrite
+ * answering after the draft moved on is not an error, it is nothing.
+ *
+ * "Materially changed" means the registry behind the language context changed
+ * — compared by value via `sameLanguageContext`, not by object identity. The
+ * composer rebuilds its context object on ordinary re-renders even when every
+ * field is unchanged, so identity would wrongly discard every successful
+ * response whenever React re-rendered between the click and the reply.
  */
 
 import * as React from 'react';
@@ -49,6 +55,39 @@ export const ENHANCE_FAILURE_TOAST_KEYS = {
     'aborted': null,
 } as const satisfies Record<PromptEnhanceFailure, I18nKey | null>;
 
+/**
+ * Whether two language contexts carry the same workspace knowledge — the
+ * registries the protected-token gate resolves against. Compared by value:
+ * the composer rebuilds its context object on ordinary re-renders even when
+ * nothing changed, so object identity cannot distinguish "the registry
+ * changed" from "React re-rendered". Set members are already-normalized
+ * (lowercased) strings, so plain equality is enough.
+ */
+function sameLanguageContext(
+    a: ComposerLanguageContext,
+    b: ComposerLanguageContext,
+): boolean {
+    if (a === b) return true;
+    if (a.inputMode !== b.inputMode) return false;
+    const setFields = [
+        'knownAgentNames',
+        'confirmedMentions',
+        'knownSlashNames',
+        'knownSnippetTriggers',
+    ] as const;
+    return setFields.every((field) => {
+        const aSet = a[field];
+        const bSet = b[field];
+        if (aSet.size !== bSet.size) return false;
+        for (const member of aSet) {
+            if (!bSet.has(member)) return false;
+        }
+        return true;
+    })
+        && a.attachmentFilenames.length === b.attachmentFilenames.length
+        && a.attachmentFilenames.every((name, index) => name === b.attachmentFilenames[index]);
+}
+
 export function usePromptEnhancer(languageContext: ComposerLanguageContext) {
     const [isEnhancing, setIsEnhancing] = React.useState(false);
     const pendingCountRef = React.useRef(0);
@@ -57,8 +96,8 @@ export function usePromptEnhancer(languageContext: ComposerLanguageContext) {
     const generationRef = React.useRef(0);
     const abortRef = React.useRef<AbortController | null>(null);
     // Read through a ref so a registry change does not re-create the callback,
-    // and a response is validated against the same context object the request
-    // was started with (a rebuilt context object marks the response stale).
+    // and a response is validated against the values the request was started
+    // with (a materially changed context marks the response stale).
     const languageContextRef = React.useRef(languageContext);
     languageContextRef.current = languageContext;
 
@@ -86,7 +125,10 @@ export function usePromptEnhancer(languageContext: ComposerLanguageContext) {
         setIsEnhancing(true);
         try {
             const cleaned = await enhancePrompt(draft, context, controller.signal);
-            if (requestId !== generationRef.current || languageContextRef.current !== requestLanguageContext) {
+            if (
+                requestId !== generationRef.current
+                || !sameLanguageContext(languageContextRef.current, requestLanguageContext)
+            ) {
                 return { outcome: 'stale' };
             }
             if (!validateProtectedTokensPreserved(draft, cleaned, requestLanguageContext)) {
