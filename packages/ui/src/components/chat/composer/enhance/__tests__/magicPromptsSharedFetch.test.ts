@@ -7,9 +7,12 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
  *
  * - The shared transport has its own internal deadline; a hung `/api/` read
  *   settles the shared request, clears the in-flight slot, and lets the next
- *   caller start a fresh request. Callers already treat any overrides-fetch
- *   rejection as "use the default template", so a timed-out transport is a
- *   recoverable miss, not a dead end.
+ *   caller start a fresh request. That deadline is transport-internal: its
+ *   rejection is translated into the plain load-failure error before it
+ *   reaches any caller, so unsigned consumers degrade to the default
+ *   template exactly as for any other load failure — the abort shape never
+ *   crosses the shared/caller boundary, where it would be misread as the
+ *   caller's own cancellation or deadline.
  * - A caller's signal bounds only its own wait: it rejects the caller
  *   promptly with an abort-named error, leaves the shared transport running,
  *   and never mutates the cache. The abandoned shared branch must not become
@@ -83,10 +86,7 @@ import {
   renderMagicPrompt,
   resetMagicPromptOverridesForTests,
 } from '@/lib/magicPrompts';
-import { enhancePrompt, PromptEnhanceError } from '../promptEnhancer';
-
-const rejectionName = (error: unknown): string | null =>
-  error instanceof Error ? error.name : null;
+import { enhancePrompt, PromptEnhanceError, type EnhanceRequestBody } from '../promptEnhancer';
 
 beforeEach(() => {
   resetMagicPromptOverridesForTests();
@@ -204,7 +204,7 @@ describe('fetchMagicPromptOverrides — shared transport lifetime', () => {
     const reason = new DOMException('The operation timed out.', 'TimeoutError');
     Object.defineProperty(sharedSignal, 'aborted', { value: true });
     sharedSignal.dispatchEvent(new Event('abort'));
-    await expect(first).rejects.toThrow();
+    await expect(first).rejects.toThrow('Failed to load magic prompts');
     await nextTick();
 
     // Slot cleared → the next caller starts a fresh request. Release it
@@ -300,20 +300,48 @@ describe('renderMagicPrompt — split lifetimes through the effective-template p
     expect(instructions).toBe(getDefaultMagicPromptTemplate('composer.enhance.instructions'));
     expect(instructions.length).toBeGreaterThan(0);
   });
+
+  test('the shared transport deadline firing resolves an unsigned consumer the default template, not a throw', async () => {
+    // THE legacy-consumer regression: unsigned `renderMagicPrompt` callers
+    // (linear start session, git integrate, PlanView, reviewFlow, commit
+    // generation, …) have no signal of their own, so an abort-named
+    // rejection could only come from the shared transport's internal
+    // deadline — and it must degrade to the default template like any other
+    // load failure, never surface as a TimeoutError throw.
+    transportImpl = hangUntilAborted('TimeoutError');
+    const renderWait = renderMagicPrompt('composer.enhance.instructions');
+    await nextTick();
+    const sharedSignal = transportSignals[0];
+    Object.defineProperty(sharedSignal, 'aborted', { value: true });
+    sharedSignal.dispatchEvent(new Event('abort'));
+
+    const instructions = await renderWait;
+    expect(instructions).toBe(getDefaultMagicPromptTemplate('composer.enhance.instructions'));
+    expect(instructions.length).toBeGreaterThan(0);
+
+    // The slot cleared, so the next caller starts a fresh request. Release
+    // it before awaiting (an unreleased settleable request would deadlock).
+    const transport = settleable();
+    transportImpl = transport;
+    const retry = fetchMagicPromptOverrides();
+    transport.release({ 'composer.enhance.instructions': 'RETRIED' });
+    expect((await retry)['composer.enhance.instructions']).toBe('RETRIED');
+  });
 });
 
 describe('enhancePrompt end-to-end through the real magicPrompts module', () => {
   /**
    * The full service with the real magic-prompt fetch behind it: the only
    * additional seam replaced is the small-model request layer (responses are
-   * scripted per test; nothing here exercises it beyond a hang, because both
-   * tests below end before the generate request would matter).
+   * scripted per test; most tests end before the generate request would
+   * matter, one scripts a full response to prove the graceful-degrade path).
    */
   const smallModelCalls: Array<{ signal?: AbortSignal }> = [];
+  let smallModelImpl: (init: RequestInit) => Promise<Response> = () => new Promise<Response>(() => {});
   mock.module('@/lib/smallModelRequest', () => ({
     requestSmallModel: async (init: RequestInit): Promise<Response> => {
       smallModelCalls.push({ signal: init.signal ?? undefined });
-      return new Promise<Response>(() => {});
+      return smallModelImpl(init);
     },
   }));
   // `smallModelRequest` imports sonner at module scope; the mock above
@@ -321,9 +349,16 @@ describe('enhancePrompt end-to-end through the real magicPrompts module', () => 
 
   const enhanceContext = { directory: '/repo', sessionId: null };
 
-  test('a hanging overrides fetch maps to timed-out, and the in-flight slot is cleared for the next caller', async () => {
-    // The shared transport hangs; the composed deadline aborts the shared
-    // wait; enhancePrompt reads the fired deadline as `timed-out`. The
+  // Reset the per-test seams the module-level beforeEach cannot reach.
+  beforeEach(() => {
+    smallModelCalls.length = 0;
+    smallModelImpl = () => new Promise<Response>(() => {});
+  });
+
+  test('a caller deadline firing during a hung overrides fetch maps to timed-out, and the shared slot clears when the transport settles', async () => {
+    // The shared transport hangs; the composed CALLER deadline (1ms, far
+    // inside the shared request's own 20s) aborts the shared wait;
+    // enhancePrompt reads the fired caller deadline as `timed-out`. The
     // shared transport itself is NOT aborted by the caller wait — the
     // in-flight slot only clears when the shared request settles on its own.
     transportImpl = hangUntilAborted('TimeoutError');
@@ -341,25 +376,64 @@ describe('enhancePrompt end-to-end through the real magicPrompts module', () => 
 
     // The shared request is still in flight on its own deadline (which never
     // fires within this test), so the next caller coalesces onto it — one
-    // transport call total. Once it later times out on its own signal, the
-    // slot clears and a fresh caller starts a new request.
+    // transport call total.
     const transport = settleable();
     transportImpl = transport;
-    const nextCallerDeadline = AbortSignal.timeout(1);
-    let nextRejection: unknown = null;
-    try {
-      await renderMagicPrompt('composer.enhance.instructions', {}, { signal: nextCallerDeadline });
-    } catch (error) { nextRejection = error; }
+    const stillWaiting = renderMagicPrompt('composer.enhance.instructions');
+    await nextTick();
     expect(transport.callCount).toBe(0); // still coalescing onto the first request
 
-    // Fire the shared request's own deadline: its wait-scope rejects, the
-    // transport rejects, the slot clears.
+    // The shared transport's OWN deadline then fires: a load miss, not a
+    // caller abort. The still-waiting caller resolves the default template
+    // (graceful), never an abort-named rejection, and the slot clears.
     Object.defineProperty(transportSignals[0], 'aborted', { value: true });
     transportSignals[0].dispatchEvent(new Event('abort'));
+    const instructions = await stillWaiting;
+    expect(instructions).toBe(getDefaultMagicPromptTemplate('composer.enhance.instructions'));
     await nextTick();
-    expect((rejectionName(nextRejection) === 'AbortError' || rejectionName(nextRejection) === 'TimeoutError')).toBe(true);
 
     // Now a fresh caller starts a NEW request that succeeds.
+    const retry = fetchMagicPromptOverrides();
+    transport.release({ 'composer.enhance.instructions': 'RETRY' });
+    expect(transport.callCount).toBe(1);
+    expect((await retry)['composer.enhance.instructions']).toBe('RETRY');
+  });
+
+  test('a shared transport deadline inside the Enhance budget degrades to the default template and the request still carries the draft', async () => {
+    // THE Enhance-side regression companion: the shared transport's internal
+    // 20s deadline fires well inside Enhance's 90s budget. That is a load
+    // miss, not the caller's deadline, so Enhance proceeds with the DEFAULT
+    // built-in template and sends the generate request — graceful, never
+    // `timed-out`.
+    transportImpl = hangUntilAborted('TimeoutError');
+    smallModelImpl = (init) => {
+      // SAFETY: the body is `JSON.stringify(buildEnhanceRequestBody(...))`
+      // from promptEnhancer; parse back into its owner type.
+      const body = JSON.parse(String(init.body)) as EnhanceRequestBody;
+      return Promise.resolve(new Response(JSON.stringify({ text: `rewritten:${body.prompt}` }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    };
+    const enhanceWait = enhancePrompt('draft', enhanceContext, new AbortController().signal);
+    await nextTick();
+    expect(smallModelCalls).toHaveLength(0); // still waiting on the overrides fetch
+
+    // Fire the shared transport's own internal deadline.
+    Object.defineProperty(transportSignals[0], 'aborted', { value: true });
+    transportSignals[0].dispatchEvent(new Event('abort'));
+
+    const enhanced = await enhanceWait;
+    // The generate request went out carrying the draft, instructed by the
+    // default template — the overrides miss degraded, nothing threw.
+    expect(smallModelCalls).toHaveLength(1);
+    expect(enhanced).toBe('rewritten:draft');
+
+    // The fired deadline belonged to the shared transport; its slot cleared,
+    // so a fresh caller starts a NEW request. Release it before awaiting
+    // (an unreleased settleable request would deadlock the test).
+    const transport = settleable();
+    transportImpl = transport;
     const retry = fetchMagicPromptOverrides();
     transport.release({ 'composer.enhance.instructions': 'RETRY' });
     expect(transport.callCount).toBe(1);

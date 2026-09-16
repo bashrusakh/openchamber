@@ -363,12 +363,16 @@ The invariants that hold wherever the button is mounted:
 - The instructions fetch has two lifetimes. The shared `/api/magic-prompts`
   overrides request is coalesced across all consumers and carries its own
   internal 20s deadline — Enhance's own 90s budget is not spent waiting on a
-  fetch that should take seconds, and a hung shared request clears so the
-  next caller retries. Each caller races that shared request with its own
-  signals (scope/cancellation/deadline) and stops waiting early without
-  aborting the shared transport; a caller's cancellation or deadline is
-  abort-named and mapped by `enhancePrompt` (`aborted` vs `timed-out`),
-  while genuine transport failures still fall back to the default template.
+  fetch that should take seconds. That deadline is transport-internal: when
+  it fires, the shared rejection is translated into the same plain
+  load-failure error a non-ok response produces, so every consumer (Enhance
+  included) degrades to the built-in/default prompt — for Enhance that means
+  the generate request still goes out on the default template, not a
+  `timed-out` failure — and the cleared slot lets the next caller retry.
+  Each caller races that shared request with its own signals
+  (scope/cancellation/deadline) and stops waiting early without aborting the
+  shared transport; only a caller's own cancellation or deadline reaches
+  `enhancePrompt` abort-named, which maps it (`aborted` vs `timed-out`).
 - The request refuses truncation: `onOverflow: 'error'` turns an
   over-budget draft into a 413 error instead of a silently clipped rewrite.
 - The guard rejects corruption, not creativity: a rewrite that loses a

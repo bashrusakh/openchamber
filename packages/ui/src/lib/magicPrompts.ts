@@ -1155,10 +1155,35 @@ const normalizeOverridesPayload = (payload: unknown): Record<string, string> => 
  * would then eat the whole 90s budget on a fetch that should take seconds).
  * 20s sits with the project's read-fetch deadlines (`pullRequestDiff` uses
  * 30s for heavier reads; relay probes use 8s) — a fresh, local JSON read
- * should finish well inside it, and a fired deadline is recoverable: the
- * in-flight request is cleared and the next caller starts a new one.
+ * should finish well inside it, and a fired deadline is recoverable: it is
+ * translated into the plain load-failure error callers already treat as
+ * "use the default template", the in-flight request is cleared, and the next
+ * caller starts a new one.
  */
 const MAGIC_PROMPTS_FETCH_TIMEOUT_MS = 20_000;
+
+/**
+ * The one rejection shape every overrides-load failure carries — non-ok
+ * responses and the shared transport's own deadline alike — so callers have
+ * exactly one meaning for it: fall back to the default template.
+ */
+const magicPromptsLoadFailure = (): Error => new Error('Failed to load magic prompts');
+
+/**
+ * Translates an abort-shaped rejection from the shared transport into the
+ * plain load-failure error. The transport signal is created locally and no
+ * caller signal is ever composed into it, so an abort-named error on this
+ * chain can only be the internal 20s deadline firing — a recoverable load
+ * miss that must degrade to the default template, never a caller
+ * cancellation: those are delivered out-of-band by
+ * `awaitSharedUntilCallerSignal` and never touch the shared chain.
+ */
+const translateTransportDeadline = (error: Error): Error => {
+  if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+    return magicPromptsLoadFailure();
+  }
+  return error;
+};
 
 /**
  * The shared in-flight request runs on its own internally-deadlined transport
@@ -1175,7 +1200,7 @@ const requestMagicPromptOverrides = (transportSignal?: AbortSignal): Promise<Rec
   }
   return runtimeFetch(API_ENDPOINT, init).then(async (response) => {
     if (!response.ok) {
-      throw new Error('Failed to load magic prompts');
+      throw magicPromptsLoadFailure();
     }
     const payload = await response.json().catch(() => ({}));
     const normalized = normalizeOverridesPayload(payload);
@@ -1243,6 +1268,13 @@ export const fetchMagicPromptOverrides = async (
 
   if (!inFlightOverridesRequest) {
     inFlightOverridesRequest = requestMagicPromptOverrides(AbortSignal.timeout(MAGIC_PROMPTS_FETCH_TIMEOUT_MS))
+      .catch((error: Error) => {
+        // The transport's own deadline firing is a load miss, not a caller
+        // cancellation: translate it so callers degrade to the default
+        // template exactly as they do for a non-ok response. Caller leaves
+        // are delivered separately by `awaitSharedUntilCallerSignal`.
+        throw translateTransportDeadline(error);
+      })
       .finally(() => {
         inFlightOverridesRequest = null;
       });
@@ -1274,14 +1306,15 @@ const getEffectiveMagicPromptTemplate = async (
     // render, not a reason to silently fall back: the composed deadline's
     // owner (e.g. the enhancer) reads the abort to map its failure reason,
     // and proceeding on an aborted deadline would start a doomed request.
-    // Transport failures still resolve to the default template.
+    // Any load failure — a non-ok response or the shared transport's own
+    // 20s deadline, already translated to a plain Error — resolves to the
+    // default template.
     //
-    // The rejection here is always an Error at the boundary: the shared
-    // request rejects with `Error`s it throws itself or abort-shaped
-    // DOMExceptions from the transport and its deadline, and a caller's
-    // early leave rejects with the fired signal's reason (abort-named in
-    // every production path). Anything outside that shape falls through to
-    // the default template below, which is the safe fallback.
+    // The rejection here is an abort-named Error only when the caller's own
+    // signal (composed via `AbortSignal.any`) fired the wait: the shared
+    // chain never surfaces abort-shaped rejections past
+    // `translateTransportDeadline`. Anything outside that shape falls
+    // through to the default template below, which is the safe fallback.
     if (error.name === 'AbortError' || error.name === 'TimeoutError') {
       throw error;
     }
