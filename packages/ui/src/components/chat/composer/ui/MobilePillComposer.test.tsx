@@ -48,6 +48,7 @@ const renderPill = async (options: { hasContent: boolean; newSessionDraftOpen: b
                 canEnhance={false}
                 isEnhancing={false}
                 onEnhance={() => {}}
+                onCancelEnhance={() => {}}
             />
         </I18nProvider>
         </ThemeSystemProvider>

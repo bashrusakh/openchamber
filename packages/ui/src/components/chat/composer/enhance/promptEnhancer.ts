@@ -12,6 +12,14 @@
  * session provider when one is known, and `onOverflow: 'error'` refuses to
  * truncate — a rewritten prompt with its tail silently clipped would read as
  * confident nonsense.
+ *
+ * Both awaits (the instructions fetch and the generate request) share one
+ * client-side deadline. The server caps its own provider work at 60s, but the
+ * transports — browser fetch, relay tunnel, desktop — give a lost response
+ * frame no rejection of their own, so without a deadline a lost frame pends
+ * the spinner forever; the deadline (90s, over the server cap with margin)
+ * turns that hang into a `timed-out` failure the UI can toast. A genuine
+ * caller cancellation (`aborted`) stays silent by convention.
  */
 
 import { z } from 'zod';
@@ -21,6 +29,12 @@ import { requestSmallModel } from '@/lib/smallModelRequest';
 /** Magic prompt holding the enhancer's system instructions. */
 const ENHANCE_INSTRUCTIONS_ID = 'composer.enhance.instructions';
 
+/**
+ * Client-side deadline for one enhance attempt, over the server's 60s
+ * provider cap with margin so the server's own error wins when it fires.
+ */
+export const ENHANCE_REQUEST_TIMEOUT_MS = 90_000;
+
 /** Why an enhance attempt failed. The UI layer maps each reason to its copy. */
 export type PromptEnhanceFailure =
   | 'unavailable'        // 404 — no small model resolved
@@ -28,6 +42,7 @@ export type PromptEnhanceFailure =
   | 'context-too-small'  // 413 — the draft exceeds the model's input budget
   | 'empty-result'       // the model answered with nothing usable
   | 'invalid-result'     // protected composer tokens were lost or invented
+  | 'timed-out'          // the deadline fired before any usable response
   | 'aborted';           // the caller cancelled
 
 export class PromptEnhanceError extends Error {
@@ -159,13 +174,42 @@ const describeFailure = async (response: Response): Promise<PromptEnhanceError> 
  *
  * The enhance request carries no conversation history, attachments, or extra
  * context: the draft is the only user content.
+ *
+ * `options.timeoutMs` overrides the deadline for tests; production callers
+ * use the exported `ENHANCE_REQUEST_TIMEOUT_MS` default.
  */
 export const enhancePrompt = async (
   draft: string,
   context: PromptEnhanceContext,
   signal: AbortSignal,
+  options: { timeoutMs?: number } = {},
 ): Promise<string> => {
-  const instructions = await renderMagicPrompt(ENHANCE_INSTRUCTIONS_ID);
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs ?? ENHANCE_REQUEST_TIMEOUT_MS)]);
+  const timeoutMs = options.timeoutMs ?? ENHANCE_REQUEST_TIMEOUT_MS;
+
+  // A cancelled deadline rejects with the abort that fired it. Whose abort is
+  // read from the caller's signal: if the caller cancelled, the enhance stays
+  // silently `aborted`; otherwise the deadline fired and the hang is surfaced
+  // as `timed-out` — the user must know the spinner ended in failure. The
+  // name check covers both surfaces: `AbortSignal.timeout` reasons carry
+  // `TimeoutError` in browsers, while engines without it (and some fetch
+  // polyfills) surface a plain `AbortError` instead. Any other rejection is
+  // the transport's own error and propagates unchanged.
+  const isDeadlineAbortName = (error: Error): boolean =>
+    error.name === 'TimeoutError' || error.name === 'AbortError';
+
+  let instructions: string;
+  try {
+    instructions = await renderMagicPrompt(ENHANCE_INSTRUCTIONS_ID, {}, { signal: deadline });
+  } catch (error) {
+    if (signal.aborted) {
+      throw new PromptEnhanceError('aborted', 'Prompt enhancement was cancelled.', { cause: error });
+    }
+    if (error instanceof Error && isDeadlineAbortName(error)) {
+      throw new PromptEnhanceError('timed-out', `Prompt enhancement did not finish within ${timeoutMs}ms.`, { cause: error });
+    }
+    throw error;
+  }
   if (!instructions.trim()) {
     // The default template is never empty; an override that lands here
     // produces nothing the request could use, so it stops before sending.
@@ -180,7 +224,7 @@ export const enhancePrompt = async (
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal,
+        signal: deadline,
         body: JSON.stringify(buildEnhanceRequestBody(draft, instructions, context)),
       },
       // 404 ("no small model available") and 413 (draft over the context
@@ -190,10 +234,11 @@ export const enhancePrompt = async (
       { silentStatuses: [404, 413] },
     );
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      // requestSmallModel already exempts aborts from its toast; rethrow as
-      // the typed error so the hook can treat the cancellation silently.
+    if (signal.aborted) {
       throw new PromptEnhanceError('aborted', 'Prompt enhancement was cancelled.', { cause: error });
+    }
+    if (error instanceof Error && isDeadlineAbortName(error)) {
+      throw new PromptEnhanceError('timed-out', `Prompt enhancement did not finish within ${timeoutMs}ms.`, { cause: error });
     }
     throw error;
   }

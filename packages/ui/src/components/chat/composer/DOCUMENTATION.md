@@ -347,9 +347,15 @@ The invariants that hold wherever the button is mounted:
   only when the draft is byte-identical to the snapshot the request started
   from and the draft identity has not moved.
 - A failure never touches the draft. Failures map to toasts: unavailable,
-  context-too-small, empty-result, and invalid-result get Enhance-specific
-  copy; provider-failed uses the request layer's generic Small Model toast;
-  aborts and stale responses stay silent.
+  context-too-small, empty-result, invalid-result, and timed-out get
+  Enhance-specific copy; provider-failed uses the request layer's generic
+  Small Model toast; aborts and stale responses stay silent.
+- One attempt has one deadline. Both awaits — the instructions fetch and the
+  generate request — share a 90s client deadline (over the server's 60s
+  provider cap), because the transports give a lost response frame no
+  rejection of their own; a fired deadline toasts `timed-out` instead of
+  spinning forever. While the request runs, the same button is the cancel
+  control, so the user is never trapped on the spinner.
 - The request refuses truncation: `onOverflow: 'error'` turns an
   over-budget draft into a 413 error instead of a silently clipped rewrite.
 - The guard rejects corruption, not creativity: a rewrite that loses a
@@ -357,8 +363,8 @@ The invariants that hold wherever the button is mounted:
   validation, and so does one that invents a token of any kind the source
   did not use.
 
-All logic lives in `enhance/`: `promptEnhancer.ts` (request, cleaning, typed
-`PromptEnhanceError`), `protectedTokens.ts` (the guard), and
+All logic lives in `enhance/`: `promptEnhancer.ts` (request, deadline,
+cleaning, typed `PromptEnhanceError`), `protectedTokens.ts` (the guard), and
 `usePromptEnhancer.ts` (the state machine); `ui/PromptEnhanceButton.tsx`
 renders it. `ChatInput.tsx` only decides whether an enhance may run (never in
 BTW mode, never on a slash-command draft), applies the result, and maps

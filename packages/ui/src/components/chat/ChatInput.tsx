@@ -3736,6 +3736,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         canEnhance={canEnhance}
                         isEnhancing={isEnhancing}
                         onEnhance={handleEnhance}
+                        onCancelEnhance={cancelEnhance}
                         onExpand={mobileShell.expand}
                         onPrimaryAction={handlePrimaryAction}
                         onQueueMessage={() => { void handleQueueMessage(); }}
@@ -3919,6 +3920,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         canEnhance={canEnhance}
                         isEnhancing={isEnhancing}
                         onEnhance={handleEnhance}
+                        onCancelEnhance={cancelEnhance}
                         onOpenSettings={onOpenSettings}
                         onPickLocalFiles={handlePickLocalFiles}
                         onOpenIssuePicker={openIssuePicker}

@@ -43,6 +43,7 @@ export interface MobilePillComposerProps {
     canEnhance: boolean;
     isEnhancing: boolean;
     onEnhance: () => void;
+    onCancelEnhance?: () => void;
     onExpand: () => void;
     onPrimaryAction: () => void;
     /** While a turn runs, the trailing action queues, as the expanded composer does. */
@@ -77,6 +78,7 @@ export function MobilePillComposer(props: MobilePillComposerProps) {
         canEnhance,
         isEnhancing,
         onEnhance,
+        onCancelEnhance,
         onExpand,
         onPrimaryAction,
         onQueueMessage,
@@ -131,6 +133,7 @@ export function MobilePillComposer(props: MobilePillComposerProps) {
                     canEnhance={canEnhance}
                     isEnhancing={isEnhancing}
                     onEnhance={onEnhance}
+                    onCancel={onCancelEnhance}
                 />
                 <button
                     type="button"

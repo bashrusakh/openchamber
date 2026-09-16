@@ -48,6 +48,7 @@ export const ENHANCE_FAILURE_TOAST_KEYS = {
     'context-too-small': 'chat.chatInput.toast.enhanceContextTooSmall',
     'empty-result': 'chat.chatInput.toast.enhanceEmptyResult',
     'invalid-result': 'chat.chatInput.toast.enhanceInvalidResult',
+    'timed-out': 'chat.chatInput.toast.enhanceTimedOut',
     // The reasons below surface exactly one toast elsewhere, or stay silent:
     // `provider-failed` is covered by the request layer's generic Small Model
     // notification; `aborted` and stale responses are silent by convention.

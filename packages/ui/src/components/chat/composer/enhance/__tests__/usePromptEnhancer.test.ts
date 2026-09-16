@@ -260,6 +260,19 @@ describe('usePromptEnhancer', () => {
     }
   });
 
+  test('a deadline failure surfaces as timed-out, not stale', async () => {
+    // The service maps a fired deadline to the typed reason; the hook must
+    // pass it through so ChatInput can toast it (unlike a silent abort).
+    script = [{ error: new MockPromptEnhanceError('timed-out', 'deadline') }];
+    const harness = renderHarness();
+    try {
+      const result = await harness.enhance('my draft');
+      expect(result).toEqual({ outcome: 'failed', reason: 'timed-out' });
+    } finally {
+      harness.unmount();
+    }
+  });
+
   test('a raw transport abort resolves silently as stale', async () => {
     // The mocked transport rejects with a plain Error named AbortError — the
     // shape a fetch cancellation surfaces when it bypasses the service layer.

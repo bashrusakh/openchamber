@@ -1,4 +1,4 @@
-import { runtimeFetch } from './runtime-fetch';
+import { runtimeFetch, type RuntimeFetchOptions } from './runtime-fetch';
 
 export type MagicPromptId =
   | 'git.commit.generate.visible'
@@ -1142,28 +1142,46 @@ const normalizeOverridesPayload = (payload: unknown): Record<string, string> => 
   return result;
 };
 
-export const fetchMagicPromptOverrides = async (): Promise<Record<string, string>> => {
+const requestMagicPromptOverrides = (signal?: AbortSignal): Promise<Record<string, string>> => {
+  const init: RuntimeFetchOptions = {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  };
+  if (signal) {
+    // A signaled request opts out of runtime-fetch's read coalescing —
+    // acceptable: one caller's deadline must never cancel the shared fetch
+    // for the others.
+    init.signal = signal;
+  }
+  return runtimeFetch(API_ENDPOINT, init).then(async (response) => {
+    if (!response.ok) {
+      throw new Error('Failed to load magic prompts');
+    }
+    const payload = await response.json().catch(() => ({}));
+    const normalized = normalizeOverridesPayload(payload);
+    cachedOverrides = normalized;
+    return normalized;
+  });
+};
+
+export const fetchMagicPromptOverrides = async (
+  options: { signal?: AbortSignal } = {},
+): Promise<Record<string, string>> => {
   if (cachedOverrides) {
     return cachedOverrides;
   }
 
+  // A signaled caller cannot join the shared in-flight request: that promise
+  // may be unsigned (started by a caller without a deadline), and attaching a
+  // deadline to a fetch that never sees the signal would never fire.
+  if (options.signal) {
+    return requestMagicPromptOverrides(options.signal);
+  }
+
   if (!inFlightOverridesRequest) {
-    inFlightOverridesRequest = runtimeFetch(API_ENDPOINT, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error('Failed to load magic prompts');
-        }
-        const payload = await response.json().catch(() => ({}));
-        const normalized = normalizeOverridesPayload(payload);
-        cachedOverrides = normalized;
-        return normalized;
-      })
-      .finally(() => {
-        inFlightOverridesRequest = null;
-      });
+    inFlightOverridesRequest = requestMagicPromptOverrides().finally(() => {
+      inFlightOverridesRequest = null;
+    });
   }
 
   return inFlightOverridesRequest;
@@ -1181,8 +1199,11 @@ export const getDefaultMagicPromptTemplate = (id: MagicPromptId): string => {
   return getMagicPromptDefinition(id).template;
 };
 
-const getEffectiveMagicPromptTemplate = async (id: MagicPromptId): Promise<string> => {
-  const overrides = await fetchMagicPromptOverrides().catch((): Record<string, string> => ({}));
+const getEffectiveMagicPromptTemplate = async (
+  id: MagicPromptId,
+  options: { signal?: AbortSignal } = {},
+): Promise<string> => {
+  const overrides = await fetchMagicPromptOverrides(options).catch((): Record<string, string> => ({}));
   const override = overrides[id];
   if (typeof override === 'string') {
     return override;
@@ -1190,8 +1211,12 @@ const getEffectiveMagicPromptTemplate = async (id: MagicPromptId): Promise<strin
   return getDefaultMagicPromptTemplate(id);
 };
 
-export const renderMagicPrompt = async (id: MagicPromptId, variables: Record<string, string> = {}): Promise<string> => {
-  const template = await getEffectiveMagicPromptTemplate(id);
+export const renderMagicPrompt = async (
+  id: MagicPromptId,
+  variables: Record<string, string> = {},
+  options: { signal?: AbortSignal } = {},
+): Promise<string> => {
+  const template = await getEffectiveMagicPromptTemplate(id, options);
   return replaceTemplateVariables(template, variables);
 };
 

@@ -57,6 +57,7 @@ export interface ComposerFooterProps {
     canEnhance: boolean;
     isEnhancing: boolean;
     onEnhance: () => void;
+    onCancelEnhance?: () => void;
 
     onOpenSettings?: () => void;
     onPickLocalFiles: () => void;
@@ -107,6 +108,7 @@ export function ComposerFooter(props: ComposerFooterProps) {
         canEnhance,
         isEnhancing,
         onEnhance,
+        onCancelEnhance,
         onOpenSettings,
         onPickLocalFiles,
         onOpenIssuePicker,
@@ -174,6 +176,7 @@ export function ComposerFooter(props: ComposerFooterProps) {
                                 canEnhance={canEnhance}
                                 isEnhancing={isEnhancing}
                                 onEnhance={onEnhance}
+                                onCancel={onCancelEnhance}
                             />
                             {!isBtw ? <SessionGoalButton
                                 sessionId={currentSessionId}
@@ -260,6 +263,7 @@ export function ComposerFooter(props: ComposerFooterProps) {
                             canEnhance={canEnhance}
                             isEnhancing={isEnhancing}
                             onEnhance={onEnhance}
+                            onCancel={onCancelEnhance}
                         />
                         {!isBtw ? <SessionGoalButton
                             sessionId={currentSessionId}

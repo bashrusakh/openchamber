@@ -8,6 +8,14 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
 const DEFAULT_INSTRUCTIONS = 'You rewrite drafts. DEFAULT-INSTRUCTIONS-V1.';
 let overrideText: string | null = null;
 const renderCalls: string[] = [];
+// Default: a settled response when one is scripted, else a hang. Timeout
+// tests leave nothing scripted and let the composed deadline fire.
+const defaultTransport = (init: RequestInit): Promise<Response> => {
+  if (scriptedError) return Promise.reject(scriptedError);
+  if (scriptedResponse) return Promise.resolve(scriptedResponse);
+  return new Promise<Response>(() => {});
+};
+let transport: (init: RequestInit) => Promise<Response> = defaultTransport;
 
 mock.module('@/lib/runtime-fetch', () => ({
   runtimeFetch: async () => {
@@ -27,14 +35,35 @@ mock.module('@/stores/useConfigStore', () => ({
 mock.module('@/lib/smallModelRequest', () => ({
   requestSmallModel: (init: RequestInit, options?: { silentStatuses?: number[] }) => {
     requestSmallModelCalls.push({ init, options });
-    if (scriptedError) return Promise.reject(scriptedError);
-    return Promise.resolve(scriptedResponse);
+    return transport(init);
   },
 }));
 
 let scriptedResponse: Response | null = null;
 let scriptedError: Error | null = null;
 const requestSmallModelCalls: Array<{ init: RequestInit; options?: { silentStatuses?: number[] } }> = [];
+
+/**
+ * A transport that only resolves when the composed deadline aborts it,
+ * rejecting with the reason's DOMException name (the surface real fetch
+ * gives when its signal fires). An already-aborted signal rejects
+ * immediately, like real fetch does.
+ */
+const abortAwareHang = (reason: 'TimeoutError' | 'AbortError'): ((init: RequestInit) => Promise<Response>) => {
+  const rejectWithReason = (reject: (error: Error) => void): void => {
+    reject(new DOMException(
+      reason === 'TimeoutError' ? 'The operation timed out.' : 'The operation was aborted.',
+      reason,
+    ));
+  };
+  return (init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    if (init.signal?.aborted) {
+      rejectWithReason(reject);
+      return;
+    }
+    init.signal?.addEventListener('abort', () => rejectWithReason(reject), { once: true });
+  });
+};
 
 interface JsonBody {
   text?: string;
@@ -60,6 +89,7 @@ import {
   buildEnhanceRequestBody,
   cleanEnhancedPromptText,
   enhancePrompt,
+  ENHANCE_REQUEST_TIMEOUT_MS,
   type EnhanceRequestBody,
   PromptEnhanceError,
   type PromptEnhanceFailure,
@@ -76,6 +106,7 @@ beforeEach(() => {
   overrideText = null;
   scriptedResponse = null;
   scriptedError = null;
+  transport = defaultTransport;
 });
 
 const expectFailure = async (promise: Promise<string>, reason: PromptEnhanceFailure): Promise<PromptEnhanceError> => {
@@ -235,6 +266,45 @@ describe('enhancePrompt — failure mapping', () => {
     controller.abort();
     scriptedError = new DOMException('The operation was aborted.', 'AbortError');
     await expectFailure(enhancePrompt('draft', context(), controller.signal), 'aborted');
+  });
+
+  test('a caller cancel during flight maps to aborted, not timed-out', async () => {
+    // The caller's controller cancels the composed deadline, so even though
+    // the rejection is an abort-shaped error it must stay silent `aborted`.
+    const controller = new AbortController();
+    transport = abortAwareHang('AbortError');
+    const promise = enhancePrompt('draft', context(), controller.signal, { timeoutMs: 90_000 });
+    controller.abort();
+    await expectFailure(promise, 'aborted');
+  });
+
+  test('a deadline that fires before any response maps to timed-out', async () => {
+    // A transport that never answers (a lost relay frame): the composed
+    // deadline rejects the fetch with the timeout reason, and the service
+    // maps it to the surfaced failure, not a silent abort.
+    transport = abortAwareHang('TimeoutError');
+    const error = await expectFailure(
+      enhancePrompt('draft', context(), new AbortController().signal, { timeoutMs: 30 }),
+      'timed-out',
+    );
+    expect(error.cause).toBeInstanceOf(Error);
+    // SAFETY: the transport under test rejects with a DOMException-shaped
+    // Error; the assertion above already confirmed the instance.
+    expect((error.cause as Error).name).toBe('TimeoutError');
+  });
+
+  test('a deadline firing as a plain AbortError also maps to timed-out', async () => {
+    // Engines without `AbortSignal.timeout` reasons surface a plain
+    // AbortError; that must still read as a deadline, not a cancellation.
+    transport = abortAwareHang('AbortError');
+    await expectFailure(
+      enhancePrompt('draft', context(), new AbortController().signal, { timeoutMs: 30 }),
+      'timed-out',
+    );
+  });
+
+  test('the exported deadline constant is the production value', () => {
+    expect(ENHANCE_REQUEST_TIMEOUT_MS).toBe(90_000);
   });
 
   test('a non-abort thrown error propagates unchanged', async () => {

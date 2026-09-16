@@ -11,11 +11,13 @@ const notifySmallModelUnavailable = (): void => {
 };
 
 /**
- * A cancelled request is the caller's decision, not an availability problem:
- * rethrow it without the "Small Model unavailable" toast.
+ * A cancelled or deadline-aborted request is the caller's decision, not an
+ * availability problem: rethrow it without the "Small Model unavailable"
+ * toast. `TimeoutError` is what `AbortSignal.timeout` deadlines surface in
+ * browsers; engines without it raise a plain `AbortError` instead.
  */
-const isAbortError = (error: Error): boolean => {
-  return error.name === 'AbortError';
+const isCallerAbort = (error: Error): boolean => {
+  return error.name === 'AbortError' || error.name === 'TimeoutError';
 };
 
 export async function requestSmallModel(
@@ -31,7 +33,7 @@ export async function requestSmallModel(
   } catch (error) {
     // Every rejection this fetch can raise is an Error (fetch aborts surface
     // as DOMException, an Error subclass); only cancellations skip the toast.
-    if (!(error instanceof Error) || !isAbortError(error)) {
+    if (!(error instanceof Error) || !isCallerAbort(error)) {
       notifySmallModelUnavailable();
     }
     throw error;
