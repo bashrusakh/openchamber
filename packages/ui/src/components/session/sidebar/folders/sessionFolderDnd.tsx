@@ -12,19 +12,13 @@ import {
 } from '@dnd-kit/core';
 import { Icon } from "@/components/icon/Icon";
 import { getSessionFolderIdentityKey } from '../sessions/sessionFolderIdentity';
+import { isArchivedFolderScope } from '@/lib/sessionFolderIdentity';
 
 export type SessionFolderDropTarget = {
   folderId: string;
   scopeKey: string;
   ownerKey: string;
 };
-
-const ARCHIVED_FOLDER_SCOPE_PREFIX = '__archived__:';
-
-const isArchivedSessionFolderScope = (scopeKey: string): boolean => (
-  scopeKey.startsWith(ARCHIVED_FOLDER_SCOPE_PREFIX)
-  && scopeKey.length > ARCHIVED_FOLDER_SCOPE_PREFIX.length
-);
 
 export const DraggableSessionRow: React.FC<{
   sessionId: string;
@@ -79,7 +73,7 @@ export const DroppableFolderWrapper: React.FC<{
 }> = ({ folderId, scopeKey, ownerKey, disabled = false, children }) => {
   const { setNodeRef, isOver } = useDroppable({
     id: `folder-drop:${getSessionFolderIdentityKey(scopeKey, folderId)}`,
-    disabled: disabled || isArchivedSessionFolderScope(scopeKey),
+    disabled: disabled || isArchivedFolderScope(scopeKey),
     data: { type: 'folder', folderId, scopeKey, ownerKey },
   });
   return <>{children(setNodeRef, isOver)}</>;
@@ -136,7 +130,7 @@ export const SessionFolderDndScope: React.FC<{
       || !overData.scopeKey
       || !overData.ownerKey
       || activeData.archivedBucket === true
-      || isArchivedSessionFolderScope(overData.scopeKey)
+      || isArchivedFolderScope(overData.scopeKey)
       || activeData.ownerKey !== overData.ownerKey
     ) return;
     onSessionDroppedOnFolder(activeData.sessionId, {

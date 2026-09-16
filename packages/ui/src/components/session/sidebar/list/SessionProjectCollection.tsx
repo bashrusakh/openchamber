@@ -37,6 +37,7 @@ import { SessionRowOrderProvider } from '../sessions/sessionRowOrder';
 import { CHAT_DRAFT_PROJECT_ID, getChatsRootForHome, getChatsRootFromDirectory } from '@/lib/chatDirectories';
 import { getProjectFolderScopesFromTopology, getSessionFolderOwnerKey, getSessionFolderScopes } from '../sessions/sessionFolderIdentity';
 import { isCapacitorApp } from '@/lib/platform';
+import { isArchivedFolderScope } from '@/lib/sessionFolderIdentity';
 import type { ProjectSection } from '../projects/sessionProjectRender';
 import {
   buildSessionSearchRowModel,
@@ -58,14 +59,12 @@ const isRootSession = (session: Session): boolean => {
   return !(session as Session & { parentID?: string | null }).parentID;
 };
 
-const ARCHIVED_FOLDER_SCOPE_PREFIX = '__archived__:';
-
 const getActiveFolderScopeKeys = (
   scopes: readonly { scopeKey: string }[],
 ): readonly string[] => Object.freeze([...new Set(
   scopes
     .map((scope) => scope.scopeKey)
-    .filter((scopeKey) => scopeKey.length > 0 && !scopeKey.startsWith(ARCHIVED_FOLDER_SCOPE_PREFIX)),
+    .filter((scopeKey) => scopeKey.length > 0 && !isArchivedFolderScope(scopeKey)),
 )]);
 
 const buildActiveFolderScopesByOwner = ({

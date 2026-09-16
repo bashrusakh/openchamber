@@ -4,7 +4,7 @@ import { getDeferredSafeStorage, getSafeStorage } from './utils/safeStorage';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { getRuntimeKey } from '@/lib/runtime-switch';
-import { getSessionFolderIdentityKey } from '@/lib/sessionFolderIdentity';
+import { getSessionFolderIdentityKey, isArchivedFolderScope } from '@/lib/sessionFolderIdentity';
 
 // --- Types ---
 
@@ -59,7 +59,6 @@ const COLLAPSED_STORAGE_KEY = 'oc.sessions.folderCollapse';
 const STORAGE_INDEX_KEY = 'oc.sessions.folders.v2.index';
 const SESSION_FOLDERS_API_PATH = '/api/session-folders';
 const DISK_WRITE_DEBOUNCE_MS = 250;
-const ARCHIVED_FOLDER_SCOPE_PREFIX = '__archived__:';
 
 const safeStorage = getDeferredSafeStorage();
 const immediateSafeStorage = getSafeStorage();
@@ -352,11 +351,6 @@ const createFolderId = (): string => {
   }
   return `folder_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 };
-
-const isArchivedFolderScope = (scopeKey: string): boolean => (
-  scopeKey.startsWith(ARCHIVED_FOLDER_SCOPE_PREFIX)
-  && scopeKey.length > ARCHIVED_FOLDER_SCOPE_PREFIX.length
-);
 
 type NormalizedArchivedFolderAssignment = {
   name: string;

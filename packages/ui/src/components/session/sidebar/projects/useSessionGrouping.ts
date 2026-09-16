@@ -5,10 +5,10 @@ import type { WorktreeMetadata } from '@/types/worktree';
 import type { SessionGroup, SessionNode, SessionNodeSearchResult } from '../types';
 import {
   dedupeSessionsById,
-  getArchivedScopeKey,
   normalizeForBranchComparison,
   normalizePath,
 } from '../utils';
+import { getArchivedScopeKey } from '@/lib/sessionFolderIdentity';
 import { getSessionLifecycleOrderValue } from '@/sync/session-ordering';
 import { formatDirectoryName, formatPathForDisplay } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';

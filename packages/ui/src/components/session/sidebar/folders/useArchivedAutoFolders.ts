@@ -1,8 +1,6 @@
 import React from 'react';
-import {
-  getArchivedScopeKey,
-  resolveArchivedFolderName,
-} from '../utils';
+import { resolveArchivedFolderName } from '../utils';
+import { getArchivedScopeKey } from '@/lib/sessionFolderIdentity';
 import type { SessionOwnershipIndex } from '../sessions/sessionOwnership';
 import { useSessionFoldersStore, type ArchivedFolderAssignment } from '@/stores/useSessionFoldersStore';
 
