@@ -3,7 +3,6 @@ import { cn } from '@/lib/utils';
 import type { SessionNode } from '../types';
 import { useI18n } from '@/lib/i18n';
 import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
-import { Icon } from "@/components/icon/Icon";
 import {
   collectSubtreeContainingId,
   computeNodeStructureKey,
@@ -14,6 +13,7 @@ import { getSessionFolderOwnerKey, getSessionSelectionScopeKey } from '../sessio
 import { SessionTreeItem, type SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import { useRegisterSessionRowOrder } from '../sessions/sessionRowOrder';
 import { buildActivityRowOrderEntries, buildActivitySessionRowKeys } from '../sessions/sessionRowOrderUtils';
+import { SidebarActivityHeaderPresentation } from '../projects/groupHeaderPresentation';
 
 export type ActivityItem = {
   node: SessionNode;
@@ -295,37 +295,18 @@ export function SidebarActivitySections(props: Props): React.ReactNode {
           <div key={section.key} className="relative">
             {rowOrderRegistration}
             <div data-sidebar-activity-start={section.key} className="pointer-events-none absolute inset-x-0 top-0 h-px" aria-hidden="true" />
-            <div className={cn(
-              'relative group/chats',
-              '-ml-2.5 -mr-2',
-              !isCollapsed && 'mb-1',
-              stickyZoneHeaders && 'sticky top-0 z-20 bg-sidebar',
-            )} data-sidebar-sticky-header={stickyZoneHeaders ? 'true' : undefined}>
-              <button
-                type="button"
-                onClick={() => toggleSection(section.key)}
-                className={cn('group flex w-full items-center gap-1.5 py-1 pl-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50', section.key === 'chats' ? 'pr-10' : 'pr-3.5')}
-                aria-expanded={!isCollapsed}
-              >
-                <span className="inline-flex h-3.5 w-3.5 items-center justify-center">
-                  <Icon name={section.key === 'chats' ? 'chat-4' : 'history'} className={cn('h-3.5 w-3.5 text-muted-foreground/80', 'group-hover:hidden')} />
-                  <span className="hidden h-3.5 w-3.5 items-center justify-center text-muted-foreground group-hover:inline-flex">
-                    {isCollapsed ? <Icon name="arrow-right-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-down-s" className="h-3.5 w-3.5" />}
-                  </span>
-                </span>
-                <span className="typography-ui-label font-semibold lowercase text-foreground">{section.title}</span>
-              </button>
-              {section.key === 'chats' && props.onNewChat ? (
-                <button
-                  type="button"
-                  onClick={(event) => { event.stopPropagation(); props.onNewChat?.(); }}
-                  className={cn('absolute right-0.5 top-1/2 z-10 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50', props.alwaysShowActions ? 'opacity-100' : 'opacity-0 pointer-events-none group-hover/chats:opacity-100 group-hover/chats:pointer-events-auto group-focus-within/chats:opacity-100 group-focus-within/chats:pointer-events-auto')}
-                  aria-label={t('sessions.sidebar.header.actions.newSession')}
-                >
-                  <Icon name="add" className="h-4 w-4" />
-                </button>
-              ) : null}
-            </div>
+            <SidebarActivityHeaderPresentation
+              title={section.title}
+              icon={section.key === 'chats' ? 'chat-4' : 'history'}
+              isCollapsed={isCollapsed}
+              onToggle={() => toggleSection(section.key)}
+              showNewChat={section.key === 'chats' && Boolean(props.onNewChat)}
+              onNewChat={props.onNewChat}
+              alwaysShowActions={props.alwaysShowActions}
+              isSticky={stickyZoneHeaders}
+              className={cn('-ml-2.5 -mr-2', !isCollapsed && 'mb-1')}
+              isChats={section.key === 'chats'}
+            />
             {!isCollapsed ? (
               <div className={cn('space-y-0.5')}>
                 {usesCustomRenderer ? props.renderChatsSection?.(section.items) : visibleItems.map(renderItem)}

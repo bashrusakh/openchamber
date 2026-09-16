@@ -659,6 +659,66 @@ describe('SessionSearchRows public behavior', () => {
       await dom.restore();
     }
   });
+
+  test('keeps the search group header toggle affordance visible when actions are always shown', async () => {
+    const dom = installRealTestDom();
+    prepareSearchViewport(dom.container);
+    const root = createRoot(dom.container);
+    const group = {
+      id: 'worktree-group',
+      label: 'Worktree A',
+      branch: 'feature-a',
+      description: null,
+      isMain: false,
+      worktree: null,
+      directory: '/repo/project-worktree',
+      sessions: [],
+    };
+    const model: SessionSearchRowModel = {
+      rows: [{
+        kind: 'group-header',
+        key: 'project:project:worktree-group:header',
+        group,
+        groupKey: 'project:worktree-group',
+        projectId: 'project',
+        hideGroupLabel: false,
+        isCollapsed: false,
+        allGroupSessions: [],
+      }],
+      entries: [],
+      projectSections: [],
+      hasResults: true,
+      hasRecentRows: false,
+      folderRows: [],
+      searchMatchCount: 0,
+      activeFolderScopesByOwner: new Map(),
+    };
+
+    try {
+      await act(async () => root.render(
+        <I18nProvider><SessionSearchRows {...makeProps(model, { current: dom.container })} /></I18nProvider>,
+      ));
+
+      const hoverStaticIcon = dom.container.querySelector<HTMLElement>('[data-gh-icon-static="git-branch"]');
+      const hoverArrowSwap = dom.container.querySelector<HTMLElement>('span[data-gh-icon-swap="git-branch"]');
+      expect(hoverStaticIcon?.className).toContain('group-hover/gh:hidden');
+      expect(hoverArrowSwap?.className).toContain('group-hover/gh:inline-flex');
+
+      await act(async () => root.render(
+        <I18nProvider><SessionSearchRows {...makeProps(model, { current: dom.container })} alwaysShowActions /></I18nProvider>,
+      ));
+
+      const alwaysStaticIcon = dom.container.querySelector<HTMLElement>('[data-gh-icon-static="git-branch"]');
+      const alwaysArrowSwap = dom.container.querySelector<HTMLElement>('span[data-gh-icon-swap="git-branch"]');
+      expect(alwaysStaticIcon?.className).toContain('hidden');
+      expect(alwaysStaticIcon?.className).not.toContain('group-hover/gh:hidden');
+      expect(alwaysArrowSwap?.className).toContain('inline-flex');
+      expect(alwaysArrowSwap?.className).not.toContain('group-hover/gh:inline-flex');
+    } finally {
+      await act(async () => root.unmount());
+      await dom.restore();
+    }
+  });
 });
 
 const RegistryProbe: React.FC<{ capture: RegistryCapture }> = ({ capture }) => {

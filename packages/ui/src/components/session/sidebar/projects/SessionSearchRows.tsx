@@ -1,7 +1,5 @@
 import React from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Icon } from '@/components/icon/Icon';
-import { DirectoryActionIndicator } from '../sessions/DirectoryActionIndicator';
 import { SessionTreeItem, type SessionTreeItemProps } from '../sessions/SessionTreeItem';
 import { SessionFolderItem } from '../../SessionFolderItem';
 import { DroppableFolderWrapper, SessionFolderDndScope, type SessionFolderDropTarget } from '../folders/sessionFolderDnd';
@@ -9,10 +7,11 @@ import { FolderDeleteConfirmDialog, type DeleteFolderConfirmState } from '../she
 import { useSessionFoldersStore } from '@/stores/useSessionFoldersStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { sessionEvents } from '@/lib/sessionEvents';
-import { cn, formatDirectoryName, formatPathForDisplay } from '@/lib/utils';
+import { formatDirectoryName, formatPathForDisplay } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
-import { getGitHubPrStatusKey, usePrVisualSummary } from '@/stores/useGitHubPrStatusStore';
+import { isArchivedFolderScope } from '@/lib/sessionFolderIdentity';
 import { SortableProjectItem } from './sortableItems';
+import { SidebarActivityHeaderPresentation, SidebarGroupHeaderPresentation } from './groupHeaderPresentation';
 import type {
   SessionSearchActivityHeaderRow,
   SessionSearchEmptyRow,
@@ -24,7 +23,7 @@ import type {
   SessionSearchSessionRow,
 } from './sessionSearchRowModel';
 import type { SessionGroup, SessionNode } from '../types';
-import { formatProjectLabel, isBranchDifferentFromLabel, normalizePath, renderHighlightedText } from '../utils';
+import { formatProjectLabel } from '../utils';
 import {
   collectSubtreeContainingId,
   computeNodeStructureKey,
@@ -34,17 +33,11 @@ import type { SessionNodeRenderExtras } from '../sessions/sessionNodeItemUtils';
 import { useRegisterSessionRowOrder } from '../sessions/sessionRowOrder';
 
 const ROW_ESTIMATE_PX = 32;
-const ARCHIVED_FOLDER_SCOPE_PREFIX = '__archived__:';
 const EMPTY_SESSION_RENDER_EXTRAS: SessionNodeRenderExtras = {
   subtreeContainsEditing: new Set<string>(),
   menuOpenSessionId: null,
   nodeStructureKey: '',
 };
-
-const isArchivedFolderScope = (scopeKey: string): boolean => (
-  scopeKey.startsWith(ARCHIVED_FOLDER_SCOPE_PREFIX)
-  && scopeKey.length > ARCHIVED_FOLDER_SCOPE_PREFIX.length
-);
 
 const findSearchScrollElement = (content: HTMLElement | null): HTMLElement | null => {
   let ancestor = content?.parentElement ?? null;
@@ -174,48 +167,20 @@ const SearchActivityHeader: React.FC<{
   const { t } = useI18n();
   const isChats = row.activityKey === 'chats';
   return (
-    <div
-      className={cn(
-        'group/chats relative -mx-2.5',
-        stickyZoneHeaders && 'sticky top-0 z-20 bg-sidebar',
-      )}
-      data-sidebar-sticky-header={stickyZoneHeaders ? 'true' : undefined}
-    >
-      <button
-        type="button"
-        onClick={onToggle}
-        className={cn(
-          'group flex w-full items-center gap-1.5 py-1 pl-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
-          isChats ? 'pr-10' : 'pr-3.5',
-        )}
-        aria-expanded={!collapsed}
-        aria-label={isChats ? t('sessions.sidebar.activity.chatsTitle') : t('sessions.sidebar.activity.recentTitle')}
-        data-sidebar-activity-start={row.activityKey}
-      >
-        <span className="inline-flex h-3.5 w-3.5 items-center justify-center">
-          <Icon name={isChats ? 'chat-4' : 'history'} className={cn('h-3.5 w-3.5 text-muted-foreground/80', 'group-hover:hidden')} />
-          <span className="hidden h-3.5 w-3.5 items-center justify-center text-muted-foreground group-hover:inline-flex">
-            {collapsed ? <Icon name="arrow-right-s" className="h-3.5 w-3.5" /> : <Icon name="arrow-down-s" className="h-3.5 w-3.5" />}
-          </span>
-        </span>
-        <span className="typography-ui-label font-semibold lowercase text-foreground">
-          {isChats ? t('sessions.sidebar.activity.chatsTitle') : t('sessions.sidebar.activity.recentTitle')}
-        </span>
-      </button>
-      {row.showNewChat ? (
-        <button
-          type="button"
-          onClick={(event) => { event.stopPropagation(); onNewChat(); }}
-          className={cn(
-            'absolute right-0.5 top-1/2 z-10 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
-            alwaysShowActions ? 'opacity-100' : 'opacity-0 pointer-events-none group-hover/chats:opacity-100 group-hover/chats:pointer-events-auto group-focus-within/chats:opacity-100 group-focus-within/chats:pointer-events-auto',
-          )}
-          aria-label={t('sessions.sidebar.header.actions.newSession')}
-        >
-          <Icon name="add" className="h-4 w-4" />
-        </button>
-      ) : null}
-    </div>
+    <SidebarActivityHeaderPresentation
+      title={isChats ? t('sessions.sidebar.activity.chatsTitle') : t('sessions.sidebar.activity.recentTitle')}
+      icon={isChats ? 'chat-4' : 'history'}
+      isCollapsed={collapsed}
+      onToggle={onToggle}
+      showNewChat={row.showNewChat}
+      onNewChat={onNewChat}
+      alwaysShowActions={alwaysShowActions}
+      isSticky={stickyZoneHeaders}
+      className="-mx-2.5"
+      activityStartKey={row.activityKey}
+      isChats={isChats}
+      toggleAriaLabel={t(isChats ? 'sessions.sidebar.activity.chatsTitle' : 'sessions.sidebar.activity.recentTitle')}
+    />
   );
 };
 
@@ -273,147 +238,24 @@ const SearchProjectHeader: React.FC<{
 const SearchGroupHeader: React.FC<{
   row: SessionSearchGroupHeaderRow;
   props: SessionSearchRowsProps;
-}> = ({ row, props }) => {
-  const { t } = useI18n();
-  const { group } = row;
-  const groupPrKey = React.useMemo(() => {
-    if (group.isMain || group.isArchivedBucket || row.hideGroupLabel) return null;
-    const directory = normalizePath(group.directory ?? null);
-    const branch = group.branch?.trim();
-    return directory && branch ? getGitHubPrStatusKey(directory, branch) : null;
-  }, [group.branch, group.directory, group.isArchivedBucket, group.isMain, row.hideGroupLabel]);
-  const groupPrSummary = usePrVisualSummary(groupPrKey);
-  const groupPrColor = groupPrSummary ? `var(--pr-${groupPrSummary.visualState})` : undefined;
-  const worktreeMissingIndicator = group.worktree?.worktreeStatus === 'missing' ? (
-    <span
-      className="inline-flex flex-shrink-0 items-center text-status-warning"
-      title={t('sessions.sidebar.group.worktreeMissing')}
-      aria-label={t('sessions.sidebar.group.worktreeMissing')}
-    >
-      <Icon name="alert" className="h-3 w-3" />
-    </span>
-  ) : null;
-  const hasWorktreeDeleteAction = Boolean(!group.isMain && group.worktree);
-  const groupHeaderRightPadding = props.alwaysShowActions
-    ? (hasWorktreeDeleteAction ? 'pr-14' : 'pr-7')
-    : (hasWorktreeDeleteAction
-        ? 'pr-2 group-hover/gh:pr-14 group-focus-within/gh:pr-14'
-        : 'pr-2 group-hover/gh:pr-7 group-focus-within/gh:pr-7');
-  const actionVisibilityClassName = props.alwaysShowActions
-    ? 'opacity-100'
-    : 'opacity-0 pointer-events-none group-hover/gh:opacity-100 group-hover/gh:pointer-events-auto group-focus-within/gh:opacity-100 group-focus-within/gh:pointer-events-auto';
-  const showBranchSubtitle = !group.isMain && Boolean(group.branch);
-  const statusLine = group.branch && isBranchDifferentFromLabel(group.branch, group.label)
-    ? { label: group.branch }
-    : null;
-  return (
-    <div className="oc-group">
-      <div
-        className="group/gh relative flex min-w-0 cursor-pointer items-start justify-between gap-1 rounded-md py-1"
-        onClick={() => props.sessionProps.onToggleCollapsedGroup(row.groupKey)}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            props.sessionProps.onToggleCollapsedGroup(row.groupKey);
-          }
-        }}
-        aria-label={t('sessions.sidebar.group.collapseAria', { label: group.label })}
-        aria-expanded={!row.isCollapsed}
-      >
-        <div className={cn('min-w-0 flex flex-1 items-start gap-1 overflow-hidden pl-1.5 transition-[padding]', groupHeaderRightPadding)}>
-          <div className="min-w-0 flex flex-1 flex-col justify-center gap-0.5 overflow-hidden">
-            <p className="typography-ui-label truncate font-normal text-foreground/92">
-              {group.isArchivedBucket ? (
-                <span className="inline-flex min-w-0 max-w-full items-center gap-1">
-                  <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-                    <Icon name="archive" className="h-3.5 w-3.5 shrink-0 text-muted-foreground group-hover/gh:hidden" />
-                    <span className="hidden h-3.5 w-3.5 items-center justify-center text-muted-foreground group-hover/gh:inline-flex">
-                      <Icon name={row.isCollapsed ? 'arrow-right-s' : 'arrow-down-s'} className="h-3.5 w-3.5" />
-                    </span>
-                  </span>
-                  <span className="min-w-0 flex-1 truncate">{renderHighlightedText(group.label, props.sessionProps.normalizedSessionSearchQuery)}</span>
-                  {worktreeMissingIndicator}
-                </span>
-              ) : (
-                <span className="flex w-full min-w-0 items-center gap-1.5">
-                  <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-                    <Icon
-                      name="git-branch"
-                      className={cn('h-3.5 w-3.5 shrink-0 group-hover/gh:hidden', !groupPrColor && 'text-muted-foreground')}
-                      style={groupPrColor ? { color: groupPrColor } : undefined}
-                    />
-                    <span className="hidden h-3.5 w-3.5 items-center justify-center text-muted-foreground group-hover/gh:inline-flex">
-                      <Icon name={row.isCollapsed ? 'arrow-right-s' : 'arrow-down-s'} className="h-3.5 w-3.5" />
-                    </span>
-                  </span>
-                  <span className="min-w-0 truncate font-semibold text-muted-foreground">
-                    {renderHighlightedText(group.label, props.sessionProps.normalizedSessionSearchQuery)}
-                  </span>
-                  {worktreeMissingIndicator}
-                  {groupPrSummary ? (
-                    <span className="ml-auto flex-shrink-0 text-[0.72rem] font-medium leading-none" style={groupPrColor ? { color: groupPrColor } : undefined}>
-                      #{groupPrSummary.number}
-                    </span>
-                  ) : null}
-                </span>
-              )}
-            </p>
-            {showBranchSubtitle && statusLine ? (
-              <span className="inline-flex min-w-0 items-center gap-1.5 leading-tight">
-                <Icon name={group.isArchivedBucket ? 'archive' : 'git-branch'} className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
-                <span className="min-w-0 truncate text-[11px] font-medium text-muted-foreground/80">{statusLine.label}</span>
-              </span>
-            ) : null}
-          </div>
-          {!group.isArchivedBucket && group.directory ? <DirectoryActionIndicator directory={group.directory} className="self-center" /> : null}
-        </div>
-        {group.isArchivedBucket && row.allGroupSessions.length > 0 ? (
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              sessionEvents.requestDelete({ sessions: [...row.allGroupSessions], mode: 'session' });
-            }}
-             className={cn('absolute right-0.5 top-1/2 z-10 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-opacity hover:bg-interactive-hover/50 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50', actionVisibilityClassName)}
-            aria-label={t('sessions.sidebar.group.actions.deleteArchivedInGroupAria', { label: group.label })}
-          >
-            <Icon name="delete-bin" className="h-4 w-4" />
-          </button>
-        ) : null}
-        {group.directory && !group.isMain && group.worktree ? (
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              sessionEvents.requestDelete({ sessions: [...row.allGroupSessions], mode: 'worktree', worktree: group.worktree });
-            }}
-             className={cn('absolute right-7 top-1/2 z-10 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-opacity hover:bg-interactive-hover/50 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50', actionVisibilityClassName)}
-            aria-label={t('sessions.sidebar.group.actions.deleteGroupAria', { label: group.label })}
-          >
-            <Icon name="delete-bin" className="h-4 w-4" />
-          </button>
-        ) : null}
-        {group.directory ? (
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              if (row.projectId && row.projectId !== props.activeProjectId) props.setActiveProjectIdOnly(row.projectId);
-              if (props.mobileVariant) props.setSessionSwitcherOpen(false);
-              props.openNewSessionDraft({ selectedProjectId: row.projectId, directoryOverride: group.directory });
-            }}
-             className={cn('absolute right-0.5 top-1/2 z-10 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-opacity hover:bg-interactive-hover/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50', actionVisibilityClassName)}
-            aria-label={t('sessions.sidebar.group.actions.newDraftInGroupAria', { label: group.label })}
-          >
-            <Icon name="add" className="h-4 w-4" />
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-};
+}> = ({ row, props }) => (
+  <SidebarGroupHeaderPresentation
+    group={row.group}
+    labelQuery={props.sessionProps.normalizedSessionSearchQuery}
+    isCollapsed={row.isCollapsed}
+    onToggle={() => props.sessionProps.onToggleCollapsedGroup(row.groupKey)}
+    alwaysShowActions={props.alwaysShowActions}
+    collapsedActivityNodes={row.group.sessions}
+    notifyOnSubtasks={props.sessionProps.notifyOnSubtasks}
+    allGroupSessions={row.allGroupSessions}
+    projectId={row.projectId}
+    activeProjectId={props.activeProjectId}
+    mobileVariant={props.mobileVariant}
+    setActiveProjectIdOnly={props.setActiveProjectIdOnly}
+    setSessionSwitcherOpen={props.setSessionSwitcherOpen}
+    openNewSessionDraft={props.openNewSessionDraft}
+  />
+);
 
 const SearchFolderRow: React.FC<{
   row: SessionSearchFolderRow;
