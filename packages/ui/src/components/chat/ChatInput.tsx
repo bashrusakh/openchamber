@@ -1274,7 +1274,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             }
         };
         // A void-returning callback keeps the prop identity stable for the
-        // memoized footer and mobile pill (same shape as handleAbort); the
+        // memoized PromptEnhanceButton (same shape as handleAbort); the
         // promise is swallowed here.
         void runEnhance();
     }, [

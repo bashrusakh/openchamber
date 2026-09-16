@@ -169,6 +169,50 @@ const describeFailure = async (response: Response): Promise<PromptEnhanceError> 
 };
 
 /**
+ * The caller's cancellation signal composed with the request deadline — the
+ * first source to abort wins, with its reason. `AbortSignal.any` does this
+ * natively but is missing on Safari/WKWebView before 17.4 (engines that do
+ * have `AbortSignal.timeout`), where calling it would throw a TypeError
+ * before the request even starts. There the composition is built by hand
+ * from one controller with the same semantics, and `detach` removes the
+ * listeners once the request has settled so neither signal keeps a
+ * dangling listener.
+ */
+interface ComposedDeadline {
+  signal: AbortSignal;
+  /** Removes the fallback listeners; a no-op on the native path. */
+  detach: () => void;
+}
+
+const composeDeadline = (callerSignal: AbortSignal, timeoutMs: number): ComposedDeadline => {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if ('any' in AbortSignal) {
+    return {
+      signal: AbortSignal.any([callerSignal, timeoutSignal]),
+      detach: () => undefined,
+    };
+  }
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(callerSignal.reason);
+  const abortFromTimeout = () => controller.abort(timeoutSignal.reason);
+  if (callerSignal.aborted) {
+    abortFromCaller();
+  } else if (timeoutSignal.aborted) {
+    abortFromTimeout();
+  } else {
+    callerSignal.addEventListener('abort', abortFromCaller, { once: true });
+    timeoutSignal.addEventListener('abort', abortFromTimeout, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    detach: () => {
+      callerSignal.removeEventListener('abort', abortFromCaller);
+      timeoutSignal.removeEventListener('abort', abortFromTimeout);
+    },
+  };
+};
+
+/**
  * Rewrites `draft` with the Small Model. Throws `PromptEnhanceError` with a
  * `reason` the caller can map to UI copy; `aborted` is silent by convention.
  *
@@ -184,8 +228,8 @@ export const enhancePrompt = async (
   signal: AbortSignal,
   options: { timeoutMs?: number } = {},
 ): Promise<string> => {
-  const deadline = AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs ?? ENHANCE_REQUEST_TIMEOUT_MS)]);
   const timeoutMs = options.timeoutMs ?? ENHANCE_REQUEST_TIMEOUT_MS;
+  const { signal: deadline, detach: detachDeadline } = composeDeadline(signal, timeoutMs);
 
   // A cancelled deadline rejects with the abort that fired it. Whose abort is
   // read from the caller's signal: if the caller cancelled, the enhance stays
@@ -198,59 +242,63 @@ export const enhancePrompt = async (
   const isDeadlineAbortName = (error: Error): boolean =>
     error.name === 'TimeoutError' || error.name === 'AbortError';
 
-  let instructions: string;
   try {
-    instructions = await renderMagicPrompt(ENHANCE_INSTRUCTIONS_ID, {}, { signal: deadline });
-  } catch (error) {
-    if (signal.aborted) {
-      throw new PromptEnhanceError('aborted', 'Prompt enhancement was cancelled.', { cause: error });
+    let instructions: string;
+    try {
+      instructions = await renderMagicPrompt(ENHANCE_INSTRUCTIONS_ID, {}, { signal: deadline });
+    } catch (error) {
+      if (signal.aborted) {
+        throw new PromptEnhanceError('aborted', 'Prompt enhancement was cancelled.', { cause: error });
+      }
+      if (error instanceof Error && isDeadlineAbortName(error)) {
+        throw new PromptEnhanceError('timed-out', `Prompt enhancement did not finish within ${timeoutMs}ms.`, { cause: error });
+      }
+      throw error;
     }
-    if (error instanceof Error && isDeadlineAbortName(error)) {
-      throw new PromptEnhanceError('timed-out', `Prompt enhancement did not finish within ${timeoutMs}ms.`, { cause: error });
+    if (!instructions.trim()) {
+      // The default template is never empty; an override that lands here
+      // produces nothing the request could use, so it stops before sending.
+      // `empty-result` carries the Enhance-specific toast copy for a result
+      // that has nothing usable in it.
+      throw new PromptEnhanceError('empty-result', 'The prompt enhancer instructions are empty.');
     }
-    throw error;
-  }
-  if (!instructions.trim()) {
-    // The default template is never empty; an override that lands here
-    // produces nothing the request could use, so it stops before sending.
-    // `empty-result` carries the Enhance-specific toast copy for a result
-    // that has nothing usable in it.
-    throw new PromptEnhanceError('empty-result', 'The prompt enhancer instructions are empty.');
-  }
 
-  let response: Response;
-  try {
-    response = await requestSmallModel(
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: deadline,
-        body: JSON.stringify(buildEnhanceRequestBody(draft, instructions, context)),
-      },
-      // 404 ("no small model available") and 413 (draft over the context
-      // budget) are Enhance-specific failures whose copy comes from the
-      // thrown error, so the shared toast is silenced for both statuses —
-      // the toast dedupes by id regardless.
-      { silentStatuses: [404, 413] },
-    );
-  } catch (error) {
-    if (signal.aborted) {
-      throw new PromptEnhanceError('aborted', 'Prompt enhancement was cancelled.', { cause: error });
+    let response: Response;
+    try {
+      response = await requestSmallModel(
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: deadline,
+          body: JSON.stringify(buildEnhanceRequestBody(draft, instructions, context)),
+        },
+        // 404 ("no small model available") and 413 (draft over the context
+        // budget) are Enhance-specific failures whose copy comes from the
+        // thrown error, so the shared toast is silenced for both statuses —
+        // the toast dedupes by id regardless.
+        { silentStatuses: [404, 413] },
+      );
+    } catch (error) {
+      if (signal.aborted) {
+        throw new PromptEnhanceError('aborted', 'Prompt enhancement was cancelled.', { cause: error });
+      }
+      if (error instanceof Error && isDeadlineAbortName(error)) {
+        throw new PromptEnhanceError('timed-out', `Prompt enhancement did not finish within ${timeoutMs}ms.`, { cause: error });
+      }
+      throw error;
     }
-    if (error instanceof Error && isDeadlineAbortName(error)) {
-      throw new PromptEnhanceError('timed-out', `Prompt enhancement did not finish within ${timeoutMs}ms.`, { cause: error });
+
+    if (!response.ok) {
+      throw await describeFailure(response);
     }
-    throw error;
-  }
 
-  if (!response.ok) {
-    throw await describeFailure(response);
+    const payload = await decodeResponsePayload(response);
+    const cleaned = cleanEnhancedPromptText(payload?.text ?? '');
+    if (!cleaned) {
+      throw new PromptEnhanceError('empty-result', 'The small model returned an empty prompt.');
+    }
+    return cleaned;
+  } finally {
+    detachDeadline();
   }
-
-  const payload = await decodeResponsePayload(response);
-  const cleaned = cleanEnhancedPromptText(payload?.text ?? '');
-  if (!cleaned) {
-    throw new PromptEnhanceError('empty-result', 'The small model returned an empty prompt.');
-  }
-  return cleaned;
 };

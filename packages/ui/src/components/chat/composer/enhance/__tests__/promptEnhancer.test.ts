@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 
 // The enhance path reaches the network through two seams, both replaced here:
 // the small-model request layer (so responses are scripted per test) and the
@@ -310,6 +310,48 @@ describe('enhancePrompt — failure mapping', () => {
   test('a non-abort thrown error propagates unchanged', async () => {
     scriptedError = new Error('socket hangup');
     await expect(enhancePrompt('draft', context(), new AbortController().signal)).rejects.toThrow('socket hangup');
+  });
+});
+
+describe('enhancePrompt — without AbortSignal.any (WKWebView < 17.4)', () => {
+  // WKWebView gained `AbortSignal.any` in 17.4; engines below it (iOS
+  // 16.4–17.3) have `AbortSignal.timeout` but throw a TypeError on `.any`.
+  // Every test here hides the static so the deadline composition must fall
+  // back to the manual controller path, and restores it afterwards.
+  const nativeAny = AbortSignal.any;
+
+  beforeEach(() => {
+    // SAFETY: deleting the host constructor's static emulates WKWebView
+    // < 17.4, where `AbortSignal.any` does not exist; afterEach restores it.
+    delete (AbortSignal as { any?: unknown }).any;
+  });
+
+  afterEach(() => {
+    // SAFETY: re-adds the static deleted in beforeEach so later tests see
+    // the real host `AbortSignal.any` again.
+    (AbortSignal as { any?: unknown }).any = nativeAny;
+  });
+
+  test('still resolves with a scripted response — no TypeError before the await', async () => {
+    scriptedResponse = jsonResponse({ text: 'rewritten without .any' });
+    const enhanced = await enhancePrompt('draft', context(), new AbortController().signal);
+    expect(enhanced).toBe('rewritten without .any');
+  });
+
+  test('a deadline that fires while .any is absent still maps to timed-out', async () => {
+    transport = abortAwareHang('TimeoutError');
+    await expectFailure(
+      enhancePrompt('draft', context(), new AbortController().signal, { timeoutMs: 30 }),
+      'timed-out',
+    );
+  });
+
+  test('a caller abort while .any is absent still maps to aborted', async () => {
+    const controller = new AbortController();
+    transport = abortAwareHang('AbortError');
+    const promise = enhancePrompt('draft', context(), controller.signal, { timeoutMs: 90_000 });
+    controller.abort();
+    await expectFailure(promise, 'aborted');
   });
 });
 
