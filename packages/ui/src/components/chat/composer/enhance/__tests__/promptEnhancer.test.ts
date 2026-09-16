@@ -10,7 +10,7 @@ let overrideText: string | null = null;
 const renderCalls: string[] = [];
 // Default: a settled response when one is scripted, else a hang. Timeout
 // tests leave nothing scripted and let the composed deadline fire.
-const defaultTransport = (init: RequestInit): Promise<Response> => {
+const defaultTransport = (): Promise<Response> => {
   if (scriptedError) return Promise.reject(scriptedError);
   if (scriptedResponse) return Promise.resolve(scriptedResponse);
   return new Promise<Response>(() => {});

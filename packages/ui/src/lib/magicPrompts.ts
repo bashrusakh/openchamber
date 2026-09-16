@@ -1233,7 +1233,7 @@ const awaitSharedUntilCallerSignal = <T>(
     void shared.catch(() => undefined);
     return Promise.reject(callerSignal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
   }
-  let onAbort: EventListener = () => {
+  const onAbort: EventListener = () => {
     // The abandoned shared branch must not become an unhandled rejection
     // when it later settles (e.g. its own timeout fires after we left).
     void shared.catch(() => undefined);

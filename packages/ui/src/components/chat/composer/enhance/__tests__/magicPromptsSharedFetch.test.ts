@@ -201,7 +201,6 @@ describe('fetchMagicPromptOverrides — shared transport lifetime', () => {
     expect(sharedSignal.aborted).toBe(false);
 
     // Fire the internal deadline signal: the transport rejects.
-    const reason = new DOMException('The operation timed out.', 'TimeoutError');
     Object.defineProperty(sharedSignal, 'aborted', { value: true });
     sharedSignal.dispatchEvent(new Event('abort'));
     await expect(first).rejects.toThrow('Failed to load magic prompts');
