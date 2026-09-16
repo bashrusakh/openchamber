@@ -10,6 +10,14 @@ const notifySmallModelUnavailable = (): void => {
   });
 };
 
+/**
+ * A cancelled request is the caller's decision, not an availability problem:
+ * rethrow it without the "Small Model unavailable" toast.
+ */
+const isAbortError = (error: Error): boolean => {
+  return error.name === 'AbortError';
+};
+
 export async function requestSmallModel(
   init: RequestInit,
   options: { silentStatuses?: number[] } = {},
@@ -21,7 +29,11 @@ export async function requestSmallModel(
     }
     return response;
   } catch (error) {
-    notifySmallModelUnavailable();
+    // Every rejection this fetch can raise is an Error (fetch aborts surface
+    // as DOMException, an Error subclass); only cancellations skip the toast.
+    if (!(error instanceof Error) || !isAbortError(error)) {
+      notifySmallModelUnavailable();
+    }
     throw error;
   }
 }

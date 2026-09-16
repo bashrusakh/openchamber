@@ -329,6 +329,41 @@ The unsent panel shows "Ask your question" until fork creation starts.
 Existing panels hide titles. Promotion retains the existing internal title, without
 transcript fetching or Small Model generation.
 
+## Enhance Prompt
+
+The Enhance Prompt button rewrites the current draft with the Small Model,
+instructed by the `composer.enhance.instructions` magic prompt
+(Settings → Magic Prompts → Composer). The request carries the draft alone,
+no conversation history or attachments. What comes back is cleaned of model
+dressing, checked by the protected-token guard, and written back through
+`setMessage`, whose controlled writeback produces a native undo entry
+(Cmd/Ctrl+Z restores the pre-enhance draft).
+
+The invariants that hold wherever the button is mounted:
+
+- Enhance never sends. It only replaces the draft; the user still sends.
+- A stale response never overwrites newer text. `usePromptEnhancer` counts
+  generations and compares the language context; ChatInput applies a result
+  only when the draft is byte-identical to the snapshot the request started
+  from and the draft identity has not moved.
+- A failure never touches the draft. Failures map to toasts: unavailable,
+  context-too-small, empty-result, and invalid-result get Enhance-specific
+  copy; provider-failed uses the request layer's generic Small Model toast;
+  aborts and stale responses stay silent.
+- The request refuses truncation: `onOverflow: 'error'` turns an
+  over-budget draft into a 413 error instead of a silently clipped rewrite.
+- The guard rejects corruption, not creativity: a rewrite that loses an
+  `@`/`#` token the user typed, or invents one, fails validation. Slash
+  tokens are the exception — a rewrite may name a command the source did
+  not use.
+
+All logic lives in `enhance/`: `promptEnhancer.ts` (request, cleaning, typed
+`PromptEnhanceError`), `protectedTokens.ts` (the guard), and
+`usePromptEnhancer.ts` (the state machine); `ui/PromptEnhanceButton.tsx`
+renders it. `ChatInput.tsx` only decides whether an enhance may run (never in
+BTW mode, never on a slash-command draft), applies the result, and maps
+failures to toasts.
+
 ## Mobile
 
 `state/useMobileComposerShell.ts` and `state/useMobileViewportPin.ts` are

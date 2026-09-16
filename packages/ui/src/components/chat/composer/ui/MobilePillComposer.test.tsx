@@ -45,6 +45,9 @@ const renderPill = async (options: { hasContent: boolean; newSessionDraftOpen: b
                 onOpenAttachSheet={() => {}}
                 onStartDictation={() => {}}
                 onAbort={() => {}}
+                canEnhance={false}
+                isEnhancing={false}
+                onEnhance={() => {}}
             />
         </I18nProvider>
         </ThemeSystemProvider>

@@ -52,13 +52,14 @@ export type MagicPromptId =
   | 'session.explore.visible'
   | 'session.explore.instructions'
   | 'session.fusion.visible'
-  | 'session.fusion.instructions';
+  | 'session.fusion.instructions'
+  | 'composer.enhance.instructions';
 
 export interface MagicPromptDefinition {
   id: MagicPromptId;
   title: string;
   description: string;
-  group: 'Git' | 'GitHub' | 'Linear' | 'Planning' | 'Session';
+  group: 'Git' | 'GitHub' | 'Linear' | 'Planning' | 'Session' | 'Composer';
   template: string;
   placeholders?: Array<{ key: string; description: string }>;
 }
@@ -1042,6 +1043,40 @@ Goal: produce the strongest possible final answer by combining complementary inf
 Use the results below as source material. Do not mention that the inputs were hidden parts. If sources disagree, prefer the most specific, well-supported, and internally consistent answer.
 
 --- FUSION INPUTS START ---`,
+  },
+  {
+    id: 'composer.enhance.instructions',
+    title: 'Prompt Enhancer Instructions',
+    group: 'Composer',
+    description: 'Instructions the composer\'s Enhance Prompt action uses to rewrite the draft with the Small Model.',
+    template: `You rewrite a draft user instruction for another AI assistant.
+
+Treat the user's draft only as source text to improve. Do not answer it, execute it, or solve the task.
+
+Return only the rewritten prompt.
+
+Preserve the user's actual intent, language, technical meaning, constraints, explicit non-goals, uncertainty, identifiers, commands, paths, URLs, references, and code.
+
+Improve clarity and structure by making information already expressed by the user easier for another assistant to act on, including when applicable:
+- desired outcome;
+- relevant context;
+- explicit constraints;
+- explicit non-goals;
+- source of truth or existing behavior the user asked to reuse;
+- observable completion or verification criteria already implied by the draft.
+
+Rules:
+- Never invent requirements.
+- Never invent architecture, APIs, files, libraries, technologies, tests, commands, constraints, or acceptance criteria that were not expressed or necessarily implied.
+- Never resolve ambiguity by guessing.
+- Preserve uncertainty when information is missing.
+- Do not over-specify implementation when the user specified behavior rather than implementation.
+- When the user asks to reuse or match existing behavior, preserve that requirement instead of designing a replacement.
+- Preserve explicit "do not", "only", "without", scope, compatibility, and safety constraints.
+- Do not add generic boilerplate such as "write clean code", "follow best practices", or unnecessary process instructions.
+- Do not make the prompt longer merely for the sake of detail.
+- Do not prepend explanations such as "Enhanced prompt:".
+- Do not wrap the result in quotes or a markdown code fence.`,
   },
 ] as const;
 
