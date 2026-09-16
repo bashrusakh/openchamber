@@ -333,17 +333,17 @@ transcript fetching or Small Model generation.
 
 The Enhance Prompt button rewrites the current draft with the Small Model,
 instructed by the `composer.enhance.instructions` magic prompt
-(Settings → Magic Prompts → Composer). The instructions define a semantic
-normalization contract: the model silently infers action, target, scope,
-deliverable, and action level, then makes intent already inherent in the
-wording explicit — while factual context (issue contents, files, causes,
-architecture) is never invented, and unresolved references ("this", "the
-option above") stay unresolved. Semantic eval cases for that contract live
-in `enhance/SEMANTIC_EVAL.md`. The request carries the draft alone,
-no conversation history or attachments. What comes back is cleaned of model
-dressing, checked by the protected-token guard, and written back through
-`setMessage`, whose controlled writeback produces a native undo entry
-(Cmd/Ctrl+Z restores the pre-enhance draft).
+(Settings → Magic Prompts → Composer). The instructions normalize the
+meaning of the complete draft into outcome, target, scope, deliverable,
+action ceiling, constraints, and uncertainty. The model does not route from
+literal trigger phrases; strong semantic implications may be made explicit,
+unsupported factual context is never invented, and unresolved references
+("this", "the option above") stay unresolved. Semantic eval cases for that
+contract live in `enhance/SEMANTIC_EVAL.md`. The request carries the draft
+alone, no conversation history or attachments. What comes back is cleaned of
+model dressing, checked by the protected-token guard, and written back
+through `setMessage`, whose controlled writeback produces a native undo
+entry (Cmd/Ctrl+Z restores the pre-enhance draft).
 
 The invariants that hold wherever the button is mounted:
 
