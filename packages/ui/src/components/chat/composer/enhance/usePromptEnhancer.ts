@@ -25,7 +25,12 @@
  * The hook owns everything ChatInput should not: request generations, stale
  * responses, cancellation, and validation. ChatInput only decides whether an
  * enhance may run, applies the returned text to the exact draft the request
- * was started from, and maps failure reasons to toasts.
+ * was started from, and maps failure reasons to toasts. Live-draft reads are
+ * ChatInput's own concern at both ends: its change handler passes the live
+ * editor value into `noteDraftChanged`, and its apply-side backstop compares
+ * the result's source snapshot against that same live value, so a keystroke
+ * that has not reached the effect-synced ref yet still counts as the
+ * composer's content.
  *
  * "Materially changed" means the registry behind the language context changed
  * — compared by value via `sameLanguageContext`, not by object identity. The
@@ -119,13 +124,6 @@ export interface PromptEnhancerInput {
      * obsolete and the new scope can enhance immediately.
      */
     scopeKey: string | null;
-    /**
-     * Reads the composer's live draft. ChatInput pushes draft changes
-     * eagerly through `noteDraftChanged`; this reader is the hook's own
-     * window onto the same document the apply-side backstop compares
-     * against.
-     */
-    getLiveDraft: () => string;
 }
 
 export function usePromptEnhancer(input: PromptEnhancerInput) {
@@ -146,8 +144,6 @@ export function usePromptEnhancer(input: PromptEnhancerInput) {
     // with (a materially changed context marks the response stale).
     const languageContextRef = React.useRef(input.languageContext);
     languageContextRef.current = input.languageContext;
-    const getLiveDraftRef = React.useRef(input.getLiveDraft);
-    getLiveDraftRef.current = input.getLiveDraft;
 
     const cancel = React.useCallback(() => {
         abortRef.current?.abort();

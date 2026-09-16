@@ -122,19 +122,11 @@ function renderHarness(
   // recompute, so a re-render can hand the hook a rebuilt object.
   let currentContext = initialContext;
   let currentScopeKey = initialScopeKey;
-  // The harness has no editor, so this stands in for the composer's live
-  // document: noteDraftChanged is what moves it, exactly as a keystroke does
-  // through ChatInput's change handler.
-  let liveDraft = '';
 
   function Probe() {
     const hook = usePromptEnhancer({
       languageContext: currentContext,
       scopeKey: currentScopeKey,
-      // ChatInput's seam: the live editor value wins over the effect-synced
-      // ref. The harness has no editor, so the ref value IS the live value;
-      // tests drive it through noteDraftChanged the way edits do.
-      getLiveDraft: () => liveDraft,
     });
     captured = {
       isEnhancing: hook.isEnhancing,
@@ -166,7 +158,6 @@ function renderHarness(
     startEnhance: (draft: string) => getEnhance()(draft, enhanceContext),
     cancel: () => { act(() => { captured?.cancel(); }); },
     noteDraftChanged: (nextDraft: string) => {
-      liveDraft = nextDraft;
       act(() => { captured?.noteDraftChanged(nextDraft); });
     },
     unmount: () => { act(() => { root.unmount(); }); },

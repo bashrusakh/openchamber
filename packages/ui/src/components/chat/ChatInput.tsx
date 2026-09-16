@@ -1218,10 +1218,6 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         // scope → same draft the apply-side backstop compares against; a
         // different scope cannot share a rewrite.
         scopeKey: chatDraftIdentity ? getChatDraftIdentityKey(chatDraftIdentity) : null,
-        // The same live-draft precedence the apply path uses: the editor
-        // document wins over the effect-synced ref, so a keystroke that has
-        // not reached the ref yet still counts as the composer's content.
-        getLiveDraft: () => composerRef.current?.getValue() ?? messageRef.current,
     });
     // The session's last assistant model is the authoritative provider when
     // one is known (same resolution as summarizeSelectionForNotes); the

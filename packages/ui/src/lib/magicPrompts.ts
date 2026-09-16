@@ -1217,7 +1217,7 @@ const awaitSharedUntilCallerSignal = <T>(
     callerSignal.removeEventListener('abort', onAbort);
     rejectSharedWait(callerSignal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
   };
-  let rejectSharedWait: (error: unknown) => void = () => {};
+  let rejectSharedWait: (error: Error) => void = () => {};
   const left = new Promise<never>((_resolve, reject) => {
     rejectSharedWait = reject;
   });
@@ -1269,13 +1269,20 @@ const getEffectiveMagicPromptTemplate = async (
   id: MagicPromptId,
   options: { signal?: AbortSignal } = {},
 ): Promise<string> => {
-  const overrides = await fetchMagicPromptOverrides(options).catch((error: unknown): Record<string, string> => {
+  const overrides = await fetchMagicPromptOverrides(options).catch((error: Error): Record<string, string> => {
     // A caller's cancellation or deadline is the caller giving up on THIS
     // render, not a reason to silently fall back: the composed deadline's
     // owner (e.g. the enhancer) reads the abort to map its failure reason,
     // and proceeding on an aborted deadline would start a doomed request.
     // Transport failures still resolve to the default template.
-    if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+    //
+    // The rejection here is always an Error at the boundary: the shared
+    // request rejects with `Error`s it throws itself or abort-shaped
+    // DOMExceptions from the transport and its deadline, and a caller's
+    // early leave rejects with the fired signal's reason (abort-named in
+    // every production path). Anything outside that shape falls through to
+    // the default template below, which is the safe fallback.
+    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
       throw error;
     }
     return {};
