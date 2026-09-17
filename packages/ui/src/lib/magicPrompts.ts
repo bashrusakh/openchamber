@@ -165,46 +165,43 @@ Files changed across these commits:
     title: 'PR Review Instructions',
     group: 'GitHub',
     description: 'Hidden instructions attached when generating a PR review response.',
-    template: `You are drafting a pull request review comment that will be posted back to the PR author. You are not the implementer; do not propose to write code or run commands.
+    template: `Review this pull request semantically and draft a single high-signal review comment for the PR author.
+
+You are the reviewer, not the implementer. Do not edit code, offer to implement changes, or prescribe unnecessary patch details.
 
 Before drafting:
-- Read the PR title and body first to anchor on the author's intent. Evaluate whether the implementation matches that intent — missing pieces, incorrect behavior vs intent, scope creep.
-- The PR diff is the source of truth for what changed; the repo on disk may not yet reflect those changes. Read the diff carefully. Use the repo only as ancillary context (imports, call sites, existing patterns, nearby code) when you need to verify a specific claim — not to discover the changes themselves.
-- No speculation: every reported issue must be grounded in the diff plus ancillary repo evidence you actually read. If a claim cannot be verified, drop it — do not hedge or guess.
-- Clarifying question: if the PR's intent itself is unreadable (title/body give no "why", diff is ambiguous on purpose), ask me one focused question about intent and stop. Do not open a discovery loop — this is a review, not a planning session.
 
-High-signal bar — only report issues that meet all of:
-- Objective and verifiable from the diff plus ancillary repo evidence.
-- Introduced by this PR (not pre-existing).
-- Material: bugs that will cause incorrect runtime behavior, security/privacy risks, correctness edge cases, backwards-compat breakage, missing implementations across modules/targets, boundary violations, OR a clear CLAUDE.md / AGENTS.md violation where you can quote the exact rule.
-
-Do NOT report:
-- Pre-existing issues unrelated to the diff.
-- Pedantic nitpicks a senior engineer would not flag.
-- Issues a linter would catch.
-- Subjective style preferences not explicitly required by CLAUDE.md / AGENTS.md.
-- "Might" / "could" / "potential" concerns without concrete evidence.
-- Rules mentioned in CLAUDE.md / AGENTS.md but explicitly silenced in the code (e.g., via an ignore comment or documented exception).
-- Missing tests / coverage gaps unless CLAUDE.md / AGENTS.md explicitly requires them for the changed area.
-
-Validation pass: before writing the final comment, re-check each candidate issue against the diff + ancillary repo evidence. Drop anything you are not certain about. False positives waste the author's time.
+1. Bind the review target: read the PR title and body, the complete current diff, the authoritative changed-file set, prior review comments and author clarifications, and linked issues when they materially define the change. The diff is the source of truth for what changed. Review the PR as one integrated change, including cross-file interactions. Bind conclusions to the current diff; if the PR state changes, affected evidence is stale unless proven unchanged.
+2. Establish claim authority. Authority belongs to individual claims, not automatically to the artifact containing them. A PR title/body is authoritative evidence of what the author states they intend, but it does not automatically define product semantics. An issue, comment, bot finding, new test, implementation comment, proposed mechanism, or repeated statement is not self-authenticating. Existing production behavior is evidence of preserved semantics where the change is not explicitly intended to alter it. Do not treat several sources repeating the same premise as independent confirmation.
+3. Normalize the semantic contract before judging implementation: authoritative intended outcome; behavior that must change; behavior that must remain unchanged; affected scope and surfaces; relevant contracts and invariants; explicit non-goals; compatibility expectations. Separate required semantic outcome, observed facts, root-cause hypotheses, proposed mechanisms, tests, and unresolved assumptions. Do not confuse a proposed mechanism with the required outcome.
+4. Prove semantic correspondence for every material candidate finding: state the semantic property that must be true, identify the implementation facts used as evidence, trace actual system behavior far enough to justify the inference, and actively look for an ordinary valid system behavior where the same facts would not justify that conclusion. Reproducing a behavior proves only that it exists; before reporting it, establish separately that an authoritative contract, preserved invariant, compatibility requirement, or explicit project rule requires different behavior. If semantic correspondence cannot be established, do not convert uncertainty into a defect. Passing tests, comments, and implementation intent do not waive this proof.
+5. Analyze the contract delta for materially changed behavior: previous vs new contract, producer, transformations, consumers, ownership, preserved invariants, error/fallback semantics, externally observable effects. A locally correct transformation can still be wrong when producer or consumer uses a different semantic contract.
+6. Check the change level: determine where the affected invariant is actually owned (UI, caller, shared helper, state transformation, API/persistence, config/runtime). Look for symptom-level compensation for a deeper contract problem, protection added only to the reported caller, one consumer updated after a shared contract changed, incomplete propagation across runtimes, preserved behavior accidentally changed, or dead/unwired implementation. Do not demand a broader abstraction merely because one is possible; wrong-level findings require concrete semantic consequences.
+7. Perform bounded-complete invariant review: when the PR changes a semantic rule, inspect the nearest meaningful siblings governed by the same invariant (states, callers, input classes, error paths) and group manifestations under one root finding. Do not broaden into an unrelated repository audit.
+8. Handle unresolved contracts: if the intended invariant itself is unresolved from conflicting requirements, tests, comments, or existing behavior, do not invent a local rule to close the review; name the unresolved invariant and what needs authoritative resolution.
+9. Evaluate tests and verification as evidence, not authority: check whether a test verifies the semantic contract or merely repeats the same implementation assumption, whether fixtures/mocks preserve the needed correspondence, and whether the PR's stated validation covers the applicable behavior. Use fresh CI/test/runtime evidence when available. Do not recreate a broad verification pipeline for review. If broader required verification is missing, classify it as a verification gap rather than pretending inspection replaces it. Passing tests or CI do not override a demonstrated semantic defect.
+10. Classify candidate findings internally before deciding severity: current-diff regression; missed case of current invariant; design/invariant gap; verification gap; latent/pre-existing related; latent/pre-existing unrelated. Do not present a pre-existing issue as introduced by the PR; latent unrelated findings are normally omitted. A related pre-existing condition blocks this PR only when the change materially worsens it, depends on it incorrectly, or makes the changed contract unsafe/incomplete.
+11. Apply the finding bar. Report an issue only when it is objectively verifiable from evidence actually inspected; introduced, worsened, or materially exposed by this PR in a way relevant to the changed contract; tied to a violated authoritative intent, contract, invariant, boundary, compatibility requirement, or explicit repository rule; semantic correspondence between evidence and claimed defect is established; has a concrete consequence; and is material enough for a senior engineer to raise. Qualifying findings include incorrect runtime behavior; security/privacy/auth/data-safety regressions; invalid state transitions; API/protocol/schema/config compatibility breaks; incomplete propagation of a changed contract; missing required implementation across targets/runtimes; wrong fix level with a concrete behavioral consequence; demonstrably reachable missed cases under the affected invariant; mandatory repository-contract violations; and material verification gaps when changed behavior cannot otherwise be established. Do not report speculative risks; "might/could/potential" concerns without evidence; style or naming preferences; linter/compiler-only issues; optional refactoring; "cheap while you're here" hardening; surprising behavior not proven incorrect; unsupported architectural preferences; missing tests by themselves when existing evidence already establishes correctness; or bot/reviewer findings not independently reconciled.
+12. Assign severity. Must-fix only for a current-scope correctness, security, compatibility, invariant, boundary, incomplete-implementation, unresolved-required-contract, or mandatory repository/handoff defect that should prevent merge. Nice-to-have only for an objective, PR-introduced, non-blocking issue with concrete engineering value. If project guidance makes a process/evidence requirement mandatory for PR handoff, classify its absence accordingly rather than downgrading it because the implementation code is correct.
+13. Cite evidence and state actions. For implementation findings cite the responsible changed file path and line range derived from the diff (use "approx" only as a last resort); for repository/process-contract findings cite the applicable rule and the relevant PR section. Do not invent line numbers. For each Action, state the semantic outcome that must become true; do not prescribe a specific implementation unless the evidence establishes it as necessary.
+14. Final falsification pass before finalizing every finding: what exact semantic proposition is violated and what gives it authority; did I prove the observed behavior corresponds to that proposition or merely reproduce it; is it introduced/worsened/materially exposed by this PR; is the path actually reachable; does a valid counterexample break my inference; did I inspect enough unchanged adjacent behavior; are tests proving production semantics or only their own setup; is this one manifestation of a broader invariant or a contract/design ambiguity rather than an implementation bug; is severity justified. Drop any candidate that fails these checks; full changed-file coverage does not waive semantic proof.
+15. Clarification: only ask one focused question and stop when authoritative intended behavior cannot be established from the PR, discussion, and existing system semantics, and materially different interpretations would change correctness. Do not open a planning or discovery loop.
 
 Output rules:
-- Produce a single review comment addressed to the PR author, using the exact format below.
+- Produce exactly one review comment addressed to the PR author, using the exact format below.
 - No emojis. No code snippets. No fenced blocks. Short inline code identifiers are fine.
-- Reference evidence with file paths and line ranges (e.g., path/to/file.ts:120-138) derived from the diff. Use "approx" only as a last resort when the diff does not expose exact lines.
-- One bullet per unique issue; do not duplicate an issue across sections.
+- One bullet per unique root issue; group sibling manifestations under their shared invariant; do not duplicate an issue across sections.
 - Keep the whole comment under ~300 words.
 
 Format exactly:
-<1-2 sentence summary of intent and top-level verdict>
+<1-2 sentence summary of the authoritative intended change and whether the integrated implementation matches it>
 
 Must-fix:
-- <issue> - <brief why> - <file:line-range> - Action: <one-line action>
+- <issue> - <violated semantic contract/invariant and concrete consequence> - <file:line-range or applicable rule> - Action: <required semantic outcome>
 Nice-to-have:
-- <issue> - <brief why> - <file:line-range> - Action: <one-line action>
+- <issue> - <concrete reason> - <evidence> - Action: <required outcome>
 
-If nothing clears the high-signal bar, write:
+If nothing qualifies:
 Must-fix:
 - None
 Nice-to-have:
