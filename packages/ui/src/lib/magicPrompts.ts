@@ -225,7 +225,7 @@ Nice-to-have:
     title: 'Issue Review Instructions',
     group: 'GitHub',
     description: 'Hidden instructions attached when generating an issue review response.',
-    template: `Review this issue using the provided issue context.
+    template: `Review this issue semantically using the complete provided issue context.
 
 Read the original issue, all follow-up comments, maintainer replies, linked or referenced context available to you, bot reviews, and later corrections before reaching conclusions. Later evidence may refine or invalidate earlier claims.
 
@@ -477,58 +477,28 @@ Do not convert uncertainty into a likely fact merely to make the analysis comple
 
 Choose exactly one template.
 
-### Bug
-- Summary
-- Contract / expected behavior
-- Evidence
-- Root cause
-- Fix boundary / ownership
-- Required outcome
-- Implementation status
-- Regression / side effects
-- Verification
-- Missing info
+Formatting:
+- Render each template item as a level-2 Markdown heading: \`## <section name>\`.
+- Put the section content below the heading, never on the same line.
+- Leave one blank line after each heading and between sections.
+- Use concise paragraphs for prose and Markdown bullets when a section contains multiple distinct items.
+- Keep bullet items on separate lines.
+- Do not collapse multiple template sections into one paragraph.
+- Keep the selected template's section order exactly as listed below.
+- Do not use inline section labels such as \`**Summary** text\`.
+- Markdown structure takes precedence over compactness.
 
-### Feature
-- Summary
-- Requested contract
-- Existing behavior / architecture
-- Requirements
-- Boundary / ownership
-- Required outcome
-- Implementation options
-- Compatibility / side effects
-- Verification
-- Missing info
+Templates:
 
-### Question/Support
-- Summary
-- Relevant contract / behavior
-- Answer / guidance
-- Evidence
-- Missing info
+Bug: Summary; Contract / expected behavior; Evidence; Root cause; Fix boundary / ownership; Required outcome; Implementation status; Regression / side effects; Verification; Missing info.
 
-### Refactor
-- Summary
-- Current contract / ownership
-- Problem being addressed
-- Proposed boundary
-- Preserved behavior
-- Implementation constraints
-- Risks / side effects
-- Verification
-- Missing info
+Feature: Summary; Requested contract; Existing behavior / architecture; Requirements; Boundary / ownership; Required outcome; Implementation options; Compatibility / side effects; Verification; Missing info.
 
-### Ops
-- Summary
-- Expected runtime contract
-- Evidence / diagnostics
-- Failure boundary / ownership
-- Required outcome
-- Implementation status
-- Side effects
-- Verification
-- Missing info
+Question/Support: Summary; Relevant contract / behavior; Answer / guidance; Evidence; Missing info.
+
+Refactor: Summary; Current contract / ownership; Problem being addressed; Proposed boundary; Preserved behavior; Implementation constraints; Risks / side effects; Verification; Missing info.
+
+Ops: Summary; Expected runtime contract; Evidence / diagnostics; Failure boundary / ownership; Required outcome; Implementation status; Side effects; Verification; Missing info.
 
 For boundary/ownership sections:
 - distinguish semantic responsibility from architectural owner;
@@ -541,7 +511,9 @@ For \`Implementation status\`, distinguish when appropriate:
 - unresolved — required outcome known, implementation not established.
 
 End with:
-Next actions: <one concise sentence>.`,
+
+**Next actions:** <one concise sentence>.
+`,
   },
   {
     id: 'linear.issue.review.visible',
@@ -558,7 +530,7 @@ Next actions: <one concise sentence>.`,
     title: 'Linear Issue Review Instructions',
     group: 'Linear',
     description: 'Hidden instructions attached when generating a Linear issue review response.',
-    template: `Review this Linear issue using the provided issue context.
+    template: `Review this Linear issue semantically using the complete provided issue context.
 
 Read the original issue, all follow-up comments, maintainer replies, linked or referenced context available to you, bot reviews, and later corrections before reaching conclusions. Later evidence may refine or invalidate earlier claims.
 
@@ -810,58 +782,28 @@ Do not convert uncertainty into a likely fact merely to make the analysis comple
 
 Choose exactly one template.
 
-### Bug
-- Summary
-- Contract / expected behavior
-- Evidence
-- Root cause
-- Fix boundary / ownership
-- Required outcome
-- Implementation status
-- Regression / side effects
-- Verification
-- Missing info
+Formatting:
+- Render each template item as a level-2 Markdown heading: \`## <section name>\`.
+- Put the section content below the heading, never on the same line.
+- Leave one blank line after each heading and between sections.
+- Use concise paragraphs for prose and Markdown bullets when a section contains multiple distinct items.
+- Keep bullet items on separate lines.
+- Do not collapse multiple template sections into one paragraph.
+- Keep the selected template's section order exactly as listed below.
+- Do not use inline section labels such as \`**Summary** text\`.
+- Markdown structure takes precedence over compactness.
 
-### Feature
-- Summary
-- Requested contract
-- Existing behavior / architecture
-- Requirements
-- Boundary / ownership
-- Required outcome
-- Implementation options
-- Compatibility / side effects
-- Verification
-- Missing info
+Templates:
 
-### Question/Support
-- Summary
-- Relevant contract / behavior
-- Answer / guidance
-- Evidence
-- Missing info
+Bug: Summary; Contract / expected behavior; Evidence; Root cause; Fix boundary / ownership; Required outcome; Implementation status; Regression / side effects; Verification; Missing info.
 
-### Refactor
-- Summary
-- Current contract / ownership
-- Problem being addressed
-- Proposed boundary
-- Preserved behavior
-- Implementation constraints
-- Risks / side effects
-- Verification
-- Missing info
+Feature: Summary; Requested contract; Existing behavior / architecture; Requirements; Boundary / ownership; Required outcome; Implementation options; Compatibility / side effects; Verification; Missing info.
 
-### Ops
-- Summary
-- Expected runtime contract
-- Evidence / diagnostics
-- Failure boundary / ownership
-- Required outcome
-- Implementation status
-- Side effects
-- Verification
-- Missing info
+Question/Support: Summary; Relevant contract / behavior; Answer / guidance; Evidence; Missing info.
+
+Refactor: Summary; Current contract / ownership; Problem being addressed; Proposed boundary; Preserved behavior; Implementation constraints; Risks / side effects; Verification; Missing info.
+
+Ops: Summary; Expected runtime contract; Evidence / diagnostics; Failure boundary / ownership; Required outcome; Implementation status; Side effects; Verification; Missing info.
 
 For boundary/ownership sections:
 - distinguish semantic responsibility from architectural owner;
@@ -874,7 +816,9 @@ For \`Implementation status\`, distinguish when appropriate:
 - unresolved — required outcome known, implementation not established.
 
 End with:
-Next actions: <one concise sentence>.`,
+
+**Next actions:** <one concise sentence>.
+`,
   },
   {
     id: 'github.pr.checks.review.visible',
