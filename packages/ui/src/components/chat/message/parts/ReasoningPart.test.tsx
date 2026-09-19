@@ -257,7 +257,7 @@ describe('ReasoningPart streaming gating (issue #2020)', () => {
   // complete text, letting us assert full content on first paint.
   const SHORT_REASONING = 'Persisted reasoning text that is already fully available.';
 
-  const BUSY_INDICATOR = 'animate-busy-pulse';
+  const BUSY_INDICATOR = 'animate-busy-wave';
 
   const makeReasoningPart = (
     time: ReasoningPartFixture['time'],
@@ -417,6 +417,35 @@ describe('ReasoningTimelineBlock live follow', () => {
       });
       await act(async () => { followObserver.notify(); });
       expect(scroller.scrollTop).toBe(480);
+
+      // The previous automatic scroll event can arrive after the next markdown
+      // commit grew the body, but before ResizeObserver follows that growth.
+      for (const height of [1100, 1800, 2600]) {
+        contentHeight = height;
+        await act(async () => { scroller.dispatchEvent(new window.Event('scroll')); });
+        await act(async () => { followObserver.notify(); });
+        expect(scroller.scrollTop).toBe(height - 320);
+      }
+
+      // A layout shrink clamps scrollTop without the reader scrolling up.
+      contentHeight = 800;
+      scroller.scrollTop = 480;
+      await act(async () => { scroller.dispatchEvent(new window.Event('scroll')); });
+      contentHeight = 900;
+      await act(async () => { followObserver.notify(); });
+      expect(scroller.scrollTop).toBe(580);
+
+      // Wheel intent releases follow before the browser delivers its scroll.
+      await act(async () => {
+        scroller.dispatchEvent(new window.WheelEvent('wheel', { deltaY: -80, bubbles: true }));
+      });
+      contentHeight = 950;
+      await act(async () => { followObserver.notify(); });
+      expect(scroller.scrollTop).toBe(580);
+      await act(async () => {
+        scroller.scrollTop = 630;
+        scroller.dispatchEvent(new window.Event('scroll'));
+      });
 
       // A scrollbar drag emits scroll, without a wheel or touch event.
       await act(async () => {

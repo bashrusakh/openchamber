@@ -1,10 +1,23 @@
-export function registerGitRoutes(app) {
+export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
   let gitLibraries = null;
   const getGitLibraries = async () => {
     if (!gitLibraries) {
       gitLibraries = await import('./index.js');
+      if (emitWorktreeChanged) {
+        gitLibraries.subscribeWorktreeTopologyChanges(emitWorktreeChanged);
+      }
     }
     return gitLibraries;
+  };
+
+  // A path from an earlier status listing that no longer resolves is a stale
+  // row or a nested repository, not a server fault.
+  const GIT_PATH_ERROR_STATUS = new Map([['path_not_found', 404], ['nested_repository', 422], ['untracked_directory', 422]]);
+  const sendGitPathError = (res, error) => {
+    const status = GIT_PATH_ERROR_STATUS.get(error?.code);
+    if (!status) return false;
+    res.status(status).json({ error: error.message, code: error.code });
+    return true;
   };
 
   const resolveDirectoryQuery = (value, preserveWhitespace = false) => {
@@ -220,7 +233,7 @@ export function registerGitRoutes(app) {
   });
 
   app.get('/api/git/status', async (req, res) => {
-    const { getStatus, isGitRepository } = await getGitLibraries();
+    const { getStatus, isGitRepository, observeWorktreeTopology } = await getGitLibraries();
 
     try {
       const directory = resolveDirectoryQuery(req.query.directory);
@@ -232,6 +245,11 @@ export function registerGitRoutes(app) {
       if (!isRepo) {
         return res.json(nonRepoStatusPayload());
       }
+
+      // Clients ask for status while they work in a repository, so this is
+      // where an externally added or removed worktree gets noticed. It runs
+      // beside the status call and never delays or fails the response.
+      void observeWorktreeTopology(directory);
 
       const mode = req.query.mode === 'light' ? 'light' : undefined;
       const status = await getStatus(directory, { mode });
@@ -337,7 +355,7 @@ export function registerGitRoutes(app) {
   });
 
   app.get('/api/git/diff', async (req, res) => {
-    const { getDiff } = await getGitLibraries();
+    const { getPathDiff } = await getGitLibraries();
     try {
       const directory = req.query.directory;
       if (!directory) {
@@ -352,14 +370,15 @@ export function registerGitRoutes(app) {
       const staged = req.query.staged === 'true';
       const context = req.query.context ? parseInt(String(req.query.context), 10) : undefined;
 
-      const diff = await getDiff(directory, {
+      const { diff, submodule } = await getPathDiff(directory, {
         path,
         staged,
         contextLines: Number.isFinite(context) ? context : 3,
       });
 
-      res.json({ diff });
+      res.json({ diff, submodule });
     } catch (error) {
+      if (sendGitPathError(res, error)) return;
       console.error('Failed to get git diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get git diff' });
     }
@@ -390,8 +409,10 @@ export function registerGitRoutes(app) {
         modified: result.modified,
         path: result.path,
         isBinary: Boolean(result.isBinary),
+        submodule: result.submodule ?? null,
       });
     } catch (error) {
+      if (sendGitPathError(res, error)) return;
       console.error('Failed to get git file diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get git file diff' });
     }
@@ -1078,7 +1099,7 @@ export function registerGitRoutes(app) {
   });
 
   app.get('/api/git/worktrees', async (req, res) => {
-    const { getWorktrees } = await getGitLibraries();
+    const { getWorktrees, observeWorktreeTopology } = await getGitLibraries();
     try {
       const directory = req.query.directory;
       if (!directory) {
@@ -1086,13 +1107,18 @@ export function registerGitRoutes(app) {
       }
 
       const worktrees = await getWorktrees(directory);
+      // A repository always lists at least its primary worktree; an empty
+      // list means "not a repository" and has no topology to track.
+      if (worktrees.length > 0) {
+        void observeWorktreeTopology(directory);
+      }
       res.json(worktrees);
     } catch (error) {
-      // Worktrees are an optional feature. Avoid repeated 500s (and repeated client retries)
-      // when the directory isn't a git repo or uses shell shorthand like "~/".
-      console.warn('Failed to get worktrees, returning empty list:', error?.message || error);
-      res.setHeader('X-OpenChamber-Warning', 'git worktrees unavailable');
-      res.json([]);
+      // A directory outside any repository still answers `[]` from getWorktrees.
+      // Anything else is a real failure the client must not mistake for "no
+      // worktrees", or it would drop the ones it already knows.
+      console.error('Failed to get worktrees:', error);
+      res.status(500).json({ error: error.message || 'Failed to get worktrees' });
     }
   });
 

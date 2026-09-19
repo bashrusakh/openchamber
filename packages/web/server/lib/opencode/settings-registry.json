@@ -127,6 +127,10 @@
       "scope": "instance",
       "computed": true
     },
+    "routingFeatureAvailable": {
+      "scope": "instance",
+      "computed": true
+    },
     "openCodeUpdateToastDismissedVersion": {
       "scope": "instance"
     },
@@ -134,6 +138,9 @@
       "scope": "instance"
     },
     "autoDeleteAfterDays": {
+      "scope": "instance"
+    },
+    "sessionRetentionOnlyArchived": {
       "scope": "instance"
     },
     "sessionRetentionAction": {
@@ -212,6 +219,9 @@
       "scope": "profile"
     },
     "sidebarShowRecentSection": {
+      "scope": "profile"
+    },
+    "workStatusSectionOrder": {
       "scope": "profile"
     },
     "workStatusPanelEnabled": {
@@ -602,6 +612,10 @@
       "scope": "device",
       "local": true
     },
+    "contextEditorVisible": {
+      "scope": "device",
+      "local": true
+    },
     "contextEditorTreeWidth": {
       "scope": "device",
       "local": true
@@ -611,6 +625,10 @@
       "local": true
     },
     "workStatusExpandedSections": {
+      "scope": "device",
+      "local": true
+    },
+    "messageQueueExpanded": {
       "scope": "device",
       "local": true
     },

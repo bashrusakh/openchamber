@@ -133,6 +133,8 @@ export const parseQueuedItemInput = (value) => {
   if (agentMention) item.agentMention = agentMention;
   item.attachments = attachments;
   item.context = context;
+  const contextPreview = asNonEmptyString(raw.contextPreview).slice(0, 103);
+  if (contextPreview) item.contextPreview = contextPreview;
   item.sendConfig = sendConfig;
   return item;
 };
@@ -157,6 +159,17 @@ const toPublicItem = (item) => {
   const publicItem = { id: item.id, createdAt: item.createdAt, content: item.content, text: item.text };
   if (item.agentMention) publicItem.agentMention = item.agentMention;
   publicItem.attachments = item.attachments.map(toPublicAttachment);
+  // Older persisted items have no UI summary. Prefer their attached comment
+  // before falling back to the model-facing context text.
+  const contextPreview = item.contextPreview || item.context
+    .filter((part) => part.kind !== 'instruction')
+    .map((part) => asNonEmptyString(asRecord(part.metadata?.openchamberContext)?.text) || part.text.trim())
+    .find(Boolean);
+  if (contextPreview) {
+    const firstLine = contextPreview.split('\n', 1)[0];
+    publicItem.contextPreview = firstLine.slice(0, 100)
+      + (contextPreview.length > firstLine.length || firstLine.length > 100 ? '...' : '');
+  }
   publicItem.sendConfig = { ...item.sendConfig };
   return publicItem;
 };
@@ -198,6 +211,9 @@ export function createMessageQueueRuntime({
   sessionKnowledgeRuntime = null,
   broadcastGlobalUiEvent,
   onPromptSent,
+  // Turns the `openchamber/auto` model into a real one right before the send;
+  // absent means the queue never sees the sentinel.
+  resolvePromptBody = null,
   dataDir,
   fetchImpl = fetch,
   now = Date.now,
@@ -213,6 +229,13 @@ export function createMessageQueueRuntime({
   let loadPromise = null;
   let writePromise = Promise.resolve();
   let stopped = false;
+
+  // An unfinished assistant message older than this marker is a run that died
+  // with the previous server, not a streaming turn: no completion event will
+  // ever arrive for it, so treating it as live strands restored queue items
+  // forever. A run that outlived the restart (external OpenCode) is still
+  // caught by the live status check, which runs first.
+  const runtimeStartedAt = now();
 
   /** In-memory only — a restart has no in-flight sends. */
   const sending = new Map(); // sessionId → itemId
@@ -380,7 +403,15 @@ export function createMessageQueueRuntime({
     }).catch(() => null));
     if (!messages) return null;
     const last = asRecord(asRecord(messages[messages.length - 1])?.info);
-    if (last?.role === 'assistant' && asCount(asRecord(last.time)?.completed) === null) return false;
+    const lastTime = asRecord(last?.time);
+    if (last?.role === 'assistant' && asCount(lastTime?.completed) === null) {
+      const created = asCount(lastTime?.created);
+      if (created === null || created >= runtimeStartedAt) return false;
+      // Unfinished tail from before this runtime started: its run died with
+      // the previous server, so it must not block delivery. (A missing
+      // created timestamp stays conservative and blocks, as before.)
+      console.log(`[message-queue] ignoring pre-boot unfinished tail for ${sessionId}`);
+    }
     return true;
   };
 
@@ -456,6 +487,7 @@ export function createMessageQueueRuntime({
       if (agent) body.agent = agent;
       if (variant) body.variant = variant;
       if (fileParts.length > 0) body.parts = fileParts;
+      await resolvePromptBody?.(body, { sessionId, directory });
       await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/command`, { directory, method: 'POST', body });
       return;
     }
@@ -490,6 +522,7 @@ export function createMessageQueueRuntime({
     if (agent) body.agent = agent;
     if (variant) body.variant = variant;
     body.parts = parts;
+    await resolvePromptBody?.(body, { sessionId, directory });
     await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/prompt_async`, { directory, method: 'POST', body });
     if (knowledge.text && sessionKnowledgeRuntime) {
       // After the prompt is accepted, so a rejected dispatch carries it again.

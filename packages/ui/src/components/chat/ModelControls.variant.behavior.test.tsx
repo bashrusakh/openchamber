@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { createRoot } from 'react-dom/client';
 import { Window } from 'happy-dom';
 import { create } from 'zustand';
+import { ThemeSystemContext, type ThemeContextValue } from '@/contexts/theme-system-context';
+import { getThemeById } from '@/lib/theme/themes';
+import { AUTO_MODEL_ID, AUTO_PROVIDER_ID, isAutoModel } from '@/lib/routing/autoModel';
+import { useRoutingStore } from '@/stores/useRoutingStore';
 
 /**
  * Restoring a session must not invent an effort choice.
@@ -37,7 +41,13 @@ const model = {
   variants: { low: {}, high: {} },
 };
 const provider = { id: PROVIDER_ID, name: PROVIDER_ID, models: [model] };
-const agent = { name: AGENT, mode: 'primary' as const };
+type Agent = {
+  name: string;
+  mode: 'primary';
+  model?: { providerID: string; modelID: string };
+  variant?: string;
+};
+const agent: Agent = { name: AGENT, mode: 'primary' };
 
 let latestUserChoice: UserModelChoice | null = null;
 let forcePreserveManualOverride: boolean | null = null;
@@ -49,7 +59,10 @@ const overrideWrites: Array<{ override: VariantChoice; inherited: string | undef
 
 type ConfigState = {
   providers: typeof provider[];
-  agents: typeof agent[];
+  agents: Agent[];
+  providersLoaded: boolean;
+  agentsLoaded: boolean;
+  settingsDefaultsLoaded: boolean;
   modelsMetadata: Record<string, never>;
   currentProviderId: string;
   currentModelId: string;
@@ -65,16 +78,19 @@ type ConfigState = {
   setAgent: (agentName: string) => void;
   setCurrentVariant: (variant: string | undefined) => void;
   setCurrentVariantOverride: (override: VariantChoice, inherited: string | undefined) => void;
-  getCurrentProvider: () => typeof provider;
-  getCurrentAgent: () => typeof agent;
-  getVisibleAgents: () => typeof agent[];
+  getCurrentProvider: () => typeof provider | undefined;
+  getCurrentAgent: () => Agent;
+  getVisibleAgents: () => Agent[];
   getCurrentModelVariants: () => string[];
   getModelMetadata: () => undefined;
 };
 
-const useConfigStore = create<ConfigState>((set) => ({
+const useConfigStore = create<ConfigState>((set, get) => ({
   providers: [provider],
   agents: [agent],
+  providersLoaded: true,
+  agentsLoaded: true,
+  settingsDefaultsLoaded: true,
   modelsMetadata: {},
   currentProviderId: PROVIDER_ID,
   currentModelId: MODEL_ID,
@@ -108,9 +124,9 @@ const useConfigStore = create<ConfigState>((set) => ({
       return { currentVariant, currentVariantSelection: { override, inherited } };
     });
   },
-  getCurrentProvider: () => provider,
-  getCurrentAgent: () => agent,
-  getVisibleAgents: () => [agent],
+  getCurrentProvider: () => get().providers.find((entry) => entry.id === get().currentProviderId),
+  getCurrentAgent: () => get().agents.find((entry) => entry.name === get().currentAgentName) ?? agent,
+  getVisibleAgents: () => get().agents,
   getCurrentModelVariants: () => Object.keys(model.variants),
   getModelMetadata: () => undefined,
 }));
@@ -150,7 +166,8 @@ const useSelectionStore = create<SelectionState>((set, get) => ({
   },
 }));
 
-const useSessionUIStore = create(() => ({
+type SessionUIState = { currentSessionId: string | null; getDirectoryForSession: () => string };
+const useSessionUIStore = create<SessionUIState>(() => ({
   currentSessionId: SESSION_ID,
   getDirectoryForSession: () => '/workspace/project',
 }));
@@ -190,7 +207,10 @@ mock.module('@/lib/messages/userModelChoice', () => ({
   ),
 }));
 
-mock.module('@/stores/useConfigStore', () => ({ useConfigStore }));
+mock.module('@/stores/useConfigStore', () => ({
+  useConfigStore,
+  selectCatalogLoadedForDirectory: (state: ConfigState, resource: 'models' | 'agents') => resource === 'models' ? state.providersLoaded : state.agentsLoaded,
+}));
 mock.module('@/sync/selection-store', () => ({ useSelectionStore }));
 mock.module('@/sync/session-ui-store', () => ({ useSessionUIStore }));
 mock.module('@/stores/useUIStore', () => ({ useUIStore }));
@@ -237,11 +257,7 @@ mock.module('@/components/model-picker/ModelPickerList', () => ({
 mock.module('@/hooks/useRuntimeAPIs', () => ({ useIsVSCodeRuntime: () => false }));
 mock.module('@/hooks/useModelLists', () => ({ useModelLists: () => ({ favoriteModelsList: [], recentModelsList: [] }) }));
 mock.module('@/hooks/useIsTextTruncated', () => ({ useIsTextTruncated: () => false }));
-mock.module('@/hooks/useOpenCodeReadiness', () => ({
-  useOpenCodeReadiness: () => ({ isReady: true, isUnavailable: false }),
-}));
 mock.module('@/lib/device', () => ({ useDeviceInfo: () => ({ isTouch: false }) }));
-mock.module('@/lib/desktop', () => ({ isDesktopShell: () => false }));
 mock.module('@/lib/startupTrace', () => ({ markStartupTrace: () => undefined }));
 
 const { ModelControls } = await import('./ModelControls');
@@ -315,10 +331,21 @@ const installDom = () => {
 const renderModelControls = async (props: React.ComponentProps<typeof ModelControls> = {}) => {
   const dom = installDom();
   const root = createRoot(dom.container);
+  const theme = getThemeById('openchamber-dark');
+  if (!theme) throw new Error('Expected built-in theme');
+  const themeContext: ThemeContextValue = {
+    currentTheme: theme, availableThemes: [theme], customThemeIds: [], customThemesLoading: false,
+    isSystemPreference: false, themeMode: 'dark', lightThemeId: 'openchamber-light', darkThemeId: 'openchamber-dark',
+    setTheme: () => undefined, setSystemPreference: () => undefined, setThemeMode: () => undefined,
+    setLightThemePreference: () => undefined, setDarkThemePreference: () => undefined,
+    reloadCustomThemes: async () => undefined, importTheme: async () => theme, deleteImportedTheme: async () => undefined,
+  };
   await act(async () => root.render(
-    <I18nProvider>
-      <ModelControls {...props} />
-    </I18nProvider>,
+    <ThemeSystemContext.Provider value={themeContext}>
+      <I18nProvider>
+        <ModelControls {...props} />
+      </I18nProvider>
+    </ThemeSystemContext.Provider>,
   ));
   return {
     dom,
@@ -335,9 +362,15 @@ describe('ModelControls effort restore', () => {
     overrideWrites.length = 0;
     latestUserChoice = null;
     forcePreserveManualOverride = null;
+    useSessionUIStore.setState({ currentSessionId: SESSION_ID });
     useUIStore.setState({ isMobile: false, isModelSelectorOpen: false });
     useSelectionStore.setState({ savedVariant: undefined });
     useConfigStore.setState({
+      providers: [provider],
+      agents: [agent],
+      providersLoaded: true,
+      agentsLoaded: true,
+      settingsDefaultsLoaded: true,
       currentProviderId: PROVIDER_ID,
       currentModelId: MODEL_ID,
       currentAgentName: AGENT,
@@ -346,6 +379,31 @@ describe('ModelControls effort restore', () => {
       settingsDefaultVariant: undefined,
       selectionSource: 'auto',
     });
+  });
+
+  test('a draft inherits a pinned agent variant over the settings default', async () => {
+    useSessionUIStore.setState({ currentSessionId: null });
+    useConfigStore.setState({
+      agents: [{
+        ...agent,
+        model: { providerID: PROVIDER_ID, modelID: MODEL_ID },
+        variant: 'high',
+      }],
+      currentVariant: 'high',
+      currentVariantSelection: { override: undefined, inherited: 'high' },
+      settingsDefaultVariant: 'low',
+    });
+
+    const { cleanup } = await renderModelControls();
+    try {
+      expect(useConfigStore.getState().currentVariant).toBe('high');
+      expect(useConfigStore.getState().currentVariantSelection).toEqual({
+        override: undefined,
+        inherited: 'high',
+      });
+    } finally {
+      await cleanup();
+    }
   });
 
   test('restores the concrete effort the session history carries', async () => {
@@ -364,6 +422,155 @@ describe('ModelControls effort restore', () => {
     }
   });
 
+  test('a draft keeps its chosen model and effort through a provider discovery gap', async () => {
+    useSessionUIStore.setState({ currentSessionId: null });
+    useConfigStore.setState({
+      providers: [], currentVariant: 'high', settingsDefaultVariant: 'high',
+      currentVariantSelection: { override: 'high', inherited: 'high' },
+    });
+    const { dom, cleanup } = await renderModelControls();
+    try {
+      expect(useConfigStore.getState().currentModelId).toBe(MODEL_ID);
+      expect(useConfigStore.getState().currentVariant).toBe('high');
+      expect(overrideWrites).toEqual([]);
+      await act(async () => { useConfigStore.setState({ providers: [provider] }); });
+      expect(dom.container.textContent).toContain(MODEL_ID);
+      expect(useConfigStore.getState().currentVariant).toBe('high');
+      expect(overrideWrites).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('a project draft inherits its own effort instead of the global default', async () => {
+    useSessionUIStore.setState({ currentSessionId: null });
+    useConfigStore.setState({
+      currentVariant: 'high', settingsDefaultVariant: 'low',
+      currentVariantSelection: { override: undefined, inherited: 'high' },
+    });
+    const { cleanup } = await renderModelControls();
+    try {
+      expect(useConfigStore.getState().currentVariant).toBe('high');
+      expect(useConfigStore.getState().currentVariantSelection.override).toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  for (const ready of [true, false]) {
+    test(`a saved Auto ${ready ? 'wins over' : 'is not overwritten by'} the model history ran on`, async () => {
+      latestUserChoice = { id: 'msg-1', agent: AGENT, providerID: PROVIDER_ID, modelID: MODEL_ID, variant: undefined };
+      const selections = useSelectionStore.getState();
+      // Picking Auto records it for the session and for the agent alike.
+      const auto = { providerId: AUTO_PROVIDER_ID, modelId: AUTO_MODEL_ID };
+      const getSaved = spyOn(selections, 'getSessionModelSelection');
+      const getAgentSaved = spyOn(selections, 'getAgentModelForSession');
+      getSaved.mockReturnValue(auto);
+      getAgentSaved.mockReturnValue(auto);
+      const saveModel = spyOn(selections, 'saveSessionModelSelection');
+      useRoutingStore.setState({ available: ready, autoReady: ready });
+      const { cleanup } = await renderModelControls();
+      try {
+        const { currentProviderId, currentModelId } = useConfigStore.getState();
+        if (ready) {
+          expect([currentProviderId, currentModelId]).toEqual([AUTO_PROVIDER_ID, AUTO_MODEL_ID]);
+        } else {
+          expect([currentProviderId, currentModelId]).toEqual([PROVIDER_ID, MODEL_ID]);
+        }
+        // History must never replace the saved Auto, ready or not.
+        expect(saveModel.mock.calls.some(([, providerId, modelId]) => !isAutoModel(providerId, modelId))).toBe(false);
+      } finally {
+        await cleanup();
+        for (const spy of [getSaved, getAgentSaved, saveModel]) spy.mockRestore();
+        useSelectionStore.setState(selections);
+        useRoutingStore.setState({ available: false, autoReady: false });
+      }
+    });
+  }
+
+  for (const savedVariant of ['high', null]) {
+    test(`a saved effort choice wins over older message history: ${savedVariant}`, async () => {
+      latestUserChoice = { id: 'old', agent: AGENT, providerID: PROVIDER_ID, modelID: MODEL_ID, variant: 'low' };
+      useSelectionStore.setState({ savedVariant });
+      const { cleanup } = await renderModelControls();
+      try {
+        expect(useSelectionStore.getState().savedVariant).toBe(savedVariant);
+        expect(useConfigStore.getState().currentVariant).toBe(savedVariant ?? undefined);
+      } finally {
+        await cleanup();
+      }
+    });
+  }
+
+  for (const mobile of [false, true]) {
+    test(`keeps loading labels until selections arrive (${mobile ? 'mobile' : 'desktop'})`, async () => {
+      useUIStore.setState({ isMobile: mobile });
+      useSessionUIStore.setState({ currentSessionId: null });
+      useConfigStore.setState({
+        providers: [], agents: [], providersLoaded: false, agentsLoaded: false, settingsDefaultsLoaded: false,
+        currentProviderId: '', currentModelId: '', currentAgentName: undefined,
+      });
+      const { dom, cleanup } = await renderModelControls();
+      const modelLabel = () => dom.container.querySelector('.model-controls__model-trigger')?.textContent;
+      const agentLabel = () => dom.container.querySelector('.model-controls__agent-label')?.textContent;
+      try {
+        expect(modelLabel()).toContain('Loading');
+        expect(agentLabel()).toContain('Loading');
+        await act(async () => { useConfigStore.setState({ providers: [provider], providersLoaded: true }); });
+        expect(modelLabel()).toContain('Loading');
+        expect(agentLabel()).toContain('Loading');
+        await act(async () => {
+          useConfigStore.setState({
+            settingsDefaultsLoaded: true, currentProviderId: PROVIDER_ID, currentModelId: MODEL_ID,
+            currentAgentName: AGENT,
+          });
+        });
+        expect(modelLabel()).toContain(MODEL_ID);
+        expect(agentLabel()).toBe('Build');
+        await act(async () => { useConfigStore.setState({ agents: [agent], agentsLoaded: true }); });
+        expect(modelLabel()).toContain(MODEL_ID);
+        expect(agentLabel()).toBe('Build');
+      } finally {
+        await cleanup();
+      }
+    });
+
+    test(`shows known choices before catalogs arrive (${mobile ? 'mobile' : 'desktop'})`, async () => {
+      useUIStore.setState({ isMobile: mobile });
+      useSessionUIStore.setState({ currentSessionId: null });
+      useConfigStore.setState({ providers: [], agents: [], providersLoaded: false, agentsLoaded: false });
+      const { dom, cleanup } = await renderModelControls();
+      try {
+        expect(dom.container.querySelector('.model-controls__model-trigger')?.textContent?.toLowerCase()).toContain(MODEL_ID);
+        expect(dom.container.querySelector('.model-controls__agent-label')?.textContent).toBe('Build');
+      } finally {
+        await cleanup();
+      }
+    });
+  }
+
+  test('enables the agent picker before providers and distinguishes a completed empty catalog', async () => {
+    useUIStore.setState({ isMobile: true });
+    useSessionUIStore.setState({ currentSessionId: null });
+    useConfigStore.setState({
+      providers: [], providersLoaded: false, agents: [agent], agentsLoaded: true,
+      currentProviderId: '', currentModelId: '', currentAgentName: AGENT,
+    });
+    const { dom, cleanup } = await renderModelControls();
+    try {
+      expect(dom.container.querySelector('.model-controls__agent-trigger')?.hasAttribute('disabled')).toBe(false);
+      expect(dom.container.querySelector('.model-controls__model-trigger')?.hasAttribute('disabled')).toBe(true);
+      expect(dom.container.querySelector('.model-controls__model-trigger')?.textContent).toContain('Loading');
+      await act(async () => {
+        useConfigStore.setState({ providersLoaded: true, agents: [], currentAgentName: undefined });
+      });
+      expect(dom.container.querySelector('.model-controls__model-trigger')?.textContent?.toLowerCase()).toContain('select model');
+      expect(dom.container.querySelector('.model-controls__agent-label')?.textContent?.toLowerCase()).toContain('select agent');
+    } finally {
+      await cleanup();
+    }
+  });
+
   test('history without an effort records no choice instead of an explicit Default', async () => {
     latestUserChoice = { id: 'msg-2', agent: AGENT, providerID: PROVIDER_ID, modelID: MODEL_ID };
 
@@ -373,6 +580,23 @@ describe('ModelControls effort restore', () => {
       expect(useSelectionStore.getState().savedVariant).toBe(undefined);
       expect(useConfigStore.getState().currentVariantSelection.override).toBe(undefined);
     } finally {
+      await cleanup();
+    }
+  });
+
+  test('does not reapply persisted session selections after a live agent change', async () => {
+    const selections = useSelectionStore.getState();
+    const getSessionModel = spyOn(selections, 'getSessionModelSelection');
+    const { cleanup } = await renderModelControls();
+    try {
+      const callsAfterHydration = getSessionModel.mock.calls.length;
+
+      await act(async () => useConfigStore.setState({ currentAgentName: 'plan' }));
+
+      expect(getSessionModel.mock.calls.length).toBe(callsAfterHydration);
+      expect(useConfigStore.getState().currentAgentName).toBe('plan');
+    } finally {
+      getSessionModel.mockRestore();
       await cleanup();
     }
   });

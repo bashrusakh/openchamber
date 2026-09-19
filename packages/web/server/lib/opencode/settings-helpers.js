@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 
 import { isAgentMemoryFeatureAvailable } from '../agent-memory/feature-flag.js';
+import { isRoutingFeatureAvailable } from '../routing/feature-flag.js';
 
 // Generated from packages/ui/src/lib/settings/registry.ts by
 // `bun run settings-registry:generate`; `registry.test.ts` fails when stale.
@@ -232,6 +233,11 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (typeof candidate.workStatusHiddenSectionsExplicit === 'boolean') {
       result.workStatusHiddenSectionsExplicit = candidate.workStatusHiddenSectionsExplicit;
+    }
+    if (Array.isArray(candidate.workStatusSectionOrder)) {
+      result.workStatusSectionOrder = [
+        ...new Set(candidate.workStatusSectionOrder.filter((entry) => typeof entry === 'string' && entry.length > 0)),
+      ];
     }
     if (typeof candidate.desktopLanAccessEnabled === 'boolean') {
       result.desktopLanAccessEnabled = candidate.desktopLanAccessEnabled;
@@ -472,6 +478,9 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (candidate.sessionRetentionAction === 'archive' || candidate.sessionRetentionAction === 'delete') {
       result.sessionRetentionAction = candidate.sessionRetentionAction;
+    }
+    if (typeof candidate.sessionRetentionOnlyArchived === 'boolean') {
+      result.sessionRetentionOnlyArchived = candidate.sessionRetentionOnlyArchived;
     }
     if (candidate.tunnelBootstrapTtlMs === null) {
       result.tunnelBootstrapTtlMs = null;
@@ -1005,6 +1014,8 @@ export const createSettingsHelpers = (dependencies) => {
       // Tells the client whether agent memory exists in this build at all, so
       // its settings row and panel tab can be absent rather than merely off.
       agentMemoryFeatureAvailable: isAgentMemoryFeatureAvailable(),
+      // Same idea for Jev routing: absent from the picker and Settings unless the build has it.
+      routingFeatureAvailable: isRoutingFeatureAvailable(),
       ...(pwaAppName ? { pwaAppName } : {}),
       pwaOrientation,
       mobileKeyboardMode,

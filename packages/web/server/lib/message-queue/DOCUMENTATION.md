@@ -22,6 +22,12 @@ session-knowledge runtime; routes registered in
 JSON bodies enabled in `opencode/core-routes.js`; stopped by
 `opencode/shutdown-runtime.js`.
 
+## Auto routing
+
+`resolvePromptBody` (the routing runtime) runs on the assembled body right
+before the prompt or command send, turning a queued `openchamber/auto` model
+into a real one. The queue captures the sentinel like any other send config.
+
 ## Item
 
 An item is what the UI would have sent itself, captured at queue time so the
@@ -31,6 +37,7 @@ send never re-resolves mutable UI state:
 {
   id, createdAt,
   content,        // raw text for display and editing
+  contextPreview?, // bounded display-only summary captured by the UI
   text,           // text to deliver (agent mention stripped, file mentions resolved); defaults to content
   agentMention?,  // delivered as an `agent` part
   attachments: [{ id, filename, mimeType, size, source, serverPath?, dataUrl }],
@@ -55,6 +62,12 @@ the context block back. The payload inside `metadata` is the UI's contract
 context entry). Public snapshots and broadcasts strip the payloads —
 attachment `dataUrl` (megabytes of base64) and `context` (a PR diff, say) —
 so they do not ride every update; the only way to get them back is a `take`.
+
+Snapshots retain `contextPreview`, capped at 100 characters plus an ellipsis.
+It carries the attached comment or context label when `content` is empty and
+never replaces editable text or delivered parts. Older items without a summary
+derive one from the attached comment metadata or the first non-instruction
+context text. This optional field needs no queue-file migration.
 
 ## Persistence
 
@@ -91,7 +104,10 @@ persisted "sending" flag would strand a message forever.
    next one: `GET /session/status` must not list the session as busy/retry,
    and the trailing message must not be an unfinished assistant reply (the
    status map only lists busy sessions, so a missed busy event leaves no
-   entry while a turn still streams). A failed fetch is unknown, never idle:
+   entry while a turn still streams). An unfinished reply created before this
+   runtime started does not block: its run died with the previous server and
+   will never complete, so a restored queue would wait on it forever. A reply
+   with no `created` time still blocks. A failed fetch is unknown, never idle:
    the tick re-arms with backoff.
 5. The head is marked in flight (broadcast), then sent:
    - text starting with `/` that names a command in OpenCode's `/command`

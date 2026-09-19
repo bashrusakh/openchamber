@@ -28,6 +28,7 @@ test('mobile comparisons drill into files, retry, resume, change source, and yie
   const requests: URL[] = [];
   const originalFetch = globalThis.fetch;
   let failBranchDiff = true;
+  let nestedIsRepository = true;
   globalThis.fetch = Object.assign(async (input: RequestInfo | URL) => {
     const url = new URL(input instanceof Request ? input.url : String(input), 'http://localhost');
     if (url.pathname === '/api/fs/home' || url.pathname === '/api/session-folders') return new Promise<Response>(() => {});
@@ -44,7 +45,17 @@ test('mobile comparisons drill into files, retry, resume, change source, and yie
       case '/api/git/log': return Response.json({ all: commits, latest: commits[0], total: commits.length });
       case '/api/git/commit-files': return Response.json({ files: [{ path: `commit-${url.searchParams.get('hash')?.[0]}.png`, previousPath: 'old.png', changeType: 'R', insertions: 0, deletions: 0, isBinary: true }] });
       case '/api/git/commit-diff': return Response.json({ diff: 'Binary files a/old.png and b/commit.png differ' });
-      case '/api/git/file-diff': return Response.json({ path: 'working.png', original: '', modified: '', isBinary: true });
+      case '/api/git/file-diff':
+        if (url.searchParams.get('path') === 'nested/' && nestedIsRepository) {
+          return Response.json({ error: 'Path is a separate Git repository: nested/', code: 'nested_repository' }, { status: 422 });
+        }
+        return Response.json({ path: url.searchParams.get('path'), original: '', modified: '', isBinary: true });
+      case '/api/github/pr/status': return Response.json({ connected: true, repo: { owner: 'upstream', repo: 'project' },
+        pr: { number: 42, title: 'Published PR', url: 'https://github.com/upstream/project/pull/42', state: 'open', draft: false, head: 'feature', base: 'main' } });
+      case '/api/github/pulls/list': return Response.json({ connected: true, repo: { owner: 'upstream', repo: 'project' },
+        prs: [{ number: 42, title: 'Published PR', url: 'https://github.com/upstream/project/pull/42', state: 'open', draft: false,
+          head: 'feature', base: 'main', sourceRepo: { owner: 'upstream', repo: 'project', source: 'upstream' } }], hasMore: false });
+      case '/api/walkthrough/pr-diff': return new Response('diff --git a/published.png b/published.png\nindex 1111111..2222222 100644\nBinary files a/published.png and b/published.png differ\n', { headers: { 'content-type': 'text/plain' } });
       default: throw new Error(`Unexpected request ${url.pathname}`);
     }
   }, originalFetch);
@@ -54,9 +65,11 @@ test('mobile comparisons drill into files, retry, resume, change source, and yie
   const { RuntimeAPIContext } = await import('@/contexts/runtimeAPIContext');
   const { createWebAPIs } = await import('../../../web/src/api/index');
   const { useGitStore } = await import('@/stores/useGitStore');
+  const { useGitHubAuthStore } = await import('@/stores/useGitHubAuthStore');
+  useGitHubAuthStore.setState({ hasChecked: true, status: { connected: true } });
   const { MobileChangesPane } = await import('./MobileChangesSurface');
   const apis = createWebAPIs();
-  const status: GitStatus = { current: 'feature', tracking: null, ahead: 0, behind: 0, files: [], isClean: true, diffStats: {} };
+  const status: GitStatus = { current: 'feature', tracking: null, ahead: 0, behind: 0, files: [], isClean: true, diffStats: { staged: {}, working: {} } };
   const seed = (directory: string, nextStatus = status) => {
     useGitStore.getState().setActiveDirectory(directory);
     const previous = useGitStore.getState().getDirectoryState(directory);
@@ -160,6 +173,17 @@ test('mobile comparisons drill into files, retry, resume, change source, and yie
     expect(commitRequest?.searchParams.get('previousPath')).toBe('old.png');
     expect(requests.filter((url) => url.pathname === '/api/git/range-diff').every((url) => url.searchParams.get('includeWorkingTree') === 'true')).toBe(true);
 
+    await click('[aria-label="Back"]');
+    await chooseMode('Pull Requests');
+    expect(container.querySelector('[aria-label="Sync Changes"]')).toBeNull();
+    expect(container.querySelector('[title="published.png"]')).not.toBeNull();
+    await openFile('published.png');
+    expect(container.textContent).toContain('Pull Requests · #42');
+    expect(container.textContent).toContain('Content of this file cannot be viewed.');
+    const prRequest = requests.find((url) => url.pathname === '/api/walkthrough/pr-diff');
+    expect(JSON.parse(prRequest?.searchParams.get('source') ?? '')).toEqual({ kind: 'pr', number: 42, sourceRepo: { owner: 'upstream', repo: 'project' } });
+    expect(requests.filter((url) => url.pathname === '/api/git/file-diff')).toHaveLength(0);
+
     await act(async () => { seed('/repo', { ...status, isClean: false, files: [{ path: 'working.png', index: 'M', working_dir: ' ' }] }); });
     initialDiff = { path: 'working.png', staged: true };
     await render();
@@ -170,6 +194,21 @@ test('mobile comparisons drill into files, retry, resume, change source, and yie
     expect(container.querySelector('[aria-label="Select change mode"]')?.textContent).toBe('Changes');
     expect(container.querySelector('[aria-label="Sync Changes"]')).not.toBeNull();
     expect(checkoutControl()).toBeDefined();
+
+    // A nested-repository answer must not outlive the read that produced it.
+    await act(async () => { seed('/repo', { ...status, isClean: false, files: [{ path: 'nested/', index: '?', working_dir: '?' }] }); });
+    initialDiff = { path: 'nested/', staged: false };
+    await render();
+    expect(container.textContent).toContain('Separate Git repository');
+    await click('[aria-label="Back"]');
+    nestedIsRepository = false;
+    initialDiff = { path: 'nested/', staged: false };
+    await render();
+    expect(container.querySelector('h2')?.textContent).toBe('nested/');
+    expect(container.textContent).not.toContain('Separate Git repository');
+    expect(container.textContent).toContain('Content of this file cannot be viewed.');
+    await click('[aria-label="Back"]');
+    await act(async () => { seed('/repo', { ...status, isClean: false, files: [{ path: 'working.png', index: 'M', working_dir: ' ' }] }); });
 
     await chooseMode('Branch');
     initialDiff = { path: 'working.png', staged: true };
@@ -191,4 +230,7 @@ test('mobile comparisons drill into files, retry, resume, change source, and yie
       else Reflect.deleteProperty(globalThis, name);
     }
   }
-});
+  // One scenario loads the Changes surface and walks every mode in happy-dom.
+  // It takes about a second on an idle machine, but the full suite runs four
+  // test processes at once, and there it crossed the 5 second default on Windows.
+}, 30_000);

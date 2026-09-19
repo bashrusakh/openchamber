@@ -33,7 +33,15 @@ Use this doc when you ask an agent to change tool/header/description behavior.
 
 - `toolPresentation.tsx`
   - Shared icon mapping for tool names (`getToolIcon`).
-  - Used by both `ProgressiveGroup.tsx` and `ToolPart.tsx`.
+  - Used by `ProgressiveGroup.tsx`, `ToolPart.tsx`, and `ToolOutputDialog.tsx`.
+  - Takes an optional extension rule (below) whose `icon` wins when the sprite carries it.
+
+- Extension tool presentations (`contributes.tools` in a guest manifest)
+  - The registry is `lib/guests/tool-presentation.ts`: `useGuestToolPresentation(part.tool)` / `resolveGuestToolPresentation` return the first matching rule of an active guest (exact `match` beats a suffix wildcard; first extension wins) or `null`. Rules are compiled once per catalog array; each part does one linear scan.
+  - The lookup always gets the **full** tool name OpenCode reported (`mcp.jira.search`); `normalizeToolName` still feeds every built-in switch, so built-in behavior is untouched when there is no rule.
+  - Hook points, each falling back to today's code when the rule is `null` or silent on that field: icon (`getToolIcon`), header title (`title` template, else `name`, else `getToolMetadata`), header subtitle (`subtitle` template replaces both the description and the justification text), and the expanded body (`output`: `text` / `code` / `json` / `markdown` / `table`, checked at the top of `renderResultContent` and inside `ToolScrollableTextOutput`; `auto` keeps detection). A `table` whose output is not an array or `{ items: [] }` falls through to detection.
+  - `GuestToolTable.tsx` draws the table with the same cell classes the markdown decorator gives assistant tables, capped at 200 rows with a count line.
+  - VS Code and mobile mark the guest catalog unsupported, so the registry is empty and nothing changes there.
 
 - `toolRenderUtils.ts`
   - Core classification helpers:
@@ -115,6 +123,22 @@ call. Per-file patches/counts take precedence over a whole-call patch; the two
 representations are never added together. Missing or truncated diffs suppress
 the line total rather than presenting a partial total as complete. Write input
 content is not evidence of added lines. Repeated records of one call count once.
+
+The completed-turn file pills under the final answer (the "show changed files"
+setting) use the same tool-result file identities, in first-touch order, with
+paths relative to the message's project root. The user message's
+`summary.diffs` is a working-tree snapshot between turn start and end, so it
+also lists edits made by other sessions or by hand in the same directory; it
+never decides which files belong to the turn on its own. It supplies a touched
+file's line counts, because those match the turn diff a pill opens; a file the
+snapshot does not list falls back to its tool patch and renders as a plain
+chip, since the turn diff has nothing to open for it. A file with no
+recoverable counts, or a snapshot entry without line changes, shows its name
+alone. One exception: edits delegated to `task` subagents live in child
+sessions the projection cannot see, so when a turn ran subagents the snapshot
+entries no own tool call touched are appended after the turn's own files. The
+list is projected once the last assistant message finished with `stop`, so no
+tool patch is parsed while the turn streams.
 
 ### Message parts
 
@@ -200,7 +224,7 @@ Why: only navigation tools use the compact static path; all other tools need obs
   `normalizeUserDisplayParts.ts`. Legacy pre-metadata messages still render
   via text sniffing (`<terminal_context>` blocks, `GitHub issue context (JSON)`
   and `Linear issue context (JSON)` prefixes).
-- Tools: `ToolPart.tsx`, `ToolPartDiffPreview.tsx`, `PlainDiffFallback.tsx`, `ProgressiveGroup.tsx`, `toolPresentation.tsx`, `toolRenderUtils.ts`, `ToolRevealOnMount.tsx`
+- Tools: `ToolPart.tsx`, `ToolPartDiffPreview.tsx`, `PlainDiffFallback.tsx`, `ProgressiveGroup.tsx`, `toolPresentation.tsx`, `toolRenderUtils.ts`, `ToolRevealOnMount.tsx`, `GuestToolTable.tsx`
 - Reasoning/justification: `ReasoningPart.tsx`, `JustificationBlock.tsx`
 - Status/placeholders: `WorkingPlaceholder.tsx`, `SessionActiveSpinner.tsx`, `MigratingPart.tsx`, `BusyDots.tsx`
 - Utility renderers: `VirtualizedCodeBlock.tsx`, `MinDurationShineText.tsx`
