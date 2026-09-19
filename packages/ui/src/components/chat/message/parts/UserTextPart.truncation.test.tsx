@@ -52,11 +52,6 @@ const makeTextPart = (text: string): TextPartFixture => ({
     text,
 });
 
-interface ResizeObserverStub extends ResizeObserver {
-    readonly targets: Set<Element>;
-    notify(): void;
-}
-
 // SAFETY: happy-dom types querySelector results as its own class instances;
 // the runtime objects satisfy React's expected HTMLElement shape because the
 // stub installed exactly these happy-dom classes as the global DOM types.
@@ -66,7 +61,7 @@ const installDomStub = () => {
     const previous = DOM_GLOBAL_NAMES.map(
         (name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const,
     );
-    const observers: ResizeObserverStub[] = [];
+    const observers: Array<{ notify(): void }> = [];
     class ResizeObserverStub implements ResizeObserver {
         readonly targets = new Set<Element>();
 
