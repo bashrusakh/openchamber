@@ -2,12 +2,27 @@
 
 ## Purpose
 
-This module exposes OpenChamber orchestration to agents as one typed OpenCode
-custom tool named `openchamber`. It is injected only when OpenChamber launches
-and owns the OpenCode process, and only while the persisted
-`agentControlToolEnabled` setting is not `false` (default on; toggled in
-Settings → General → OpenCode CLI and applied on the next managed OpenCode
-restart).
+This module exposes OpenChamber to agents as typed OpenCode custom tools. There
+are two, because controlling sessions and driving a page are separate intents
+the user can want independently:
+
+- `openchamber` — projects, sessions, worktrees, and scheduled tasks. Enabled
+  while the persisted `agentControlToolEnabled` setting is not `false`.
+- `openchamber_web` — looking at and interacting with the page in OpenChamber's
+  browser panel. Enabled while `agentWebToolEnabled` is not `false`.
+
+Both default to on, are toggled in Settings → General → OpenCode CLI, and apply
+on the next managed OpenCode restart. Each tool carries only its own actions and
+only the parameters those actions use, so turning one off removes its inputs
+from the schema rather than leaving them visible. The plugin is injected only
+when OpenChamber launches and owns the OpenCode process, and not at all when
+both settings are `false`.
+
+- The plugin accepts the action's inputs either inside `parameters` or beside
+  `action`, because models produce both shapes; an explicit `parameters` object
+  wins on a conflict. Rejecting the flattened shape turned a call that plainly
+  carried a `url` into "url is required", which reads as a broken tool rather
+  than a malformed call.
 
 ## Runtime flow
 
@@ -15,8 +30,10 @@ restart).
 2. `prepareManagedOpenCodeEnv()` materializes the plugin under
    `<openchamber-data-dir>/agent-tool/` and appends its `file://` URL to
    `OPENCODE_CONFIG_CONTENT` without replacing existing plugin entries.
-3. A random per-child token and loopback callback URL are added only to the
-   managed OpenCode child environment.
+3. A random per-child token and callback URL are added only to the managed
+   OpenCode child environment. The URL points at loopback, except when the
+   listener is bound to one concrete address (`--host <ip>`): that socket does
+   not answer on loopback, so the URL uses the bound address instead.
 4. The plugin calls `POST /api/openchamber/agent-tool` with its typed input and
    OpenCode's authoritative session directory.
 5. The route delegates the fixed action allowlist directly to the shared
@@ -33,6 +50,9 @@ restart).
 - The tool exposes one shared parameter object rather than repeating parameters
   in a large per-action union. Action descriptions carry only required inputs,
   defaults, or one non-obvious semantic detail.
+- The action schema carries `oneOf` and no `enum`. A node combining `enum` and
+  `oneOf` is valid JSON Schema, but some OpenAI-compatible gateways reject it
+  and answer with an empty completion instead of an error.
 - Obvious fields rely on their names and JSON types. Parameter descriptions are
   reserved for formats, dependencies, scope, and behavior that cannot be safely
   inferred from the field name.
@@ -54,10 +74,18 @@ restart).
 
 ## Security invariants
 
-- The callback accepts loopback requests only and requires the current
-  per-child bearer token using a timing-safe comparison.
+- The callback accepts same-machine requests only and requires the current
+  per-child bearer token using a timing-safe comparison. Same-machine means a
+  loopback source, or, for a listener bound to one concrete address, a source
+  equal to that address: the OS sources a local connection to `<ip>` from
+  `<ip>`. A wildcard bind keeps the loopback-only rule, and another machine on
+  the network always arrives with its own address.
 - The token is never persisted, logged, returned to the UI, or written into
   the materialized plugin.
+- The plugin adds the callback host to `NO_PROXY`/`no_proxy` inside the managed
+  child when it loads. Without that, an `HTTP_PROXY` in the child's environment
+  would receive a non-loopback callback, token included, because `fetch` has no
+  per-request way to skip the environment proxy.
 - Inputs map to a fixed action and parameter allowlist. There is no arbitrary
   CLI, shell, route, or URL forwarding.
 - Session/worktree deletion and project-path registration are not exposed.
@@ -88,3 +116,17 @@ error state.
 - VS Code: not injected; the extension owns a separate OpenCode lifecycle.
 - Hosted and Capacitor mobile clients use the server's managed OpenCode tool
   when connected to such a server; no tool runs in the client runtime.
+
+## The calling tool is part of the request
+
+Each generated tool sends its own name with every callback. Models routinely
+drop the namespace their tool's name appears to supply — `openchamber_memory`
+asked for `memory.read` gets called as `read` — and resolving the bare name
+inside the calling tool's action set makes that unambiguous even where it is not
+globally (`delete` belongs to both schedule and memory).
+
+Resolution never reaches outside the tool that asked: `open` from the memory
+tool fails rather than driving the browser. An unresolvable action answers with
+the actions that tool actually has, because an error that only says
+"unsupported" leaves the model to guess a second wrong name — which is exactly
+what happened before this existed.

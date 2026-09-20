@@ -408,20 +408,78 @@ export const desktopInstallIdGet = async (): Promise<string> => {
 };
 
 const RELAY_PROBE_TIMEOUT_MS = 8_000;
+// Whole-probe budget, spanning the tunnel's own reconnect attempts.
+const RELAY_PROBE_DEADLINE_MS = 15_000;
+const RELAY_PROBE_RETRY_DELAY_MS = 400;
+
+const fetchRelayProbe = async (
+  tunnel: ReturnType<typeof createRelayTunnelClient>,
+  path: string,
+  timeoutMs: number,
+  init?: RequestInit,
+): Promise<Response> => {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await tunnel.fetch(path, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+  }
+};
 
 /**
- * Reachability check for a relay host: open a throwaway E2EE tunnel and hit
- * /health. Relay hosts have no HTTP address for `desktopHostProbe`. Hard
- * timeout: a ghost relay registration (relay lost the host, host doesn't know)
- * leaves the tunnel in `connecting` forever — the probe must report
- * unreachable instead of hanging every status/switch flow with it.
+ * Reach the host, letting the tunnel's own reconnect do the work.
+ *
+ * The tunnel rejects everything waiting on its channel the moment ONE connect
+ * attempt fails, even though it has already scheduled the next one with
+ * backoff. That is right for app traffic — `runtime-fetch` retries for itself —
+ * but it made a one-shot probe report a durable red "Unreachable" for a host
+ * that answers when the user presses refresh a second later. A cold start is
+ * exactly when that first attempt loses: DNS and TLS to the relay are cold, the
+ * remote host may still be re-establishing its control connection, and the
+ * probe competes with the app's own bootstrap traffic.
+ *
+ * A terminal tunnel state (auth failed, duplicate client, limit reached) will
+ * not resolve by waiting, so it ends the probe immediately.
+ */
+const fetchRelayProbeUntilDeadline = async (
+  tunnel: ReturnType<typeof createRelayTunnelClient>,
+  path: string,
+  deadline: number,
+  init?: RequestInit,
+): Promise<Response> => {
+  for (;;) {
+    // Every attempt is capped by what is LEFT of the budget, not by the full
+    // per-request timeout: an attempt started just under the deadline would
+    // otherwise run the whole 8s past it, and the switch flow waits on this.
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error('relay probe deadline exceeded');
+    try {
+      return await fetchRelayProbe(tunnel, path, Math.min(RELAY_PROBE_TIMEOUT_MS, remainingMs), init);
+    } catch (error) {
+      if (tunnel.getStatus().state === 'error') throw error;
+      if (Date.now() >= deadline) throw error;
+      await new Promise((resolve) => window.setTimeout(resolve, RELAY_PROBE_RETRY_DELAY_MS));
+    }
+  }
+};
+
+/**
+ * Reachability and client-auth check for a relay host: open a throwaway E2EE
+ * tunnel, verify `/health`, then verify `/auth/session` with the saved bearer.
+ * Relay hosts have no HTTP address for `desktopHostProbe`. Bounded by
+ * `RELAY_PROBE_DEADLINE_MS`: a ghost relay registration (relay lost the host,
+ * host doesn't know) leaves the tunnel reconnecting forever — the probe must
+ * report unreachable rather than hang every status/switch flow with it — while
+ * still spanning enough reconnect attempts that a cold first attempt is not
+ * mistaken for an unreachable instance.
  */
 export const probeRelayDesktopHost = async (
   relay: DesktopHostRelay,
   // With `keepTunnel`, an 'ok' probe RETURNS its live tunnel (the caller owns
   // it — typically adopting it as the runtime tunnel, skipping a second
   // WebSocket connect + E2EE handshake); every other outcome closes it.
-  options?: { keepTunnel?: boolean },
+  options?: { keepTunnel?: boolean; clientToken?: string | null; requestHeaders?: Record<string, string> | null },
 ): Promise<HostProbeResult & { tunnel?: ReturnType<typeof createRelayTunnelClient> }> => {
   const tunnel = createRelayTunnelClient({
     relayUrl: relay.relayUrl,
@@ -429,18 +487,22 @@ export const probeRelayDesktopHost = async (
     hostEncPubJwk: relay.hostEncPubJwk,
   });
   const startedAt = Date.now();
+  const deadline = startedAt + RELAY_PROBE_DEADLINE_MS;
   let keep = false;
   try {
-    const response = await Promise.race([
-      tunnel.fetch('/health'),
-      new Promise<null>((resolve) => {
-        const timer = window.setTimeout(() => resolve(null), RELAY_PROBE_TIMEOUT_MS);
-        if (typeof timer !== 'number' && typeof (timer as { unref?: () => void }).unref === 'function') {
-          (timer as unknown as { unref: () => void }).unref();
-        }
-      }),
-    ]);
-    if (!response?.ok) return { status: 'unreachable', latencyMs: 0 };
+    const response = await fetchRelayProbeUntilDeadline(tunnel, '/health', deadline);
+    if (!response.ok) return { status: 'unreachable', latencyMs: 0 };
+    const headers = new Headers({ Accept: 'application/json' });
+    for (const [name, value] of Object.entries(options?.requestHeaders || {})) {
+      if (name.toLowerCase() !== 'authorization') headers.set(name, value);
+    }
+    const clientToken = options?.clientToken?.trim();
+    if (clientToken) headers.set('Authorization', `Bearer ${clientToken}`);
+    const sessionResponse = await fetchRelayProbeUntilDeadline(tunnel, '/auth/session', deadline, { headers });
+    if (sessionResponse.status === 401 || sessionResponse.status === 403) {
+      return { status: 'auth', latencyMs: Math.max(0, Date.now() - startedAt) };
+    }
+    if (!sessionResponse.ok) return { status: 'unreachable', latencyMs: 0 };
     keep = options?.keepTunnel === true;
     return { status: 'ok', latencyMs: Math.max(0, Date.now() - startedAt), ...(keep ? { tunnel } : {}) };
   } catch {

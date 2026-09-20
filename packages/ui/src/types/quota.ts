@@ -3,6 +3,7 @@ export type QuotaProviderId =
   | 'codex'
   | 'cursor'
   | 'claude'
+  | 'cline-pass'
   | 'github-copilot'
   | 'github-copilot-addon'
   | 'google'
@@ -15,7 +16,12 @@ export type QuotaProviderId =
   | 'minimax-cn-coding-plan'
   | 'ollama-cloud'
   | 'wafer'
-  | 'opencode-go';
+  | 'opencode-go'
+  | 'deepseek'
+  | 'exe-dev'
+  | 'hyper'
+  | 'neuralwatt'
+  | 'xai';
 
 export interface UsageWindow {
   usedPercent: number | null;
@@ -42,6 +48,8 @@ export interface ProviderResult {
   ok: boolean;
   configured: boolean;
   error?: string;
+  /** Subscription tier reported by the provider, when it exposes one. */
+  planLabel?: string | null;
   usage: ProviderUsage | null;
   fetchedAt: number;
 }

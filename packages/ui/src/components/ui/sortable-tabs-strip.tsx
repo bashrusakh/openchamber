@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/useUIStore';
 import { useDeviceInfo } from '@/lib/device';
 import { Icon } from "@/components/icon/Icon";
+import { ContextMenu, ContextMenuContent, ContextMenuTrigger } from '@/components/ui/context-menu';
 
 export type SortableTabsStripItem = {
   id: string;
@@ -44,6 +45,20 @@ type SortableTabsStripProps = {
   inactiveTabsIconOnly?: boolean;
   animateActivePill?: boolean;
   activePillLowercase?: boolean;
+  /** Position the active-pill indicator with left/top instead of translate3d.
+      Use when the strip lives inside an ancestor that transform-animates
+      (e.g. a sliding mobile drawer): creating a composited layer mid-slide
+      flickers in WKWebView. Tab-switch animation stays (layout transition). */
+  nonCompositedIndicator?: boolean;
+  /** Per-tab right-click context menu. Return the menu items for the given tab,
+      or null/undefined to disable the context menu for that tab. */
+  tabContextMenu?: (args: {
+    id: string;
+    index: number;
+    isActive: boolean;
+    allIds: string[];
+    close: () => void;
+  }) => React.ReactNode;
   className?: string;
 };
 
@@ -100,6 +115,8 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
   inactiveTabsIconOnly = false,
   animateActivePill,
   activePillLowercase = true,
+  nonCompositedIndicator = false,
+  tabContextMenu,
   className,
 }) => {
   const { t } = useI18n();
@@ -409,13 +426,21 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
               // than a hard border, so the pill reads as raised above the track.
               'border border-[color-mix(in_srgb,var(--foreground)_7%,transparent)]',
               'shadow-[0_1px_2px_color-mix(in_srgb,var(--foreground)_10%,transparent),0_2px_6px_color-mix(in_srgb,var(--foreground)_6%,transparent)]',
-              shouldAnimateActivePill && pillTransitionEnabled && 'pill-tabs__indicator--is-animated'
+              shouldAnimateActivePill && pillTransitionEnabled
+                && (nonCompositedIndicator ? 'pill-tabs__indicator--is-animated-layout' : 'pill-tabs__indicator--is-animated')
             )}
-            style={{
-              transform: `translate3d(${pillRect.left + pillNudge}px, ${pillRect.top}px, 0)`,
-              width: `${pillRect.width}px`,
-              height: `${pillRect.height}px`,
-            }}
+            style={nonCompositedIndicator
+              ? {
+                  left: `${pillRect.left + pillNudge}px`,
+                  top: `${pillRect.top}px`,
+                  width: `${pillRect.width}px`,
+                  height: `${pillRect.height}px`,
+                }
+              : {
+                  transform: `translate3d(${pillRect.left + pillNudge}px, ${pillRect.top}px, 0)`,
+                  width: `${pillRect.width}px`,
+                  height: `${pillRect.height}px`,
+                }}
           />
         ) : null}
         {useUnderlineIndicator && pillRect ? (
@@ -431,7 +456,7 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
             aria-hidden
           />
         ) : null}
-        {items.map((item) => {
+        {items.map((item, index) => {
           const isActive = item.id === activeId;
           const showInactiveIconOnly = inactiveTabsIconOnly && usesActivePillIndicator && !isActive && Boolean(item.icon);
           const shouldShowLabel = !showInactiveIconOnly;
@@ -465,9 +490,18 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
                 }
               }
             : undefined;
-          return (
-            <Wrapper key={item.id} id={item.id} className={wrapperClassName}>
-              <div
+          const tabMenuItems = !isMobile && tabContextMenu
+            ? tabContextMenu({
+              id: item.id,
+              index,
+              isActive,
+              allIds: itemIDs,
+              close: () => onClose?.(item.id),
+            })
+            : null;
+
+          const tabElement = (
+            <div
                 ref={(element) => setTabRef(item.id, element)}
                 onAuxClick={handleAuxClick}
                 onMouseDown={handleMouseDown}
@@ -622,6 +656,24 @@ export const SortableTabsStrip: React.FC<SortableTabsStripProps> = ({
                   </button>
                 ) : null}
               </div>
+          );
+
+          return (
+            <Wrapper key={item.id} id={item.id} className={wrapperClassName}>
+              {tabMenuItems ? (
+                <ContextMenu>
+                  <ContextMenuTrigger
+                    render={(triggerProps) => (
+                      <div {...triggerProps} className={cn('flex h-full min-w-0', triggerProps.className)}>
+                        {tabElement}
+                      </div>
+                    )}
+                  />
+                  <ContextMenuContent className="w-52">{tabMenuItems}</ContextMenuContent>
+                </ContextMenu>
+              ) : (
+                tabElement
+              )}
             </Wrapper>
           );
         })}

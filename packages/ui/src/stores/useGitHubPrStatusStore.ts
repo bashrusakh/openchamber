@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { runBackgroundNetworkTask } from '@/lib/background-network';
 import { persist } from 'zustand/middleware';
 import type { GitHubPullRequestStatus, RuntimeAPIs } from '@/lib/api/types';
 import { mapWithConcurrency } from '@/lib/concurrency';
@@ -179,6 +180,98 @@ const getSignatureFromEntry = (entry: PrStatusEntry | null | undefined): string 
   return JSON.stringify([identity.runtimeKey, identity.directory, identity.branch, identity.remoteName ?? 'auto']);
 };
 
+const parseStatusKey = (key: string): { runtimeKey: string; directory: string; branch: string; remote: string } | null => {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    if (!Array.isArray(parsed) || parsed.length !== 4 || parsed.some((part) => typeof part !== 'string')) {
+      return null;
+    }
+    const [runtimeKey, directory, branch, remote] = parsed as [string, string, string, string];
+    return { runtimeKey, directory, branch, remote };
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Best already-resolved entry for the same directory+branch under a different
+ * remote key. Used to seed a freshly created entry so switching remote keys
+ * (e.g. 'auto' -> 'origin') shows the known PR immediately instead of a
+ * "checking status" flash; the entry's own refresh remains authoritative.
+ */
+const findResolvedSiblingEntry = (
+  entries: Record<string, PrStatusEntry>,
+  key: string,
+): PrStatusEntry | null => {
+  const target = parseStatusKey(key);
+  if (!target) {
+    return null;
+  }
+
+  let fallback: PrStatusEntry | null = null;
+  for (const [entryKey, entry] of Object.entries(entries)) {
+    if (entryKey === key || !entry.isInitialStatusResolved || !entry.status) {
+      continue;
+    }
+    const parsed = parseStatusKey(entryKey);
+    if (!parsed
+      || parsed.runtimeKey !== target.runtimeKey
+      || parsed.directory !== target.directory
+      || parsed.branch !== target.branch) {
+      continue;
+    }
+    const resolvedRemote = entry.resolvedRemoteName ?? entry.status.resolvedRemoteName ?? null;
+    if (target.remote !== 'auto' && resolvedRemote && resolvedRemote !== target.remote) {
+      continue;
+    }
+    if (parsed.remote === 'auto') {
+      return entry;
+    }
+    fallback = fallback ?? entry;
+  }
+
+  return fallback;
+};
+
+/**
+ * Freshest known status for a directory+branch across ALL remote-keyed
+ * entries. Passive readers (e.g. the git-view PR chip) should use this
+ * instead of a single key: the entry being actively watched/refreshed may be
+ * keyed by a concrete remote while the 'auto' entry goes stale.
+ */
+const getFreshestPrEntryForBranch = (
+  entries: Record<string, PrStatusEntry>,
+  directory: string,
+  branch: string,
+): PrStatusEntry | null => {
+  const runtimeKey = getRuntimeKey();
+  let best: PrStatusEntry | null = null;
+  for (const [key, entry] of Object.entries(entries)) {
+    if (!entry.status) {
+      continue;
+    }
+    const parsed = parseStatusKey(key);
+    if (!parsed
+      || parsed.runtimeKey !== runtimeKey
+      || parsed.directory !== directory
+      || parsed.branch !== branch) {
+      continue;
+    }
+    if (!best || entry.lastRefreshAt > best.lastRefreshAt) {
+      best = entry;
+    }
+  }
+  return best;
+};
+
+export const getFreshestPrStatusForBranch = (
+  entries: Record<string, PrStatusEntry>,
+  directory: string,
+  branch: string,
+): GitHubPullRequestStatus | null => {
+  return getFreshestPrEntryForBranch(entries, directory, branch)?.status ?? null;
+};
+
 const getKeysBySignature = (entries: Record<string, PrStatusEntry>, signature: string): string[] => {
   return Object.entries(entries)
     .filter(([, entry]) => getSignatureFromEntry(entry) === signature)
@@ -275,15 +368,22 @@ const toPersistedEntry = (entry: PrStatusEntry): PersistedPrStatusEntry => ({
   resolvedRemoteName: entry.resolvedRemoteName ?? entry.status?.resolvedRemoteName ?? null,
 });
 
-const hydrateEntry = (entry: PersistedPrStatusEntry | undefined): PrStatusEntry => ({
-  ...createEntry(),
-  status: entry?.status ?? null,
-  isInitialStatusResolved: entry?.isInitialStatusResolved ?? false,
-  lastRefreshAt: entry?.lastRefreshAt ?? 0,
-  lastDiscoveryPollAt: entry?.lastDiscoveryPollAt ?? 0,
-  identity: entry?.identity ?? null,
-  resolvedRemoteName: entry?.resolvedRemoteName ?? entry?.status?.resolvedRemoteName ?? null,
-});
+const hydrateEntry = (entry: PersistedPrStatusEntry | undefined): PrStatusEntry => {
+  // A persisted closed/merged PR is restored so the panel keeps showing the
+  // branch's PR history across a reload. It is never treated as live authority:
+  // `lastDiscoveryPollAt` is reset so the watcher revalidates it immediately and
+  // an open PR (or an authoritative empty result) replaces it.
+  const hasTerminalPr = isTerminalPrState(entry?.status?.pr?.state);
+  return {
+    ...createEntry(),
+    status: entry?.status ?? null,
+    isInitialStatusResolved: entry?.isInitialStatusResolved ?? false,
+    lastRefreshAt: entry?.lastRefreshAt ?? 0,
+    lastDiscoveryPollAt: hasTerminalPr ? 0 : (entry?.lastDiscoveryPollAt ?? 0),
+    identity: entry?.identity ?? null,
+    resolvedRemoteName: entry?.resolvedRemoteName ?? entry?.status?.resolvedRemoteName ?? null,
+  };
+};
 
 const boundEntries = (entries: Record<string, PrStatusEntry>): Record<string, PrStatusEntry> => {
   const all = Object.entries(entries);
@@ -331,10 +431,19 @@ export const useGitHubPrStatusStore = create<GitHubPrStatusStore>()(
           if (state.entries[key]) {
             return state;
           }
+          const sibling = findResolvedSiblingEntry(state.entries, key);
+          const seeded: PrStatusEntry = sibling
+            ? {
+                ...createEntry(),
+                status: sibling.status,
+                isInitialStatusResolved: true,
+                resolvedRemoteName: sibling.resolvedRemoteName ?? sibling.status?.resolvedRemoteName ?? null,
+              }
+            : createEntry();
           return {
             entries: boundEntries({
               ...state.entries,
-              [key]: createEntry(),
+              [key]: seeded,
             }),
           };
         });
@@ -379,6 +488,9 @@ export const useGitHubPrStatusStore = create<GitHubPrStatusStore>()(
             if (!entry || entry.watchers <= 0) {
               return;
             }
+            // Bootstrap retries only help discovery before any PR is known.
+            // Once a PR is cached — open or historical — the discovery interval
+            // owns revalidation.
             if (entry.status?.pr) {
               return;
             }
@@ -403,7 +515,11 @@ export const useGitHubPrStatusStore = create<GitHubPrStatusStore>()(
           }
 
           const hasPr = Boolean(entry.status?.pr);
-          if (!hasPr) {
+          // A closed/merged PR is history, not live status. It stays on the
+          // discovery cadence like a branch with no PR at all, so a newer open
+          // PR — or an authoritative empty result — replaces it on its own.
+          const isTerminal = isTerminalPrState(entry.status?.pr?.state);
+          if (!hasPr || isTerminal) {
             const now = Date.now();
             if (now - entry.lastDiscoveryPollAt < PR_DISCOVERY_INTERVAL_MS) {
               return;
@@ -424,10 +540,6 @@ export const useGitHubPrStatusStore = create<GitHubPrStatusStore>()(
               };
             });
             void get().refresh(key, { force: true, silent: true, markInitialResolved: true });
-            return;
-          }
-
-          if (isTerminalPrState(entry.status?.pr?.state)) {
             return;
           }
 
@@ -588,6 +700,7 @@ export const useGitHubPrStatusStore = create<GitHubPrStatusStore>()(
           return;
         }
 
+        const requestPrStatus = params.github.prStatus.bind(params.github);
         try {
           set((prev) => ({
             ...prev,
@@ -595,23 +708,43 @@ export const useGitHubPrStatusStore = create<GitHubPrStatusStore>()(
             totalRequestCount: prev.totalRequestCount + 1,
           }));
           await acquirePrStatusNetworkSlot();
-          let next: GitHubPullRequestStatus;
+          let next: GitHubPullRequestStatus | null;
           try {
-            if (!isCurrent()) return;
-            // Failed requests need the same non-forced cooldown as successful
-            // refreshes. Record only work that reaches the network slot so a
-            // stale queued request cannot suppress its replacement.
-            lastRefreshBySignature.set(signature, Date.now());
-            next = await params.github.prStatus(params.directory, params.branch, params.remoteName ?? undefined, { force: options?.force });
+            next = await runBackgroundNetworkTask(async () => {
+              if (!isCurrent()) return null;
+              // Keep PR reads inside the aggregate HTTP budget as well as the
+              // PR-specific cap. Separate caps otherwise occupy every socket.
+              lastRefreshBySignature.set(signature, Date.now());
+              return requestPrStatus(params.directory, params.branch, params.remoteName ?? undefined, { force: options?.force });
+            });
           } finally {
             releasePrStatusNetworkSlot();
           }
-          if (!isCurrent()) return;
+          if (!next || !isCurrent()) return;
           set((prev) => {
             const nextEntries = { ...prev.entries };
             signatureKeys.forEach((signatureKey) => {
               const current = nextEntries[signatureKey];
               if (!current) {
+                return;
+              }
+
+              // Freshness guard: the server may serve this response from its
+              // cache. If we already hold newer data (e.g. checks derived
+              // from a fresher pulls/context fetch), keep it and only clear
+              // the loading flag — never regress to an older snapshot.
+              const currentFetchedAt = current.status?.fetchedAt;
+              const nextFetchedAt = next.fetchedAt;
+              if (typeof currentFetchedAt === 'number'
+                && typeof nextFetchedAt === 'number'
+                && nextFetchedAt < currentFetchedAt) {
+                nextEntries[signatureKey] = {
+                  ...current,
+                  error: null,
+                  isLoading: options?.silent ? current.isLoading : false,
+                  isInitialStatusResolved: options?.markInitialResolved === false ? current.isInitialStatusResolved : true,
+                  lastRefreshAt: Date.now(),
+                };
                 return;
               }
 
@@ -820,36 +953,48 @@ const deriveSummary = (entry: PrStatusEntry): PrVisualSummary | null => {
 const summarySignature = (s: PrVisualSummary): string =>
   `${s.number}:${s.visualState}:${s.prState}:${s.draft}:${s.title ?? ''}:${s.url ?? ''}:${s.base ?? ''}:${s.head ?? ''}:${s.canMerge ?? ''}:${s.mergeableState ?? ''}:${s.checks?.state ?? ''}:${s.checks?.total ?? ''}:${s.checks?.success ?? ''}:${s.checks?.failure ?? ''}:${s.checks?.pending ?? ''}:${s.repo?.owner ?? ''}:${s.repo?.repo ?? ''}`;
 
-let prKeyedCacheSigs = new Map<string, string>();
-let prKeyedCacheResult: Map<string, PrVisualSummary> = new Map();
+// Per-key summary cache so many independent row subscribers (one key each)
+// keep referential stability.
+// Practically bounded by the number of worktree branches observed in a
+// session; the explicit cap below guards long-running documents that rotate
+// through many branches/runtimes (entries are tiny; insertion-order eviction
+// only costs a one-frame identity change for the evicted key's subscriber).
+const PR_SUMMARY_CACHE_MAX_ENTRIES = 300;
+const prSummaryCacheByKey = new Map<string, { sig: string; summary: PrVisualSummary }>();
 
-export const usePrVisualSummaryByKeys = (keys: string[]) => {
+const getCachedPrSummary = (cacheKey: string, entry: PrStatusEntry | null | undefined): PrVisualSummary | null => {
+  const summary = entry ? deriveSummary(entry) : null;
+  if (!summary) {
+    prSummaryCacheByKey.delete(cacheKey);
+    return null;
+  }
+
+  const sig = summarySignature(summary);
+  const cached = prSummaryCacheByKey.get(cacheKey);
+  if (cached?.sig === sig) return cached.summary;
+
+  if (!cached && prSummaryCacheByKey.size >= PR_SUMMARY_CACHE_MAX_ENTRIES) {
+    const oldestKey = prSummaryCacheByKey.keys().next().value;
+    if (oldestKey !== undefined) prSummaryCacheByKey.delete(oldestKey);
+  }
+  prSummaryCacheByKey.set(cacheKey, { sig, summary });
+  return summary;
+};
+
+export const usePrVisualSummary = (key: string | null): PrVisualSummary | null => {
   return useGitHubPrStatusStore((state) => {
-    // Derive summaries for requested keys only
-    const nextSigs = new Map<string, string>();
-    const nextSummaries = new Map<string, PrVisualSummary>();
+    if (!key) return null;
+    return getCachedPrSummary(key, state.entries[key]);
+  });
+};
 
-    for (const key of keys) {
-      const entry = state.entries[key];
-      if (!entry) continue;
-      const summary = deriveSummary(entry);
-      if (!summary) continue;
-      const sig = summarySignature(summary);
-      nextSigs.set(key, sig);
-      nextSummaries.set(key, summary);
-    }
-
-    // Compare with cached signatures
-    if (nextSigs.size === prKeyedCacheSigs.size) {
-      let same = true;
-      for (const [k, sig] of nextSigs) {
-        if (prKeyedCacheSigs.get(k) !== sig) { same = false; break; }
-      }
-      if (same) return prKeyedCacheResult;
-    }
-
-    prKeyedCacheSigs = nextSigs;
-    prKeyedCacheResult = nextSummaries;
-    return nextSummaries;
+export const useFreshestPrVisualSummaryForBranch = (
+  directory: string | null,
+  branch: string | null,
+): PrVisualSummary | null => {
+  const cacheKey = directory && branch ? JSON.stringify(['branch', getRuntimeKey(), directory, branch]) : null;
+  return useGitHubPrStatusStore((state) => {
+    if (!directory || !branch || !cacheKey) return null;
+    return getCachedPrSummary(cacheKey, getFreshestPrEntryForBranch(state.entries, directory, branch));
   });
 };

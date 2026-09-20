@@ -19,6 +19,8 @@ export const createBootstrapRuntime = (dependencies) => {
       serverStartedAt,
       gracefulShutdown,
       getHealthSnapshot,
+      getServerPort,
+      getTunnelUrl,
       verboseRequestLogs,
       uiPassword,
       tunnelAuthController,
@@ -61,6 +63,7 @@ export const createBootstrapRuntime = (dependencies) => {
       getCachedZenModels,
       setAutoAcceptSession,
       agentToolRuntime,
+      desktopUpdater,
     } = options;
 
     const uiAuthController = createUiAuth({
@@ -81,6 +84,8 @@ export const createBootstrapRuntime = (dependencies) => {
       gracefulShutdown,
       getHealthSnapshot,
       getServerId,
+      getServerPort,
+      getTunnelUrl,
       tunnelAuthController,
       uiAuthController,
     });
@@ -126,6 +131,7 @@ export const createBootstrapRuntime = (dependencies) => {
       writeSseEvent,
       getSessionActivitySnapshot: sessionRuntime.getSessionActivitySnapshot,
       getSessionStateSnapshot: sessionRuntime.getSessionStateSnapshot,
+      getPendingBlockingRequestsSnapshot: sessionRuntime.getPendingBlockingRequestsSnapshot,
       getSessionAttentionSnapshot: sessionRuntime.getSessionAttentionSnapshot,
       getSessionState: sessionRuntime.getSessionState,
       getSessionAttentionState: sessionRuntime.getSessionAttentionState,
@@ -149,6 +155,7 @@ export const createBootstrapRuntime = (dependencies) => {
       readSettingsFromDiskMigrated,
       fetchFreeZenModels,
       getCachedZenModels,
+      desktopUpdater,
     });
 
     return {

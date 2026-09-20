@@ -50,6 +50,38 @@ const waitForReaderCount = async (count: number) => {
 
 const pngBytes = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
 
+describe("input-store composer restore", () => {
+  beforeEach(() => {
+    useInputStore.setState({ pendingComposerRestore: null })
+  })
+
+  test("only the destination can consume a restore, and only once", () => {
+    const target = { runtimeKey: "runtime", directory: "/repo", sessionId: "fork" }
+    const pending = { target, text: "replay", files: [] }
+    useInputStore.setState({ pendingComposerRestore: pending })
+    for (const identity of [
+      null,
+      { ...target, sessionId: "source" },
+      { ...target, directory: "/elsewhere" },
+      { ...target, runtimeKey: "other-runtime" },
+    ]) {
+      expect(useInputStore.getState().consumePendingComposerRestore(identity)).toBeNull()
+      expect(useInputStore.getState().pendingComposerRestore).toBe(pending)
+    }
+    expect(useInputStore.getState().consumePendingComposerRestore(target)).toBe(pending)
+    expect(useInputStore.getState().consumePendingComposerRestore(target)).toBeNull()
+  })
+
+  test("keeps ordinary pending text independent from fork restoration", () => {
+    const target = { runtimeKey: "runtime", directory: "/repo", sessionId: "fork" }
+    const pending = { target, text: "", files: [] }
+    useInputStore.setState({ pendingComposerRestore: pending })
+    useInputStore.getState().setPendingInputText("ordinary insertion", "append")
+    expect(useInputStore.getState().consumePendingInputText()).toEqual({ text: "ordinary insertion", mode: "append" })
+    expect(useInputStore.getState().consumePendingComposerRestore(target)).toBe(pending)
+  })
+})
+
 describe("input-store attachments", () => {
   beforeEach(() => {
     pendingReaders.length = 0
@@ -58,7 +90,11 @@ describe("input-store attachments", () => {
       pendingInputText: null,
       pendingInputMode: "replace",
       pendingSyntheticParts: null,
+      pendingGuestIssue: null,
+      pendingBtwComposerRequest: null,
       activeEditorFile: null,
+      attachmentDraftKey: null,
+      attachmentDrafts: new Map(),
     })
     useInputStore.getState().setAttachedFiles([])
   })
@@ -74,6 +110,24 @@ describe("input-store attachments", () => {
     expect(useInputStore.getState().attachedFiles).toEqual([])
   })
 
+  testWithMockFileReader("rejects pending file and selection reads after switching drafts, even after returning", async () => {
+    const source = { runtimeKey: "runtime", directory: "/repo", sessionId: "source" }
+    const input = useInputStore.getState()
+    input.selectAttachmentDraft(source)
+    input.addRestoredAttachment({ url: "data:text/plain;base64,aGVsbG8=", mimeType: "text/plain", filename: "ready.txt" })
+    const ready = useInputStore.getState().attachedFiles
+    const local = input.addAttachedFile(new File(["hello"], "hello.txt", { type: "text/plain" }))
+    const selection = input.addVSCodeSelectionAttachment("/repo/code.ts", new File(["hello"], "selection.ts", { type: "text/plain" }))
+    expect(pendingReaders).toHaveLength(2)
+    input.selectAttachmentDraft({ ...source, sessionId: "other" })
+    expect(useInputStore.getState().attachedFiles).toEqual([])
+    input.selectAttachmentDraft(source)
+    for (const reader of pendingReaders) resolveReader(reader, "data:text/plain;base64,aGVsbG8=")
+    expect(await local).toBe(false)
+    await selection
+    expect(useInputStore.getState().attachedFiles).toBe(ready)
+  })
+
   testWithMockFileReader("does not attach a local file after attached files are replaced", async () => {
     const addPromise = useInputStore.getState().addAttachedFile(new File(["hello"], "hello.txt", { type: "text/plain" }))
     expect(pendingReaders).toHaveLength(1)
@@ -82,6 +136,25 @@ describe("input-store attachments", () => {
     resolveReader(pendingReaders[0], "data:text/plain;base64,aGVsbG8=")
     await addPromise
 
+    expect(useInputStore.getState().attachedFiles).toEqual([])
+  })
+
+  testWithMockFileReader("a pending selection in another draft does not block the same selection here", async () => {
+    const source = { runtimeKey: "runtime", directory: "/repo", sessionId: "source" }
+    const input = useInputStore.getState()
+    const file = new File(["hello"], "selection.ts", { type: "text/plain" })
+    input.selectAttachmentDraft(source)
+    const first = input.addVSCodeSelectionAttachment("/repo/code.ts", file)
+    input.selectAttachmentDraft({ ...source, sessionId: "other" })
+    const second = input.addVSCodeSelectionAttachment("/repo/code.ts", file)
+    expect(pendingReaders).toHaveLength(2)
+    // A repeated selection of the current identity must not cancel its read.
+    input.selectAttachmentDraft({ ...source, sessionId: "other" })
+    input.clearAttachedFiles(source)
+    for (const reader of pendingReaders) resolveReader(reader, "data:text/plain;base64,aGVsbG8=")
+    await Promise.all([first, second])
+    expect(useInputStore.getState().attachedFiles.map((attachment) => attachment.filename)).toEqual(["selection.ts"])
+    input.selectAttachmentDraft(source)
     expect(useInputStore.getState().attachedFiles).toEqual([])
   })
 
@@ -275,5 +348,158 @@ describe("input-store attachments", () => {
     ])
     const textAttachment = useInputStore.getState().attachedFiles[1]
     expect((await textAttachment?.file.text())?.includes("[design-image-2.png]")).toBe(true)
+  })
+
+  testWithMockFileReader("extracted document entries share a sourceDocumentId for cascade removal", async () => {
+    const archive = zipSync({
+      "word/document.xml": strToU8(`<w:document xmlns:w="w" xmlns:a="a" xmlns:r="r"><w:body><w:p><w:t>Diagram</w:t><a:blip r:embed="rId1"/></w:p></w:body></w:document>`),
+      "word/_rels/document.xml.rels": strToU8(`<Relationships><Relationship Id="rId1" Target="media/image.png" Type="image"/></Relationships>`),
+      "word/media/image.png": pngBytes,
+    })
+    const addPromise = useInputStore.getState().addAttachedFile(new File([archive], "design.docx"))
+
+    await waitForReaderCount(1)
+    resolveReader(pendingReaders[0], "data:text/plain;base64,RG9jdW1lbnQ=")
+    await waitForReaderCount(2)
+    resolveReader(pendingReaders[1], "data:image/png;base64,AQID")
+
+    expect(await addPromise).toBe(true)
+    const files = useInputStore.getState().attachedFiles
+    expect(files).toHaveLength(2)
+    expect(files[0].filename).toBe("design.docx")
+    expect(files[1].filename).toBe("design-image-1.png")
+
+    // All entries from the same document extraction share the same sourceDocumentId
+    expect(files[0].sourceDocumentId).toBeDefined()
+    expect(files[0].sourceDocumentId).toBe(files[1].sourceDocumentId)
+
+    // Removing any entry in the group cascade-removes all entries
+    useInputStore.getState().removeAttachedFile(files[0].id)
+    expect(useInputStore.getState().attachedFiles).toEqual([])
+  })
+
+  testWithMockFileReader("removing an extracted image child also cascade-removes the document group", async () => {
+    const archive = zipSync({
+      "word/document.xml": strToU8(`<w:document xmlns:w="w" xmlns:a="a" xmlns:r="r"><w:body><w:p><w:t>Diagram</w:t><a:blip r:embed="rId1"/></w:p></w:body></w:document>`),
+      "word/_rels/document.xml.rels": strToU8(`<Relationships><Relationship Id="rId1" Target="media/image.png" Type="image"/></Relationships>`),
+      "word/media/image.png": pngBytes,
+    })
+    const addPromise = useInputStore.getState().addAttachedFile(new File([archive], "design.docx"))
+
+    await waitForReaderCount(1)
+    resolveReader(pendingReaders[0], "data:text/plain;base64,RG9jdW1lbnQ=")
+    await waitForReaderCount(2)
+    resolveReader(pendingReaders[1], "data:image/png;base64,AQID")
+
+    expect(await addPromise).toBe(true)
+    const files = useInputStore.getState().attachedFiles
+    expect(files).toHaveLength(2)
+    expect(files[0].filename).toBe("design.docx")
+    expect(files[1].filename).toBe("design-image-1.png")
+
+    // Removing the image child also cascade-removes the entire group
+    useInputStore.getState().removeAttachedFile(files[1].id)
+    expect(useInputStore.getState().attachedFiles).toEqual([])
+  })
+
+  testWithMockFileReader("non-document attachments do not have sourceDocumentId and remove individually", async () => {
+    const addPromise = useInputStore.getState().addAttachedFile(
+      new File(["hello"], "hello.txt", { type: "text/plain" })
+    )
+    expect(pendingReaders).toHaveLength(1)
+    resolveReader(pendingReaders[0], "data:text/plain;base64,aGVsbG8=")
+
+    expect(await addPromise).toBe(true)
+    const files = useInputStore.getState().attachedFiles
+    expect(files).toHaveLength(1)
+    expect(files[0].sourceDocumentId).toBe(undefined)
+
+    useInputStore.getState().removeAttachedFile(files[0].id)
+    expect(useInputStore.getState().attachedFiles).toEqual([])
+  })
+
+  testWithMockFileReader("PPTX slide extraction cascades removal of all slide images", async () => {
+    const archive = zipSync({
+      "ppt/slides/slide1.xml": strToU8(`<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:pic><p:nvPicPr/><p:blipFill><a:blip r:embed="rId1"/></p:blipFill></p:pic></p:spTree></p:cSld></p:sld>`),
+      "ppt/slides/_rels/slide1.xml.rels": strToU8(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="../media/image1.png" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"/></Relationships>`),
+      "ppt/media/image1.png": pngBytes,
+    })
+    const addPromise = useInputStore.getState().addAttachedFile(new File([archive], "deck.pptx"))
+
+    await waitForReaderCount(1)
+    resolveReader(pendingReaders[0], "data:text/plain;base64,RG9jdW1lbnQ=")
+    await waitForReaderCount(2)
+    resolveReader(pendingReaders[1], "data:image/png;base64,AQID")
+
+    expect(await addPromise).toBe(true)
+    const files = useInputStore.getState().attachedFiles
+    expect(files).toHaveLength(2)
+    expect(files[0].filename).toBe("deck.pptx")
+    expect(files[1].filename).toBe("deck-image-1.png")
+    expect(files[0].sourceDocumentId).toBeDefined()
+    expect(files[0].sourceDocumentId).toBe(files[1].sourceDocumentId)
+
+    // Removing the text entry cascades to the slide image
+    useInputStore.getState().removeAttachedFile(files[0].id)
+    expect(useInputStore.getState().attachedFiles).toEqual([])
+  })
+})
+
+describe("input-store guest attach", () => {
+  beforeEach(() => {
+    useInputStore.setState({ pendingGuestIssue: null })
+  })
+
+  test("holds a guest issue until the composer consumes it", () => {
+    const issue = {
+      providerId: "clickup",
+      id: "abc",
+      title: "Login",
+      url: "https://app.clickup.com/t/abc",
+    }
+    useInputStore.getState().setPendingGuestIssue(issue)
+    expect(useInputStore.getState().pendingGuestIssue).toEqual(issue)
+    expect(useInputStore.getState().consumePendingGuestIssue()).toEqual(issue)
+    expect(useInputStore.getState().pendingGuestIssue).toBeNull()
+    expect(useInputStore.getState().consumePendingGuestIssue()).toBeNull()
+  })
+
+  test("holds a guest pull with author and branches", () => {
+    const pull = {
+      providerId: "gitlab",
+      id: "!12",
+      title: "Fix login",
+      url: "https://gitlab.com/acme/app/-/merge_requests/12",
+      kind: "pull" as const,
+      author: "ada",
+      branches: { head: "feature", base: "main" },
+    }
+    useInputStore.getState().setPendingGuestIssue(pull)
+    expect(useInputStore.getState().pendingGuestIssue).toEqual(pull)
+    expect(useInputStore.getState().consumePendingGuestIssue()).toEqual(pull)
+  })
+})
+
+describe("input-store BTW composer requests", () => {
+  test("keeps the request scoped to its parent without changing the normal composer", () => {
+    useInputStore.setState({
+      pendingInputText: "normal draft",
+      pendingInputMode: "replace",
+      pendingBtwComposerRequest: null,
+      attachedFiles: [],
+    })
+    useInputStore.getState().requestBtwComposer({
+      parentSessionId: "parent-1",
+      text: "> selected text",
+    })
+
+    expect(useInputStore.getState().consumePendingBtwComposerRequest("parent-2")).toBeNull()
+    expect(useInputStore.getState().pendingInputText).toBe("normal draft")
+    expect(useInputStore.getState().consumePendingBtwComposerRequest("parent-1")).toEqual({
+      parentSessionId: "parent-1",
+      text: "> selected text",
+    })
+    expect(useInputStore.getState().consumePendingBtwComposerRequest("parent-1")).toBeNull()
+    expect(useInputStore.getState().pendingInputText).toBe("normal draft")
   })
 })

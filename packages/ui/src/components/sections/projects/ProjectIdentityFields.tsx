@@ -3,10 +3,21 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Icon } from '@/components/icon/Icon';
 import { ModelSelector } from '@/components/sections/agents/ModelSelector';
+import { AgentSelector } from '@/components/sections/commands/AgentSelector';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  SettingsFieldRow,
+  SETTINGS_CUSTOM_TRIGGER_CLASS,
+  SETTINGS_SELECT_ROW_TRIGGER_CLASS,
+  SETTINGS_SELECT_SIZE,
+} from '@/components/sections/shared/SettingsSection';
+import { selectProvidersForDirectory, useConfigStore } from '@/stores/useConfigStore';
+import { modelVariantNames } from '@/lib/modelVariants';
 import { PROJECT_COLORS, PROJECT_ICONS, PROJECT_COLOR_MAP as COLOR_MAP, ProjectIconImage } from '@/lib/projectMeta';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { isPrimaryMode } from '@/components/chat/mobileControlsUtils';
 import {
   PROJECT_SETTINGS_CONTROL_WIDTH,
   ProjectSettingsSubsection,
@@ -19,9 +30,14 @@ type ProjectIdentityFieldsProps = {
   form: ProjectIdentityFormState;
 };
 
+const NO_VARIANT_VALUE = '__default__';
+
+const formatVariantLabel = (variant: string): string => variant.charAt(0).toUpperCase() + variant.slice(1);
+
 export const ProjectIdentityFields: React.FC<ProjectIdentityFieldsProps> = ({ form }) => {
   const { t } = useI18n();
   const { currentTheme } = useThemeSystem();
+   const providers = useConfigStore((state) => selectProvidersForDirectory(state, form.project?.path));
   const {
     name,
     setName,
@@ -31,8 +47,12 @@ export const ProjectIdentityFields: React.FC<ProjectIdentityFieldsProps> = ({ fo
     setColor,
     iconBackground,
     setIconBackground,
+    defaultAgent,
+    setDefaultAgent,
     parsedDefaultModel,
+    defaultVariant,
     handleDefaultModelChange,
+    handleDefaultVariantChange,
     isUploadingIcon,
     isRemovingCustomIcon,
     isDiscoveringIcon,
@@ -52,6 +72,15 @@ export const ProjectIdentityFields: React.FC<ProjectIdentityFieldsProps> = ({ fo
     currentIconImage,
     project,
   } = form;
+
+  const availableVariants = React.useMemo(() => {
+    const { providerId, modelId } = parsedDefaultModel;
+    if (!providerId || !modelId) return [];
+    const model = providers
+      .find((provider) => provider.id === providerId)
+      ?.models.find((entry) => entry.id === modelId);
+    return modelVariantNames(model);
+  }, [parsedDefaultModel, providers]);
 
   if (!project) {
     return null;
@@ -75,16 +104,65 @@ export const ProjectIdentityFields: React.FC<ProjectIdentityFieldsProps> = ({ fo
       </ProjectSettingsSubsection>
 
       <ProjectSettingsSubsection
-        title={t('settings.projects.page.field.defaultModel')}
-        info={t('settings.projects.page.field.defaultModelDescription')}
-        settingsItem="projects.default-model"
+        title={t('settings.projects.page.section.chatDefaults')}
+        info={t('settings.projects.page.section.chatDefaultsDescription')}
+        contentClassName="space-y-0"
       >
-        <ModelSelector
-          providerId={parsedDefaultModel.providerId}
-          modelId={parsedDefaultModel.modelId}
-          onChange={handleDefaultModelChange}
-          className={cn('h-8 min-h-8 rounded-md px-3 max-w-48', PROJECT_SETTINGS_CONTROL_WIDTH)}
-        />
+        <SettingsFieldRow
+          settingsItem="projects.default-agent"
+          label={t('settings.projects.page.field.projectAgent')}
+        >
+          <AgentSelector
+            directory={project.path}
+            agentName={defaultAgent || ''}
+            onChange={(agentName) => setDefaultAgent(agentName || undefined)}
+            filter={(agent) => isPrimaryMode(agent.mode)}
+            className={SETTINGS_CUSTOM_TRIGGER_CLASS}
+          />
+        </SettingsFieldRow>
+
+        <SettingsFieldRow
+          settingsItem="projects.default-model"
+          label={t('settings.projects.page.field.projectModel')}
+        >
+          <ModelSelector
+            directory={project.path}
+            providerId={parsedDefaultModel.providerId}
+            modelId={parsedDefaultModel.modelId}
+            onChange={handleDefaultModelChange}
+            className={SETTINGS_CUSTOM_TRIGGER_CLASS}
+          />
+        </SettingsFieldRow>
+
+        {availableVariants.length > 0 ? (
+          <SettingsFieldRow
+            settingsItem="projects.default-thinking"
+            label={t('settings.projects.page.field.projectThinking')}
+          >
+            <Select
+              value={defaultVariant ?? NO_VARIANT_VALUE}
+              onValueChange={(value) => handleDefaultVariantChange(value === NO_VARIANT_VALUE ? undefined : value)}
+            >
+              <SelectTrigger
+                size={SETTINGS_SELECT_SIZE}
+                className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}
+                aria-label={t('settings.projects.page.field.projectThinking')}
+              >
+                <SelectValue>
+                  {defaultVariant
+                    ? formatVariantLabel(defaultVariant)
+                    : t('settings.projects.page.option.thinkingDefault')}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_VARIANT_VALUE}>{t('settings.projects.page.option.thinkingDefault')}</SelectItem>
+                {availableVariants.map((variant) => (
+                  <SelectItem key={variant} value={variant}>{formatVariantLabel(variant)}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </SettingsFieldRow>
+        ) : null}
       </ProjectSettingsSubsection>
 
       <ProjectSettingsSubsection
@@ -98,7 +176,7 @@ export const ProjectIdentityFields: React.FC<ProjectIdentityFieldsProps> = ({ fo
             className={cn(
               'h-7 w-7 rounded-md border transition-colors flex items-center justify-center',
               color === null
-                ? 'border-2 border-foreground bg-[var(--primary-base)]/10'
+                ? 'border-2 border-foreground bg-interactive-selection'
                 : 'border-border/40 hover:border-border hover:bg-[var(--surface-muted)]',
             )}
             title={t('settings.projects.page.field.none')}
@@ -113,7 +191,7 @@ export const ProjectIdentityFields: React.FC<ProjectIdentityFieldsProps> = ({ fo
               className={cn(
                 'h-7 w-7 rounded-md border transition-colors',
                 color === entry.key
-                  ? 'border-2 border-foreground ring-1 ring-[var(--primary-base)]/40'
+                  ? 'border-2 border-foreground ring-1 ring-interactive-selection'
                   : 'border-transparent hover:border-border/70',
               )}
               style={{ backgroundColor: entry.cssVar }}
@@ -146,7 +224,7 @@ export const ProjectIdentityFields: React.FC<ProjectIdentityFieldsProps> = ({ fo
             className={cn(
               'h-7 w-7 rounded-md border transition-colors flex items-center justify-center',
               icon === null
-                ? 'border-2 border-foreground bg-[var(--primary-base)]/10'
+                ? 'border-2 border-foreground bg-interactive-selection'
                 : 'border-border/40 hover:border-border hover:bg-[var(--surface-muted)]',
             )}
             title={t('settings.projects.page.field.none')}
@@ -163,7 +241,7 @@ export const ProjectIdentityFields: React.FC<ProjectIdentityFieldsProps> = ({ fo
                 className={cn(
                   'h-7 w-7 rounded-md border transition-colors flex items-center justify-center',
                   icon === entry.key
-                    ? 'border-2 border-foreground bg-[var(--primary-base)]/10'
+                    ? 'border-2 border-foreground bg-interactive-selection'
                     : 'border-transparent hover:border-border hover:bg-[var(--surface-muted)]',
                 )}
                 title={entry.label}

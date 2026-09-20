@@ -5,16 +5,18 @@ description: Use when changing Electron main/preload code, desktop IPC, native w
 
 # Desktop Shell
 
-## Read First
+## Required Context
 
-Read `packages/electron/README.md` and nearby `packages/electron` code before editing.
+Read `packages/electron/README.md` and nearby `packages/electron` code before editing. Context gathering is complete when each changed behavior is assigned to main, preload, renderer/shared UI, or web/runtime ownership.
+
+Load `ui-api-decoupling` when a native change adds or alters a renderer-facing capability, `RuntimeAPIs`, runtime auth/URL behavior, or shared bridge contract. This skill owns the Electron privilege boundary; `ui-api-decoupling` owns the shared UI/runtime contract.
+
+Before editing behavior a user can reach, write the surface list from `ui-api-decoupling`, *Name The Surfaces Before Editing*: one line per runtime, including the ones this change appears to leave alone. A native-looking change is the usual place this gets skipped: a shutdown order, an updater handoff, or a window lifecycle reads as desktop-only while the sequence around it is shared, and the platform guard that is correct on its own becomes a trap when the rest of the sequence does not account for it.
 
 ## Runtime Boundary
 
 - Electron boots `@openchamber/web` in the same Node process and loads the UI over loopback. Do not introduce a sidecar server process.
-- Keep OpenCode feature backends and shared domain logic in web/server or runtime APIs.
-- Keep Electron focused on inherently native behavior: windows, menus, dialogs, notifications, updater, deep links, runtime host switching, privileged IPC, SSH, and tunnel lifecycle.
-- Shared renderer-facing contracts belong in `packages/ui`; shared server behavior belongs in `packages/web`.
+- Keep renderer contracts and domain logic in `packages/ui`, server behavior in `packages/web`, and Electron focused on inherently native behavior: windows, menus, dialogs, notifications, updater, deep links, runtime host switching, privileged IPC, SSH, and tunnel lifecycle.
 - Electron is the desktop release target.
 
 ## IPC And Security
@@ -47,4 +49,6 @@ Non-user-visible child processes must never flash a console window.
 
 ## Validation
 
-Run the Electron package type-check/lint commands from `package.json` and focused tests. For startup, preload, routing, or packaging changes, test both HMR development and bundled UI mode. For Windows process work, inspect the complete process tree and verify no console flash; a successful command alone is insufficient.
+Before judging any change to the update or quit/install sequence, read `openchamber-change-discipline`'s `references/updater-testing.md`: that path cannot be verified by review or by unit tests, a run done the obvious way reports success while testing nothing, and a passing run on one platform says nothing about the others.
+
+Run focused Electron tests and package checks. For startup, preload, routing, or packaging changes, completion requires both HMR development and bundled UI validation. For Windows process work, completion requires inspection of the complete process tree with no console flash; command success alone is insufficient.

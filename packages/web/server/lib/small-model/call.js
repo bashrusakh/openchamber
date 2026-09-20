@@ -1,10 +1,12 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { randomUUID } from 'node:crypto';
 import { readAuthFile, writeAuthFile } from '../opencode/auth.js';
-import { readConfig, readConfigLayers } from '../opencode/shared.js';
+import { readConfig, readConfigLayers, isPlainObject } from '../opencode/shared.js';
 import { getCatalogProvider } from './catalog.js';
 import { getAuthEntryForProvider } from './resolve.js';
+import { getRuntimeProvider } from './runtime-providers.js';
 
 // Direct, non-streaming text generation against the provider APIs, replicating
 // how OpenCode authenticates each of them (see the plugin auth loaders in the
@@ -18,6 +20,37 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 4_000;
 
 const USER_AGENT = 'opencode/1.0 openchamber';
 
+// Providers whose endpoint lives inside their dedicated AI SDK package, so the
+// models.dev catalog carries no `api` URL and OpenCode reports none at runtime.
+// Each of these serves OpenAI-compatible `/chat/completions` at the URL below.
+const SDK_DEFAULT_BASE_URLS = new Map([
+  ['groq', 'https://api.groq.com/openai/v1'],
+  ['xai', 'https://api.x.ai/v1'],
+  ['mistral', 'https://api.mistral.ai/v1'],
+  ['cerebras', 'https://api.cerebras.ai/v1'],
+  ['togetherai', 'https://api.together.xyz/v1'],
+  ['deepinfra', 'https://api.deepinfra.com/v1/openai'],
+  ['perplexity', 'https://api.perplexity.ai'],
+  ['cohere', 'https://api.cohere.ai/compatibility/v1'],
+]);
+
+// Where `thinking: { type: 'disabled' }` is a real switch rather than an
+// unknown field (mirrors the gates in OpenCode's provider/transform.ts).
+const ZAI_ENDPOINT_HOSTS = ['api.z.ai', 'bigmodel.cn'];
+const MINIMAX_THINKING_ADAPTERS = new Set(['@ai-sdk/openai-compatible', '@ai-sdk/anthropic']);
+
+const mergeHeadersCaseInsensitive = (base, overrides) => {
+  const merged = { ...base };
+  for (const [name, value] of Object.entries(overrides || {})) {
+    const existingName = Object.keys(merged).find((key) => key.toLowerCase() === name.toLowerCase());
+    if (existingName) {
+      delete merged[existingName];
+    }
+    merged[name] = value;
+  }
+  return merged;
+};
+
 const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
 const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
@@ -25,7 +58,44 @@ const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
 const httpError = async (response, provider) => {
   const body = await response.text().catch(() => '');
   const snippet = body ? `: ${body.slice(0, 300)}` : '';
-  return new Error(`${provider} request failed with ${response.status}${snippet}`);
+  // Callers need the status to tell "this provider rejected the request shape"
+  // (retryable with a different shape) from "this provider is down".
+  return Object.assign(new Error(`${provider} request failed with ${response.status}${snippet}`), {
+    status: response.status,
+    provider,
+  });
+};
+
+// Callers own two independent reasons to stop: their own abort signal (user
+// navigated away, request cancelled) and a per-call deadline. Long-running
+// callers such as the diff walkthrough need a deadline well past the default.
+const requestSignal = (timeoutMs, signal) => {
+  const deadline = AbortSignal.timeout(Number(timeoutMs) > 0 ? Number(timeoutMs) : REQUEST_TIMEOUT_MS);
+  return signal ? AbortSignal.any([deadline, signal]) : deadline;
+};
+
+const STRUCTURED_OUTPUT_NAME = 'response';
+
+// Google's schema dialect is OpenAPI-flavored and rejects JSON Schema keywords
+// it does not know, so unsupported keys are dropped rather than passed through.
+const GOOGLE_UNSUPPORTED_SCHEMA_KEYS = new Set([
+  '$schema',
+  'additionalProperties',
+  'definitions',
+  '$defs',
+  '$ref',
+  'strict',
+]);
+
+const toGoogleSchema = (schema) => {
+  if (Array.isArray(schema)) return schema.map(toGoogleSchema);
+  if (!schema || typeof schema !== 'object') return schema;
+  const result = {};
+  for (const [key, value] of Object.entries(schema)) {
+    if (GOOGLE_UNSUPPORTED_SCHEMA_KEYS.has(key)) continue;
+    result[key] = toGoogleSchema(value);
+  }
+  return result;
 };
 
 // ---------------------------------------------------------------------------
@@ -106,7 +176,7 @@ const ensureFreshOpenaiOauth = async (entry) => {
 // Wire formats
 // ---------------------------------------------------------------------------
 
-const callOpenaiCompatible = async ({ baseURL, headers, modelID, prompt, system, maxOutputTokens, providerLabel, extraBody }) => {
+const callOpenaiCompatible = async ({ baseURL, headers, modelID, prompt, system, maxOutputTokens, providerLabel, extraBody, responseSchema, timeoutMs, signal }) => {
   const trimmedBase = baseURL.replace(/\/+$/, '');
   console.log('[small-model:diagnostic] request', {
     provider: providerLabel,
@@ -119,11 +189,10 @@ const callOpenaiCompatible = async ({ baseURL, headers, modelID, prompt, system,
   });
   const response = await fetch(`${trimmedBase}/chat/completions`, {
     method: 'POST',
-    headers: {
+    headers: mergeHeadersCaseInsensitive({
       'Content-Type': 'application/json',
       Accept: 'application/json',
-      ...headers,
-    },
+    }, headers),
     body: JSON.stringify({
       model: modelID,
       messages: [
@@ -132,9 +201,17 @@ const callOpenaiCompatible = async ({ baseURL, headers, modelID, prompt, system,
       ],
       max_tokens: maxOutputTokens,
       stream: false,
+      ...(responseSchema
+        ? {
+          response_format: {
+            type: 'json_schema',
+            json_schema: { name: STRUCTURED_OUTPUT_NAME, strict: true, schema: responseSchema },
+          },
+        }
+        : {}),
       ...(extraBody || {}),
     }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: requestSignal(timeoutMs, signal),
   });
   console.log('[small-model:diagnostic] response', {
     provider: providerLabel,
@@ -171,11 +248,16 @@ const callOpenaiCompatible = async ({ baseURL, headers, modelID, prompt, system,
       .map((part) => (typeof part?.text === 'string' ? part.text : ''))
       .join('');
   }
-  if (!text.trim() && typeof message?.reasoning_content === 'string' && message.reasoning_content.trim()) {
-    const finishReason = payload?.choices?.[0]?.finish_reason;
-    throw new Error(
-      `${providerLabel} spent the output budget on reasoning and returned no answer`
-      + (finishReason ? ` (finish_reason: ${finishReason})` : ''),
+  const finishReason = payload?.choices?.[0]?.finish_reason;
+  if (!text.trim() && (finishReason === 'length' || (typeof message?.reasoning_content === 'string' && message.reasoning_content.trim()))) {
+    // The model produced only reasoning, or was cut off before answering. This
+    // is a budget problem, not a transport problem, and callers can act on it.
+    throw Object.assign(
+      new Error(
+        `${providerLabel} spent the output budget on reasoning and returned no answer`
+        + (finishReason ? ` (finish_reason: ${finishReason})` : ''),
+      ),
+      { code: 'output-exhausted', provider: providerLabel },
     );
   }
   if (!text.trim()) {
@@ -184,7 +266,7 @@ const callOpenaiCompatible = async ({ baseURL, headers, modelID, prompt, system,
   return text;
 };
 
-const callOpenaiResponses = async ({ baseURL, headers, modelID, prompt, system, maxOutputTokens, providerLabel }) => {
+const callOpenaiResponses = async ({ baseURL, headers, modelID, prompt, system, maxOutputTokens, providerLabel, responseSchema, timeoutMs, signal }) => {
   const trimmedBase = baseURL.replace(/\/+$/, '');
   const response = await fetch(`${trimmedBase}/responses`, {
     method: 'POST',
@@ -201,10 +283,22 @@ const callOpenaiResponses = async ({ baseURL, headers, modelID, prompt, system, 
         content: [{ type: 'input_text', text: prompt }],
       }],
       max_output_tokens: maxOutputTokens,
+      ...(responseSchema
+        ? {
+          text: {
+            format: {
+              type: 'json_schema',
+              name: STRUCTURED_OUTPUT_NAME,
+              strict: true,
+              schema: responseSchema,
+            },
+          },
+        }
+        : {}),
       stream: false,
       store: false,
     }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: requestSignal(timeoutMs, signal),
   });
   if (!response.ok) {
     throw await httpError(response, providerLabel);
@@ -224,7 +318,7 @@ const callOpenaiResponses = async ({ baseURL, headers, modelID, prompt, system, 
   return text;
 };
 
-const callMessages = async ({ url, headers, modelID, prompt, system, maxOutputTokens, providerLabel }) => {
+const callMessages = async ({ url, headers, modelID, prompt, system, maxOutputTokens, providerLabel, responseSchema, timeoutMs, signal }) => {
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -237,13 +331,36 @@ const callMessages = async ({ url, headers, modelID, prompt, system, maxOutputTo
       max_tokens: maxOutputTokens,
       ...(system ? { system } : {}),
       messages: [{ role: 'user', content: prompt }],
+      // The messages API has no response_format; a forced single-tool call is
+      // the supported way to get schema-shaped output.
+      ...(responseSchema
+        ? {
+          tools: [{
+            name: STRUCTURED_OUTPUT_NAME,
+            description: 'Return the answer in the required structure.',
+            input_schema: responseSchema,
+          }],
+          tool_choice: { type: 'tool', name: STRUCTURED_OUTPUT_NAME },
+        }
+        : {}),
     }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: requestSignal(timeoutMs, signal),
   });
   if (!response.ok) {
     throw await httpError(response, providerLabel);
   }
   const payload = await response.json();
+
+  if (responseSchema) {
+    const toolUse = (payload?.content || []).find(
+      (part) => part?.type === 'tool_use' && part.name === STRUCTURED_OUTPUT_NAME,
+    );
+    if (!toolUse || typeof toolUse.input !== 'object' || toolUse.input === null) {
+      throw new Error(`${providerLabel} returned no structured output`);
+    }
+    return JSON.stringify(toolUse.input);
+  }
+
   const text = (payload?.content || [])
     .filter((part) => part?.type === 'text' && typeof part.text === 'string')
     .map((part) => part.text)
@@ -254,8 +371,11 @@ const callMessages = async ({ url, headers, modelID, prompt, system, maxOutputTo
   return text;
 };
 
-const callAnthropic = async ({ apiKey, modelID, prompt, system, maxOutputTokens }) => callMessages({
-  url: 'https://api.anthropic.com/v1/messages',
+const callAnthropic = async ({ apiKey, baseURL, modelID, prompt, system, maxOutputTokens, responseSchema, timeoutMs, signal }) => callMessages({
+  // Matches @ai-sdk/anthropic: baseURL is the full API prefix (commonly
+  // already ending in /v1), so it gets /messages appended as-is rather than
+  // having /v1/messages appended, which would double up a configured /v1.
+  url: `${(baseURL || 'https://api.anthropic.com/v1').replace(/\/+$/, '')}/messages`,
   headers: {
     'x-api-key': apiKey,
     'anthropic-version': '2023-06-01',
@@ -265,6 +385,9 @@ const callAnthropic = async ({ apiKey, modelID, prompt, system, maxOutputTokens 
   system,
   maxOutputTokens,
   providerLabel: 'Anthropic',
+  responseSchema,
+  timeoutMs,
+  signal,
 });
 
 const getCopilotEndpoint = async ({ baseURL, headers, modelID }) => {
@@ -312,11 +435,12 @@ const getCopilotEndpoint = async ({ baseURL, headers, modelID }) => {
   throw new Error(`GitHub Copilot model "${modelID}" has no supported text endpoint`);
 };
 
-const callGoogle = async ({ apiKey, modelID, prompt, system, maxOutputTokens }) => {
+const callGoogle = async ({ apiKey, modelID, prompt, system, maxOutputTokens, responseSchema, timeoutMs, signal }) => {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelID)}:generateContent`;
-  const thinkingConfig = modelID.toLowerCase().startsWith('gemini-3')
-    ? { thinkingLevel: modelID.toLowerCase().includes('flash') ? 'minimal' : 'low' }
-    : { thinkingBudget: 0 };
+  const lowerModelID = modelID.toLowerCase();
+  const thinkingConfig = lowerModelID.startsWith('gemini-3')
+    ? { thinkingLevel: lowerModelID.includes('flash') ? 'minimal' : 'low' }
+    : lowerModelID.startsWith('gemini-2') ? { thinkingBudget: 0 } : null;
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -326,10 +450,14 @@ const callGoogle = async ({ apiKey, modelID, prompt, system, maxOutputTokens }) 
     },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
-      generationConfig: { maxOutputTokens, thinkingConfig },
+      ...(system && { systemInstruction: { parts: [{ text: system }] } }),
+      generationConfig: {
+        maxOutputTokens,
+        ...(thinkingConfig && { thinkingConfig }),
+        ...(responseSchema && { responseMimeType: 'application/json', responseSchema: toGoogleSchema(responseSchema) }),
+      },
     }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: requestSignal(timeoutMs, signal),
   });
   if (!response.ok) {
     throw await httpError(response, 'Google');
@@ -346,7 +474,7 @@ const callGoogle = async ({ apiKey, modelID, prompt, system, maxOutputTokens }) 
 
 // ChatGPT-plan traffic goes to the codex backend, which only speaks the
 // streaming Responses API — collect the output_text deltas from the SSE body.
-const callCodexResponses = async ({ accessToken, accountId, modelID, prompt, system }) => {
+const callCodexResponses = async ({ accessToken, accountId, modelID, prompt, system, timeoutMs, signal }) => {
   const response = await fetch(CODEX_RESPONSES_URL, {
     method: 'POST',
     headers: {
@@ -372,7 +500,7 @@ const callCodexResponses = async ({ accessToken, accountId, modelID, prompt, sys
       stream: true,
       store: false,
     }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: requestSignal(timeoutMs, signal),
   });
   if (!response.ok) {
     throw await httpError(response, 'OpenAI (ChatGPT plan)');
@@ -413,7 +541,7 @@ const callCodexResponses = async ({ accessToken, accountId, modelID, prompt, sys
 // Custom provider configuration support
 // ---------------------------------------------------------------------------
 
-const resolveConfigApiKey = (value, workingDirectory, providerID) => {
+const resolveConfigValue = (value, workingDirectory, providerID, headerName = null) => {
   const envMatch = value.match(/^\{env:([^}]+)\}$/i);
   if (envMatch) {
     return process.env[envMatch[1].trim()]?.trim() || null;
@@ -434,7 +562,12 @@ const resolveConfigApiKey = (value, workingDirectory, providerID) => {
       { config: layers.customConfig, filePath: layers.paths.customPath },
       { config: layers.projectConfig, filePath: layers.paths.projectPath },
       { config: layers.userConfig, filePath: layers.paths.userPath },
-    ].find(({ config }) => config?.provider?.[providerID]?.options?.apiKey === value);
+    ].find(({ config }) => {
+      const options = config?.provider?.[providerID]?.options;
+      return headerName
+        ? options?.headers?.[headerName] === value
+        : options?.apiKey === value;
+    });
     resolvedPath = path.resolve(source?.filePath ? path.dirname(source.filePath) : workingDirectory || process.cwd(), configuredPath);
   }
 
@@ -443,8 +576,31 @@ const resolveConfigApiKey = (value, workingDirectory, providerID) => {
     if (!key) throw new Error('empty file');
     return key;
   } catch {
-    throw new Error(`Failed to resolve configured apiKey file for provider "${providerID}"`);
+    throw new Error(`Failed to resolve configured ${headerName ? `header "${headerName}"` : 'apiKey'} file for provider "${providerID}"`);
   }
+};
+
+/**
+ * `options.headers` from the provider config, with the same `{env:…}`/`{file:…}`
+ * substitutions the API key gets.
+ *
+ * OpenCode sends these on every request, so dropping them here would have the
+ * small model authenticating differently from the request path against the same
+ * URL. Gateways fronted by an API-management layer reject a bearer-only request
+ * outright, because the header is the credential rather than a supplement to it.
+ */
+const readConfiguredHeaders = (providerCfg, workingDirectory, providerID) => {
+  const configured = providerCfg?.options?.headers;
+  if (!isPlainObject(configured)) return null;
+  const headers = {};
+  for (const [name, value] of Object.entries(configured)) {
+    // Config headers are strings; a malformed entry is skipped rather than
+    // stringified into a header the gateway would reject.
+    if (String(value) !== value) continue;
+    const resolved = resolveConfigValue(value.trim(), workingDirectory, providerID, name);
+    if (resolved) headers[name] = resolved;
+  }
+  return Object.keys(headers).length ? headers : null;
 };
 
 const readProviderConfig = (workingDirectory, providerID) => {
@@ -454,9 +610,10 @@ const readProviderConfig = (workingDirectory, providerID) => {
     if (!providerCfg || typeof providerCfg !== 'object') return null;
     const baseURL = typeof providerCfg?.options?.baseURL === 'string' ? providerCfg.options.baseURL.trim() : null;
     const rawApiKey = typeof providerCfg?.options?.apiKey === 'string' ? providerCfg.options.apiKey.trim() : null;
-    const apiKey = rawApiKey ? resolveConfigApiKey(rawApiKey, workingDirectory, providerID) : null;
+    const apiKey = rawApiKey ? resolveConfigValue(rawApiKey, workingDirectory, providerID) : null;
     return {
       baseURL,
+      headers: readConfiguredHeaders(providerCfg, workingDirectory, providerID),
       // Shape the config-supplied key as a regular api-key auth entry so it
       // can win the precedence check below and flow through the dispatch's
       // `entry.type === 'api' ? entry.key : ...` branch unchanged.
@@ -468,19 +625,67 @@ const readProviderConfig = (workingDirectory, providerID) => {
   }
 }
 
+const getRuntimeModel = (runtimeProvider, modelID) => runtimeProvider?.models?.get(modelID) ?? null;
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
-export async function callSmallModel({ auth, catalog, workingDirectory, providerID, modelID, prompt, system, maxOutputTokens }) {
+/**
+ * Providers reached through a dedicated wire format below: a token exchange,
+ * an OAuth refresh, or a non-bearer header. OpenCode's runtime
+ * `options.apiKey` is not the value those branches need — the ChatGPT-plan
+ * `openai` login is the clearest case, where the runtime key is an OAuth
+ * access token that api.openai.com answers with 401 — so the runtime
+ * credential never stands in for them, and the runtime listing skips them
+ * because the auth.json scan already covers them.
+ */
+export const DEDICATED_WIRE_FORMAT_PROVIDERS = new Set(['github-copilot', 'copilot', 'openai', 'anthropic', 'google']);
+
+/**
+ * The runtime credential shaped as an auth entry, or `null` when the provider
+ * owns its credential handling or OpenCode reports nothing usable.
+ */
+const runtimeCredential = (providerID, runtime) => (
+  !DEDICATED_WIRE_FORMAT_PROVIDERS.has(providerID) && runtime?.apiKey
+    ? { type: 'api', key: runtime.apiKey }
+    : null
+);
+
+/**
+ * Same credential resolution the request path uses: config
+ * `provider.<id>.options.apiKey` wins, then the runtime credential OpenCode
+ * resolved for a plugin provider, then the auth.json entry.
+ * Callers that need to refuse before spending a request (walkthrough readiness)
+ * must use this rather than inventing a second rule.
+ */
+export async function resolveProviderLogin({ auth, workingDirectory, providerID }) {
+  const providerConfig = readProviderConfig(workingDirectory, providerID);
+  return providerConfig?.auth
+    || runtimeCredential(providerID, await getRuntimeProvider(providerID))
+    || getAuthEntryForProvider(auth, providerID)
+    || null;
+}
+
+export async function callSmallModel({ auth, catalog, workingDirectory, sessionID, providerID, modelID, prompt, system, maxOutputTokens, responseSchema, timeoutMs, signal }) {
   const tokens = Number(maxOutputTokens) > 0 ? Number(maxOutputTokens) : DEFAULT_MAX_OUTPUT_TOKENS;
   const providerConfig = readProviderConfig(workingDirectory, providerID);
-  // Match OpenCode's resolveSDK precedence:
-  // config provider.<id>.options.apiKey (providerConfig.auth) wins; the
-  // auth.json entry is only a fallback.
-  const entry = providerConfig?.auth || getAuthEntryForProvider(auth, providerID);
+  const runtimeProvider = await getRuntimeProvider(providerID);
+  const runtimeModel = getRuntimeModel(runtimeProvider, modelID);
+  // Match OpenCode's resolveSDK precedence: config `provider.<id>.options`
+  // wins, then what OpenCode itself resolved at runtime (the only place a
+  // plugin's credential exists), and the auth.json entry last.
+  const entry = providerConfig?.auth
+    || runtimeCredential(providerID, runtimeProvider)
+    || getAuthEntryForProvider(auth, providerID);
   if (!entry) {
-    throw new Error(`No OpenCode login found for provider "${providerID}"`);
+    // Structured so the walkthrough (and any other caller) can show a blocker
+    // instead of a raw 500 banner with this developer-oriented sentence.
+    throw Object.assign(new Error(`No OpenCode login found for provider "${providerID}"`), {
+      statusCode: 401,
+      code: 'no-provider-login',
+      providerID,
+    });
   }
 
   if (providerID === 'github-copilot') {
@@ -516,6 +721,9 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
       system,
       maxOutputTokens: tokens,
       providerLabel: 'GitHub Copilot',
+      responseSchema,
+      timeoutMs,
+      signal,
     };
     if (endpoint === 'messages') {
       return callMessages({
@@ -534,6 +742,15 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
   }
 
   if (providerID === 'openai' && entry.type === 'oauth') {
+    // The codex backend speaks only the streaming Responses API and rejects
+    // the structured-output fields, so a schema request fails loudly here
+    // instead of silently returning free-form prose.
+    if (responseSchema) {
+      throw Object.assign(
+        new Error('The ChatGPT-plan OpenAI login does not support structured output — choose another small model'),
+        { code: 'structured-output-unsupported' },
+      );
+    }
     const fresh = await ensureFreshOpenaiOauth(entry);
     return callCodexResponses({
       accessToken: fresh.access,
@@ -541,6 +758,8 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
       modelID,
       prompt,
       system,
+      timeoutMs,
+      signal,
     });
   }
 
@@ -552,18 +771,23 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
   }
 
   if (providerID === 'anthropic') {
-    return callAnthropic({ apiKey, modelID, prompt, system, maxOutputTokens: tokens });
+    return callAnthropic({ apiKey, baseURL: providerConfig?.baseURL, modelID, prompt, system, maxOutputTokens: tokens, responseSchema, timeoutMs, signal });
   }
   if (providerID === 'google') {
-    return callGoogle({ apiKey, modelID, prompt, system, maxOutputTokens: tokens });
+    return callGoogle({ apiKey, modelID, prompt, system, maxOutputTokens: tokens, responseSchema, timeoutMs, signal });
   }
 
   // Everything else: OpenAI-compatible chat completions against the catalog's
   // base URL for that provider (openai itself included). When a custom provider
   // is not in the catalog (e.g. a user-configured OpenAI-compatible proxy),
-  // fall back to its baseURL from the OpenCode provider config. The openai
-  // provider also respects provider.openai.options.baseURL — OpenCode itself
-  // uses the same config for all providers including openai.
+  // fall back to its baseURL from the OpenCode provider config, then to the
+  // selected model's endpoint OpenCode resolved at runtime, then to the
+  // provider-level runtime endpoint. For a plugin provider, the runtime listing
+  // is the only place those endpoints exist, and several are local proxies the
+  // plugin itself runs. Last comes SDK_DEFAULT_BASE_URLS, for providers whose
+  // endpoint only their SDK package knows. The openai provider also respects
+  // provider.openai.options.baseURL — OpenCode itself uses the same config for
+  // all providers including openai.
   const provider = getCatalogProvider(catalog, providerID);
   const providerConfigUrl = providerConfig?.baseURL;
   const defaultOpenaiUrl = 'https://api.openai.com/v1';
@@ -571,9 +795,11 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
     ? providerConfigUrl
     : providerID === 'openai'
       ? defaultOpenaiUrl
-      : typeof provider?.api === 'string' && provider.api
-        ? provider.api
-        : null;
+      : runtimeModel?.api?.url
+        ?? runtimeProvider?.baseURL
+        ?? (typeof provider?.api === 'string' && provider.api
+          ? provider.api
+          : SDK_DEFAULT_BASE_URLS.get(providerID) ?? null);
   if (!baseURL) {
     throw new Error(`Provider "${providerID}" has no known API base URL`);
   }
@@ -584,21 +810,42 @@ export async function callSmallModel({ auth, catalog, workingDirectory, provider
   // parameter: unknown body fields 400 on some providers, so this stays an
   // explicit allowlist. Models without a switch (DeepSeek, Qwen, Kimi, …)
   // just get the generous output budget.
-  const lowerModel = modelID.toLowerCase();
-  const supportsThinkingToggle = providerID.includes('zai')
+  // GLM's switch belongs to the Z.ai/Zhipu endpoints, not to the model: the
+  // same GLM served by another provider (OpenCode Go) rejects the field. The
+  // host check keeps the switch for a custom-named provider pointed at them.
+  const servedByZai = providerID.includes('zai')
     || providerID.includes('zhipu')
-    || lowerModel.includes('glm')
-    || lowerModel.includes('minimax-m3');
+    || ZAI_ENDPOINT_HOSTS.some((host) => baseURL.includes(host));
+  // MiniMax M3's switch is understood only behind the adapters OpenCode sends
+  // it through. An adapter nobody reports (a custom provider) is OpenAI-
+  // compatible by OpenCode's own default.
+  const adapter = runtimeModel?.api?.npm
+    ?? provider?.models?.[modelID]?.provider?.npm
+    ?? provider?.npm
+    ?? null;
+  const minimaxSwitch = modelID.toLowerCase().includes('minimax-m3')
+    && (adapter === null || MINIMAX_THINKING_ADAPTERS.has(adapter));
+  const supportsThinkingToggle = servedByZai || minimaxSwitch;
   const extraBody = supportsThinkingToggle ? { thinking: { type: 'disabled' } } : undefined;
 
   return callOpenaiCompatible({
     baseURL,
-    headers: { Authorization: `Bearer ${apiKey}` },
+    // Configured headers last: a gateway that authenticates on its own header
+    // must be able to override the bearer default rather than sit beside it.
+    headers: mergeHeadersCaseInsensitive(
+      mergeHeadersCaseInsensitive({ Authorization: `Bearer ${apiKey}` }, providerConfig?.headers),
+      providerID.startsWith('opencode')
+        ? { 'x-opencode-session': typeof sessionID === 'string' && sessionID.trim() ? sessionID.trim() : randomUUID() }
+        : null,
+    ),
     modelID,
     prompt,
     system,
     maxOutputTokens: tokens,
     providerLabel: provider?.name || providerID,
     extraBody,
+    responseSchema,
+    timeoutMs,
+    signal,
   });
 }

@@ -13,7 +13,7 @@
 import React from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
-import { getMarkdownSyntaxVars } from '@/components/chat/markdown/markdownTheme';
+import { getMarkdownSyntaxVars } from '@/components/chat/markdown/markdownSyntaxVars';
 import { useWorkerHighlightedLines } from '@/components/code/useWorkerHighlightedLines';
 
 // ── Threshold: files smaller than this render without virtualization ──
@@ -54,7 +54,8 @@ export const VirtualizedCodeBlock: React.FC<VirtualizedCodeBlockProps> = React.m
   const syntaxVars = React.useMemo(() => getMarkdownSyntaxVars(currentTheme), [currentTheme]);
   // Tokenize the whole block in one worker call; rows index into the result.
   const fullText = React.useMemo(() => lines.map((line) => line.text).join('\n'), [lines]);
-  const highlighted = useWorkerHighlightedLines(fullText, language);
+  const highlightResult = useWorkerHighlightedLines(fullText, language);
+  const highlighted = highlightResult.lines;
 
   const shouldVirtualize = lines.length > VIRTUALIZE_THRESHOLD;
 
@@ -62,7 +63,7 @@ export const VirtualizedCodeBlock: React.FC<VirtualizedCodeBlockProps> = React.m
   if (!shouldVirtualize) {
     return (
       <div
-        className="typography-code font-mono w-full min-w-0"
+        className="oc-surface-code bg-[var(--syntax-background)] typography-code font-mono w-full min-w-0"
         style={{ ...(syntaxVars as React.CSSProperties), maxHeight, overflow: 'auto' }}
       >
         {lines.map((line, idx) => (
@@ -125,7 +126,7 @@ const VirtualizedRows: React.FC<VirtualizedRowsProps> = React.memo(({
   return (
     <div
       ref={parentRef}
-      className="typography-code font-mono w-full min-w-0"
+      className="oc-surface-code bg-[var(--syntax-background)] typography-code font-mono w-full min-w-0"
       style={{ ...(syntaxVars as React.CSSProperties), height: viewportHeight, maxHeight, overflow: 'auto' }}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
@@ -172,7 +173,7 @@ const Row: React.FC<RowProps> = React.memo(({ line, html, showLineNumbers, style
       {showLineNumbers && (
         <span
           className="w-10 flex-shrink-0 text-right pr-3 select-none border-r mr-3 -my-0.5 py-0.5"
-          style={{ color: 'var(--tools-edit-line-number)', borderColor: 'var(--tools-border)' }}
+          style={{ color: 'var(--syntax-line-number)', borderColor: 'var(--interactive-border)' }}
         >
           {!line.isInfo && line.lineNumber != null ? line.lineNumber : ''}
         </span>

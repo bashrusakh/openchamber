@@ -12,6 +12,49 @@ describe('session runtime', () => {
     runtimes.length = 0;
   });
 
+  it('keeps pending permission and question requests until they are answered', () => {
+    const runtime = createSessionRuntime({
+      writeSseEvent() {},
+      getNotificationClients: () => new Set(),
+      broadcastEvent: () => {},
+    });
+    runtimes.push(runtime);
+    const permission = { id: 'perm-1', sessionID: 'session-1', permission: 'bash', patterns: ['rm *'], metadata: {}, always: [] };
+    const question = { id: 'q-1', sessionID: 'session-2', questions: [{ header: 'Pick', question: 'Which?', options: [] }] };
+
+    runtime.processOpenCodeSsePayload({ type: 'permission.asked', properties: permission });
+    runtime.processOpenCodeSsePayload({ type: 'permission.asked', properties: permission });
+    runtime.processOpenCodeSsePayload({ type: 'question.asked', properties: question });
+    expect(runtime.getPendingBlockingRequestsSnapshot()).toEqual({
+      'session-1': { permissions: [permission], questions: [] },
+      'session-2': { permissions: [], questions: [question] },
+    });
+
+    runtime.processOpenCodeSsePayload({ type: 'permission.replied', properties: { sessionID: 'session-1', requestID: 'perm-1' } });
+    runtime.processOpenCodeSsePayload({ type: 'question.rejected', properties: { sessionID: 'session-2' } });
+    expect(runtime.getPendingBlockingRequestsSnapshot()).toEqual({});
+  });
+
+  it('drops pending requests when the session is deleted or OpenCode restarts', () => {
+    const runtime = createSessionRuntime({
+      writeSseEvent() {},
+      getNotificationClients: () => new Set(),
+      broadcastEvent: () => {},
+    });
+    runtimes.push(runtime);
+    const ask = (sessionID, id) => runtime.processOpenCodeSsePayload({
+      type: 'permission.asked', properties: { id, sessionID, permission: 'edit', patterns: [], metadata: {}, always: [] },
+    });
+
+    ask('session-1', 'perm-1');
+    ask('session-2', 'perm-2');
+    runtime.processOpenCodeSsePayload({ type: 'session.deleted', properties: { info: { id: 'session-1' } } });
+    expect(Object.keys(runtime.getPendingBlockingRequestsSnapshot())).toEqual(['session-2']);
+
+    runtime.interruptBusySessionsAfterRestart();
+    expect(runtime.getPendingBlockingRequestsSnapshot()).toEqual({});
+  });
+
   it('broadcasts attention clears through the shared broadcaster', () => {
     const events = [];
     const runtime = createSessionRuntime({
@@ -177,6 +220,80 @@ describe('session runtime', () => {
 
     runtime.resetAllSessionActivityToIdle();
     expect(runtime.getActiveSessionCount()).toBe(0);
+  });
+
+  it('interrupts busy sessions after restart and broadcasts terminal events once', () => {
+    const events = [];
+    const runtime = createSessionRuntime({
+      writeSseEvent() {},
+      getNotificationClients: () => new Set(),
+      broadcastEvent: (event) => events.push(event),
+    });
+    runtimes.push(runtime);
+    const status = (sessionID, type) => runtime.processOpenCodeSsePayload({
+      type: 'session.status',
+      properties: { sessionID, status: { type } },
+    });
+
+    status('session-busy-1', 'busy');
+    status('session-busy-2', 'retry');
+    status('session-busy-3', 'busy');
+    status('session-idle', 'idle');
+    expect(runtime.getActiveSessionCount()).toBe(3);
+    events.length = 0;
+
+    expect(runtime.interruptBusySessionsAfterRestart()).toEqual({
+      sessionIds: ['session-busy-1', 'session-busy-2', 'session-busy-3'],
+    });
+
+    expect(runtime.getActiveSessionCount()).toBe(0);
+    expect(runtime.getSessionActivitySnapshot()).toEqual({
+      'session-busy-1': { type: 'idle' },
+      'session-busy-2': { type: 'idle' },
+      'session-busy-3': { type: 'idle' },
+      'session-idle': { type: 'idle' },
+    });
+    expect(runtime.getSessionStateSnapshot()).toEqual({
+      'session-busy-1': expect.objectContaining({
+        status: 'idle',
+        metadata: expect.objectContaining({
+          message: 'Interrupted by OpenCode restart',
+          reason: 'opencode-restart',
+        }),
+      }),
+      'session-busy-2': expect.objectContaining({ status: 'idle' }),
+      'session-busy-3': expect.objectContaining({ status: 'idle' }),
+      'session-idle': expect.objectContaining({ status: 'idle' }),
+    });
+
+    const terminalEvents = events.filter((event) => (
+      event.type === 'openchamber:session-status' || event.type === 'session.error'
+    ));
+    expect(terminalEvents).toHaveLength(6);
+    for (const sessionId of ['session-busy-1', 'session-busy-2', 'session-busy-3']) {
+      expect(terminalEvents).toContainEqual({
+        type: 'openchamber:session-status',
+        properties: expect.objectContaining({
+          sessionID: sessionId,
+          status: 'idle',
+        }),
+      });
+      expect(terminalEvents).toContainEqual({
+        type: 'session.error',
+        properties: {
+          sessionID: sessionId,
+          error: {
+            name: 'MessageAbortedError',
+            message: 'The running turn was interrupted when OpenCode restarted.',
+          },
+        },
+      });
+    }
+    expect(terminalEvents.some((event) => event.properties.sessionID === 'session-idle')).toBe(false);
+
+    events.length = 0;
+    expect(runtime.interruptBusySessionsAfterRestart()).toEqual({ sessionIds: [] });
+    expect(events).toEqual([]);
   });
 
   it('restores activity when busy interrupts cooldown without timer underflow', () => {

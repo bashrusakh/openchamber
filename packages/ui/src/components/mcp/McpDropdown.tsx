@@ -21,6 +21,8 @@ import { computeMcpHealth, useMcpStore } from '@/stores/useMcpStore';
 import { McpIcon } from '@/components/icons/McpIcon';
 import { Icon } from "@/components/icon/Icon";
 import { useI18n } from '@/lib/i18n';
+import { toast } from 'sonner';
+import { startMcpAuthorization } from '@/components/sections/mcp/startMcpAuthorization';
 
 const statusTooltip = (
   status: McpStatus | undefined,
@@ -133,7 +135,7 @@ export const McpDropdownContent: React.FC<McpDropdownContentProps> = ({ active, 
             {headerAction}
             <button
               type="button"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground hover:bg-interactive-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground hover:bg-interactive-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               disabled={isSpinning}
               onClick={handleRefresh}
               aria-label={t('mcpDropdown.actions.refreshAria')}
@@ -196,11 +198,27 @@ export const McpDropdownContent: React.FC<McpDropdownContentProps> = ({ active, 
                 onCheckedChange={async (checked) => {
                   setBusyName(serverName);
                   try {
-                    if (checked) {
-                      await connect(serverName, directory);
-                    } else {
+                    if (!checked) {
                       await disconnect(serverName, directory);
+                      return;
                     }
+                    // Reconnecting a server that is waiting on authorization
+                    // just repeats the attempt that produced `needs_auth`;
+                    // the user has to visit the provider first.
+                    const entryStatus = status?.[serverName]?.status;
+                    if (entryStatus === 'needs_auth' || entryStatus === 'needs_client_registration') {
+                      const { opened } = await startMcpAuthorization({
+                        name: serverName,
+                        directory,
+                      });
+                      if (!opened) {
+                        toast.error(t('mcpDropdown.toast.authorizeOpenFailed'));
+                      }
+                      return;
+                    }
+                    await connect(serverName, directory);
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : t('mcpDropdown.toast.authorizeFailed'));
                   } finally {
                     setBusyName(null);
                   }

@@ -1,43 +1,5 @@
 /* Mobile Adaptations - All Devices */
 
-/* Set global device type variables */
-:root {
-  --is-mobile: 0;
-  --device-type: 'desktop';
-  --font-scale: 1;
-}
-
-@media (max-width: 1024px) {
-:root.mobile-pointer:not(.desktop-runtime) {
-    --is-mobile: 1;
-    --device-type: 'mobile';
-    --font-scale: 0.9;
-  }
-}
-
-/* Utility classes for device-specific styling */
-.desktop-only {
-  display: block;
-}
-
-.mobile-only {
-  display: none;
-}
-
-@media (max-width: 1024px) {
-  :root.mobile-pointer:not(.desktop-runtime) .desktop-only {
-    display: none !important;
-  }
-
-  :root.desktop-runtime .mobile-only {
-    display: none !important;
-  }
-
-  :root.mobile-pointer:not(.desktop-runtime) .mobile-only {
-    display: block !important;
-  }
-}
-
 /* General mobile improvements for all mobile devices */
 @media (max-width: 1024px) {
   /* Override CSS custom properties for mobile */
@@ -79,12 +41,25 @@
     font-size: var(--text-code) !important;
   }
 
+  :root.mobile-pointer:not(.desktop-runtime) .question-markdown > .markdown-content.markdown-tool {
+    font-size: inherit !important;
+  }
+
   /* Improve touch targets for mobile */
   :root.mobile-pointer:not(.desktop-runtime) button:not([role="radio"]):not([role="checkbox"]):not([role="switch"]),
   :root.mobile-pointer:not(.desktop-runtime) .btn,
-  :root.mobile-pointer:not(.desktop-runtime) [role="button"] {
+  :root.mobile-pointer:not(.desktop-runtime) [role="button"],
+  /* Static chat tool rows: not interactive as a whole, but they must share
+     the 36px rhythm of the [role="button"] expandable/reasoning rows. */
+  :root.mobile-pointer:not(.desktop-runtime) .oc-static-tool-row {
     min-height: 36px;
     min-width: 36px;
+  }
+
+  /* The Changes section and source pickers take their height from dropdownTriggerVariants,
+     rather than the generic mobile button minimum. */
+  :root.mobile-pointer:not(.desktop-runtime) button[data-mobile-comparison-trigger] {
+    min-height: 0;
   }
 
   /* Composer footer action buttons (sessions / attach / auto-accept): hug the
@@ -144,17 +119,6 @@
     -webkit-touch-callout: default;
   }
 
-  /* Improve mobile spacing */
-  :root.mobile-pointer:not(.desktop-runtime) .px-4 {
-    padding-left: 1rem !important;
-    padding-right: 1rem !important;
-  }
-
-  :root.mobile-pointer:not(.desktop-runtime) .py-2 {
-    padding-top: 0.75rem !important;
-    padding-bottom: 0.75rem !important;
-  }
-
   /* Fix mobile scroll containers */
   :root.mobile-pointer:not(.desktop-runtime) .overflow-hidden {
     overflow-x: hidden !important;
@@ -188,6 +152,23 @@
     min-height: 0;
   }
 
+  /* -webkit-fill-available above is a pre-dvh iOS Safari fix. On Android
+     Chrome it freezes the root at the pre-keyboard height: when
+     interactive-widget=resizes-content shrinks the viewport, the document
+     stays taller than the screen and (with overflow hidden) the composer's
+     bottom is clipped behind the keyboard with no way to scroll to it.
+     Every dvh-capable browser gets the dynamic height instead; the legacy
+     fallback above keeps serving browsers without dvh. */
+  @supports (height: 100dvh) {
+    :root.mobile-pointer:not(.desktop-runtime) {
+      height: 100dvh;
+    }
+
+    :root.mobile-pointer:not(.desktop-runtime) .flex.flex-col.h-screen {
+      height: 100dvh;
+    }
+  }
+
   /* Fix main content area */
   :root.mobile-pointer:not(.desktop-runtime) .flex-1.overflow-hidden {
     min-height: 0;
@@ -205,30 +186,6 @@
     min-height: 0;
   }
 
-  /* Mobile sidebar positioning */
-  :root.mobile-pointer:not(.desktop-runtime) .mobile-sidebar-top {
-    top: var(--header-height, 3rem);
-    height: calc(100vh - var(--header-height, 3rem));
-  }
-
-  /* Set header height variable */
-  :root.mobile-pointer:not(.desktop-runtime) .header-safe-area {
-    --header-height: 3rem;
-  }
-
-  /* For mobile devices with larger header */
-  @media (max-width: 768px) {
-    :root.mobile-pointer:not(.desktop-runtime) .header-safe-area {
-      --header-height: 3.5rem;
-    }
-  }
-
-  /* For tablet devices */
-  @media (min-width: 769px) and (max-width: 1024px) {
-    :root.mobile-pointer:not(.desktop-runtime) .header-safe-area {
-      --header-height: 3.25rem;
-    }
-  }
 }
 
 /* iOS PWA Adaptations */
@@ -241,7 +198,7 @@
     --oc-safe-area-top: env(safe-area-inset-top, 0);
     --oc-safe-area-right: env(safe-area-inset-right, 0);
     --oc-safe-area-bottom: env(safe-area-inset-bottom, 0);
-    --oc-safe-area-bottom-visual: clamp(0px, calc(var(--oc-safe-area-bottom) * 0.05), 4px);
+    --oc-safe-area-bottom-visual: clamp(0px, calc(var(--oc-safe-area-bottom) * 0.35), 12px);
     --oc-safe-area-left: env(safe-area-inset-left, 0);
   }
 
@@ -258,25 +215,10 @@
 
 /* Phase 1: iOS PWA safe area handling - Enhanced positioning approach */
 @media (display-mode: standalone) {
-  /* iOS-specific safe area handling with CSS variable support */
+  /* iOS-specific safe area handling. The --oc-safe-area-* tokens and the
+     .header-safe-area padding are already set by the unconditional iOS block
+     above; only the standalone-specific rules live here. */
   @supports (-webkit-touch-callout: none) {
-    /* Safe area handling for fixed positioned elements */
-    :root.device-mobile:not(.desktop-runtime),
-    :root.device-tablet:not(.desktop-runtime),
-    :root.mobile-pointer:not(.desktop-runtime) {
-      --oc-safe-area-top: env(safe-area-inset-top, 0);
-      --oc-safe-area-right: env(safe-area-inset-right, 0);
-      --oc-safe-area-bottom: env(safe-area-inset-bottom, 0);
-      --oc-safe-area-bottom-visual: clamp(0px, calc(var(--oc-safe-area-bottom) * 0.05), 4px);
-      --oc-safe-area-left: env(safe-area-inset-left, 0);
-    }
-
-    :root.device-mobile:not(.desktop-runtime) .header-safe-area,
-    :root.device-tablet:not(.desktop-runtime) .header-safe-area,
-    :root.mobile-pointer:not(.desktop-runtime) .header-safe-area {
-      padding-top: var(--oc-safe-area-top);
-    }
-
     :root.device-mobile:not(.desktop-runtime) .main-content-safe-area,
     :root.device-tablet:not(.desktop-runtime) .main-content-safe-area,
     :root.mobile-pointer:not(.desktop-runtime) .main-content-safe-area {
@@ -293,20 +235,22 @@
       padding-bottom: var(--oc-safe-area-bottom-visual) !important;
     }
 
-    /* Drawer safe area - top already offset by header height */
-    :root.device-mobile:not(.desktop-runtime) .drawer-safe-area,
-    :root.device-tablet:not(.desktop-runtime) .drawer-safe-area,
-    :root.mobile-pointer:not(.desktop-runtime) .drawer-safe-area {
-      padding-top: 0;
-      padding-bottom: var(--oc-safe-area-bottom-visual);
-    }
-
     /* Fix iOS viewport issues */
     :root.device-mobile:not(.desktop-runtime) .flex.flex-col.h-screen,
     :root.device-tablet:not(.desktop-runtime) .flex.flex-col.h-screen,
     :root.mobile-pointer:not(.desktop-runtime) .flex.flex-col.h-screen {
       min-height: 100vh;
       min-height: -webkit-fill-available;
+    }
+
+    /* Same Android-keyboard clipping fix as above: dvh-capable browsers
+       must not keep a frozen -webkit-fill-available minimum. */
+    @supports (min-height: 100dvh) {
+      :root.device-mobile:not(.desktop-runtime) .flex.flex-col.h-screen,
+      :root.device-tablet:not(.desktop-runtime) .flex.flex-col.h-screen,
+      :root.mobile-pointer:not(.desktop-runtime) .flex.flex-col.h-screen {
+        min-height: 100dvh;
+      }
     }
 
     /* Prevent content overlap in iOS */
@@ -316,19 +260,6 @@
       position: relative;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
-    }
-
-    /* Update header height for iOS */
-    :root.device-mobile:not(.desktop-runtime) .header-safe-area,
-    :root.device-tablet:not(.desktop-runtime) .header-safe-area,
-    :root.mobile-pointer:not(.desktop-runtime) .header-safe-area {
-      --header-height: 4.5rem;
-    }
-
-    :root.device-mobile:not(.desktop-runtime) .mobile-sidebar-top,
-    :root.device-tablet:not(.desktop-runtime) .mobile-sidebar-top,
-    :root.mobile-pointer:not(.desktop-runtime) .mobile-sidebar-top {
-      --header-height: 4.5rem;
     }
 
     /* Mobile typography improvements */
@@ -370,7 +301,7 @@
       --oc-safe-area-top: env(safe-area-inset-top, 0);
       --oc-safe-area-right: env(safe-area-inset-right, 0);
       --oc-safe-area-bottom: env(safe-area-inset-bottom, 0);
-      --oc-safe-area-bottom-visual: clamp(0px, calc(var(--oc-safe-area-bottom) * 0.05), 4px);
+      --oc-safe-area-bottom-visual: clamp(0px, calc(var(--oc-safe-area-bottom) * 0.35), 12px);
       --oc-safe-area-left: env(safe-area-inset-left, 0);
     }
 
@@ -537,12 +468,28 @@
   --oc-safe-area-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
   --oc-safe-area-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
   --oc-safe-area-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
-  --oc-safe-area-bottom-visual: clamp(0px, calc(var(--oc-safe-area-bottom) * 0.05), 4px);
+  --oc-safe-area-bottom-visual: clamp(0px, calc(var(--oc-safe-area-bottom) * 0.35), 12px);
   --oc-safe-area-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
 }
 
 :root.oc-capacitor-app.oc-platform-android .header-safe-area {
   padding-top: var(--oc-safe-area-top);
+}
+
+/* Android 15+ enforces edge-to-edge, and once the WebView can read the insets
+   itself Capacitor stops padding the view and just hands them over — so the app
+   draws under the navigation/gesture bar and every full-cover surface has to
+   keep its own content clear of it. Marked surfaces opt in through
+   .oc-bottom-safe-surface; iOS deliberately stays on its softer visual inset,
+   where the home indicator is a thin overlay rather than a bar that eats taps.
+   Capacitor reports a zero bottom inset while the keyboard is up, so this never
+   stacks with --oc-keyboard-inset. */
+:root.oc-capacitor-app.oc-platform-android {
+  --oc-app-bottom-safe: max(16px, var(--oc-safe-area-bottom));
+}
+
+:root.oc-capacitor-app.oc-platform-android .oc-bottom-safe-surface {
+  padding-bottom: var(--oc-safe-area-bottom);
 }
 
 :root.oc-capacitor-app.oc-platform-android [data-sonner-toaster][data-y-position='top'] {
@@ -579,7 +526,7 @@
    choreography driven by useNativeMobileChrome:
 
      show: shell keeps its full height for the whole 0.25s; the composer (and, when
-           pinned, the chat scroll container — see useChatAutoFollow) slides up via
+           pinned, the chat scroll container — see useChatTimelineScroll) slides up via
            inline transforms in sync with the keyboard; at the end the shell snaps to
            its final height (--oc-kb-layout, one reflow) and the shift is removed
            in the same frame — visually identical, so the swap is invisible.
@@ -646,13 +593,8 @@
    .oc-draft-center note below) are moved with INLINE transform/transition set
    by useNativeMobileChrome — WebKit does not reliably start transitions when a
    transform changes via a CSS custom property, which parked the composer until
-   the keyboard finished. Only the sliding backdrop lives here. */
-:root.oc-capacitor-app.oc-kb-animating .oc-mobile-composer {
-  /* While sliding, the composer passes over chat content that hasn't moved (user
-     scrolled up) — give it an opaque backdrop so text doesn't show through the
-     form's transparent padding. */
-  background: var(--background);
-}
+   the keyboard finished. The composer floats over the transcript on a glass
+   box, so nothing else lives here. */
 
 /* Constant-viewport trick for the chat scroller: when the keyboard settles the
    shell shrinks by --oc-kb-layout, but the scroller keeps its full height by
@@ -684,8 +626,29 @@
    the final one. Hide it during the transition (+ UIKit's reposition lag,
    see oc-kb-caret-hold timing in useNativeMobileChrome) and pop it back in. */
 :root.oc-capacitor-app.oc-kb-caret-hold textarea,
-:root.oc-capacitor-app.oc-kb-caret-hold input {
+:root.oc-capacitor-app.oc-kb-caret-hold input,
+:root.oc-capacitor-app.oc-kb-caret-hold [contenteditable] {
   caret-color: transparent;
+}
+
+/* The composer is a CodeMirror editor, so it is neither a textarea nor an
+   input, and its caret is not the native one either: drawSelection() hides
+   that and paints a .cm-cursor element instead. Hiding caret-color alone
+   would leave that element riding across the screen. */
+:root.oc-capacitor-app.oc-kb-caret-hold .cm-cursor,
+:root.oc-capacitor-app.oc-kb-caret-hold .cm-dropCursor {
+  opacity: 0;
+}
+
+/* On touch devices the composer re-enables the NATIVE caret with `!important`
+   (composerNativeSelectionTheme: iOS colours its selection handles from the
+   caret colour, so the caret cannot stay transparent). That declaration beats
+   the plain [contenteditable] rule above, so the caret-hold needs its own
+   heavier rule for the composer — !important plus more specificity than the
+   theme's `.cm-editor .cm-content` selector. */
+:root.oc-capacitor-app.oc-kb-caret-hold .cm-editor .cm-content,
+:root.oc-capacitor-app.oc-kb-caret-hold .cm-editor .cm-content .cm-line {
+  caret-color: transparent !important;
 }
 
 /* The composer keeps its 1rem bottom padding while the keyboard is down (breathing
@@ -697,13 +660,28 @@
   padding-bottom: 12px;
 }
 
-/* Draft starter chips leave the moment the keyboard starts rising
-   (oc-keyboard-open lands at keyboardWillShow) and return when it's gone —
-   with the keyboard up there is only room for the draft title. Instant
-   show/hide (no squish animation); the title's own keyboard compensation
-   (.oc-draft-center below) carries the smooth motion. */
-:root.oc-capacitor-app.oc-keyboard-open .oc-draft-starters,
-:root.oc-browser-keyboard-open .oc-draft-starters {
+/* The recap hint is for reading, not writing: with the mobile composer
+   expanded (keyboard up) it hides, whatever the scroll position. The class
+   lands in the same frame as the pill swap, so the hint leaves with it. */
+:root.oc-composer-expanded .oc-recap-hint {
+  opacity: 0;
+}
+
+/* Draft starter chips leave when the full composer takes over — with the
+   composer expanded (and hence the keyboard up) there is only room for the
+   draft title. oc-composer-expanded is set in the SAME frame as the pill swap
+   (see useMobileComposerShell), so the chips leave together with the morph;
+   the keyboard classes remain as fallbacks for keyboard-up states that do not
+   go through the pill (and for mobile browsers). Instant show/hide (no squish
+   animation); the title's own keyboard compensation (.oc-draft-center below)
+   carries the smooth motion.
+
+   A tablet has room to keep them: `oc-keep-draft-starters` is set by the shell
+   (portrait, or any orientation with a hardware keyboard — see MobileApp) and
+   opts the whole draft screen out of the hiding below. */
+:root:not(.oc-keep-draft-starters).oc-composer-expanded .oc-draft-starters,
+:root:not(.oc-keep-draft-starters).oc-capacitor-app.oc-keyboard-open .oc-draft-starters,
+:root:not(.oc-keep-draft-starters).oc-browser-keyboard-open .oc-draft-starters {
   display: none;
 }
 
@@ -759,7 +737,7 @@
      collapsing browser chrome, so the dynamic and large viewports are the same
      thing — pin the shell to 100lvh, which always reports full screen height.
      Initial geometry is identical (lvh == dvh on load). */
-  :root:not(.oc-capacitor-app) .h-\[100dvh\] {
+  :root:not(.oc-capacitor-app) .oc-mobile-app-shell {
     height: 100lvh;
   }
 
@@ -773,6 +751,20 @@
 @keyframes oc-composer-morph-fade {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+/* Pill ↔ full-composer morph (native iOS; see mobileComposerMorph.ts). While
+   the box carries data-composer-morph its height is animated inline, so it
+   clips instead of overflowing and its contents sit on the bottom edge: the
+   footer icon row and the model/agent row stay where the pill's rows were
+   and the editor block travels above them. flex-shrink: 0 keeps the children
+   at their natural size (a squeezed editor would distort instead of clip). */
+:root.oc-capacitor-app [data-composer-box][data-composer-morph] {
+  overflow: clip !important;
+  justify-content: flex-end;
+}
+:root.oc-capacitor-app [data-composer-box][data-composer-morph] > * {
+  flex-shrink: 0;
 }
 
 /* Voice overlay variant: the overlay BACKGROUND appears immediately (it rides

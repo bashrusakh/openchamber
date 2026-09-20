@@ -11,6 +11,8 @@ Optimize the amount and frequency of work before optimizing individual operation
 
 **Core principle:** Make expensive work structurally unnecessary. A fast inner function still freezes the app when called millions of times on the main thread.
 
+Load `sync-state-invariants` when an optimization changes state authority, reconciliation, optimistic data, event ordering, cache lifecycle, or destructive cleanup. This skill owns measured cost; `sync-state-invariants` owns state correctness.
+
 ## Start With A Performance Contract
 
 Define before editing:
@@ -27,6 +29,36 @@ Do not optimize against a toy fixture when the report provides production scale.
 
 ## Workflow
 
+Complete the numbered workflow in order. An optimization is complete only when the exact measured scenario meets its budget and separate correctness checks preserve every applicable state, identity, layout, and lifecycle transition.
+
+### 0. Trust The Measurement Before Trusting The Number
+
+A measurement setup that is wrong produces clean, confident, wrong numbers, and
+a clean number ends an investigation. Establish validity first.
+
+**Prove the environment is not throttled.** Chrome stops producing frames and
+throttles timers for windows it considers backgrounded or occluded, headless or
+not. A capture taken that way reports near-zero rendering work no matter what
+the page does. Disable background/occlusion throttling at launch and measure
+frame liveness inside the capture. The same applies to any environment that
+idles when unobserved.
+
+**Prove zero is a measurement.** A metric reading zero, absent, or perfectly
+quiet is a claim that requires evidence, because a disabled instrument reports
+exactly the same thing. `RunTask` only appears under the disabled-by-default
+timeline category; a scenario opened for the wrong directory renders nothing at
+all. Before believing a quiet result, confirm the instrument fired and the
+workload actually ran: assert on an independent signal, such as DOM growth
+alongside the application's own render counters.
+
+**Prove the workload is comparable.** When the stimulus varies in size between
+runs, per-second and total figures are not comparable. Normalise by units of
+work delivered, and check run-to-run spread on an unchanged build before
+attributing any difference to a change.
+
+Do not report a number whose validity you have not established. State which
+validity checks ran.
+
 ### 1. Reproduce And Measure
 
 - Reproduce the exact interaction, not a nearby helper in isolation.
@@ -36,6 +68,26 @@ Do not optimize against a toy fixture when the report provides production scale.
 - Capture a baseline before changing code.
 
 Do not infer a bottleneck from code appearance when a trace or counter can identify it.
+
+Treat every proposed optimization as a hypothesis. Memoization, caches, indexes, workers, scheduling, retries, and lifecycle machinery must address an observed cost or failure in the measured path; “could be slow” or “might race” is not evidence. Keep only the smallest mechanism that meets the contract, except where an inherent security, data-loss, destructive-operation, or concurrency invariant requires proactive protection.
+
+**Never accept an "after" without a "before" on the identical scenario and
+build.** Measuring a fixed build against a remembered number, a different
+scenario, or a nearby baseline proves nothing: the mechanism you changed may
+not even execute in the path you measured. Re-run the unchanged build through
+the same scenario, however inconvenient the rebuild. Expect to discover that a
+plausible fix changes nothing.
+
+**A sampling profiler cannot explain native work.** Self time attributed to
+`(program)` says only that the time was not in interpreted JavaScript. Use the
+timeline trace, which names parsing, style recalculation, layout, layerization,
+paint, and raster, and reserve the sampler for attributing application code.
+
+**Reproduction may require production scale you do not have.** A threshold
+effect is invisible below its threshold, and a development workspace is usually
+below it. When a report will not reproduce, compare the reporter's scale
+against yours on the specific dimension the code keys on before concluding the
+bug is absent.
 
 Profiling identifies where time is spent; it does not prove behavioral equivalence. Separately verify the applicable state, identity, layout, and lifecycle transitions for every structural optimization.
 
@@ -147,7 +199,35 @@ Add a cache only when all are explicit:
 - runtime/project/user isolation where identities can collide;
 - proof that caching removes enough work to meet the budget.
 
+Do not introduce a cache merely to make an abstraction reusable or prepare for future consumers. First prove repeated work in the real path; then place the cache with the narrowest owner and lifetime that can invalidate it correctly.
+
 A cache inside an `O(consumers × entities × candidates)` loop is a mitigation, not automatically a complete fix.
+
+## Repository Tooling
+
+`scripts/perf/DOCUMENTATION.md` is the entry point: it covers every capture
+command, how to stand up a production build to measure against, how to read the
+artifacts, and the validity guarantees these scripts enforce. Read it before
+measuring.
+
+Five unattended capture commands exist; prefer them over ad-hoc timing code,
+and extend them when a scenario is missing rather than measuring by hand.
+
+| Command | Answers |
+|---|---|
+| `bun run profile:idle` | What the app does while nobody interacts with it. Supports `--session`, `--tab`, `--then-tab`, `--panel`, `--expand-projects` to reach a specific mounted state, plus `--baseline` and `--budget-*` for regression gating. |
+| `bun run profile:session` | What a streaming assistant response costs. Creates a session, dispatches a prompt through the `openchamber session` CLI, and records until the session reports idle. Reports the long-task distribution, a timeline-trace breakdown, running animations, and output-normalised metrics. |
+| `bun run profile:animation` | What a CSS animation costs, isolated from the app. Animate only `transform` and `opacity`; everything else recalculates style every frame. |
+| `bun run profile:switch` | How long switching sessions from the sidebar takes: `ack` (the clicked row highlights) and `content` (the target session's messages are on screen), cold and warm, plus the requests each switch fires. Use it as the regression gate for any change in the sidebar, header, chat container, or markdown first paint. |
+| `bun run profile:switch` | How long switching sessions from the sidebar takes: `ack` (the clicked row highlights) and `content` (the target session's messages are on screen), cold and warm, plus the requests each switch fires. Use it as the regression gate for any change in the sidebar, header, chat container, or markdown first paint. |
+| `bun run profile:browser` | A manually driven capture when the interaction cannot be scripted. |
+
+Both automated commands fail loudly rather than reporting a clean result when
+the renderer was throttled, the trace collected no tasks, or the scenario never
+rendered. Keep that property when extending them.
+
+Measure a production build. A development build's render and bundle behaviour
+does not represent what users run.
 
 ## Verification
 
@@ -169,6 +249,32 @@ Require both correctness and performance guards:
 
 State what was not measured. Never claim a freeze is fixed from type-check and unit tests alone.
 
+## Revert What You Cannot Measure
+
+A change that does not move its target metric is not a small win, a safety
+improvement, or a cleanup. It is unvalidated complexity, and shipping it under
+a performance rationale makes the next investigation harder by implying the
+path was already optimised. Revert it and record the hypothesis as rejected.
+
+This applies to a change whose benefit appears only in reasoning, one measured
+against the wrong baseline, and one whose measured scenario turns out to behave
+identically without it.
+
+Report negative results explicitly. "Disabling this removed 40% of the
+layerization, and the fix that preserved the visuals did not" is a finding, and
+the next person needs it.
+
+## Know When To Stop
+
+Compare the remaining cost against the user-facing budget, not against zero.
+When the interaction already sits far inside budget, further optimisation of
+that path trades real regression risk for an invisible gain, and it displaces
+work on the path the user actually reported. Say so and move on.
+
+Cost that comes from intentional, user-visible behaviour is not waste. Removing
+it is a product decision, not a performance fix, and it needs the owner's
+agreement rather than a quiet commit.
+
 ## Hotfix Policy
 
 Ship a bounded cache-only or local mitigation under deadline pressure only when:
@@ -180,21 +286,10 @@ Ship a bounded cache-only or local mitigation under deadline pressure only when:
 
 If the interaction remains above budget, do not call the mitigation the completed performance fix.
 
-## Common Rationalizations
-
-| Rationalization | Reality |
-|---|---|
-| "The helper is cheap" | Multiply it by events, entities, candidates, and consumers. |
-| "No component rerendered" | Selectors and equality comparisons may still burn CPU. |
-| "`useMemo` fixes it" | Memoization does not help when dependencies churn or consumers duplicate work. |
-| "The cache made it 10× faster" | Compare the result with the interaction budget, not only the baseline. |
-| "Projects are few" | Identify the dimension that is large and the dimensions multiplying it. |
-| "Move it to a worker" | Moving waste changes responsiveness, not total cost or data correctness. |
-| "Empty means nothing exists" | Empty after failure or partial loading is not authoritative absence. |
-| "We can optimize later" | Add a scale regression now or the multiplier will return. |
-
 ## Exit Checklist
 
+- [ ] Measurement validity established: no throttling, instruments confirmed firing, workload comparable.
+- [ ] Baseline captured from the unchanged build through the identical scenario.
 - [ ] Exact interaction and production scale reproduced.
 - [ ] Cost equation written and dominant multipliers removed.
 - [ ] Sources of truth, completeness, and invalidation explicit.
@@ -205,4 +300,6 @@ If the interaction remains above budget, do not call the mitigation the complete
 - [ ] Operation-count or repeated-event regression test prevents recurrence.
 - [ ] Structural optimizations have transition-focused correctness coverage independent of performance measurements.
 - [ ] When mount topology or activation boundaries change, instrumentation distinguishes those transitions from steady state.
+- [ ] Every change retained is justified by a measured difference; unvalidated ones reverted and recorded as rejected.
+- [ ] Remaining cost compared against the budget, and stopping justified when inside it.
 - [ ] Correctness, type, lint, and relevant runtime validations pass.

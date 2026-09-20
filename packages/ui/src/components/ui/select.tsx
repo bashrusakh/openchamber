@@ -8,6 +8,8 @@ import { cn } from "@/lib/utils"
 import { dropdownTriggerVariants } from "@/components/ui/dropdown-trigger"
 import { ScrollableOverlay } from "@/components/ui/ScrollableOverlay";
 import { Icon } from "@/components/icon/Icon";
+import { shortcutRegistry } from "@/lib/shortcuts";
+import { handleDropdownNavigationKey } from "./dropdown-navigation";
 
 type AsChildProps = { asChild?: boolean };
 type AsChildRenderProps = {
@@ -16,8 +18,11 @@ type AsChildRenderProps = {
 };
 
 type SelectPortalContextValue = {
+  isOpen: boolean;
   portalContainer: HTMLElement | null;
+  collisionBoundary: Element | null;
   setPortalContainer: (container: HTMLElement | null) => void;
+  setCollisionBoundary: (boundary: Element | null) => void;
 };
 
 const SelectPortalContext = React.createContext<SelectPortalContextValue | null>(null);
@@ -36,18 +41,29 @@ type SelectRootProps<Value extends string = string> = Omit<
   value?: Value;
   defaultValue?: Value;
   onValueChange?: (value: Value, eventDetails: SelectRootChangeEventDetails) => void;
+  disableGlobalShortcuts?: boolean;
 };
 
 function Select<Value extends string = string>({
   onValueChange,
   modal = false,
+  disableGlobalShortcuts = false,
+  open,
+  defaultOpen,
+  onOpenChange,
   ...props
 }: SelectRootProps<Value>) {
   const [portalContainer, setPortalContainer] = React.useState<HTMLElement | null>(null);
+  const [collisionBoundary, setCollisionBoundary] = React.useState<Element | null>(null);
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen ?? false);
+  const isOpen = open ?? uncontrolledOpen;
   const portalContextValue = React.useMemo<SelectPortalContextValue>(() => ({
+    isOpen,
     portalContainer,
+    collisionBoundary,
     setPortalContainer,
-  }), [portalContainer]);
+    setCollisionBoundary,
+  }), [collisionBoundary, isOpen, portalContainer]);
 
   const handleValueChange = React.useCallback(
     (value: unknown, eventDetails: SelectRootChangeEventDetails) => {
@@ -58,9 +74,26 @@ function Select<Value extends string = string>({
     [onValueChange]
   );
 
+  React.useLayoutEffect(() => {
+    if (!disableGlobalShortcuts || !isOpen) return;
+    return shortcutRegistry.suspend();
+  }, [disableGlobalShortcuts, isOpen]);
+
+  const handleOpenChange: NonNullable<React.ComponentProps<typeof BaseSelect.Root>['onOpenChange']> = (nextOpen, eventDetails) => {
+    if (open === undefined) setUncontrolledOpen(nextOpen);
+    onOpenChange?.(nextOpen, eventDetails);
+  };
+
   return (
     <SelectPortalContext.Provider value={portalContextValue}>
-      <BaseSelect.Root {...props} modal={modal} onValueChange={handleValueChange} />
+      <BaseSelect.Root
+        {...props}
+        modal={modal}
+        open={open}
+        defaultOpen={defaultOpen}
+        onOpenChange={handleOpenChange}
+        onValueChange={handleValueChange}
+      />
     </SelectPortalContext.Provider>
   )
 }
@@ -119,6 +152,7 @@ function SelectTrigger({
     }
     const element = target instanceof HTMLElement ? target : null;
     portalContext.setPortalContainer(resolveDialogContainer(element));
+    portalContext.setCollisionBoundary(element?.closest('main') ?? null);
   }, [portalContext]);
 
   const asChildRender: AsChildRenderProps | null = asChild && React.isValidElement(children)
@@ -163,6 +197,8 @@ type SelectContentExtra = {
   sideOffset?: number;
   side?: "top" | "right" | "bottom" | "left";
   align?: "start" | "center" | "end";
+  collisionAvoidance?: React.ComponentProps<typeof BaseSelect.Positioner>["collisionAvoidance"];
+  constrainToMain?: boolean;
 };
 
 function SelectContent({
@@ -174,11 +210,57 @@ function SelectContent({
   sideOffset,
   side,
   align,
+  collisionAvoidance,
+  constrainToMain = false,
+  onKeyDown,
   ...props
 }: React.ComponentProps<typeof BaseSelect.Popup> & SelectContentExtra) {
   const portalContext = React.useContext(SelectPortalContext);
   const alignItemWithTrigger = position === "item-aligned";
   const portalContainer = portalContext?.portalContainer ?? null;
+  // Floating UI bounds the viewport, but native status/home areas live inside
+  // that viewport. Include the app's resolved insets in collision sizing too.
+  const [collisionPadding, setCollisionPadding] = React.useState({ top: 8, right: 8, bottom: 8, left: 8 });
+
+  React.useLayoutEffect(() => {
+    if (!portalContext?.isOpen) return;
+    let frame = 0;
+    const measure = () => {
+      const styles = getComputedStyle(document.documentElement);
+      const inset = (side: string) => Math.max(0, Number.parseFloat(styles.getPropertyValue(`--oc-safe-area-${side}`)) || 0) + 8;
+      const next = { top: inset('top'), right: inset('right'), bottom: inset('bottom'), left: inset('left') };
+      setCollisionPadding((previous) => previous.top === next.top && previous.right === next.right
+        && previous.bottom === next.bottom && previous.left === next.left ? previous : next);
+    };
+    const scheduleMeasure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    };
+    measure();
+    // Native safe-area updates can arrive after the viewport resize event.
+    const observer = new MutationObserver(scheduleMeasure);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'class'] });
+    window.addEventListener('resize', scheduleMeasure);
+    const viewport = window.visualViewport;
+    viewport?.addEventListener('resize', scheduleMeasure);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener('resize', scheduleMeasure);
+      viewport?.removeEventListener('resize', scheduleMeasure);
+    };
+  }, [portalContext?.isOpen]);
+
+  const handleKeyDown: NonNullable<React.ComponentProps<typeof BaseSelect.Popup>['onKeyDown']> = (event) => {
+    onKeyDown?.(event);
+    handleDropdownNavigationKey(event, (navigationKey) => {
+      event.currentTarget.dispatchEvent(new KeyboardEvent('keydown', {
+        key: navigationKey,
+        bubbles: true,
+        cancelable: true,
+      }));
+    });
+  };
 
   return (
     <BaseSelect.Portal container={portalToBody ? undefined : portalContainer || undefined}>
@@ -187,22 +269,25 @@ function SelectContent({
         sideOffset={sideOffset}
         side={side}
         align={align}
+        collisionAvoidance={collisionAvoidance}
+        collisionPadding={collisionPadding}
+        collisionBoundary={constrainToMain ? portalContext?.collisionBoundary ?? undefined : undefined}
         className="absolute z-[120] pointer-events-auto"
       >
         <BaseSelect.Popup
           data-slot="select-content"
           style={{
-            backgroundColor: 'var(--surface-elevated)',
             color: 'var(--surface-elevated-foreground)',
           }}
           className={cn(
-            "pointer-events-auto transition-all duration-150 ease-out data-[starting-style]:opacity-0 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[ending-style]:scale-95 relative z-[120] max-h-[var(--available-height)] min-w-[8rem] origin-[var(--transform-origin)] overflow-x-hidden rounded-xl shadow-[inset_0_1px_0_0_rgba(255,255,255,0.8),inset_0_0_0_1px_rgba(0,0,0,0.04),0_0_0_1px_rgba(0,0,0,0.10),0_1px_2px_-0.5px_rgba(0,0,0,0.08),0_4px_8px_-2px_rgba(0,0,0,0.08),0_12px_20px_-4px_rgba(0,0,0,0.08)] dark:shadow-[inset_0_1px_0_0_rgba(255,255,255,0.12),inset_0_0_0_1px_rgba(255,255,255,0.08),0_0_0_1px_rgba(0,0,0,0.36),0_1px_1px_-0.5px_rgba(0,0,0,0.22),0_3px_3px_-1.5px_rgba(0,0,0,0.20),0_6px_6px_-3px_rgba(0,0,0,0.16)]",
+            "oc-glass-popover oc-glass-floating pointer-events-auto transition-all duration-150 ease-out data-[starting-style]:opacity-0 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[ending-style]:scale-95 relative z-[120] max-h-[var(--available-height)] min-w-[8rem] origin-[var(--transform-origin)] overflow-x-hidden rounded-xl",
             !alignItemWithTrigger &&
               "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
             fitContent && "w-max min-w-0",
             className
           )}
           {...props}
+          onKeyDown={handleKeyDown}
         >
           <ScrollableOverlay
             outerClassName={cn(
@@ -242,13 +327,17 @@ function SelectLabel({
 function SelectItem({
   className,
   children,
+  showSelectedBackground = true,
   ...props
-}: React.ComponentProps<typeof BaseSelect.Item>) {
+}: React.ComponentProps<typeof BaseSelect.Item> & {
+  showSelectedBackground?: boolean;
+}) {
   return (
     <BaseSelect.Item
       data-slot="select-item"
       className={cn(
-        "data-[highlighted]:bg-interactive-hover hover:bg-interactive-hover data-[selected]:bg-interactive-selection data-[selected]:text-interactive-selection-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-pointer items-center gap-2 rounded-lg py-1.5 pr-8 pl-2 typography-ui-label outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        "data-[highlighted]:bg-interactive-hover hover:bg-interactive-hover [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-pointer items-center gap-2 rounded-lg py-1.5 pr-8 pl-2 typography-ui-label outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        showSelectedBackground && "data-[selected]:bg-interactive-selection data-[selected]:text-interactive-selection-foreground",
         className
       )}
       {...props}

@@ -11,6 +11,7 @@ description: Use when creating or modifying OpenChamber shared UI data access, O
 - OpenChamber-owned HTTP capabilities use `RuntimeAPIs` where runtime-specific behavior exists, otherwise explicit OpenChamber routes through `runtimeFetch`.
 - Browser/realtime consumers use shared runtime URL/socket helpers.
 - Shared UI never hardcodes localhost, ports, API origins, credentials, or one runtime's transport assumptions.
+- Treat runtime adapters as the imperative shell: they own transport, auth, serialization, and platform mechanics. Shared feature code receives trusted contracts and owns domain decisions.
 
 ## Classify First
 
@@ -23,11 +24,21 @@ description: Use when creating or modifying OpenChamber shared UI data access, O
 | Browser-owned authenticated URL | Runtime URL resolver and scoped URL auth |
 | SSE/WebSocket | Owning realtime transport; also load `relay-transport` |
 
+## Name The Surfaces Before Editing
+
+Before writing code that changes what a user can reach or do, write the surface list: every runtime this behavior exists on, and one line per runtime saying what happens there. Runtimes are web, Electron desktop, VS Code, hosted mobile, and Capacitor mobile.
+
+The step is done when no runtime is missing a line. "Not applicable" is a line; silence is not. A stable unsupported response is a valid outcome, an accidental fallthrough is not.
+
+Carry the list into the pull request description, which asks for the same table. It is the same artifact: written once while deciding, restated once while handing off. A surface you cannot answer for is the finding — say so in the list rather than leaving the row blank.
+
+This applies to any user-reachable behavior, not only shared UI data access. A sequence that spans native shell, server, and renderer has surfaces too; so does a capability that only one runtime implements today.
+
 ## Load References By Task
 
 | Task | Required reference |
 |---|---|
-| Iframes, downloads, raw images, object URLs, URL tokens, preview proxy/subresources | `references/browser-assets-and-auth.md` |
+| Iframes, downloads, raw images, object URLs, URL tokens | `references/browser-assets-and-auth.md` |
 | Adding runtime capabilities, VS Code behavior, Electron privilege/security, unsupported runtime behavior | `references/runtime-parity.md` |
 | Locating implementations, route registration, runtime switching, or focused tests | `references/implementation-map.md` |
 
@@ -45,6 +56,9 @@ Load every matching reference before editing.
 8. **Authoritative fetches must signal failure.** Do not convert failure into a valid empty value that callers use to clear state.
 9. **Keep privileges at the native/runtime boundary.** UI visibility and prompts are not authorization.
 10. **Confirm trust-boundary mutations.** Host imports, credential writes, privileged deep links, and runtime switching require explicit user intent.
+11. **Parse at the boundary.** Treat external, persisted, bridge, IPC, and network payloads as unknown until a schema, parser, or narrow constructor produces the trusted type consumed by shared code. Do not validate fields and then continue passing the raw payload.
+12. **Model the real contract.** Prefer precise result/state unions and required dependencies over loose strings, boolean combinations, optional callback bags, `any`, or repeated casts. Make unsupported runtime behavior and failure distinct from valid empty success.
+13. **Keep adapters deep and bridges thin.** Hide meaningful protocol or platform mechanics behind an intention-revealing runtime operation; do not add pass-through layers that only rename SDK, fetch, or bridge calls.
 
 ## HTTP Decision Rules
 
@@ -59,7 +73,7 @@ await runtimeFetch('/api/fs/raw', { query: { path } });
 Do not immediately fetch a URL produced by `getRuntimeUrlResolver()`. Use the resolver only when the browser/realtime API itself consumes the URL:
 
 ```ts
-const iframeSrc = getRuntimeUrlResolver().authenticatedAsset('/api/preview/frame');
+const imageSrc = getRuntimeUrlResolver().authenticatedAsset('/api/fs/raw?path=diagram.png');
 const eventUrl = getRuntimeUrlResolver().sse('/api/event');
 ```
 
@@ -68,6 +82,8 @@ Plain `fetch` is reserved for intentional external origins that are not the acti
 ## Runtime Switch Safety
 
 Review runtime base URL, auth, SDK clients, terminal/realtime transports, stores, session memory, and caches. Key caches by runtime identity where IDs, paths, or URLs can collide. Reset or reconnect affected state through the established runtime-switch flow.
+
+Re-parse values obtained after a switch at their owning boundary. A type established for one runtime response does not make cached raw data from another runtime trustworthy.
 
 ## Common Anti-Patterns
 
@@ -80,6 +96,8 @@ Review runtime base URL, auth, SDK clients, terminal/realtime transports, stores
 | Web-only shared route | Explicit VS Code/mobile decision |
 | Returning `[]` after authoritative fetch failure | Throw or distinct failure result |
 | Rebuilding SDK `Request` from URL only | Preserve original request body/headers/signal |
+| Component validates unknown JSON then passes it onward | Adapter parses once and returns a trusted contract |
+| Boolean/nullable combinations for exclusive outcomes | Discriminated result or state union |
 
 ## Verification
 
@@ -87,7 +105,7 @@ Review runtime base URL, auth, SDK clients, terminal/realtime transports, stores
 - OpenChamber routes win before generic proxy fallback.
 - Request fidelity, auth, abort, query, and body behavior are tested.
 - Browser/realtime auth uses narrow allowlists and scoped tokens.
-- Every applicable runtime has implementation or explicit unsupported behavior.
+- Every applicable runtime has implementation or explicit unsupported behavior, and the surface list written before editing has a line for each.
 - Runtime switching cannot reuse stale endpoint/auth/cache state.
 - Privileged Electron/extension behavior is enforced outside the renderer.
 - Focused transport, bridge, proxy, auth, and runtime tests pass; static type/lint checks alone are insufficient.

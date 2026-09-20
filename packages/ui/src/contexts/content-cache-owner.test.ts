@@ -36,6 +36,25 @@ describe("content cache owner", () => {
     owner.dispose()
   })
 
+  test("bypasses metadata cache for an authoritative read", async () => {
+    let content = "old"
+    let reads = 0
+    const owner = createContentCachedFiles({
+      readFile: async (path: string) => {
+        reads += 1
+        return { path, content }
+      },
+      statFile: async () => ({ isFile: true, isDirectory: false, size: 3, mtimeMs: 1 }),
+    } as unknown as FilesAPI)
+
+    await owner.files.readFile!("file.ts")
+    content = "new"
+    expect((await owner.files.readFile!("file.ts")).content).toBe("old")
+    expect((await owner.files.readFile!("file.ts", { fresh: true })).content).toBe("new")
+    expect(reads).toBe(2)
+    owner.dispose()
+  })
+
   test("retries a read that overlaps a write", async () => {
     const firstRead = deferred<{ path: string; content: string }>()
     let content = "old"
@@ -70,5 +89,55 @@ describe("content cache owner", () => {
     expect(first.content).toBe("/a-1")
     expect(second.content).toBe("/b-2")
     owner.dispose()
+  })
+
+  test("disposed owners throw on subsequent reads", async () => {
+    const owner = createContentCachedFiles({
+      readFile: async (path: string) => ({ path, content: "value" }),
+      statFile: async () => ({ isFile: true, isDirectory: false, size: 5, mtimeMs: 1 }),
+    } as unknown as FilesAPI)
+
+    owner.dispose()
+    await expect(owner.files.readFile!("notes.txt", { optional: true, directory: "/tmp/project" }))
+      .rejects.toThrow("File cache owner disposed")
+  })
+
+  test("runtime endpoint changes clear cache but keep serving reads", async () => {
+    const originalWindow = globalThis.window
+    const events = new EventTarget()
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        addEventListener: events.addEventListener.bind(events),
+        removeEventListener: events.removeEventListener.bind(events),
+        dispatchEvent: events.dispatchEvent.bind(events),
+      },
+    })
+
+    try {
+      let reads = 0
+      const owner = createContentCachedFiles({
+        readFile: async (path: string) => ({ path, content: `value-${++reads}` }),
+        statFile: async () => ({ isFile: true, isDirectory: false, size: 7, mtimeMs: 1 }),
+      } as unknown as FilesAPI)
+
+      expect((await owner.files.readFile!("notes.txt")).content).toBe("value-1")
+      window.dispatchEvent(new CustomEvent("openchamber:runtime-endpoint-will-change", {
+        detail: {
+          apiBaseUrl: "http://127.0.0.1:3902",
+          previousApiBaseUrl: "http://127.0.0.1:3901",
+          runtimeKey: "url:http://127.0.0.1:3902",
+          previousRuntimeKey: "url:http://127.0.0.1:3901",
+        },
+      }))
+      expect((await owner.files.readFile!("notes.txt")).content).toBe("value-2")
+      expect(reads).toBe(2)
+      owner.dispose()
+    } finally {
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: originalWindow,
+      })
+    }
   })
 })

@@ -11,6 +11,8 @@ import {
   isVSCodeRuntime,
   isWebRuntime,
 } from '@/lib/desktop';
+import { formatMessage, useI18nStore } from '@/lib/i18n/store';
+import { getUpdateInstallErrorMessage } from '@/lib/updateInstallError';
 import { runtimeFetch } from '@/lib/runtime-fetch';
 import { getClientPlatform, isCapacitorApp } from '@/lib/platform';
 
@@ -67,6 +69,12 @@ function detectDeviceClass(): 'mobile' | 'tablet' | 'desktop' | 'unknown' {
 }
 
 function detectArch(): 'arm64' | 'x64' | 'unknown' {
+  const electronArch = typeof window !== 'undefined'
+    ? window.__OPENCHAMBER_ELECTRON__?.arch?.toLowerCase?.()
+    : undefined;
+  if (electronArch === 'arm64' || electronArch === 'aarch64') return 'arm64';
+  if (electronArch === 'x64' || electronArch === 'amd64' || electronArch === 'x86_64') return 'x64';
+
   const vscodeArch = typeof window !== 'undefined'
     ? (window as { __VSCODE_CONFIG__?: { arch?: string } }).__VSCODE_CONFIG__?.arch?.toLowerCase?.()
     : undefined;
@@ -141,6 +149,8 @@ async function checkForWebUpdates(runtime: ClientRuntime, currentVersion?: strin
     const response = await runtimeFetch(`/api/openchamber/update-check?${params.toString()}`, {
       method: 'GET',
       headers: { Accept: 'application/json' },
+      // Background check — keep sockets free for interactive traffic at startup.
+      priority: 'low',
     });
 
     if (!response.ok) {
@@ -306,15 +316,18 @@ export const useUpdateStore = create<UpdateStore>()((set, get) => ({
       return;
     }
 
+    set({ error: null });
+
     try {
       const ok = await restartToApplyUpdate();
       if (!ok) {
-        throw new Error('Desktop restart only works on Local instance');
+        // No desktop bridge at all — the update was never installable here.
+        throw new Error(formatMessage(useI18nStore.getState().dictionary, 'updateDialog.error.restartUnavailable'));
       }
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to restart',
-      });
+      // Keep the real installer failure; the dialog shows it and the button
+      // stays clickable for another attempt.
+      set({ error: getUpdateInstallErrorMessage(error instanceof Error ? error : new Error(String(error))) });
     }
   },
 

@@ -108,13 +108,26 @@ before touching the filesystem). Rationale: metadata rides every
      stop), with a tick-side safety net. Messages sent while paused leave
      the goal alone; Resume re-arms the loop, and resuming over an aborted
      tail skips the audit and goes straight to a continuation nudge;
-   - terminal checks, cheapest first: assistant turn error → `blocked`;
-     `tokensUsed >= tokenBudget` → `budgetLimited`;
-     `turnsUsed >= MAX_AUTO_TURNS` (20) → `blocked`;
-   - if the latest message is a compaction summary, skip the audit and
-     continue unconditionally — running into the context window mid-work is
-     by definition "in progress, not finished" (the summary is a retelling,
-     not evidence, and must not be judged);
+    - terminal checks, cheapest first: assistant turn error → `blocked`;
+      `tokensUsed >= tokenBudget` → `budgetLimited`;
+      `turnsUsed >= MAX_AUTO_TURNS` (20) → `blocked`;
+    - error classification is independent of `finish`: `MessageAbortedError`
+      keeps the pause/resume behavior; only a `finish: "length"` with no
+      error, or `MessageOutputLengthError`, is an in-progress truncation that
+      skips the audit and continues. Any other non-null error wins over a
+      length finish and blocks with its non-empty `error.name`, or
+      `assistant turn failed` when unnamed;
+    - length recovery is bounded separately from the token budget and
+      auto-continuation cap: the first truncation permits one continuation, but
+      a second consecutive completed, non-summary assistant turn that is also
+      truncated settles the goal as `blocked` (`repeated output truncation`).
+      The consecutive state is derived from the loaded message history, not
+      persisted, using `info.time.created` chronology rather than message IDs.
+      Summary messages are not agent turns; an ordinary completed assistant
+      turn naturally breaks the consecutive condition. Explicit Resume grants
+      one new recovery attempt over the same transcript; the continuation
+      consumes that permission, so another truncation blocks again. Resume
+      does not bypass assistant errors or the token budget;
    - otherwise, small-model audit of the objective + the last assistant turn
      only — no conversation history and no continuation prompts
      (`restrictToPreferredProvider`, session's own provider/model preferred):
@@ -160,6 +173,12 @@ sees only that final turn, so the report is its evidence.
   colors/labels shared across surfaces.
 - `stores/useSessionGoalArmStore.ts` — the "next prompt starts a goal" flag,
   consumed by `sendMessage` in `sync/session-ui-store.ts` (works for drafts).
+  Armed slash commands resolve their authoritative command template and apply
+  OpenCode argument expansion (`$ARGUMENTS`, positional placeholders, or the
+  implicit argument suffix) for the audit objective before goal metadata is
+  written and before `session.command` dispatch. If command details cannot be
+  loaded, the raw invocation remains the objective rather than blocking command
+  execution.
 - `hooks/useSessionGoal.ts` — live goal state.
 - `components/chat/SessionGoalButton.tsx` — composer target button
   (arm / status color / cancel confirm); `SessionGoalRow.tsx` — goal strip
@@ -172,7 +191,8 @@ sees only that final turn, so the report is its evidence.
 Scheduled tasks can run as goals: `execution.goalEnabled` (+ optional
 `execution.goalTokenBudget`) on a task makes the scheduled-tasks runtime
 stamp `metadata.openchamber.goal` onto the fresh session (objective = the
-expanded task prompt) and attach the goal-mode intro part to the prompt.
+expanded task prompt, or the argument-expanded command template for a slash
+command) and attach the goal-mode intro part to normal prompts.
 The loop here picks it up from session events like any other goal.
 
 ## CLI-created goals
@@ -183,8 +203,10 @@ session, fits and stores the expanded prompt as its objective, patches active
 goal metadata, appends the synthetic goal reminder, and only then dispatches
 the prompt. `--goal-token-budget` applies the same optional budget contract as
 scheduled goals. Slash commands retain command dispatch semantics and cannot
-carry the synthetic prompt part; the goal metadata is still installed before
-the command runs.
+carry the synthetic prompt part. Their command template with OpenCode argument
+expansion becomes the audit objective; goal metadata
+is still installed before the command runs. A missing command template falls
+back to the raw invocation.
 
 `openchamber session send --goal` and `openchamber session fork --goal` use
 the same server-owned prompt orchestration. Send installs a fresh goal on the

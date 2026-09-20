@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@/styles/fonts';
+import '@/styles/katex-css';
 import '@/index.css';
 import '@/lib/debug';
 import { DiffWorkerProvider } from '@/contexts/DiffWorkerProvider';
@@ -44,6 +45,10 @@ const initializeSharedPreferences = () => {
 };
 
 export function renderMobileApp(apis: RuntimeAPIs) {
+  // Stamp the surface before anything else reads it: perf tuning, sync paging,
+  // and device info all key off isMobileSurfaceRuntime(), and without the stamp
+  // a wide native device (iPad landscape) would fall out of the mobile branch.
+  window.__OPENCHAMBER_SURFACE__ = 'mobile';
   preloadMarkdownRenderer();
   initializeSharedPreferences();
 

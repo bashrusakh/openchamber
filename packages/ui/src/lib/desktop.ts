@@ -1,15 +1,9 @@
-import type { ProjectEntry, TerminalShell } from '@/lib/api/types';
+import { z } from 'zod';
+import type { RuntimeAPIs } from '@/lib/api/types';
 import { getInjectedBootOutcome } from '@/lib/desktopBoot';
-import type { DraftStarterRef } from '@/lib/draftStarters';
-import type { MobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 import { getRuntimeApiBaseUrl, getRuntimeKey } from '@/lib/runtime-switch';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
-
-type ManagedRemoteTunnelPreset = {
-  id: string;
-  name: string;
-  hostname: string;
-};
+import { isVSCodeBootstrapPresent } from '@/lib/vscodeBootstrap';
 
 export type UpdateInfo = {
   available: boolean;
@@ -30,194 +24,25 @@ export type UpdateProgress = {
   total?: number;
 };
 
-export type SkillCatalogConfig = {
-  id: string;
-  label: string;
-  source: string;
-  subpath?: string;
-  gitIdentityId?: string;
-};
+export type { SkillCatalogConfig } from '@/lib/settings/parsers';
 
-export type DesktopWindowControlsPosition = 'auto' | 'left' | 'right';
+export type DesktopWindowControlsPosition = 'left' | 'right';
 export type DesktopWindowControlsSide = 'left' | 'right';
+export type DesktopWindowControlAction = 'close' | 'minimize' | 'maximize';
+// No fixed-width constant: control width depends on the style (classic vs traffic-lights).
+export type DesktopWindowControlsStyle = 'classic' | 'traffic-lights';
 
-export type DesktopSettings = {
-  themeId?: string;
-  useSystemTheme?: boolean;
-  themeVariant?: 'light' | 'dark';
-  lightThemeId?: string;
-  darkThemeId?: string;
-  splashBgLight?: string;
-  splashFgLight?: string;
-  splashBgDark?: string;
-  splashFgDark?: string;
-  lastDirectory?: string;
-  homeDirectory?: string;
-  // Optional absolute path to `opencode` binary.
-  opencodeBinary?: string;
-  desktopLanAccessEnabled?: boolean;
-  desktopKeepAwakeEnabled?: boolean;
-  desktopMinimizeToTrayEnabled?: boolean;
-  desktopMacMenuBarEnabled?: boolean;
-  desktopUiPassword?: string;
-  projects?: ProjectEntry[];
-  activeProjectId?: string;
-  securityScopedBookmarks?: string[];
-  pinnedDirectories?: string[];
-  showReasoningTraces?: boolean;
-  collapsibleThinkingBlocks?: boolean;
-  showDeletionDialog?: boolean;
-  nativeNotificationsEnabled?: boolean;
-  notificationMode?: 'always' | 'hidden-only';
-  notifyOnSubtasks?: boolean;
-
-  // Event toggles (which events trigger notifications)
-  notifyOnCompletion?: boolean;
-  notifyOnError?: boolean;
-  notifyOnQuestion?: boolean;
-
-  // Per-event notification templates
-  notificationTemplates?: {
-    completion: { title: string; message: string };
-    error: { title: string; message: string };
-    question: { title: string; message: string };
-    subtask: { title: string; message: string };
-  };
-
-  // Summarization settings
-  summarizeLastMessage?: boolean;
-  summaryThreshold?: number;
-  summaryLength?: number;
-  maxLastMessageLength?: number;
-
-  usageAutoRefresh?: boolean;
-  usageRefreshIntervalMs?: number;
-  usageDisplayMode?: 'usage' | 'remaining';
-  usageShowPredValues?: boolean;
-  usageDropdownProviders?: string[];
-  usageSelectedModels?: Record<string, string[]>;  // Map of providerId -> selected model names
-  usageCollapsedFamilies?: Record<string, string[]>;  // Map of providerId -> collapsed family IDs (UsagePage)
-  usageExpandedFamilies?: Record<string, string[]>;  // Map of providerId -> EXPANDED family IDs (header dropdown - inverted)
-  usageModelGroups?: Record<string, {
-    customGroups?: Array<{id: string; label: string; models: string[]; order: number}>;
-    modelAssignments?: Record<string, string>;  // modelName -> groupId
-    renamedGroups?: Record<string, string>;  // groupId -> custom label
-  }>;  // Per-provider custom model groups configuration
-  autoDeleteEnabled?: boolean;
-  autoDeleteAfterDays?: number;
-  sessionRetentionAction?: 'archive' | 'delete';
-  tunnelProvider?: string;
-  tunnelMode?: 'quick' | 'managed-remote' | 'managed-local';
-  tunnelBootstrapTtlMs?: number | null;
-  tunnelSessionTtlMs?: number;
-  managedLocalTunnelConfigPath?: string | null;
-  managedRemoteTunnelHostname?: string;
-  managedRemoteTunnelToken?: string | null;
-  hasManagedRemoteTunnelToken?: boolean;
-  managedRemoteTunnelPresets?: ManagedRemoteTunnelPreset[];
-  managedRemoteTunnelSelectedPresetId?: string;
-  managedRemoteTunnelPresetTokens?: Record<string, string>;
-  defaultModel?: string; // format: "provider/model"
-  defaultVariant?: string;
-  defaultAgent?: string;
-  smallModelUseDefault?: boolean;
-  sessionRecapEnabled?: boolean;
-  sessionSuggestionEnabled?: boolean;
-  sessionGoalEnabled?: boolean;
-  sessionGoalDefaultBudgetEnabled?: boolean;
-  sessionGoalDefaultBudget?: number;
-  smallModelOverride?: string; // format: "provider/model"
-  defaultGitIdentityId?: string; // ''/undefined = unset, 'global' or profile id
-  openInAppId?: string;
-  autoCreateWorktree?: boolean;
-  followUpBehavior?: 'steer' | 'queue';
-  queueModeEnabled?: boolean;
-  gitmojiEnabled?: boolean;
-  defaultFileViewerPreview?: boolean;
-  zenModel?: string;
-  gitProviderId?: string;
-  gitModelId?: string;
-  pwaAppName?: string;
-  pwaOrientation?: 'system' | 'portrait' | 'landscape';
-  mobileKeyboardMode?: MobileKeyboardMode;
-  desktopWindowControlsPosition?: DesktopWindowControlsPosition;
-  inputSpellcheckEnabled?: boolean;
-  showOpenCodeUpdateNotifications?: boolean;
-  agentControlToolEnabled?: boolean;
-  openCodeUpdateToastDismissedVersion?: string;
-  showToolFileIcons?: boolean;
-  codeBlockLineWrap?: boolean;
-  showTurnChangedFiles?: boolean;
-  showExpandedBashTools?: boolean;
-  showExpandedEditTools?: boolean;
-  timeFormatPreference?: 'auto' | '12h' | '24h';
-  weekStartPreference?: 'auto' | 'sunday' | 'monday';
-  chatRenderMode?: 'sorted' | 'live';
-  messageStreamTransport?: 'auto' | 'ws' | 'sse';
-  activityRenderMode?: 'collapsed' | 'summary';
-  mermaidRenderingMode?: 'svg' | 'ascii';
-  userMessageRenderingMode?: 'markdown' | 'plain';
-  collapsibleUserMessages?: boolean;
-  stickyUserHeader?: boolean;
-  promptNavigatorEnabled?: boolean;
-  expandedEditorToolbar?: boolean;
-  wideChatLayoutEnabled?: boolean;
-  showSplitAssistantMessageActions?: boolean;
-  fontSize?: number;
-  terminalFontSize?: number;
-  terminalShell?: TerminalShell;
-  terminalLoginShells?: TerminalShell[];
-  editorFontSize?: number;
-  uiFont?: string;
-  monoFont?: string;
-  padding?: number;
-  cornerRadius?: number;
-  inputBarOffset?: number;
-  shortcutOverrides?: Record<string, string>;
-
-  favoriteModels?: Array<{ providerID: string; modelID: string }>;
-  hiddenModels?: Array<{ providerID: string; modelID: string }>;
-  collapsedModelProviders?: string[];
-  recentModels?: Array<{ providerID: string; modelID: string }>;
-  recentAgents?: string[];
-  recentEfforts?: Record<string, string[]>;
-  diffLayoutPreference?: 'dynamic' | 'inline' | 'side-by-side';
-  gitChangesViewMode?: 'flat' | 'tree';
-  directoryShowHidden?: boolean;
-  filesViewShowGitignored?: boolean;
-
-  // Message limit — controls fetch, trim, and Load More chunk size (default: 200)
-  messageLimit?: number;
-
-  // User-added skills catalogs (persisted to ~/.config/openchamber/settings.json)
-  skillCatalogs?: SkillCatalogConfig[];
-  // Opt-in to send anonymous usage reports for update checks (default: true)
-  reportUsage?: boolean;
-
-  // Global behavior prompt — synced to ~/.config/opencode/AGENTS.md
-  globalBehaviorPrompt?: string;
-  responseStyleEnabled?: boolean;
-  responseStylePreset?: 'concise' | 'detailed' | 'mentor' | 'pushback' | 'noFiller' | 'matchEnergy' | 'warmPeer' | 'custom';
-  responseStyleCustomInstructions?: string;
-  dictationEnabled?: boolean;
-  sttProvider?: 'local' | 'openai-compatible';
-  sttServerUrl?: string;
-  sttModel?: string;
-  sttLocalModel?: string;
-  sttLanguage?: string;
-  // Global draft welcome starters (pinned commands/skills), persisted to settings.json
-  draftStarters?: DraftStarterRef[];
-  draftStartersVisible?: boolean;
-  // One-time migration marker: Craft a Goal was offered in the starter row.
-  draftStartersCraftGoalAdded?: boolean;
-  draftStartersScheduleTaskAdded?: boolean;
-};
+// The settings document is defined once, in the registry, and re-exported here
+// so the many existing importers keep their path.
+export type { DesktopSettings } from '@/lib/settings/registry';
 
 type DesktopBridgeGlobal = {
+  pickThemeFile?: () => Promise<unknown>;
   invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   openDialog?: (options: Record<string, unknown>) => Promise<unknown>;
   grantFileAccess?: (path: string) => Promise<unknown>;
   openExternal?: (url: string) => Promise<unknown>;
+  pathForFile?: (file: File) => string;
   listen?: (
     event: string,
     handler: (evt: { payload?: unknown }) => void,
@@ -226,8 +51,7 @@ type DesktopBridgeGlobal = {
 
 type ElectronRuntimeGlobal = {
   runtime?: string;
-  macVibrancy?: boolean;
-  macVibrancySupported?: boolean;
+  arch?: string;
   trayEnabled?: boolean;
 };
 
@@ -243,14 +67,14 @@ const getDesktopBridge = (): DesktopBridgeGlobal | null => {
 
 export const isElectronShell = (): boolean => getElectronRuntime()?.runtime === 'electron';
 
-export const getElectronPlatform = (): string | null => {
+const getElectronPlatform = (): string | null => {
   if (typeof window === 'undefined') return null;
   const platform = (window as unknown as { __OPENCHAMBER_PLATFORM__?: string }).__OPENCHAMBER_PLATFORM__;
   return typeof platform === 'string' ? platform : null;
 };
 
-/** Width of the three in-app window control buttons when placed on the left (3 × w-8). */
-export const DESKTOP_WINDOW_CONTROLS_WIDTH_PX = 96;
+/** Default side for in-app window controls (Windows-style, right). */
+export const DEFAULT_DESKTOP_WINDOW_CONTROLS_POSITION: DesktopWindowControlsPosition = 'right';
 
 /** Windows and Linux use frameless windows with in-app minimize/maximize/close controls. */
 export const usesFramelessElectronChrome = (): boolean => {
@@ -259,21 +83,36 @@ export const usesFramelessElectronChrome = (): boolean => {
   return platform === 'win32' || platform === 'linux';
 };
 
-export const getDefaultDesktopWindowControlsSide = (platform: string | null = getElectronPlatform()): DesktopWindowControlsSide => {
-  if (platform === 'linux') {
-    return 'left';
+/** Normalize a stored preference; legacy `auto` maps to the right-side default. */
+export const normalizeDesktopWindowControlsPosition = (
+  value: unknown,
+): DesktopWindowControlsPosition | undefined => {
+  if (value === 'left' || value === 'right') {
+    return value;
   }
-  return 'right';
+  // Legacy "auto" never read OS chrome config; treat it as the right default.
+  if (value === 'auto') {
+    return DEFAULT_DESKTOP_WINDOW_CONTROLS_POSITION;
+  }
+  return undefined;
 };
 
 export const resolveDesktopWindowControlsSide = (
   preference: DesktopWindowControlsPosition | undefined,
-  platform: string | null = getElectronPlatform(),
 ): DesktopWindowControlsSide => {
-  if (preference === 'left' || preference === 'right') {
-    return preference;
-  }
-  return getDefaultDesktopWindowControlsSide(platform);
+  return preference === 'left' ? 'left' : DEFAULT_DESKTOP_WINDOW_CONTROLS_POSITION;
+};
+
+/**
+ * Left matches macOS traffic-light order (close, minimize, maximize).
+ * Right keeps Windows order (minimize, maximize, close).
+ */
+export const getDesktopWindowControlsOrder = (
+  side: DesktopWindowControlsSide,
+): DesktopWindowControlAction[] => {
+  return side === 'left'
+    ? ['close', 'minimize', 'maximize']
+    : ['minimize', 'maximize', 'close'];
 };
 
 export const hasDesktopInvoke = (): boolean => {
@@ -281,6 +120,20 @@ export const hasDesktopInvoke = (): boolean => {
 };
 
 export const canUseElectronDesktopIPC = (): boolean => isElectronShell() && hasDesktopInvoke();
+
+export const createDesktopThemeFileAPI = (): RuntimeAPIs['themeFiles'] => {
+  // Preload exposes this capability only to trusted local UI pages. Unlike the
+  // active API endpoint, that page identity stays local during remote connections.
+  if (!getDesktopBridge()?.pickThemeFile) return undefined;
+  return {
+    async pick() {
+      const pick = getDesktopBridge()?.pickThemeFile;
+      if (!pick) return { status: 'unsupported' };
+      const file = z.object({ name: z.string(), size: z.number().nonnegative(), text: z.string() }).nullable().parse(await pick());
+      return { status: 'picked', file };
+    },
+  };
+};
 
 export const invokeDesktop = async <T = unknown>(command: string, args?: Record<string, unknown>): Promise<T | null> => {
   const bridge = getDesktopBridge();
@@ -505,6 +358,44 @@ export const isDesktopShell = (): boolean => {
   return isElectronShell();
 };
 
+/**
+ * Raises the desktop window.
+ *
+ * Used when work finishes somewhere the app cannot be reached from — an MCP
+ * authorization completing in the system browser, for instance. Browsers will
+ * not follow a custom-protocol link back without a user gesture, so the app
+ * brings itself forward instead of asking the page to do it.
+ */
+export const focusDesktopWindow = async (): Promise<boolean> => {
+  if (!isDesktopShell()) return false;
+  try {
+    return Boolean(await invokeDesktop('desktop_focus_window'));
+  } catch {
+    return false;
+  }
+};
+
+export const canRequestNativeDirectoryAccess = (): boolean => (
+  isDesktopShell() && hasDesktopInvoke() && isDesktopLocalOriginActive()
+);
+
+/**
+ * On-disk path of a File dropped from the OS onto the desktop app.
+ * Null outside the desktop local origin (browser drops carry no usable path).
+ */
+const droppedFilePathSchema = z.string().min(1);
+
+export const pathForDroppedFile = (file: File): string | null => {
+  if (!canRequestNativeDirectoryAccess()) return null;
+  try {
+    const parsed = droppedFilePathSchema.safeParse(getDesktopBridge()?.pathForFile?.(file));
+    return parsed.success ? parsed.data : null;
+  } catch (error) {
+    console.warn('Failed to resolve dropped file path', error);
+    return null;
+  }
+};
+
 export const startDesktopWindowDrag = async (): Promise<boolean> => {
   if (!isDesktopShell()) {
     return false;
@@ -519,6 +410,12 @@ export const startDesktopWindowDrag = async (): Promise<boolean> => {
 };
 
 export const isVSCodeRuntime = (): boolean => {
+  // Prefer extension-host bootstrap config: it is injected in webview HTML
+  // before any store module evaluates, so startup does not depend on
+  // RuntimeAPIs registration order (see #2359).
+  if (isVSCodeBootstrapPresent()) {
+    return true;
+  }
   const apis = getRegisteredRuntimeAPIs();
   return apis?.runtime?.isVSCode === true;
 };
@@ -536,6 +433,15 @@ export const isWebRuntime = (): boolean => {
   return !isVSCodeRuntime();
 };
 
+/**
+ * Electron reuses the web RuntimeAPIs implementation, so distinguish a browser
+ * client from an Electron renderer with both the runtime descriptor and shell.
+ */
+export const isBrowserClientRuntime = (
+  platform: RuntimeAPIs['runtime']['platform'],
+  desktopShell = isDesktopShell(),
+): boolean => platform === 'web' && !desktopShell;
+
 export const getDesktopHomeDirectory = async (): Promise<string | null> => {
   if (typeof window !== 'undefined') {
     const embedded = window.__OPENCHAMBER_HOME__;
@@ -551,12 +457,13 @@ export const requestDirectoryAccess = async (
   directoryPath: string
 ): Promise<{ success: boolean; path?: string; projectId?: string; error?: string }> => {
   // Desktop shell on local instance: use native folder picker.
-  if (hasDesktopInvoke() && isDesktopLocalOriginActive()) {
+  if (canRequestNativeDirectoryAccess()) {
     try {
       const selected = await getDesktopBridge()?.openDialog?.({
         directory: true,
         multiple: false,
         title: 'Select Working Directory',
+        ...(directoryPath ? { defaultPath: directoryPath } : {}),
       });
       if (!selected || typeof selected !== 'string') {
         return { success: false, error: 'Directory selection cancelled' };
@@ -568,7 +475,7 @@ export const requestDirectoryAccess = async (
     }
   }
 
-  return { success: true, path: directoryPath };
+  return { success: false, error: 'Native directory picker not available' };
 };
 
 const isDesktopFileGrantResult = (
@@ -576,6 +483,12 @@ const isDesktopFileGrantResult = (
 ): value is { path?: unknown; outsideFileGrant?: unknown } => (
   value !== null && typeof value === 'object' && !Array.isArray(value)
 );
+
+const desktopExistingFileGrantSchema = z.object({
+  path: z.string().min(1),
+  outsideFileGrant: z.string().min(1),
+  expiresAt: z.number().finite(),
+});
 
 export const requestFileAccess = async (
   options?: { filters?: Array<{ name: string; extensions: string[] }>; defaultPath?: string }
@@ -619,7 +532,10 @@ export const requestFileAccess = async (
 
 export const requestExistingFileAccess = async (
   path: string
-): Promise<{ success: boolean; path?: string; outsideFileGrant?: string; error?: string }> => {
+): Promise<
+  | { success: true; path: string; outsideFileGrant: string; expiresAt: number }
+  | { success: false; error: string }
+> => {
   const targetPath = typeof path === 'string' ? path.trim() : '';
   if (!targetPath) {
     return { success: false, error: 'Path is required' };
@@ -630,15 +546,14 @@ export const requestExistingFileAccess = async (
 
   try {
     const selected = await getDesktopBridge()?.grantFileAccess?.(targetPath);
-    if (!isDesktopFileGrantResult(selected)) {
+    const parsed = desktopExistingFileGrantSchema.safeParse(selected);
+    if (!parsed.success) {
       return { success: false, error: 'File access was not granted' };
     }
-    const grantedPath = typeof selected.path === 'string' ? selected.path : '';
-    const outsideFileGrant = typeof selected.outsideFileGrant === 'string' ? selected.outsideFileGrant : '';
-    if (!grantedPath || !outsideFileGrant) {
-      return { success: false, error: 'File access was not granted' };
-    }
-    return { success: true, path: grantedPath, outsideFileGrant };
+    return {
+      success: true,
+      ...parsed.data,
+    };
   } catch (error) {
     console.warn('Failed to request existing file access', error);
     return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -738,7 +653,11 @@ export const restartToApplyUpdate = async (): Promise<boolean> => {
     return false;
   }
 
-  return restartDesktopApp();
+  // Unlike a plain restart, an install failure (rejected signature, disabled
+  // updater session) must reach the update dialog instead of being reduced to
+  // a boolean the caller cannot explain.
+  await invokeDesktop('desktop_restart');
+  return true;
 };
 
 export const restartDesktopApp = async (): Promise<boolean> => {
@@ -914,11 +833,6 @@ export const fetchDesktopInstalledApps = async (
 ): Promise<FetchDesktopInstalledAppsResult> => {
   if (!hasDesktopInvoke() || !isDesktopLocalOriginActive()) {
     return { apps: [], success: false, hasCache: false, isCacheStale: false };
-  }
-
-  // Linux desktop does not resolve installed GUI apps; skip the IPC round-trip.
-  if (getElectronPlatform() === 'linux') {
-    return { apps: [], success: true, hasCache: false, isCacheStale: false };
   }
 
   const candidate = Array.isArray(apps) ? apps.filter((value) => typeof value === 'string') : [];

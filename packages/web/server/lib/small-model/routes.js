@@ -10,7 +10,7 @@ export function registerSmallModelRoutes(app, { getSmallModelService }) {
       res.json({
         available: Boolean(resolved),
         model: resolved,
-        authenticatedProviders: listAuthenticatedProviders(),
+        authenticatedProviders: await listAuthenticatedProviders(),
       });
     } catch (error) {
       console.error('Failed to resolve small model:', error);
@@ -21,13 +21,14 @@ export function registerSmallModelRoutes(app, { getSmallModelService }) {
   app.post('/api/small-model/generate', async (req, res) => {
     try {
       const { generateSmallModelText } = await getSmallModelService();
-      const { prompt, system, maxOutputTokens, model, directory, preferredProviderID, preferredModelID, restrictToPreferredProvider } = req.body || {};
+      const { prompt, system, maxOutputTokens, model, directory, sessionID, preferredProviderID, preferredModelID, restrictToPreferredProvider } = req.body || {};
       const result = await generateSmallModelText({
         prompt,
         system,
         maxOutputTokens,
         model,
         directory,
+        sessionID,
         preferredProviderID,
         preferredModelID,
         restrictToPreferredProvider: restrictToPreferredProvider === true,
@@ -38,7 +39,12 @@ export function registerSmallModelRoutes(app, { getSmallModelService }) {
       if (statusCode >= 500) {
         console.error('Small model generation failed:', error);
       }
-      res.status(statusCode).json({ error: error.message || 'Small model generation failed' });
+      res.status(statusCode).json({
+        error: statusCode === 404
+          ? (error.message || 'No small model is available')
+          : 'The selected Small Model could not complete this action. Choose another model in Settings → Sessions → Small Model and try again.',
+        ...(error?.code ? { code: error.code } : {}),
+      });
     }
   });
 }

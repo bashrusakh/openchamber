@@ -19,4 +19,39 @@ describe('useSessionDisplayStore project sorting', () => {
       expect(migrated.projectSortOrder).toBe(projectSortOrder);
     });
   }
+
+  test('v3→v4 drops the removed displayMode key and keeps the rest', () => {
+    const migrated = migrateSessionDisplayState(
+      { displayMode: 'default', projectSortOrder: 'a-z', showRecentSection: false, showArchivedSessions: true },
+      3,
+    );
+
+    expect('displayMode' in migrated).toBe(false);
+    expect(migrated.projectSortOrder).toBe('a-z');
+    expect(migrated.showRecentSection).toBe(false);
+    expect(migrated.showArchivedSessions).toBe(true);
+  });
+});
+
+describe('useSessionDisplayStore project display', () => {
+  test('defaults to showing all projects without a selected single project', () => {
+    expect(useSessionDisplayStore.getState().projectDisplayMode).toBe('all');
+    expect(useSessionDisplayStore.getState().singleProjectId).toBeNull();
+  });
+
+  test('stores the single-project mode independently from session grouping', () => {
+    useSessionDisplayStore.getState().setProjectDisplayMode('single');
+    useSessionDisplayStore.getState().setSingleProjectId('project-alpha');
+    useSessionDisplayStore.getState().setSessionGroupingMode('flat');
+
+    expect(useSessionDisplayStore.getState().projectDisplayMode).toBe('single');
+    expect(useSessionDisplayStore.getState().singleProjectId).toBe('project-alpha');
+    expect(useSessionDisplayStore.getState().sessionGroupingMode).toBe('flat');
+
+    useSessionDisplayStore.setState({
+      projectDisplayMode: 'all',
+      singleProjectId: null,
+      sessionGroupingMode: 'by-worktree',
+    });
+  });
 });
