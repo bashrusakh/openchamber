@@ -212,6 +212,9 @@
       "scope": "instance",
       "secret": true
     },
+    "idleInstanceTimeoutMs": {
+      "scope": "instance"
+    },
     "sidebarProjectDisplayMode": {
       "scope": "profile"
     },

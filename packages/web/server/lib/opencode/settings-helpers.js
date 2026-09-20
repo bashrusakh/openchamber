@@ -34,6 +34,7 @@ import {
   isInputHistoryLimit,
   isInputHistoryScope,
 } from './input-history-scope.js';
+import { normalizeIdleInstanceTimeoutMs } from './settings-normalization-runtime.js';
 
 export const createSettingsHelpers = (dependencies) => {
   const {
@@ -489,6 +490,11 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (typeof candidate.tunnelSessionTtlMs === 'number' && Number.isFinite(candidate.tunnelSessionTtlMs)) {
       result.tunnelSessionTtlMs = normalizeTunnelSessionTtlMs(candidate.tunnelSessionTtlMs);
+    }
+    // `0` is the disable switch (#3768), so any other invalid value lands on
+    // the default window instead of being dropped or read as "off".
+    if (candidate.idleInstanceTimeoutMs !== undefined) {
+      result.idleInstanceTimeoutMs = normalizeIdleInstanceTimeoutMs(candidate.idleInstanceTimeoutMs);
     }
     if (typeof candidate.tunnelProvider === 'string') {
       const provider = normalizeTunnelProvider(candidate.tunnelProvider);

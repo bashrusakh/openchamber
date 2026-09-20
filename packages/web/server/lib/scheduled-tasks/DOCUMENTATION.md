@@ -80,6 +80,12 @@ dispatches still skip disabled tasks, and completion never re-arms a paused task
   - Timer scheduling and queueing
   - Concurrency controls
   - Session create + prompt_async execution
+  - Optional `onDirectoryActivity(directory)` hook, awaited best-effort at the
+    start of every run before any upstream work. A run is timer-driven and
+    never passes the OpenChamber proxy, so the hook is what restarts the
+    directory's idle-eviction window before `session.create` and the reaper
+    cannot release the project instance out from under it (#3768). Wired in
+    `server/index.js` to the managed-instance activity tracker.
   - Emits OpenChamber task-run events
 
 - `packages/web/server/lib/scheduled-tasks/loops.js`

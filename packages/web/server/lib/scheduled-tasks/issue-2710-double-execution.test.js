@@ -514,3 +514,66 @@ describe('issue 2710: daily scheduled task double execution at the configured ti
     runtime.stop();
   });
 });
+
+/**
+ * Phase 4 of the idle-instance eviction work (#3768): a scheduled run is
+ * timer-driven and none of its upstream calls pass the proxy observer, so the
+ * runtime stamps the project directory before its first upstream call. The
+ * first test also covers the phase-4 stop condition that a caller starting
+ * work while the server is otherwise idle must not race a release.
+ */
+describe('scheduled run directory activity', () => {
+  beforeEach(() => {
+    sdk.sessionCreates.length = 0;
+    globalThis.fetch = vi.fn(async () => ({ ok: true, text: async () => '' }));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const createStampedRuntime = (onDirectoryActivity) => createScheduledTasksRuntime({
+    ...createRuntimeDeps(createSharedProjectConfigRuntime(makeTask({ kind: 'daily', times: ['15:00'] }))),
+    onDirectoryActivity,
+  });
+
+  it('stamps the project directory before the run creates its session', async () => {
+    const createsAtStamp = [];
+    const onDirectoryActivity = vi.fn(async () => {
+      createsAtStamp.push(sdk.sessionCreates.length);
+    });
+    const runtime = createStampedRuntime(onDirectoryActivity);
+
+    try {
+      await runtime.start();
+      const manual = await runtime.runNow('p1', 'task-1');
+
+      expect(manual.ok).toBe(true);
+      expect(onDirectoryActivity).toHaveBeenCalledWith('/repo');
+      // No OpenCode call happened before the stamp: the run's first upstream
+      // action is the session create that follows it.
+      expect(createsAtStamp).toEqual([0]);
+      expect(sdk.sessionCreates.length).toBe(1);
+    } finally {
+      runtime.stop();
+    }
+  });
+
+  it('runs the task even when the activity stamp fails', async () => {
+    const onDirectoryActivity = vi.fn(async () => {
+      throw new Error('tracker unavailable');
+    });
+    const runtime = createStampedRuntime(onDirectoryActivity);
+
+    try {
+      await runtime.start();
+      const manual = await runtime.runNow('p1', 'task-1');
+
+      expect(onDirectoryActivity).toHaveBeenCalledTimes(1);
+      expect(manual.ok).toBe(true);
+      expect(sdk.sessionCreates.length).toBe(1);
+    } finally {
+      runtime.stop();
+    }
+  });
+});

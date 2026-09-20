@@ -67,6 +67,8 @@ import {
 } from './lib/opencode/core-routes.js';
 import { registerOpenChamberRoutes } from './lib/opencode/openchamber-routes.js';
 import { createServerUtilsRuntime } from './lib/opencode/server-utils-runtime.js';
+import { createDirectoryActivityRuntime } from './lib/opencode/directory-activity-runtime.js';
+import { createIdleInstanceReaper } from './lib/opencode/idle-instance-reaper.js';
 import { createStaticRoutesRuntime } from './lib/opencode/static-routes-runtime.js';
 import { createSettingsRuntime } from './lib/opencode/settings-runtime.js';
 import { createOpenCodeResolutionRuntime } from './lib/opencode/opencode-resolution-runtime.js';
@@ -948,6 +950,10 @@ const messageQueueRuntime = createMessageQueueRuntime({
   broadcastGlobalUiEvent: broadcastOpenChamberUiEvent,
   resolvePromptBody: (body, target) => routingRuntime.resolvePromptBody(body, target),
   onPromptSent: (sessionId) => sessionRuntime.markUserMessageSent(sessionId),
+  // A dispatch is OpenChamber-owned upstream work and never passes the proxy
+  // observer, so it stamps directory activity itself (#3768). The tracker is
+  // declared below; the callback runs long after module initialization.
+  onDirectoryActivity: (directory) => directoryActivityRuntime.stampActivity(directory),
   dataDir: OPENCHAMBER_DATA_DIR,
 });
 messageQueueRuntime.start();
@@ -958,6 +964,10 @@ const openCodeWatcherRuntime = createOpenCodeWatcherRuntime({
   getOpenCodeAuthHeaders,
   parseSseDataPayload: (...args) => parseSseDataPayload(...args),
   globalEventHub: globalMessageStreamHub,
+  // Work events restart the directory's idle-eviction window even when the
+  // turn produces no proxied client traffic (#3768, decision 8). The tracker is
+  // declared below; the callback runs long after module initialization.
+  onDirectoryActivity: (directory) => directoryActivityRuntime.stampActivity(directory),
   onPayload: (payload) => {
     maybeCacheSessionInfoFromEvent(payload);
     void maybeSendPushForTrigger(payload);
@@ -975,6 +985,11 @@ globalMessageStreamHub.subscribeEvent((event) => {
   const directory = typeof event?.directory === 'string' && event.directory && event.directory !== 'global'
     ? event.directory
     : '';
+  // A disposed upstream instance is gone: keep the tracker in sync so a
+  // released directory cannot stay a candidate.
+  if (directory && payload.type === 'server.instance.disposed') {
+    void directoryActivityRuntime.deregister(directory);
+  }
   sessionAssistRuntime.processPayload(payload, directory);
   sessionGoalRuntime.processPayload(payload, directory);
   contextObligatoryRuntime.processPayload(payload, directory);
@@ -1035,6 +1050,41 @@ const processForwardedEventPayload = (payload, emitSyntheticEvent) => {
 };
 
 
+// Per-directory request activity for managed-instance idle eviction (#3768).
+// The proxy observer stamps every directory-scoped /api request; the reaper
+// reads the quiet list and releases directories whose observed activity is
+// older than the configured idle window. Keys reuse the proxy's realpath
+// handling so symlinked and real paths dedupe.
+const directoryActivityRuntime = createDirectoryActivityRuntime({
+  realpath: fs.promises.realpath.bind(fs.promises),
+});
+
+// Releases quiet managed directory instances after `idleInstanceTimeoutMs`
+// (settings; `OPENCHAMBER_IDLE_INSTANCE_TIMEOUT_MS` overrides, `0` disables).
+// Started after managed readiness and stopped during shutdown; a sweep never
+// runs against an external, restarting, or shutting-down server.
+const idleInstanceReaper = createIdleInstanceReaper({
+  tracker: directoryActivityRuntime,
+  readSettings: readSettingsFromDiskMigrated,
+  // Queued and in-flight queue dispatches are OpenChamber-owned work and never
+  // pass the proxy observer, so the reaper needs the queue snapshot directly.
+  // Queue directories arrive from clients; the tracker matches them through
+  // the spellings it has observed for a key, so win32 casing and symlinked
+  // paths cannot slip past the comparison.
+  hasQueuedWork: (directory) => messageQueueRuntime.snapshot().sessions.some((session) => (
+    (session.items.length > 0 || Boolean(session.sendingId))
+    && directoryActivityRuntime.matchesDirectory(directory, session.directory)
+  )),
+  getOpenCodePort: () => openCodePort,
+  isManagedOpenCodeReady: () => isOpenCodeReady,
+  isExternalOpenCode: () => isExternalOpenCode,
+  isRestartingOpenCode: () => isRestartingOpenCode,
+  isShuttingDown: () => isShuttingDown,
+  buildOpenCodeUrl,
+  getOpenCodeAuthHeaders,
+  env: process.env,
+});
+
 const serverUtilsRuntime = createServerUtilsRuntime({
   fs,
   os,
@@ -1075,6 +1125,7 @@ const serverUtilsRuntime = createServerUtilsRuntime({
     }
     return snapshot.PATH;
   },
+  observeDirectoryRequest: (directory) => directoryActivityRuntime.observeRequest(directory),
 });
 
 const setOpenCodePort = (...args) => serverUtilsRuntime.setOpenCodePort(...args);
@@ -1239,6 +1290,10 @@ const openCodeLifecycleRuntime = createOpenCodeLifecycleRuntime({
     }
     return [...new Set(directories)];
   },
+  // Warmup is the only traffic the MRU directories get before the UI opens
+  // them; stamping each successful warm fetch starts their idle window so the
+  // warmed set is reapable (#3768, decision 4).
+  onDirectoryWarmed: (directory) => directoryActivityRuntime.stampActivity(directory),
   // A managed restart can move OpenCode to a NEW port (the old one may stay
   // occupied if killProcessOnPort/waitForPortRelease didn't free it in time,
   // on any platform). Rebind the message-stream upstream readers to the current port
@@ -1319,6 +1374,10 @@ const scheduledTasksRuntime = createScheduledTasksRuntime({
   getOpenCodeAuthHeaders,
   waitForOpenCodeReady,
   sessionKnowledgeRuntime,
+  // Scheduled runs are timer-driven and bypass the proxy observer; stamping
+  // the project directory keeps the reaper from releasing the instance under
+  // a run that started while the directory was otherwise quiet (#3768).
+  onDirectoryActivity: (directory) => directoryActivityRuntime.stampActivity(directory),
   setSessionAutoAccept: (sessionId, enabled, directory) => permissionAutoAcceptRuntime.setSessionPolicy(sessionId, enabled, directory),
   emitTaskRunEvent: (event) => {
     for (const client of uiOpenChamberEventClients) {
@@ -1507,6 +1566,9 @@ const bootstrapOpenCodeAtStartup = async (...args) => {
   scheduleOpenCodeApiDetection();
   if (openCodeLifecycleState.openCodeProcess && !openCodeLifecycleState.isExternalOpenCode) {
     startHealthMonitoring();
+    // Only a managed server has directory instances to release, and starting
+    // after readiness keeps the first sweep behind the warmup load.
+    idleInstanceReaper.start();
   }
   // The global watcher used to start only for desktop notifications; the
   // session-assist runtime also rides its event hub, so it now starts
@@ -1535,6 +1597,7 @@ const gracefulShutdownRuntime = createGracefulShutdownRuntime({
   sessionAssistRuntime,
   sessionGoalRuntime,
   contextObligatoryRuntime,
+  idleInstanceReaper,
   messageQueueRuntime,
   sessionRuntime,
   getHealthCheckInterval: () => healthCheckInterval,

@@ -552,6 +552,14 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => !ctx.isVSCode && !ctx.isWindowsArm64,
   },
   {
+    id: 'general.idle-instance-timeout',
+    page: 'general',
+    titleKey: 'settings.openchamber.opencodeCli.field.idleInstanceTimeout',
+    descriptionKey: 'settings.openchamber.opencodeCli.field.idleInstanceTimeoutInfo',
+    keywords: ['idle', 'instance', 'idle timeout', 'release', 'eviction', 'memory', 'mcp', 'lsp', 'idleInstanceTimeoutMs'],
+    isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
     id: 'sessions.agent-control-tool',
     page: 'general',
     titleKey: 'settings.openchamber.tools.field.agentControlTool',

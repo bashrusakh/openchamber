@@ -255,6 +255,11 @@ export const createScheduledTasksRuntime = (deps) => {
     emitTaskRunEvent,
     setSessionAutoAccept,
     sessionKnowledgeRuntime = null,
+    // Stamps directory activity before a run touches OpenCode: the run is
+    // timer-driven and none of its upstream calls pass the proxy observer, so
+    // without this the idle-instance reaper can release the instance under a
+    // run that began while the directory was otherwise quiet (#3768).
+    onDirectoryActivity = null,
     logger = console,
     maxGlobalConcurrency = DEFAULT_GLOBAL_CONCURRENCY,
     maxProjectConcurrency = DEFAULT_PROJECT_CONCURRENCY,
@@ -553,6 +558,12 @@ export const createScheduledTasksRuntime = (deps) => {
     const projectPath = projectPathByID.get(projectID);
     if (!projectPath) {
       throw new Error('project path is unavailable');
+    }
+
+    try {
+      await onDirectoryActivity?.(projectPath);
+    } catch {
+      // Observation is best-effort; a run must never fail because of it.
     }
 
     if (typeof waitForOpenCodeReady === 'function') {

@@ -267,6 +267,38 @@ describe('OpenCode lifecycle', () => {
     ]);
   });
 
+  it('stamps only the directories whose warm fetch succeeded', async () => {
+    const fetchMock = vi.fn(async (url) => {
+      const href = String(url);
+      if (!href.includes('/session/status')) {
+        return { ok: true, json: async () => ({ healthy: true }) };
+      }
+      if (href.includes('worktree-b')) throw new Error('warmup connection refused');
+      if (href.includes('project-c')) return { ok: false, status: 500 };
+      return { ok: true, status: 200 };
+    });
+    globalThis.fetch = fetchMock;
+    const onDirectoryWarmed = vi.fn(async () => {});
+    const runtime = createRuntime({
+      env: {
+        ENV_CONFIGURED_OPENCODE_PORT: 45678,
+        ENV_CONFIGURED_OPENCODE_HOST: null,
+        ENV_EFFECTIVE_PORT: 45678,
+        ENV_CONFIGURED_OPENCODE_HOSTNAME: '127.0.0.1',
+        ENV_SKIP_OPENCODE_START: true,
+      },
+      reapManagedOrphanedProcesses: vi.fn(async () => ({ reaped: 0 })),
+      getWarmupDirectories: vi.fn(async () => ['/tmp/worktree-a', '/tmp/worktree-b', '/tmp/project-c']),
+      onDirectoryWarmed,
+    });
+
+    await runtime.bootstrapOpenCodeAtStartup();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onDirectoryWarmed).toHaveBeenCalledTimes(1);
+    expect(onDirectoryWarmed).toHaveBeenCalledWith('/tmp/worktree-a');
+  });
+
   it('records an authoritative error terminal event when bootstrap fails', async () => {
     const runtime = createRuntime({
       syncFromHmrState: vi.fn(() => {

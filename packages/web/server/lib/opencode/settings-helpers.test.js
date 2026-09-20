@@ -745,6 +745,52 @@ describe('settings helpers', () => {
       expect(sanitized.sessionRetentionOnlyArchived).toBe(true);
     });
   });
+
+  describe('idle instance eviction settings persistence (#3768)', () => {
+    const DEFAULT_IDLE_INSTANCE_TIMEOUT_MS = 30 * 60 * 1000;
+
+    it('round-trips 0 and a chosen idle window through sanitize, merge, and response', () => {
+      const helpers = createTestHelpers();
+
+      for (const value of [0, 900000]) {
+        const changes = helpers.sanitizeSettingsUpdate({ idleInstanceTimeoutMs: value });
+        expect(changes).toEqual({ idleInstanceTimeoutMs: value });
+        const saved = helpers.mergePersistedSettings({}, changes);
+        const reloaded = helpers.formatSettingsResponse(JSON.parse(JSON.stringify(saved)));
+        expect(reloaded.idleInstanceTimeoutMs).toBe(value);
+      }
+    });
+
+    it('normalizes negative, non-finite, and non-number writes to the default window', () => {
+      const helpers = createTestHelpers();
+
+      for (const value of [-1, -60000, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '1800000', null, true, {}]) {
+        expect(helpers.sanitizeSettingsUpdate({ idleInstanceTimeoutMs: value })).toEqual({
+          idleInstanceTimeoutMs: DEFAULT_IDLE_INSTANCE_TIMEOUT_MS,
+        });
+      }
+    });
+
+    it('treats absence as no write and keeps the persisted value across unrelated updates', () => {
+      const helpers = createTestHelpers();
+
+      const unrelated = helpers.sanitizeSettingsUpdate({ workStatusPanelEnabled: true });
+      expect(unrelated).not.toHaveProperty('idleInstanceTimeoutMs');
+
+      const saved = helpers.mergePersistedSettings({}, helpers.sanitizeSettingsUpdate({ idleInstanceTimeoutMs: 0 }));
+      const next = helpers.mergePersistedSettings(saved, helpers.sanitizeSettingsUpdate({ workStatusPanelEnabled: false }));
+      expect(next.idleInstanceTimeoutMs).toBe(0);
+      expect(helpers.formatSettingsResponse(JSON.parse(JSON.stringify(saved))).idleInstanceTimeoutMs).toBe(0);
+    });
+
+    it('normalizes an invalid persisted value on read and leaves absence absent', () => {
+      const helpers = createTestHelpers();
+
+      expect(helpers.formatSettingsResponse({ idleInstanceTimeoutMs: -5 }).idleInstanceTimeoutMs)
+        .toBe(DEFAULT_IDLE_INSTANCE_TIMEOUT_MS);
+      expect(helpers.formatSettingsResponse({})).not.toHaveProperty('idleInstanceTimeoutMs');
+    });
+  });
 });
 
 describe('settings registry gate', () => {
@@ -771,6 +817,7 @@ describe('settings registry gate', () => {
     autoDeleteEnabled: true, autoDeleteAfterDays: 30, sessionRetentionOnlyArchived: false, sessionRetentionAction: 'archive', terminalShell: 'zsh', terminalLoginShells: ['zsh'],
     openInAppId: 'vscode', dictationEnabled: true, sttProvider: 'local', sttServerUrl: 'http://localhost:8001/v1', sttModel: 'm', sttLocalModel: 'm', sttLanguage: 'en',
     tunnelProvider: 'cloudflare', tunnelMode: 'quick', tunnelBootstrapTtlMs: 600000, tunnelSessionTtlMs: 86400000, managedLocalTunnelConfigPath: '/tmp/x',
+    idleInstanceTimeoutMs: 1800000,
     managedRemoteTunnelHostname: 'x.example', managedRemoteTunnelToken: 'token', managedRemoteTunnelPresets: [{ id: 'a', name: 'A', hostname: 'a.example' }],
     managedRemoteTunnelSelectedPresetId: 'a', managedRemoteTunnelPresetTokens: { a: 'token' },
     sidebarProjectDisplayMode: 'all', sidebarSessionGroupingMode: 'flat', sidebarProjectSortOrder: 'manual', sidebarShowRecentSection: true,

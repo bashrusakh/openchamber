@@ -58,7 +58,7 @@ const createOpenCode = () => {
   return { state, fetchImpl };
 };
 
-const createRuntime = ({ dataDir = makeDataDir(), openCode = createOpenCode(), knowledge = null, retryDelayMs, resolvePromptBody, now } = {}) => {
+const createRuntime = ({ dataDir = makeDataDir(), openCode = createOpenCode(), knowledge = null, retryDelayMs, resolvePromptBody, now, onDirectoryActivity } = {}) => {
   let eventHandler = () => {};
   let statusHandler = () => {};
   const broadcasts = [];
@@ -81,6 +81,7 @@ const createRuntime = ({ dataDir = makeDataDir(), openCode = createOpenCode(), k
   if (retryDelayMs) options.retryDelayMs = retryDelayMs;
   if (resolvePromptBody) options.resolvePromptBody = resolvePromptBody;
   if (now) options.now = now;
+  if (onDirectoryActivity) options.onDirectoryActivity = onDirectoryActivity;
   const runtime = createMessageQueueRuntime(options);
   return {
     runtime,
@@ -203,6 +204,45 @@ describe('message queue runtime', () => {
     emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
     await settle();
     expect(openCode.state.sent).toHaveLength(2);
+    expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+  });
+
+  it('stamps directory activity before the queued send reaches OpenCode', async () => {
+    const openCode = createOpenCode();
+    const originalFetchImpl = openCode.fetchImpl;
+    const order = [];
+    openCode.fetchImpl = vi.fn(async (url, init = {}) => {
+      if (String(url).includes('/prompt_async')) order.push('prompt_async');
+      return originalFetchImpl(url, init);
+    });
+    const onDirectoryActivity = vi.fn(async (directory) => {
+      order.push(`stamp:${directory}`);
+    });
+    const { runtime, emit } = createRuntime({ openCode, onDirectoryActivity });
+    runtime.start();
+
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+    emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+    await settle();
+
+    expect(onDirectoryActivity).toHaveBeenCalledWith(DIRECTORY);
+    expect(order).toEqual([`stamp:${DIRECTORY}`, 'prompt_async']);
+    expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+  });
+
+  it('delivers a queued message even when the activity stamp fails', async () => {
+    const onDirectoryActivity = vi.fn(async () => {
+      throw new Error('tracker unavailable');
+    });
+    const { runtime, openCode, emit } = createRuntime({ onDirectoryActivity });
+    runtime.start();
+
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+    emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+    await settle();
+
+    expect(onDirectoryActivity).toHaveBeenCalledTimes(1);
+    expect(openCode.state.sent).toHaveLength(1);
     expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
   });
 

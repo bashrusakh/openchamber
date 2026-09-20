@@ -1,14 +1,18 @@
 import http from 'node:http';
 import https from 'node:https';
+import path from 'node:path';
 
+import express from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   createDirectoryQueryCanonicalizer,
   createOpenCodeProxyAgent,
   normalizeForwardedDirectoryHeaders,
+  registerOpenCodeProxy,
 } from './proxy.js';
+import { createDirectoryActivityRuntime } from './directory-activity-runtime.js';
 
 describe('createDirectoryQueryCanonicalizer', () => {
   it('canonicalizes directory query params and preserves other params', async () => {
@@ -248,5 +252,263 @@ describe('createOpenCodeProxyAgent', () => {
       await closeServer(front);
       await closeServer(upstream);
     }
+  });
+});
+
+const openFixtures = [];
+
+afterEach(async () => {
+  await Promise.all(openFixtures.splice(0).map((fixture) => fixture.close()));
+});
+
+const entryFor = (tracker, directory) => (
+  tracker.snapshot().find((entry) => entry.directory === directory) ?? null
+);
+
+const createDeferred = () => {
+  let resolve;
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+};
+
+const startProxyFixture = async ({
+  upstreamHandler,
+  observeDirectoryRequest,
+  readWorktreeBootstrapStatus,
+}) => {
+  const forwarded = [];
+  const upstream = http.createServer((req, res) => {
+    forwarded.push(req.url);
+    return upstreamHandler(req, res);
+  });
+  const upstreamPort = await listen(upstream);
+  const upstreamUrl = `http://127.0.0.1:${upstreamPort}`;
+
+  const app = express();
+  const proxyDependencies = {
+    fs: {},
+    os: {},
+    path,
+    OPEN_CODE_READY_GRACE_MS: 0,
+    getRuntime: () => ({
+      openCodePort: upstreamPort,
+      isOpenCodeReady: true,
+      openCodeNotReadySince: 0,
+      isRestartingOpenCode: false,
+    }),
+    getOpenCodeAuthHeaders: () => ({}),
+    buildOpenCodeUrl: (requestPath) => `${upstreamUrl}${requestPath}`,
+    ensureOpenCodeApiPrefix: () => {},
+    readWorktreeBootstrapStatus: readWorktreeBootstrapStatus
+      ?? (async () => ({ status: 'ready', phase: 'setup-ready' })),
+  };
+  if (observeDirectoryRequest) {
+    proxyDependencies.observeDirectoryRequest = observeDirectoryRequest;
+  }
+  registerOpenCodeProxy(app, proxyDependencies);
+
+  const server = await new Promise((resolve) => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+
+  const fixture = {
+    url: `http://127.0.0.1:${server.address().port}`,
+    forwarded,
+    close: async () => {
+      server.closeAllConnections?.();
+      upstream.closeAllConnections?.();
+      await Promise.all([closeServer(server), closeServer(upstream)]);
+    },
+  };
+  openFixtures.push(fixture);
+  return fixture;
+};
+
+describe('registerOpenCodeProxy directory activity observation', () => {
+  it('counts a directory request as in-flight until its response finishes', async () => {
+    const tracker = createDirectoryActivityRuntime({ realpath: async (value) => value });
+    const gate = createDeferred();
+    const fixture = await startProxyFixture({
+      upstreamHandler: (_req, res) => {
+        gate.promise.then(() => res.end('done'));
+      },
+      observeDirectoryRequest: (directory) => tracker.observeRequest(directory),
+    });
+
+    const pending = fetch(`${fixture.url}/api/config?directory=${encodeURIComponent('/repo/finish')}`);
+    await expect.poll(() => entryFor(tracker, '/repo/finish')?.inflight).toBe(1);
+
+    gate.resolve();
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('done');
+
+    await expect.poll(() => entryFor(tracker, '/repo/finish')?.inflight).toBe(0);
+    expect(entryFor(tracker, '/repo/finish')?.lastActivityAt).toBeGreaterThan(0);
+  });
+
+  it('reads the directory from the decoded forwarded header', async () => {
+    const tracker = createDirectoryActivityRuntime({ realpath: async (value) => value });
+    const fixture = await startProxyFixture({
+      upstreamHandler: (_req, res) => res.end('ok'),
+      observeDirectoryRequest: (directory) => tracker.observeRequest(directory),
+    });
+
+    const response = await fetch(`${fixture.url}/api/config`, {
+      headers: {
+        'x-opencode-directory': encodeURIComponent('/repo/header'),
+        'x-opencode-directory-encoding': 'uri',
+      },
+    });
+    await response.text();
+
+    await expect.poll(() => entryFor(tracker, '/repo/header')?.inflight).toBe(0);
+    expect(tracker.snapshot().map((entry) => entry.directory)).toEqual(['/repo/header']);
+    expect(fixture.forwarded).toEqual(['/config']);
+  });
+
+  it('prefers the query directory over the forwarded header', async () => {
+    const tracker = createDirectoryActivityRuntime({ realpath: async (value) => value });
+    const fixture = await startProxyFixture({
+      upstreamHandler: (_req, res) => res.end('ok'),
+      observeDirectoryRequest: (directory) => tracker.observeRequest(directory),
+    });
+
+    const response = await fetch(
+      `${fixture.url}/api/config?directory=${encodeURIComponent('/repo/query')}`,
+      { headers: { 'x-opencode-directory': '/repo/header' } },
+    );
+    await response.text();
+
+    expect(tracker.snapshot().map((entry) => entry.directory)).toEqual(['/repo/query']);
+  });
+
+  it('ignores requests without a directory', async () => {
+    const tracker = createDirectoryActivityRuntime({ realpath: async (value) => value });
+    const fixture = await startProxyFixture({
+      upstreamHandler: (_req, res) => res.end('ok'),
+      observeDirectoryRequest: (directory) => tracker.observeRequest(directory),
+    });
+
+    const response = await fetch(`${fixture.url}/api/config`);
+    await response.text();
+
+    expect(response.status).toBe(200);
+    expect(tracker.snapshot()).toEqual([]);
+  });
+
+  it('pairs concurrent requests to the same directory', async () => {
+    const tracker = createDirectoryActivityRuntime({ realpath: async (value) => value });
+    const gate = createDeferred();
+    const fixture = await startProxyFixture({
+      upstreamHandler: (_req, res) => {
+        gate.promise.then(() => res.end('ok'));
+      },
+      observeDirectoryRequest: (directory) => tracker.observeRequest(directory),
+    });
+
+    const first = fetch(`${fixture.url}/api/config?directory=${encodeURIComponent('/repo/shared')}`);
+    const second = fetch(`${fixture.url}/api/config?directory=${encodeURIComponent('/repo/shared')}`);
+    await expect.poll(() => entryFor(tracker, '/repo/shared')?.inflight).toBe(2);
+
+    gate.resolve();
+    await Promise.all([first, second]);
+    await expect.poll(() => entryFor(tracker, '/repo/shared')?.inflight).toBe(0);
+  });
+
+  it('releases an aborted streamed request', async () => {
+    const tracker = createDirectoryActivityRuntime({ realpath: async (value) => value });
+    const fixture = await startProxyFixture({
+      upstreamHandler: (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(':open\n\n');
+      },
+      observeDirectoryRequest: (directory) => tracker.observeRequest(directory),
+    });
+
+    const received = createDeferred();
+    const streamRequest = http.get(
+      `${fixture.url}/api/config?directory=${encodeURIComponent('/repo/stream')}`,
+      (res) => {
+        res.on('error', () => {});
+        res.once('data', () => received.resolve());
+      },
+    );
+    streamRequest.on('error', () => {});
+    await received.promise;
+    await expect.poll(() => entryFor(tracker, '/repo/stream')?.inflight).toBe(1);
+
+    streamRequest.destroy();
+    await expect.poll(() => entryFor(tracker, '/repo/stream')?.inflight).toBe(0);
+  });
+
+  it('releases when the upstream connection fails', async () => {
+    const tracker = createDirectoryActivityRuntime({ realpath: async (value) => value });
+    const fixture = await startProxyFixture({
+      upstreamHandler: (req, _res) => {
+        req.socket.destroy();
+      },
+      observeDirectoryRequest: (directory) => tracker.observeRequest(directory),
+    });
+
+    const response = await fetch(`${fixture.url}/api/config?directory=${encodeURIComponent('/repo/error')}`);
+    expect(response.status).toBe(503);
+    await response.text();
+
+    await expect.poll(() => entryFor(tracker, '/repo/error')?.inflight).toBe(0);
+    expect(entryFor(tracker, '/repo/error')?.lastActivityAt).toBeGreaterThan(0);
+  });
+
+  it('counts a request held by the worktree bootstrap as in-flight', async () => {
+    const tracker = createDirectoryActivityRuntime({ realpath: async (value) => value });
+    let bootstrap = { status: 'pending', phase: 'directory-created', error: null };
+    const probed = [];
+    const fixture = await startProxyFixture({
+      upstreamHandler: (_req, res) => res.end('ok'),
+      observeDirectoryRequest: (directory) => tracker.observeRequest(directory),
+      readWorktreeBootstrapStatus: async (directory) => {
+        probed.push(directory);
+        return bootstrap;
+      },
+    });
+
+    const pending = fetch(`${fixture.url}/api/session?directory=${encodeURIComponent('/repo/worktree')}`);
+    await expect.poll(() => probed.length).toBeGreaterThan(0);
+    expect(entryFor(tracker, '/repo/worktree')?.inflight).toBe(1);
+    expect(fixture.forwarded).toEqual([]);
+
+    bootstrap = { status: 'ready', phase: 'setup-ready', error: null };
+    const response = await pending;
+    expect(response.status).toBe(200);
+    await expect.poll(() => entryFor(tracker, '/repo/worktree')?.inflight).toBe(0);
+    expect(fixture.forwarded).toEqual(['/session?directory=%2Frepo%2Fworktree']);
+  });
+
+  it('forwards normally when the observer fails', async () => {
+    const fixture = await startProxyFixture({
+      upstreamHandler: (_req, res) => res.end('ok'),
+      observeDirectoryRequest: async () => {
+        throw new Error('tracker down');
+      },
+    });
+
+    const response = await fetch(`${fixture.url}/api/config?directory=${encodeURIComponent('/repo/broken')}`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('ok');
+  });
+
+  it('is a no-op when the observer dependency is absent', async () => {
+    const fixture = await startProxyFixture({
+      upstreamHandler: (_req, res) => res.end('ok'),
+    });
+
+    const response = await fetch(`${fixture.url}/api/config?directory=${encodeURIComponent('/repo/unobserved')}`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('ok');
+    expect(fixture.forwarded).toEqual(['/config?directory=%2Frepo%2Funobserved']);
   });
 });

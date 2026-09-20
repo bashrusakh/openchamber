@@ -293,6 +293,12 @@ export const SETTINGS_REGISTRY = {
   // tunnel status endpoint (`managedRemoteTunnelTokenPresetIds`), never from here.
   managedRemoteTunnelPresetTokens: field({ scope: 'instance', secret: true, parse: parseManagedRemoteTunnelPresetTokens }),
 
+  // ── Managed OpenCode instances (instance) ──
+  // Idle window before a managed directory instance is released (#3768).
+  // `0` disables eviction; absent means the default (1800000 ms), which the
+  // server normalizer resolves — see `normalizeIdleInstanceTimeoutMs`.
+  idleInstanceTimeoutMs: field({ scope: 'instance', parse: parseFiniteNumber }),
+
   // ── Sidebar display (profile; useSessionDisplayStore) ──
   sidebarProjectDisplayMode: field({ scope: 'profile', parse: parseOneOf(['all', 'single']), ui: sessionDisplayField('projectDisplayMode') }),
   sidebarSessionGroupingMode: field({ scope: 'profile', parse: parseOneOf(['by-worktree', 'flat']), ui: sessionDisplayField('sessionGroupingMode') }),

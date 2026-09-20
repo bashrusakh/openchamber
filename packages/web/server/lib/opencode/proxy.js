@@ -148,6 +148,19 @@ export const normalizeForwardedDirectoryHeaders = (headers) => {
   return headers;
 };
 
+/**
+ * The directory a request is scoped to: the `directory` query parameter, else
+ * the forwarded `x-opencode-directory` header after URI decoding. Requests
+ * without one (for example `/api/config/settings`) are not directory-scoped.
+ * The activity observer and the worktree gate both read through this helper so
+ * the two middlewares cannot drift apart.
+ */
+const readRequestDirectory = (req) => {
+  normalizeForwardedDirectoryHeaders(req.headers);
+  const url = new URL(req.url, 'http://localhost');
+  return url.searchParams.get('directory') || req.get('x-opencode-directory') || null;
+};
+
 const waitForSseDrain = (res, signal) => new Promise((resolve) => {
   if (signal?.aborted || res.writableEnded || res.destroyed) {
     resolve();
@@ -289,6 +302,7 @@ export const registerOpenCodeProxy = (app, deps) => {
     getSseUpstreamStallTimeoutMs = () => SSE_UPSTREAM_STALL_TIMEOUT_MS,
     readWorktreeBootstrapStatus = getWorktreeBootstrapStatus,
     WORKTREE_READY_TIMEOUT_MS = 5 * 60 * 1000,
+    observeDirectoryRequest,
   } = deps;
 
   if (app.get('opencodeProxyConfigured')) {
@@ -778,13 +792,53 @@ export const registerOpenCodeProxy = (app, deps) => {
     }
   });
 
+  // Directory activity observation for managed-instance idle eviction. Sits
+  // after the readiness gate and before the worktree gate, so a request held by
+  // a worktree bootstrap still counts as in-flight and its directory cannot be
+  // released. Bookkeeping only: forwarding is untouched, and without the
+  // optional dependency the middleware is never registered.
+  if (observeDirectoryRequest) {
+    app.use('/api', async (req, res, next) => {
+      const directory = readRequestDirectory(req);
+      if (!directory) {
+        return next();
+      }
+
+      let release = null;
+      try {
+        release = await observeDirectoryRequest(directory);
+      } catch (error) {
+        console.warn('[proxy] directory activity observation failed:', error?.message ?? error);
+      }
+      if (!release) {
+        return next();
+      }
+
+      // The response can settle while the observation is still resolving;
+      // without this the decrement would never run.
+      if (res.writableEnded || res.destroyed) {
+        release();
+        return;
+      }
+
+      const settle = () => {
+        res.off('finish', settle);
+        res.off('close', settle);
+        res.off('error', settle);
+        release();
+      };
+      res.once('finish', settle);
+      res.once('close', settle);
+      res.once('error', settle);
+      next();
+    });
+  }
+
   // Any directory-scoped read can initialize OpenCode's cached project/config,
   // before session.create runs. Hold all upstream requests until Git population
   // finishes, independently of the user's optional setup-script wait.
   app.use('/api', async (req, res, next) => {
-    normalizeForwardedDirectoryHeaders(req.headers);
-    const url = new URL(req.url, 'http://localhost');
-    const directory = url.searchParams.get('directory') || req.get('x-opencode-directory');
+    const directory = readRequestDirectory(req);
     if (!directory) return next();
 
     const deadline = Date.now() + WORKTREE_READY_TIMEOUT_MS;

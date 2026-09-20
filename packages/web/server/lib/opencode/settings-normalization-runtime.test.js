@@ -179,4 +179,47 @@ describe('settings normalization runtime - symlink resolution', () => {
       expect(result.changed).toBe(false);
     });
   });
+
+  describe('normalizeIdleInstanceTimeoutMs', () => {
+    const DEFAULT_IDLE_INSTANCE_TIMEOUT_MS = 30 * 60 * 1000;
+
+    it('keeps 0 as the explicit disable value', () => {
+      const runtime = createTestRuntime();
+
+      expect(runtime.normalizeIdleInstanceTimeoutMs(0)).toBe(0);
+    });
+
+    it('resolves an absent value to the default window', () => {
+      const normalize = createTestRuntime().normalizeIdleInstanceTimeoutMs;
+
+      expect(normalize(undefined)).toBe(DEFAULT_IDLE_INSTANCE_TIMEOUT_MS);
+      expect(normalize(null)).toBe(DEFAULT_IDLE_INSTANCE_TIMEOUT_MS);
+    });
+
+    it('keeps a finite non-negative value', () => {
+      const normalize = createTestRuntime().normalizeIdleInstanceTimeoutMs;
+
+      expect(normalize(1800000)).toBe(1800000);
+      expect(normalize(900000)).toBe(900000);
+      expect(normalize(1)).toBe(1);
+    });
+
+    it('normalizes negative, non-finite, and non-number values to the default', () => {
+      const normalize = createTestRuntime().normalizeIdleInstanceTimeoutMs;
+
+      for (const value of [
+        -1,
+        -1800000,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        '1800000',
+        true,
+        {},
+        [],
+      ]) {
+        expect(normalize(value)).toBe(DEFAULT_IDLE_INSTANCE_TIMEOUT_MS);
+      }
+    });
+  });
 });

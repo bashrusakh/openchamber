@@ -108,6 +108,9 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     getActiveSessionCount = () => 0,
     reapManagedOrphanedProcesses = reapOrphanedProcesses,
     getWarmupDirectories = async () => [],
+    // Called once per directory after a successful warm fetch, so the
+    // directory's idle-eviction window starts when it is warmed (#3768).
+    onDirectoryWarmed = null,
     onOpenCodeRestarted = null,
     managedStartupTimeoutMs = 30_000,
     now = Date.now,
@@ -1138,6 +1141,12 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
   // after readiness so the work overlaps UI startup instead. Sequential and
   // best-effort: a failed or slow directory never blocks the others for long,
   // and a restart invalidates the pass via the port/readiness guard.
+  //
+  // A warmed directory is also stamped through `onDirectoryWarmed` when the
+  // fetch succeeds: this pass is the only traffic the MRU set gets before the
+  // UI touches it, and without the stamp a warmed instance is never a
+  // reapable candidate (#3768, decision 4). A failed or aborted fetch leaves
+  // the directory lazy and unstamped.
   const warmOpenCodeDirectories = async () => {
     let directories = [];
     try {
@@ -1156,11 +1165,14 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
         const controller = new AbortController();
         timeout = setTimeout(() => controller.abort(), WARMUP_REQUEST_TIMEOUT_MS);
         const url = `${buildOpenCodeUrl('/session/status', '')}?directory=${encodeURIComponent(directory)}`;
-        await fetch(url, {
+        const response = await fetch(url, {
           method: 'GET',
           headers: { Accept: 'application/json', ...getOpenCodeAuthHeaders() },
           signal: controller.signal,
         });
+        if (response.ok) {
+          await onDirectoryWarmed?.(directory);
+        }
       } catch {
         // Best-effort — the directory stays lazy and the UI's own request warms it.
       } finally {

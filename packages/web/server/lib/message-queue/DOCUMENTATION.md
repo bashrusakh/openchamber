@@ -20,7 +20,12 @@ Wiring: created in `server/index.js` after the global event hub and the
 session-knowledge runtime; routes registered in
 `opencode/feature-routes-runtime.js` (before the generic OpenCode proxy) with
 JSON bodies enabled in `opencode/core-routes.js`; stopped by
-`opencode/shutdown-runtime.js`.
+`opencode/shutdown-runtime.js`. The runtime takes an optional
+`onDirectoryActivity(directory)` hook and awaits it best-effort before every
+dispatch send. `server/index.js` wires it to the managed-instance activity
+tracker, so a queued message restarts the directory's idle-eviction window
+before its prompt goes upstream and the reaper cannot release the instance out
+from under the send (#3768).
 
 ## Auto routing
 

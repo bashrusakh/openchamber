@@ -15,6 +15,7 @@ export const createServerUtilsRuntime = (dependencies) => {
     ensureOpenCodeApiPrefix,
     getUpstreamStallTimeoutMs,
     getUiNotificationClients,
+    observeDirectoryRequest,
     getOpenCodePort,
     setOpenCodePortState,
     syncToHmrState,
@@ -215,6 +216,7 @@ export const createServerUtilsRuntime = (dependencies) => {
       ensureOpenCodeApiPrefix,
       getSseUpstreamStallTimeoutMs: getUpstreamStallTimeoutMs,
       getUiNotificationClients,
+      observeDirectoryRequest,
     });
   };
 

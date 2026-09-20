@@ -1,3 +1,27 @@
+/**
+ * Default idle window for managed directory instances (#3768), in
+ * milliseconds. `0` is the explicit disable value; every out-of-domain value
+ * resolves here instead of silently disabling eviction.
+ */
+const IDLE_INSTANCE_TIMEOUT_DEFAULT_MS = 30 * 60 * 1000;
+
+/**
+ * Normalize the persisted `idleInstanceTimeoutMs` (and the
+ * `OPENCHAMBER_IDLE_INSTANCE_TIMEOUT_MS` override): `0` disables eviction, a
+ * finite non-negative number is kept, and absence or any other value
+ * (negative, non-finite, non-number) resolves to the default window. Exported
+ * directly because it needs no injected platform dependencies.
+ */
+export const normalizeIdleInstanceTimeoutMs = (value) => {
+  if (value === 0) {
+    return 0;
+  }
+  if (!Number.isFinite(value) || value < 0) {
+    return IDLE_INSTANCE_TIMEOUT_DEFAULT_MS;
+  }
+  return value;
+};
+
 export const createSettingsNormalizationRuntime = (dependencies) => {
   const {
     os,
@@ -459,6 +483,7 @@ export const createSettingsNormalizationRuntime = (dependencies) => {
     normalizeSettingsPaths,
     normalizeTunnelBootstrapTtlMs,
     normalizeTunnelSessionTtlMs,
+    normalizeIdleInstanceTimeoutMs,
     normalizeManagedRemoteTunnelHostname,
     normalizeManagedRemoteTunnelPresets,
     normalizeManagedRemoteTunnelPresetTokens,

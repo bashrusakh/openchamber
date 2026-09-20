@@ -214,6 +214,10 @@ export function createMessageQueueRuntime({
   // Turns the `openchamber/auto` model into a real one right before the send;
   // absent means the queue never sees the sentinel.
   resolvePromptBody = null,
+  // Stamps directory activity at dispatch start so a queued send both restarts
+  // the directory's idle-eviction window and never races a release (#3768).
+  // Absent in runtimes that do not wire idle eviction.
+  onDirectoryActivity = null,
   dataDir,
   fetchImpl = fetch,
   now = Date.now,
@@ -596,6 +600,15 @@ export function createMessageQueueRuntime({
     sending.set(sessionId, item.id);
     broadcast(sessionId);
     try {
+      // The send is OpenChamber-owned upstream work that never passes the
+      // proxy observer, so stamp the directory before the POST: the reaper
+      // must not release this instance out from under the dispatch, and the
+      // send restarts the directory's idle window (#3768, decision 8).
+      try {
+        await onDirectoryActivity?.(current.directory);
+      } catch {
+        // Observation is best-effort and must never fail a queued delivery.
+      }
       await sendItem(sessionId, current.directory, item);
       const after = queues.get(sessionId);
       if (after) setQueueItems(sessionId, after.directory, after.items.filter((entry) => entry.id !== item.id));

@@ -1,6 +1,13 @@
 import * as React from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Icon } from "@/components/icon/Icon";
 import {
   SettingsSection,
@@ -9,18 +16,40 @@ import {
   SettingsInset,
   SETTINGS_ICON_BUTTON_CLASS,
   SETTINGS_OPTION_STACK_CLASS,
+  SETTINGS_SELECT_ROW_TRIGGER_CLASS,
+  SETTINGS_SELECT_SIZE,
 } from '@/components/sections/shared/SettingsSection';
 import { isDesktopShell, requestFileAccess } from '@/lib/desktop';
 import { loadDesktopSettings, updateDesktopSettings } from '@/lib/persistence';
 import { recordDeferredOpenCodeRestart } from '@/lib/opencode/deferredRestart';
 import { useUIStore } from '@/stores/useUIStore';
-import { useI18n } from '@/lib/i18n';
+import { useI18n, type I18nKey } from '@/lib/i18n';
 import { isWindowsArm64 } from '@/lib/platform';
 import { toast } from '@/components/ui';
+
+type IdleInstanceTimeoutOption = { value: string; ms: number; labelKey: I18nKey };
+
+/** The window the server applies when `idleInstanceTimeoutMs` is absent. */
+const IDLE_INSTANCE_TIMEOUT_DEFAULT_MS = 30 * 60 * 1000;
+
+/** `0` disables release and is a real choice, not the absent-key default. */
+const IDLE_INSTANCE_TIMEOUT_OPTIONS: IdleInstanceTimeoutOption[] = [
+  { value: '0', ms: 0, labelKey: 'settings.openchamber.opencodeCli.option.idleInstanceTimeout.never' },
+  { value: '900000', ms: 15 * 60 * 1000, labelKey: 'settings.openchamber.opencodeCli.option.idleInstanceTimeout.15m' },
+  { value: String(IDLE_INSTANCE_TIMEOUT_DEFAULT_MS), ms: IDLE_INSTANCE_TIMEOUT_DEFAULT_MS, labelKey: 'settings.openchamber.opencodeCli.option.idleInstanceTimeout.30m' },
+  { value: '3600000', ms: 60 * 60 * 1000, labelKey: 'settings.openchamber.opencodeCli.option.idleInstanceTimeout.1h' },
+  { value: '14400000', ms: 4 * 60 * 60 * 1000, labelKey: 'settings.openchamber.opencodeCli.option.idleInstanceTimeout.4h' },
+];
+
+/** A stored value the options do not cover reads as the default window. */
+const idleInstanceTimeoutOptionValue = (timeoutMs: number): string =>
+  IDLE_INSTANCE_TIMEOUT_OPTIONS.find((option) => option.ms === timeoutMs)?.value
+  ?? String(IDLE_INSTANCE_TIMEOUT_DEFAULT_MS);
 
 export const OpenCodeCliSettings: React.FC = () => {
   const { t } = useI18n();
   const [value, setValue] = React.useState('');
+  const [idleInstanceTimeoutMs, setIdleInstanceTimeoutMs] = React.useState(IDLE_INSTANCE_TIMEOUT_DEFAULT_MS);
   const [isLoading, setIsLoading] = React.useState(true);
   const [isSaving, setIsSaving] = React.useState(false);
   const showOpenCodeUpdateNotifications = useUIStore((state) => state.showOpenCodeUpdateNotifications);
@@ -35,6 +64,7 @@ export const OpenCodeCliSettings: React.FC = () => {
           return;
         }
         setValue(data.opencodeBinary ?? '');
+        setIdleInstanceTimeoutMs(data.idleInstanceTimeoutMs ?? IDLE_INSTANCE_TIMEOUT_DEFAULT_MS);
       } catch {
         // ignore
       } finally {
@@ -90,6 +120,17 @@ export const OpenCodeCliSettings: React.FC = () => {
     setShowOpenCodeUpdateNotifications(enabled);
     void updateDesktopSettings({ showOpenCodeUpdateNotifications: enabled });
   }, [setShowOpenCodeUpdateNotifications]);
+
+  // The server reads this key on every sweep, so the change applies without a
+  // restart and needs no Save button.
+  const handleIdleInstanceTimeoutChange = React.useCallback((nextValue: string) => {
+    const option = IDLE_INSTANCE_TIMEOUT_OPTIONS.find((entry) => entry.value === nextValue);
+    if (!option) {
+      return;
+    }
+    setIdleInstanceTimeoutMs(option.ms);
+    void updateDesktopSettings({ idleInstanceTimeoutMs: option.ms });
+  }, []);
 
   return (
     <SettingsSection title={t('settings.openchamber.opencodeCli.title')}>
@@ -155,6 +196,40 @@ export const OpenCodeCliSettings: React.FC = () => {
               {isSaving ? t('settings.common.actions.saving') : t('settings.common.actions.saveChanges')}
             </Button>
           </div>
+        </SettingsInset>
+
+        <SettingsInset>
+          <SettingsFieldRow
+            settingsItem="general.idle-instance-timeout"
+            label={t('settings.openchamber.opencodeCli.field.idleInstanceTimeout')}
+            info={t('settings.openchamber.opencodeCli.field.idleInstanceTimeoutInfo')}
+          >
+            <Select
+              value={idleInstanceTimeoutOptionValue(idleInstanceTimeoutMs)}
+              onValueChange={handleIdleInstanceTimeoutChange}
+              disabled={isLoading}
+            >
+              <SelectTrigger
+                size={SETTINGS_SELECT_SIZE}
+                className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}
+                aria-label={t('settings.openchamber.opencodeCli.field.idleInstanceTimeout')}
+              >
+                <SelectValue>
+                  {(selected) => {
+                    const option = IDLE_INSTANCE_TIMEOUT_OPTIONS.find((entry) => entry.value === selected);
+                    return option ? t(option.labelKey) : null;
+                  }}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {IDLE_INSTANCE_TIMEOUT_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {t(option.labelKey)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </SettingsFieldRow>
         </SettingsInset>
       </div>
     </SettingsSection>
