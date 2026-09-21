@@ -183,6 +183,12 @@ Consult Models capability handshake: the version route exposes it as
 queue protocol changes in a way an older UI cannot handle; the UI fails closed
 when the field is absent or below its required value.
 
+The enqueue route itself does not perform this handshake — the composer gate
+and the submission's own re-check are what keep a backend that predates
+`kind: 'consult'` from ever receiving one; a direct HTTP enqueue that bypasses
+both is outside the capability contract (on a protocol-1 backend the
+never-raw-send rule in "Dispatcher skip rule" still holds).
+
 ### Dispatcher skip rule
 
 `tick` sends only normal items, and only the *deliverable head*: the first

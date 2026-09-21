@@ -696,6 +696,39 @@ describe('message queue runtime', () => {
       await runtime.flush();
     });
 
+    it('never evicts a session whose send is in flight', async () => {
+      const { runtime, openCode, emit } = createRuntime();
+      runtime.start();
+      // Start the oldest session's send and hold the prompt open, so the
+      // dispatch is still in flight when the cap is exceeded.
+      let release;
+      openCode.fetchImpl.mockImplementationOnce(async () => Response.json({}))
+        .mockImplementationOnce(async () => Response.json([]))
+        .mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(new Response(null, { status: 204 })); }));
+      const oldest = await runtime.enqueue(bulkSession(0), DIRECTORY, item({ content: 'bulk-0', text: 'bulk-0' }));
+      emit({ type: 'session.status', properties: { sessionID: bulkSession(0), status: { type: 'idle' } } });
+      await settle();
+      expect(runtime.sessionSnapshot(bulkSession(0)).sendingId).toBe(oldest.itemId);
+      // Freeze the loop so the seeded queues stay visible; stop() does not
+      // touch the in-flight send, so its `sending` entry must survive.
+      runtime.stop();
+      await seedBulkSessions(runtime, 49, 1);
+      await runtime.enqueue('ses_queue_cap_new', DIRECTORY, item({ content: 'newest', text: 'newest' }));
+
+      // A mid-send session holds authoritative work: the oldest survives and
+      // the next-oldest normal session is evicted in its place.
+      expect(runtime.sessionSnapshot(bulkSession(0)).items).toHaveLength(1);
+      expect(runtime.sessionSnapshot(bulkSession(0)).sendingId).toBe(oldest.itemId);
+      expect(runtime.sessionSnapshot(bulkSession(1)).items).toEqual([]);
+      expect(runtime.sessionSnapshot('ses_queue_cap_new').items).toHaveLength(1);
+      expect(runtime.snapshot().sessions).toHaveLength(50);
+      await runtime.flush();
+
+      release();
+      await settle();
+      expect(runtime.sessionSnapshot(bulkSession(0)).items).toEqual([]);
+    });
+
     it('refuses a new session and leaves every queue untouched when no session is evictable', async () => {
       const { runtime } = createRuntime();
       runtime.stop();

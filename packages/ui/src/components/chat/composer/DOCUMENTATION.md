@@ -365,12 +365,15 @@ and cancel. Do not add a second send path: the submission queues the message,
 holds the session queue, waits for the head and an idle session, runs the
 advisors, and dispatches the acting turn with the turn-scoped guidance.
 
-Availability is computed in `ChatInput` by `consultUi.ts` and is deliberately
+Availability is computed in `ChatInput` by `consultUi.ts`, fed by the
+fail-closed live capability gate (`useConsultLiveCapability`: runtime plus the
+connected OpenCode version and backend `consultProtocol`), and is deliberately
 independent of session activity: a busy session is admissible through the
 queue, so the action stays enabled while a turn runs. It is disabled without a
-session, for a `/` command or shell input, during an active consult or btw
-session, and on runtimes without the server-owned queue (VS Code), where the
-tooltip explains why instead of degrading silently.
+session, while that capability read is pending or fails closed, for a `/`
+command or shell input, during an active consult or btw session or a running
+auto-review loop, and on runtimes without the server-owned queue (VS Code),
+where the tooltip explains why instead of degrading silently.
 
 `ChatInput.captureComposerPayload` resolves the composer exactly as queueing
 does (mentions, document attachments, context drafts, synthetic parts, linked

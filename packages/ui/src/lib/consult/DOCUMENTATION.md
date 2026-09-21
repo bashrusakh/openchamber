@@ -221,12 +221,12 @@ turn was sent:
 - `refused` — a start refusal (`code`, `rejections`);
 - `failed` — any other pre-dispatch failure;
 - `delivered-raw` — the item left the server queue without this submission
-  taking it (the hold lapsed and the server delivered the raw message, or
-  another client removed it). The caller must not restore the composer and
-  must not re-send, and should tell the user the consultation did not happen.
-  `queueItemRestored` is `false`. The composer branch implements this as
-  `consultCaptureDisposition` (keep the capture cleared) plus the localized
-  delivered-raw toast.
+  claiming and dispatching it (another client removed it, for example). A
+  consult item is never delivered as a normal send, so the caller must not
+  restore the composer and must not re-send, and should tell the user the
+  consultation did not happen. `queueItemRestored` is `false`. The composer
+  branch implements this as `consultCaptureDisposition` (keep the capture
+  cleared) plus the localized delivered-raw toast.
 
 `queueItemRestored` on `refused`/`failed` is `true` only for the
 enqueue-rejection and unattributable-append edges (a copy of the message is
@@ -320,12 +320,13 @@ Branches:
   superseding run's hold is untouched because it is a different owner.
 
 **Honest hole (plan D5).** If the UI disappears mid-consult, the heartbeat
-dies with it, the hold expires server-side, and the server delivers the raw
-message without consultation. The submission still cannot close this
-client-side; it now detects the outcome (`delivered-raw`) instead of reporting
-a cancel that would restore the composer and duplicate the send. The full fix
-is a consult item kind the server never self-delivers, which needs server+UI
-changes.
+dies with it and the hold expires server-side. The item keeps
+`kind: 'consult'` and its claim simply lapses, so the generic dispatcher never
+delivers it as a normal send: it stays at its session's queue head and blocks
+that queue until a live run resolves it through its own dispatch route or the
+user removes it manually. The submission detects the item leaving the queue
+without this run (`delivered-raw`) instead of reporting a cancel that would
+restore the composer and duplicate the send.
 
 **VS Code.** `setServerHold` is a no-op where the queue is not server-owned,
 and the local `useQueuedMessageAutoSend` hook can deliver the item before the
@@ -409,11 +410,13 @@ cannot travel in the server batch.
   can only clear its own owner slot.
 - Advisor sends never participate in the shared provider circuit breaker.
 - The consult message is never delivered raw by the submission: the item is
-  held before admission, taken exactly once, and dispatched through the
-  ordinary store send only after a non-cancelled consultation result. A cancel
-  before dispatch never sends; a refusal restores the taken item instead of
-  dropping it. If the item leaves the queue without the take anyway, the
-  submission reports `delivered-raw` and never restores or re-sends.
+  held before admission, claimed before dispatch, and sent through its own
+  dispatch route only after a non-cancelled consultation result. A cancel
+  before dispatch never sends; a post-claim refusal removes the consult item
+  and the caller restores the composer from its own captured payload, never by
+  re-queueing the message for normal delivery. If the item leaves the queue
+  without the claim anyway, the submission reports `delivered-raw` and never
+  restores or re-sends.
 - The submission performs no queue or hold operation after its captured
   runtime key changes; those resources belong to the runtime that created them.
 
@@ -494,17 +497,19 @@ Accepted v1 limitations:
 - The collapsed mobile composer pill (`MobilePillComposer`) has no footer, so
   it has no consult entry point; the action is reached by expanding the
   composer.
-- A take that already succeeded before a runtime switch cannot be restored: the
-  item belongs to the old runtime's queue, and the submission performs no queue
-  or hold operation after its captured runtime key changes (see the submission
-  contract's branches).
-- A runtime switch mid-admission can still lead to a raw delivery later while
-  the composer restores. The item and the hold belong to the old runtime, whose
-  server keeps the queued item and delivers it once the hold expires; the
-  submission performs no queue or hold operation after the switch, and session
-  ids are not unique across runtimes, so there is no cross-runtime duplicate
-  guard. The user may see the restored message delivered raw after the switch.
-  Accepted v1 bound.
+- A claim that already succeeded before a runtime switch cannot be undone: the
+  item stays reserved in the old runtime's queue until its claim lapses into
+  the server's sweep (kind kept, never delivered raw), and the submission
+  performs no queue or hold operation after its captured runtime key changes
+  (see the submission contract's branches).
+- A runtime switch mid-admission strands the queued item in the old runtime's
+  queue while the composer restores. The item and the hold belong to the old
+  runtime, whose server keeps the consult item and never delivers it as a
+  normal send: once the hold expires the claim and payload are swept and the
+  item keeps blocking until it is removed manually. The submission performs no
+  queue or hold operation after the switch, and session ids are not unique
+  across runtimes, so there is no cross-runtime duplicate guard. Accepted v1
+  bound.
 - An ambiguous enqueue failure can leave an item delivered while the composer
   restores. If `addToQueue` rejects after the server accepted the item, the
   submission reports `queueItemRestored: false` and the caller restores its
