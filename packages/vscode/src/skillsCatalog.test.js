@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { afterAll, beforeEach, describe, expect, it } from 'bun:test';
 
 const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'openchamber-vscode-skills-test-'));
@@ -27,6 +29,10 @@ if [ "$1" = "clone" ]; then
     printf 'fatal: Authentication failed for origin\\n' >&2
     exit 1
   fi
+  if [ "$mode" = "hold-cancel" ]; then
+    touch "$OPENCHAMBER_VSCODE_SKILLS_MATERIALIZATION_STARTED"
+    while [ ! -f "$OPENCHAMBER_VSCODE_SKILLS_MATERIALIZATION_RELEASE" ]; do sleep 0.01; done
+  fi
   if [ "$mode" = "fallback" ] && [ "$has_filter" -eq 1 ]; then
     printf 'filter unsupported\\n' >&2
     exit 1
@@ -50,6 +56,25 @@ fi
 exit 0
 `;
 await fs.writeFile(fakeGitPath, fakeGitSource, { mode: 0o755 });
+
+const execFileAsync = promisify(execFile);
+const testExecGit = async (args, cwd, options = {}) => {
+  try {
+    const result = await execFileAsync(options.binary || 'git', args, {
+      cwd,
+      timeout: options.timeoutMs,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+    return { stdout: String(result.stdout || ''), stderr: String(result.stderr || ''), exitCode: 0 };
+  } catch (error) {
+    return {
+      stdout: String(error.stdout || ''),
+      stderr: String(error.stderr || error.message || ''),
+      exitCode: 1,
+      code: String(error.code) === error.code ? error.code : undefined,
+    };
+  }
+};
 
 let configuredGit = fakeGitPath;
 const executableCalls = [];
@@ -90,7 +115,11 @@ process.env.OPENCHAMBER_TEST_AUTH_MARKER = 'configured-auth';
 
 const { installSkillsFromRepository, scanSkillsRepository } = await import('./skillsCatalog');
 
-const dependencies = { resolveGitExecutable: executableResolver, gitExecutionRuntime: executionRuntime };
+const dependencies = {
+  resolveGitExecutable: executableResolver,
+  gitExecutionRuntime: executionRuntime,
+  execGit: testExecGit,
+};
 
 const clearGitLog = async () => {
   await fs.writeFile(gitLogPath, '');
@@ -202,6 +231,30 @@ describe('VS Code skills catalog Git execution', () => {
       error: { kind: 'gitUnavailable', message: 'Git is not available in PATH' },
     });
     expect((await readGitLog()).trim()).toBe('');
+  });
+
+  it('forwards clone cancellation without starting the fallback clone', async () => {
+    process.env.OPENCHAMBER_VSCODE_SKILLS_GIT_MODE = 'hold-cancel';
+    const controller = new AbortController();
+    const gitCalls = [];
+    const execGit = async (args, _cwd, options = {}) => {
+      gitCalls.push(args);
+      if (args[0] === '--version') return { stdout: 'git version 2.0', stderr: '', exitCode: 0 };
+      if (args[0] !== 'clone') return { stdout: '', stderr: '', exitCode: 0 };
+      await fs.writeFile(materializationStartedPath, 'started');
+      await new Promise((resolve) => options.signal?.addEventListener('abort', resolve, { once: true }));
+      return { stdout: '', stderr: 'Git process was cancelled', exitCode: 1 };
+    };
+    const scan = scanSkillsRepository({
+      source: 'owner/skills',
+      signal: controller.signal,
+    }, { ...dependencies, execGit });
+
+    await waitForFile(materializationStartedPath);
+    controller.abort();
+
+    await expect(scan).resolves.toMatchObject({ ok: false, error: { kind: 'networkError' } });
+    expect(gitCalls.filter((args) => args[0] === 'clone')).toHaveLength(1);
   });
 
   it('installs sparse-selected files locally and holds the destination lease through cleanup', async () => {

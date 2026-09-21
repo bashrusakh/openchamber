@@ -132,6 +132,7 @@ The following functions are internal helpers used by exported functions:
 - `resolveBranchForExistingMode(...)`: Resolve branch for existing-mode worktree creation.
 - `applyUpstreamConfiguration(...)`: Set upstream tracking for new branches.
 - `runPostCheckoutHook(directory)`: Invoke the worktree's `post-checkout` hook after population, because `git worktree add --no-checkout` and the bootstrap's `git reset --hard` never run git hooks. Runs with git's standard arguments and the worktree as cwd; skips missing/non-executable hooks and never throws on hook failure.
+- `process-tree.js`: Shared ownership helpers for detached Git process groups and descendant termination on cancellation or timeout.
 - And various other internal helpers for Git command execution and parsing.
 
 ### Execution Coordination
@@ -165,6 +166,8 @@ worktree writes.
 cancels it before any worktree work starts; abandoning a running waiter rejects
 that caller while the already admitted mutation finishes on its own.
 `getCommitDiff` and `getUnpushedBranchCounts` are coordinated reads. The
+`getTrackingBranch` read is coordinated through the same facade, including its
+read-only environment and optional cancellation signal. The
 integrate flow (`integrateWorktreeCommits`) reserves network capacity for its
 whole run because its fast-forward step may `git fetch` the target's upstream;
 `computeIntegratePlan`, `abortIntegrate`, and `continueIntegrate` read and write

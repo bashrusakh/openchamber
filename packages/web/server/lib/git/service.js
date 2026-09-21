@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import { createRequire } from 'module';
 
 import { getGitExecutionEnv } from './execution-scope.js';
+import { killProcessTree, withProcessTreeOwnership } from './process-tree.js';
 
 const fsp = fs.promises;
 const require = createRequire(import.meta.url);
@@ -2391,38 +2392,18 @@ const GIT_STATUS_STALL_TIMEOUT_MS = 120_000;
 const GIT_UNTRACKED_LISTING_STALL_TIMEOUT_MS = 60_000;
 const GIT_PROBE_TIMEOUT_MS = 30_000;
 
-// Untracked files under `dirPath` (repository-relative, trailing slash), read
-// Git for Windows runs commands through a launcher: the `git.exe` we spawn is a
-// wrapper whose child is the real `git`. Killing only the wrapper leaves that
-// child alive, still walking the tree on its own (a repository rooted at a
-// drive root sends it through Program Files), and it shows up in Task Manager
-// as a stuck pair until someone ends it by hand. Windows has no process groups
-// to signal, so the tree is ended through taskkill.
-const killProcessTree = (child) => {
-  if (!child.pid) return;
-  if (process.platform === 'win32') {
-    try {
-      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
-    } catch {
-      child.kill('SIGKILL');
-    }
-    return;
-  }
-  child.kill('SIGKILL');
-};
-
 // from a streamed `ls-files` that is stopped once the bound is exceeded so a
 // huge directory is never listed in full. `paths` is complete when
 // `truncated` is false.
 const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
   const env = await buildGitEnv();
   return new Promise((resolve, reject) => {
-    const child = spawn(getGitBinary(), ['ls-files', '--others', '--exclude-standard', '-z', '--', dirPath], {
+    const child = spawn(getGitBinary(), ['ls-files', '--others', '--exclude-standard', '-z', '--', dirPath], withProcessTreeOwnership({
       cwd: repoRoot,
       env,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    }));
     const paths = [];
     let pending = '';
     let truncated = false;
@@ -2548,17 +2529,21 @@ export async function getStatus(directory, options = {}) {
  * and config only, never the working tree: callers that only need the
  * tracking name must not pay for a status read.
  */
-export async function getTrackingBranch(directory) {
+export async function getTrackingBranch(directory, { signal = undefined } = {}) {
   const normalizedDirectory = normalizeDirectoryPath(directory);
   if (!normalizedDirectory) {
     return null;
   }
-  const head = await runGitCommand(normalizedDirectory, ['symbolic-ref', '--quiet', 'HEAD']);
+  const head = await runGitCommand(normalizedDirectory, ['symbolic-ref', '--quiet', 'HEAD'], { signal });
   const headRef = head.success ? head.stdout.trim() : '';
   if (!headRef.startsWith('refs/heads/')) {
     return null;
   }
-  const upstream = await runGitCommand(normalizedDirectory, ['for-each-ref', '--format=%(upstream:short)', headRef]);
+  const upstream = await runGitCommand(
+    normalizedDirectory,
+    ['for-each-ref', '--format=%(upstream:short)', headRef],
+    { signal },
+  );
   const tracking = upstream.success ? upstream.stdout.trim() : '';
   return tracking || null;
 }
@@ -5561,8 +5546,11 @@ async function resolveCommitHash(git, hash) {
 
 const commitShowArgs = (hash) => ['show', '--format=', '--root', '--diff-merges=first-parent', '--find-renames', hash];
 
-export async function getCommitDiff(directory, { hash, path: filePath, previousPath, contextLines = 3 } = {}) {
-  const { git } = await createRepositoryGitContext(directory);
+export async function getCommitDiff(
+  directory,
+  { hash, path: filePath, previousPath, contextLines = 3, signal = undefined } = {},
+) {
+  const { git } = await createRepositoryGitContext(directory, { signal });
   const commit = await resolveCommitHash(git, hash);
   const paths = [filePath, previousPath].filter(Boolean).map((value) => `:(literal)${value}`);
   return git.raw([

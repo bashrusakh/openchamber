@@ -85,6 +85,22 @@ describe('Git execution service', () => {
         });
         return 'diff';
       },
+      getCommitDiff: async () => {
+        observations.push({
+          type: 'commit-read',
+          env: getGitExecutionEnv(),
+          active: service.coordinator.getStats().active,
+        });
+        return 'commit diff';
+      },
+      getTrackingBranch: async () => {
+        observations.push({
+          type: 'tracking-read',
+          env: getGitExecutionEnv(),
+          active: service.coordinator.getStats().active,
+        });
+        return 'origin/main';
+      },
       stageFile: async () => {
         observations.push({
           type: 'write',
@@ -96,6 +112,8 @@ describe('Git execution service', () => {
     service = createGitExecutionService({ raw });
 
     await expect(service.getDiff(directory, 'file.ts')).resolves.toBe('diff');
+    await expect(service.getCommitDiff(directory, { hash: 'a'.repeat(40) })).resolves.toBe('commit diff');
+    await expect(service.getTrackingBranch(directory)).resolves.toBe('origin/main');
     await expect(service.stageFile(directory, 'file.ts')).resolves.toBeUndefined();
 
     expect(observations).toEqual([
@@ -106,6 +124,16 @@ describe('Git execution service', () => {
       },
       {
         type: 'read',
+        env: { GIT_OPTIONAL_LOCKS: '0' },
+        active: 1,
+      },
+      {
+        type: 'commit-read',
+        env: { GIT_OPTIONAL_LOCKS: '0' },
+        active: 1,
+      },
+      {
+        type: 'tracking-read',
         env: { GIT_OPTIONAL_LOCKS: '0' },
         active: 1,
       },
@@ -746,12 +774,17 @@ describe('Git execution service', () => {
     ]);
   });
 
-  it('coordinates commit diffs and unpushed counts as reads', async () => {
+  it('coordinates commit diffs, tracking branches, and unpushed counts as reads', async () => {
     const calls = [];
+    const controller = new AbortController();
     const raw = {
       getCommitDiff: async (directory, options) => {
         calls.push({ type: 'commit-diff', directory, options });
         return 'patch';
+      },
+      getTrackingBranch: async (directory, options) => {
+        calls.push({ type: 'tracking-branch', directory, options });
+        return 'origin/main';
       },
       getUnpushedBranchCounts: async (directory, branches) => {
         calls.push({ type: 'unpushed-counts', directory, branches });
@@ -769,12 +802,15 @@ describe('Git execution service', () => {
       resolver: { resolve: async (directory) => contextFor(directory) },
     });
 
-    await expect(service.getCommitDiff('/repo', { hash: 'a'.repeat(40) })).resolves.toBe('patch');
+    await expect(service.getCommitDiff('/repo', { hash: 'a'.repeat(40), signal: controller.signal })).resolves.toBe('patch');
+    await expect(service.getTrackingBranch('/repo', { signal: controller.signal })).resolves.toBe('origin/main');
     await expect(service.getUnpushedBranchCounts('/repo', ['main'])).resolves.toEqual({ counts: { main: 2 } });
 
     expect(calls).toEqual([
       { type: 'admission', label: 'getCommitDiff', kind: GIT_OPERATION_KIND.READ, network: false },
-      { type: 'commit-diff', directory: '/repo', options: { hash: 'a'.repeat(40) } },
+      { type: 'commit-diff', directory: '/repo', options: { hash: 'a'.repeat(40), signal: controller.signal } },
+      { type: 'admission', label: 'getTrackingBranch', kind: GIT_OPERATION_KIND.READ, network: false },
+      { type: 'tracking-branch', directory: '/repo', options: { signal: controller.signal } },
       { type: 'admission', label: 'getUnpushedBranchCounts', kind: GIT_OPERATION_KIND.READ, network: false },
       { type: 'unpushed-counts', directory: '/repo', branches: ['main'] },
     ]);

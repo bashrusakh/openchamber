@@ -18,4 +18,22 @@ describe('repository-qualified PR sources', () => {
     } });
     expect(received).toEqual(['/repo', 42, source.sourceRepo]);
   });
+
+  it('routes commit reads through the injected Git facade with cancellation', async () => {
+    const source = parseSource({ kind: 'commit', hash: 'a'.repeat(40) });
+    const controller = new AbortController();
+    let received;
+
+    await loadSourceSections('/repo', source, {
+      signal: controller.signal,
+      git: {
+        getCommitDiff: async (...args) => {
+          received = args;
+          return 'commit patch';
+        },
+      },
+    });
+
+    expect(received).toEqual(['/repo', { hash: source.hash, signal: controller.signal }]);
+  });
 });

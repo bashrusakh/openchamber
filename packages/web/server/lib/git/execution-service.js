@@ -42,6 +42,7 @@ const operationKinds = Object.freeze({
   getCommitFiles: operation.read,
   getCommitDiff: operation.read,
   getCommitFileDiff: operation.read,
+  getTrackingBranch: operation.read,
   getRemotes: operation.read,
   isLinkedWorktree: operation.read,
   validateWorktreeDirectory: operation.read,
@@ -373,6 +374,16 @@ export const createGitExecutionService = (dependencies = {}) => {
     options,
   );
 
+  wrapped.getCommitDiff = (directory, options = {}) => {
+    const executionOptions = options?.signal ? { signal: options.signal } : {};
+    return runOperation('getCommitDiff', directory, [directory, options], executionOptions);
+  };
+
+  wrapped.getTrackingBranch = (directory, options = {}) => {
+    const executionOptions = options?.signal ? { signal: options.signal } : {};
+    return runOperation('getTrackingBranch', directory, [directory, options], executionOptions);
+  };
+
   wrapped.isGitRepository = checkIsGitRepository;
   wrapped.getStatus = runStatus;
   wrapped.getGlobalIdentity = (...args) => coordinator.run({
@@ -433,6 +444,7 @@ export const {
   getCommitFiles,
   getCommitDiff,
   getCommitFileDiff,
+  getTrackingBranch,
   getRemotes,
   removeRemote,
   isLinkedWorktree,

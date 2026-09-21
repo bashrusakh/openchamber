@@ -3,6 +3,7 @@ import { resolveByteRange } from './byte-range.js';
 import nodeFsPromises from 'node:fs/promises';
 import nodePath from 'node:path';
 import { createGitIgnoreReader } from './gitignore.js';
+import { killProcessTree, withProcessTreeOwnership } from '../git/process-tree.js';
 
 const EXEC_JOB_TTL_MS = 30 * 60 * 1000;
 const OUTSIDE_FILE_GRANT_TTL_MS = 10 * 60 * 1000;
@@ -113,15 +114,15 @@ const createRequestAbortSignal = (req, res) => {
   };
 };
 
-const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs }) => new Promise((resolve, reject) => {
+const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs, platform }) => new Promise((resolve, reject) => {
   let child;
   try {
-    child = spawn(command, args, {
+    child = spawn(command, args, withProcessTreeOwnership({
       cwd,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       env,
-    });
+    }, platform));
   } catch (error) {
     reject(error);
     return;
@@ -149,7 +150,7 @@ const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs 
     terminationRequested = true;
     terminationError = error;
     try {
-      child.kill('SIGKILL');
+      killProcessTree(child, { spawn, platform });
     } catch {
       // The process may already have exited.
     }
@@ -987,6 +988,7 @@ export const registerFsRoutes = (app, dependencies) => {
             },
             signal: requestAbort.signal,
             timeoutMs: commandTimeoutMs,
+            platform,
           });
           lease.releaseNetwork();
 
@@ -1019,9 +1021,12 @@ export const registerFsRoutes = (app, dependencies) => {
 
           return res.json({ success: true, path: resolvedDestination, output });
         } catch (error) {
-          lease.releaseNetwork();
-          if (destinationOwned) {
-            await Promise.resolve(fsPromises.rm?.(resolvedDestination, { recursive: true, force: true })).catch(() => {});
+          try {
+            if (destinationOwned) {
+              await Promise.resolve(fsPromises.rm?.(resolvedDestination, { recursive: true, force: true })).catch(() => {});
+            }
+          } finally {
+            lease.releaseNetwork();
           }
           throw error;
         }
