@@ -1,10 +1,10 @@
 import { EventEmitter } from 'events';
 import { Readable, Writable } from 'node:stream';
 import path from 'path';
-import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import * as nativeFs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn as nativeSpawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -364,6 +364,18 @@ const waitForCloneSpawn = async (deferred) => {
   }
 };
 
+const waitForFile = async (filePath) => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await nativeFs.stat(filePath);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
+};
+
 const createDeferredCloneSpawn = ({ onClose } = {}) => {
   const pending = [];
   const spawn = vi.fn((command, args, options) => {
@@ -484,6 +496,46 @@ describe('fs clone', () => {
       clonePending: 0,
       cloneDestinations: 0,
     });
+  });
+
+  it('cancels clone descendants before removing the destination', { skip: process.platform === 'win32' }, async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), 'openchamber-clone-tree-'));
+    const marker = path.join(parent, 'descendant.pid');
+    const script = [
+      "const fs = require('node:fs');",
+      "const { spawn } = require('node:child_process');",
+      "const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+      "fs.writeFileSync(process.argv[1], String(descendant.pid));",
+      "setInterval(() => {}, 1000);",
+    ].join('\n');
+    const spawn = vi.fn((_command, _args, options) => nativeSpawn(process.execPath, ['-e', script, marker], options));
+    const handler = registerClone({
+      fsPromises: nativeFs,
+      spawn,
+      resolveCloneGitIdentity: async () => null,
+    });
+    const request = beginClone(handler, cloneBody(path.join(parent, 'repository')));
+
+    try {
+      await waitForFile(marker);
+      const descendantPid = Number(await readFile(marker, 'utf8'));
+      request.req.emit('aborted');
+      await request.promise;
+
+      expect(request.res.body).toEqual({ error: 'Git clone was cancelled' });
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        try {
+          process.kill(descendantPid, 0);
+        } catch {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(() => process.kill(descendantPid, 0)).toThrow();
+      await expect(nativeFs.stat(path.join(parent, 'repository'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
   });
 
   it('waits for a timed-out Git child to exit before cleanup', async () => {
@@ -1927,6 +1979,7 @@ describe('fs stat directory error handling', () => {
       await copyFile(new URL('../git/execution-scope.js', import.meta.url), path.join(directory, 'git/execution-scope.js'));
       await copyFile(new URL('../git/execution-coordinator.js', import.meta.url), path.join(directory, 'git/execution-coordinator.js'));
       await copyFile(new URL('../git/execution-errors.js', import.meta.url), path.join(directory, 'git/execution-errors.js'));
+      await copyFile(new URL('../git/process-tree.js', import.meta.url), path.join(directory, 'git/process-tree.js'));
       expect(() => execFileSync('node', [
         '--input-type=module',
         '--eval',

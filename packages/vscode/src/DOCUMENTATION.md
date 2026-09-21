@@ -57,6 +57,13 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
     processing, and temporary-directory cleanup; network capacity is released
     after that materialization work completes.
 
+- `skillsCatalog.ts`
+  - Routes repository availability, clone, sparse-checkout, checkout, and file
+    reads through the owned Git process runtime. Configured Git selection,
+    SSH/environment setup, timeouts, cancellation, clone reservations, and
+    preferred-clone fallback remain unchanged; deactivation stops active
+    catalog Git children through the same process registry.
+
 - `git-context-resolver.ts`, `git-execution-coordinator.ts`,
   `git-execution-errors.ts`
   - Source-bundled re-exports of the web Git execution primitives. These are

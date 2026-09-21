@@ -178,8 +178,8 @@ export const __testing = { generationTimeoutMs, walkthroughOutputTokens };
 /**
  * Current diff for a source, parsed into files and hunks.
  */
-async function loadCurrentDiff(directory, source, deps) {
-  const { sections } = await loadSourceSections(directory, source, deps);
+async function loadCurrentDiff(directory, source, deps, signal) {
+  const { sections } = await loadSourceSections(directory, source, { ...deps, signal });
   const built = buildDigest(sections);
   return built;
 }
@@ -409,7 +409,12 @@ async function runGeneration({ directory, source, repoRoot, key, force, explicit
     );
   }
 
-  const { digest, files, idByAlias, fileCount, hunkCount, generatedFileCount } = await loadCurrentDiff(directory, source, deps);
+  const { digest, files, idByAlias, fileCount, hunkCount, generatedFileCount } = await loadCurrentDiff(
+    directory,
+    source,
+    deps,
+    signal,
+  );
   setStage(repoRoot, key, 'asking');
   if (hunkCount === 0) {
     if (files.length > 0 && generatedFileCount === files.length) {

@@ -42,6 +42,7 @@ export {
   getCommitFiles,
   getCommitDiff,
   getCommitFileDiff,
+  getTrackingBranch,
   getRemotes,
   removeRemote,
   isLinkedWorktree,

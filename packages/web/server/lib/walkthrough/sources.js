@@ -1,8 +1,19 @@
-import { getCommitDiff } from '../git/service.js';
-import { getDiff, getRangeDiff, getUntrackedDiffs, listUntrackedPaths } from '../git/execution-service.js';
+import {
+  getCommitDiff,
+  getDiff,
+  getRangeDiff,
+  getUntrackedDiffs,
+  listUntrackedPaths,
+} from '../git/execution-service.js';
 import assert from 'node:assert/strict';
 
-const defaultGit = Object.freeze({ getDiff, getRangeDiff, getUntrackedDiffs, listUntrackedPaths });
+const defaultGit = Object.freeze({
+  getDiff,
+  getRangeDiff,
+  getUntrackedDiffs,
+  listUntrackedPaths,
+  getCommitDiff,
+});
 
 // A walkthrough source resolves to one or more diff *sections*. A section is a
 // patch plus the scope its hunk ids live in; keeping staged and working-tree
@@ -104,7 +115,11 @@ const untrackedSections = async (directory, git) => {
  *
  * @returns {Promise<{sections: Array<{scope: string, patch: string}>, meta: object}>}
  */
-export async function loadSourceSections(directory, source, { getPullRequestDiff, git = defaultGit } = {}) {
+export async function loadSourceSections(
+  directory,
+  source,
+  { getPullRequestDiff, git = defaultGit, signal } = {},
+) {
   if (source.kind === 'working-tree') {
     const sections = [];
 
@@ -136,7 +151,9 @@ export async function loadSourceSections(directory, source, { getPullRequestDiff
   }
 
   if (source.kind === 'commit') {
-    const patch = await getCommitDiff(directory, { hash: source.hash });
+    const commitOptions = { hash: source.hash };
+    if (signal) commitOptions.signal = signal;
+    const patch = await git.getCommitDiff(directory, commitOptions);
     return {
       sections: patch.trim() ? [{ scope: 'commit', patch }] : [],
       meta: { hash: source.hash },

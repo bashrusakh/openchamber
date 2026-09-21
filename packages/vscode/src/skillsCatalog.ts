@@ -2,16 +2,12 @@ import { OPENCODE_CONFIG_DIR } from './opencodeConfigPaths';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import yaml from 'yaml';
 
 import { discoverSkills } from './opencodeConfig';
-
-const execFileAsync = promisify(execFile);
+import type { GitProcessExecutionOptions } from './bridge-git-process-runtime';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
-const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 
@@ -114,6 +110,11 @@ function looksLikeAuthError(message: string): boolean {
 }
 
 type GitExecutableResolver = () => Promise<string | undefined>;
+type GitProcessRunner = (
+  args: string[],
+  cwd: string,
+  options?: GitProcessExecutionOptions,
+) => Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }>;
 
 type GitCloneLease = {
   releaseNetwork: () => void;
@@ -122,7 +123,7 @@ type GitCloneLease = {
 type GitExecutionRuntime = {
   coordinator: {
     runClone: <T>(
-      options: { destination: string; label: string; queueTimeoutMs: number },
+      options: { destination: string; label: string; queueTimeoutMs: number; signal?: AbortSignal },
       task: (lease: GitCloneLease) => Promise<T> | T,
     ) => Promise<T>;
   };
@@ -131,6 +132,7 @@ type GitExecutionRuntime = {
 type SkillsCatalogDependencies = {
   resolveGitExecutable?: GitExecutableResolver;
   gitExecutionRuntime?: GitExecutionRuntime;
+  execGit?: GitProcessRunner;
 };
 
 const resolveConfiguredGitExecutable: GitExecutableResolver = async () => {
@@ -143,37 +145,56 @@ const loadGitExecutionRuntime = async (): Promise<GitExecutionRuntime> => {
   return gitExecutionRuntime;
 };
 
+const loadGitProcessRuntime = async (): Promise<GitProcessRunner> => {
+  const { execGit } = await import('./bridge-git-process-runtime');
+  return execGit;
+};
+
 async function runGit(
   args: string[],
-  options?: { cwd?: string; timeoutMs?: number },
-  resolveGitExecutable: GitExecutableResolver = resolveConfiguredGitExecutable,
+  options: { cwd?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+  resolveGitExecutable: GitExecutableResolver,
+  executeGit: GitProcessRunner,
 ) {
   try {
     const configuredPath = await resolveGitExecutable();
     const gitExecutable = configuredPath?.trim() || 'git';
-    const { stdout, stderr } = await execFileAsync(gitExecutable, args, {
-      cwd: options?.cwd,
-      timeout: options?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      maxBuffer: DEFAULT_MAX_BUFFER,
-      env: {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: '0',
-      },
+    const result = await executeGit(args, options.cwd || process.cwd(), {
+      binary: gitExecutable,
+      timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      signal: options.signal,
     });
-    return { ok: true as const, stdout: stdout || '', stderr: stderr || '' };
-  } catch (error) {
-    const err = error as { stdout?: string; stderr?: string; message?: string };
+    if (result.exitCode === 0) {
+      return { ok: true as const, stdout: result.stdout || '', stderr: result.stderr || '' };
+    }
     return {
       ok: false as const,
-      stdout: typeof err.stdout === 'string' ? err.stdout : '',
-      stderr: typeof err.stderr === 'string' ? err.stderr : '',
-      message: typeof err.message === 'string' ? err.message : 'Git command failed',
+      stdout: result.stdout || '',
+      stderr: result.stderr || '',
+      message: result.stderr || result.code || 'Git command failed',
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false as const,
+      stdout: '',
+      stderr: message,
+      message: message || 'Git command failed',
     };
   }
 }
 
-async function assertGitAvailable(resolveGitExecutable: GitExecutableResolver = resolveConfiguredGitExecutable) {
-  const result = await runGit(['--version'], { timeoutMs: 5_000 }, resolveGitExecutable);
+async function assertGitAvailable(
+  resolveGitExecutable: GitExecutableResolver,
+  executeGit: GitProcessRunner,
+  signal?: AbortSignal,
+) {
+  const result = await runGit(
+    ['--version'],
+    { timeoutMs: 5_000, signal },
+    resolveGitExecutable,
+    executeGit,
+  );
   if (!result.ok) {
     return { ok: false as const, error: { kind: 'gitUnavailable' as const, message: 'Git is not available in PATH' } };
   }
@@ -275,17 +296,38 @@ async function cloneRepo(
   cloneUrl: string,
   targetDir: string,
   resolveGitExecutable: GitExecutableResolver,
+  executeGit: GitProcessRunner,
+  signal?: AbortSignal,
 ) {
   const preferred = ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', cloneUrl, targetDir];
   const fallback = ['clone', '--depth', '1', '--no-checkout', cloneUrl, targetDir];
 
-  const result = await runGit(preferred, { timeoutMs: 60_000 }, resolveGitExecutable);
+  const result = await runGit(
+    preferred,
+    { timeoutMs: 60_000, signal },
+    resolveGitExecutable,
+    executeGit,
+  );
   if (result.ok) {
     return { ok: true as const };
   }
 
+  // A cancelled operation must not start the compatibility clone after its
+  // owned child has been terminated.
+  if (signal?.aborted) {
+    return {
+      ok: false as const,
+      error: { kind: 'networkError' as const, message: result.message || 'Git process was cancelled' },
+    };
+  }
+
   await safeRm(targetDir);
-  const fallbackResult = await runGit(fallback, { timeoutMs: 60_000 }, resolveGitExecutable);
+  const fallbackResult = await runGit(
+    fallback,
+    { timeoutMs: 60_000, signal },
+    resolveGitExecutable,
+    executeGit,
+  );
   if (fallbackResult.ok) return { ok: true as const };
 
   const combined = `${fallbackResult.stderr}\n${fallbackResult.message}`.trim();
@@ -304,7 +346,7 @@ async function cloneRepo(
 }
 
 export async function scanSkillsRepository(
-  options: { source: string; subpath?: string; defaultSubpath?: string },
+  options: { source: string; subpath?: string; defaultSubpath?: string; signal?: AbortSignal },
   dependencies: SkillsCatalogDependencies = {},
 ): Promise<SkillsRepoScanResult> {
   const parsed = parseSkillRepoSource(options.source, options.subpath);
@@ -314,9 +356,10 @@ export async function scanSkillsRepository(
 
   const effectiveSubpath = parsed.effectiveSubpath || options.defaultSubpath || null;
   const resolveGitExecutable = dependencies.resolveGitExecutable || resolveConfiguredGitExecutable;
+  const executeGit = dependencies.execGit || await loadGitProcessRuntime();
   const executionRuntime = dependencies.gitExecutionRuntime || await loadGitExecutionRuntime();
-  const runGitCommand = (args: string[], runOptions?: { cwd?: string; timeoutMs?: number }) => (
-    runGit(args, runOptions, resolveGitExecutable)
+  const runGitCommand = (args: string[], runOptions: { cwd?: string; timeoutMs?: number } = {}) => (
+    runGit(args, { ...runOptions, signal: options.signal }, resolveGitExecutable, executeGit)
   );
   const tempBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openchamber-vscode-skills-scan-'));
   let cleaned = false;
@@ -328,15 +371,26 @@ export async function scanSkillsRepository(
 
   try {
     return await executionRuntime.coordinator.runClone(
-      { destination: tempBase, label: 'skills-catalog/clone-repository', queueTimeoutMs: 60_000 },
+      {
+        destination: tempBase,
+        label: 'skills-catalog/clone-repository',
+        queueTimeoutMs: 60_000,
+        signal: options.signal,
+      },
       async () => {
         try {
-          const gitCheck = await assertGitAvailable(resolveGitExecutable);
+          const gitCheck = await assertGitAvailable(resolveGitExecutable, executeGit, options.signal);
           if (!gitCheck.ok) {
             return { ok: false as const, error: gitCheck.error };
           }
 
-          const cloned = await cloneRepo(parsed.cloneUrlHttps, tempBase, resolveGitExecutable);
+          const cloned = await cloneRepo(
+            parsed.cloneUrlHttps,
+            tempBase,
+            resolveGitExecutable,
+            executeGit,
+            options.signal,
+          );
           if (!cloned.ok) {
             return { ok: false as const, error: cloned.error };
           }
@@ -517,6 +571,7 @@ export async function installSkillsFromRepository(options: {
   selections: Array<{ skillDir: string }>;
   conflictPolicy?: 'prompt' | 'skipAll' | 'overwriteAll';
   conflictDecisions?: Record<string, 'skip' | 'overwrite'>;
+  signal?: AbortSignal;
 }, dependencies: SkillsCatalogDependencies = {}): Promise<SkillsInstallResult> {
   if (options.scope === 'project' && !options.workingDirectory) {
     return { ok: false as const, error: { kind: 'invalidSource' as const, message: 'Project installs require a directory parameter' } };
@@ -534,9 +589,10 @@ export async function installSkillsFromRepository(options: {
 
   const userSkillDir = getUserSkillBaseDir();
   const resolveGitExecutable = dependencies.resolveGitExecutable || resolveConfiguredGitExecutable;
+  const executeGit = dependencies.execGit || await loadGitProcessRuntime();
   const executionRuntime = dependencies.gitExecutionRuntime || await loadGitExecutionRuntime();
-  const runGitCommand = (args: string[], runOptions?: { cwd?: string; timeoutMs?: number }) => (
-    runGit(args, runOptions, resolveGitExecutable)
+  const runGitCommand = (args: string[], runOptions: { cwd?: string; timeoutMs?: number } = {}) => (
+    runGit(args, { ...runOptions, signal: options.signal }, resolveGitExecutable, executeGit)
   );
   const targetSource: SkillInstallSource = options.targetSource === 'agents' ? 'agents' : 'opencode';
 
@@ -582,15 +638,26 @@ export async function installSkillsFromRepository(options: {
 
   try {
     return await executionRuntime.coordinator.runClone(
-      { destination: tempBase, label: 'skills-catalog/clone-repository', queueTimeoutMs: 90_000 },
+      {
+        destination: tempBase,
+        label: 'skills-catalog/clone-repository',
+        queueTimeoutMs: 90_000,
+        signal: options.signal,
+      },
       async () => {
         try {
-          const gitCheck = await assertGitAvailable(resolveGitExecutable);
+          const gitCheck = await assertGitAvailable(resolveGitExecutable, executeGit, options.signal);
           if (!gitCheck.ok) {
             return { ok: false as const, error: gitCheck.error };
           }
 
-          const cloned = await cloneRepo(parsed.cloneUrlHttps, tempBase, resolveGitExecutable);
+          const cloned = await cloneRepo(
+            parsed.cloneUrlHttps,
+            tempBase,
+            resolveGitExecutable,
+            executeGit,
+            options.signal,
+          );
           if (!cloned.ok) {
             return { ok: false as const, error: cloned.error };
           }
