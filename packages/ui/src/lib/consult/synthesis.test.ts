@@ -135,6 +135,16 @@ describe('receipt carrier', () => {
     expect(parseConsultReceiptMetadata(metadata)).toEqual(receipt);
   });
 
+  test('the emitted carrier pins the exact key and runID field the server reads', () => {
+    // The message-queue runtime correlates a landed dispatch by reading
+    // `metadata[CONSULT_RECEIPT_METADATA_KEY].runID`; this literal assertion
+    // keeps both sides pinned to the same contract.
+    const receipt = buildConsultReceipt(receiptInput());
+    const metadata = toConsultReceiptMetadata(receipt) as Record<string, Record<string, unknown>>;
+    expect(metadata[CONSULT_RECEIPT_METADATA_KEY]?.runID).toBe(receipt.runID);
+    expect(Object.keys(metadata[CONSULT_RECEIPT_METADATA_KEY] ?? {})).toContain('runID');
+  });
+
   test('malformed, missing, and empty metadata read as no receipt', () => {
     expect(parseConsultReceiptMetadata(undefined)).toBeNull();
     expect(parseConsultReceiptMetadata(null)).toBeNull();

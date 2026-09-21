@@ -3448,6 +3448,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.dialog.actions.submit': '諮詢並送出',
   'chat.consult.dialog.actions.submitting': '正在啟動…',
   'chat.consult.dialog.noAdvisorAgent': '沒有可用於顧問的主要代理',
+  'chat.consult.panel.ready': '{ready} / {total} 已完成',
+  'chat.consult.summary.segment': '{count} {status}',
   'chat.consult.panel.title': '諮詢模型',
   'chat.consult.panel.phase.waitingAdmission': '正在等待佇列與工作階段閒置…',
   'chat.consult.panel.phase.consulting': '正在諮詢 {count} 個顧問…',

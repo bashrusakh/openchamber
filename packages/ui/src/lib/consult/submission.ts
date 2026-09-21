@@ -1,5 +1,6 @@
 import { resolveQueuedSessionStatusType } from '@/hooks/useQueuedMessageAutoSend';
 import { getRuntimeKey } from '@/lib/runtime-switch';
+import { queuedContextToParts } from '@/components/chat/composer/submit/buildOutgoingMessage';
 import { CONSULT_MIN_OPENCODE_VERSION, resolveConsultLiveCapability } from '@/lib/consult/capability';
 import {
   createMessageQueueTarget,
@@ -257,7 +258,8 @@ export type ConsultQueueItemInput = {
 
 /** The queue operations the submission performs, injectable for tests. */
 export type ConsultSubmissionQueue = {
-  addToQueue: (target: MessageQueueTarget, message: ConsultQueueItemInput) => Promise<void>;
+  /** Resolves with the authoritative queued item (or undefined when unknown). */
+  addToQueue: (target: MessageQueueTarget, message: ConsultQueueItemInput) => Promise<QueuedMessage | undefined>;
   removeFromQueue: (target: MessageQueueTarget, messageId: string) => void;
   /** Reserves the head consult item for this owner; throws on refusal. */
   claimConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string, ttlMs?: number) => Promise<QueuedMessage>;
@@ -527,30 +529,6 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     }, intervalMs);
   };
 
-  type EnqueuedItemLookup =
-    | { kind: 'found'; itemId: string }
-    | { kind: 'missing' }
-    | { kind: 'ambiguous' };
-
-  /**
-   * The consult item among the entries that appeared since the pre-enqueue
-   * snapshot. `addToQueue` generates the id, so identity is derived from the
-   * projection; an append that cannot be attributed to this submission is
-   * reported instead of risking a foreign item being taken.
-   */
-  const findEnqueuedItemId = (
-    target: MessageQueueTarget,
-    knownIds: ReadonlySet<string>,
-    content: string,
-  ): EnqueuedItemLookup => {
-    const appended = deps.queue.getQueueForTarget(target).filter((item) => !knownIds.has(item.id));
-    if (appended.length === 0) return { kind: 'missing' };
-    if (appended.length === 1) return { kind: 'found', itemId: appended[0].id };
-    const matching = appended.filter((item) => item.content === content);
-    if (matching.length === 1) return { kind: 'found', itemId: matching[0].id };
-    return { kind: 'ambiguous' };
-  };
-
   const waitForAdmission = async (
     input: SubmitConsultMessageInput,
     target: MessageQueueTarget,
@@ -786,30 +764,28 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     if (!runtimeMatches(capture, deps)) return finishRuntimeChanged();
 
     // Enqueue exactly as the composer would, now that the session is held.
-    const knownIds = new Set(deps.queue.getQueueForTarget(target).map((item) => item.id));
+    // The server returns the authoritative item; there is no snapshot-diff
+    // heuristic to attribute the append.
+    let enqueued: QueuedMessage | undefined;
     try {
-      await deps.queue.addToQueue(target, toQueueItemInput(input));
+      enqueued = await deps.queue.addToQueue(target, toQueueItemInput(input));
     } catch (error) {
       await releaseHold(capture);
       return fail(`Could not queue the consult message: ${error instanceof Error ? error.message : String(error)}`);
     }
+    const itemId = enqueued?.id;
+    if (!itemId) {
+      await releaseHold(capture);
+      return fail('The queued consult item could not be identified by the queue; the message was not dispatched.');
+    }
 
-    const lookup = findEnqueuedItemId(target, knownIds, input.message.content);
-    if (lookup.kind === 'missing') {
-      // The item is not in the projection without this submission taking it:
-      // the raw message was delivered or another client removed it. Never
-      // restore the composer (a duplicate send) and never re-send.
+    if (!deps.queue.getQueueForTarget(target).some((entry) => entry.id === itemId)) {
+      // The item left the projection right after the enqueue: another client
+      // removed it (the server never delivers a consult item raw). Never
+      // restore the composer and never re-send.
       await releaseHold(capture);
       return finishDeliveredRaw();
     }
-    if (lookup.kind === 'ambiguous') {
-      // A concurrent append cannot be attributed to this submission; never
-      // take a possibly-foreign item. The message stays queued, so the caller
-      // must not restore the composer either.
-      await releaseHold(capture);
-      return fail('The queued consult item could not be identified; the message was left in the queue', true);
-    }
-    const itemId = lookup.itemId;
 
     if (capture.cancelled) {
       if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
@@ -897,6 +873,11 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         advisors: input.advisors,
         messageText: takenItem.text,
         attachments: toAdvisorAttachments(takenItem.attachments),
+        // F4/REQ-4: the advisors must analyze the same current input as the
+        // acting turn, so the captured context parts (and their instructions)
+        // ride the advisor send exactly as the server delivers them to the
+        // acting turn.
+        additionalParts: queuedContextToParts(takenItem.context ?? []),
         mode: input.mode,
         timeoutMs: input.timeoutMs,
         runId,
@@ -984,10 +965,17 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     /**
      * The dispatch outcome is unconfirmed: the message may already be on its
      * way, so the capture is never restored and the item is left to the
-     * server/owner. The composer keeps its capture cleared.
+     * server. The heartbeat stops, but the hold is deliberately NOT released:
+     * the server-owned lease (extended to the max TTL when the dispatch was
+     * entered) owns it until the server resolves or it expires. Releasing
+     * here would clear the owner hold that `hasActiveConsultReservation`
+     * needs, so the proxy prompt gate would stop protecting a parent whose
+     * send may still be running. The item + claim stay server-side and are
+     * never sent raw; manual removal clears the claim's own hold atomically.
      */
     const settleUncertain = async (error: string): Promise<ConsultSubmissionResult> => {
-      await releaseHold(capture);
+      stopHoldHeartbeat(capture);
+      capture.holdRelease = Promise.resolve();
       deps.runs.finish(parentSessionId, runId, { phase: 'failed', error });
       return { status: 'failed', runId, error, queueItemRestored: false, uncertain: true };
     };
@@ -1080,7 +1068,7 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       }
       if (outcome.status === 'send-failed' && outcome.delivered === 'unknown') {
         return settleUncertain(
-          'The consult message could not be confirmed as sent. It stays queued as a consult item and will never be sent without a new consultation; check the session.',
+          'The consult message could not be confirmed as sent. It stays in the session queue and keeps the session held until the server lease resolves or expires; it will never be sent without a new consultation. Removing the queued consult item releases the session.',
         );
       }
       // not-found / not-consult / send-failed 'no': the message was not sent
@@ -1167,6 +1155,20 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         // The run must not stay non-terminal: a stuck record would block the
         // parent's auto-review through the symmetric exclusion guard.
         deps.runs.finish(input.parentSessionId, runId, { phase: 'failed', error: message });
+        // Mirror settleUncertain: an error raised while a dispatch request was
+        // in flight may have been accepted, so releasing here would clear the
+        // owner hold the proxy prompt gate needs. Only a synchronous/unrelated
+        // failure keeps today's cleanup release.
+        if (capture.dispatching) {
+          capture.holdRelease = Promise.resolve();
+          return {
+            status: 'failed',
+            runId,
+            error: message,
+            queueItemRestored: false,
+            uncertain: true,
+          };
+        }
         await releaseHold(capture);
         return {
           status: 'failed',

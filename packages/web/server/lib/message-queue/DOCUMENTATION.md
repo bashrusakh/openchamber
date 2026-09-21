@@ -197,7 +197,10 @@ idle (the same `isSessionIdle` gate the tick applies; a failed status read is
 "unknown, never idle" and refuses). `setConsultPayload` merges
 `item.consult` while the item is claimed by that owner and not in flight —
 the claim flow may refine the system prompt or text metadata between claim
-and dispatch.
+and dispatch. Manual removal is a full cancellation of the item's own
+reservation: `remove`/`clear` release the removed consult item's claim owner
+hold in the same mutation (the stored owner key, including the owner-less
+legacy slot), while other owners' holds and normal items stay untouched.
 
 `dispatchConsult(sessionId, itemId, owner)` sends the consult item on the
 owner's explicit request and answers every control-flow case as a structured
@@ -213,22 +216,35 @@ failures 500):
 | `{ status: 'not-consult' }` | the item is not a consult item. |
 | `{ status: 'sending' }` | the session already has an item in flight. |
 | `{ status: 'send-failed', delivered: 'no' }` | the prompt definitely did not land; the item was removed and the hold released. |
-| `{ status: 'send-failed', delivered: 'unknown' }` | the prompt may or may not have landed; the item, claim, and hold stay reserved for a retry. |
+| `{ status: 'send-failed', delivered: 'unknown' }` | the prompt may or may not have landed; the item, claim, and hold stay reserved for a retry. The client deliberately leaves the owner lease to the server (resolution or expiry) instead of releasing it, so the proxy prompt gate keeps protecting a session whose send may still be running. |
 
-Before the prompt the dispatch snapshots the parent tail's user-message ids
-(the read `isSessionIdle` uses; user-only, since those are the messages a
-dispatch creates). A prompt failure does not immediately decide the outcome:
-the dispatch polls the tail up to four times, ~400 ms apart (~1.6 s total),
-for a user-message id that was not in the snapshot. A new id means the send
-landed: `dispatched` with `delivery: 'confirmed-after-failure'` — the item is
-removed and the hold released exactly like a normal success. Every poll
-succeeding with no new id is a definite failure: the item is removed and the
-hold released without any raw or queued re-delivery. If the pre-send snapshot
-or any poll fails, the outcome is `unknown` (never guessed): the item, the
-claim, and the hold stay reserved, and the owner retries the dispatch. A
-recent prior user message is never mistaken for the dispatch — the check is
-id-difference, not time. There is no tick-side retry bookkeeping for consult
-dispatches — the owner drives retries.
+A prompt failure does not immediately decide the outcome. The dispatch uses
+the acting turn's own identity, not any new message: it extracts the receipt
+`runId` from the item's `textPartMetadata` (`openchamberConsultReceipt`) and
+polls the parent tail up to four times, ~400 ms apart (~1.6 s total), for a
+user message whose text-part metadata carries that same `runId`. The marker
+names exactly this acting turn, so another client's concurrent message can
+never be mistaken for the dispatch.
+
+- Marker found → the send landed: `dispatched` with
+  `delivery: 'confirmed-after-failure'` (item removed, hold released like a
+  normal success).
+- No marker and the failure PROVES the request was never accepted → 
+  `send-failed delivered: 'no'` (item removed, hold released, no raw or queued
+  re-delivery). Only two kinds of failure prove that: an HTTP 4xx (the server
+  rejected the request before accepting it) and a connection-level failure
+  before the request reached the server (`error.cause.code` of
+  `ECONNREFUSED`, `ENOTFOUND`, or `EAI_AGAIN`).
+- Every other failure — an HTTP 5xx (it may have been accepted before the
+  error surfaced), a timeout/abort, any other network error, an unknown error
+  shape, any marker read failure, or a 5xx with no `runId` to correlate at all
+  — is `send-failed delivered: 'unknown'`: the item, claim, and hold stay
+  reserved and the owner retries. A timeout alone never yields `'no'`, and a
+  later-found marker always overrides the failure classification
+  (`dispatched`).
+
+There is no tick-side retry bookkeeping for consult dispatches — the owner
+drives retries.
 
 The prompt body is built exactly as `sendItem` builds it, plus a top-level
 `system` and the consult metadata attached to the primary text part the way a

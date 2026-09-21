@@ -360,6 +360,32 @@ const refusalOf = async (handle: { result: Promise<ConsultationResult> }): Promi
 // Tests
 // ---------------------------------------------------------------------------
 
+describe('advisor input parity (REQ-4)', () => {
+  test('the advisor send carries the captured context parts unchanged', async () => {
+    const harness = createHarness();
+    const metadata = { openchamberContext: { kind: 'github-pr' as const, number: 7, title: 'PR', url: 'https://x/pr/7' } };
+    const additionalParts = [
+      { text: 'how to read it', synthetic: true },
+      { text: 'the diff', synthetic: true, metadata },
+    ];
+    const handle = harness.runtime.startConsultation(baseInput({ additionalParts }));
+    const result = await handle.result;
+
+    expect(result.status).toBe('ok');
+    expect(harness.state.sent).toHaveLength(1);
+    expect(harness.state.sent[0].additionalParts).toEqual(additionalParts);
+  });
+
+  test('without additionalParts the request shape stays unchanged', async () => {
+    const harness = createHarness();
+    const handle = harness.runtime.startConsultation(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('ok');
+    expect('additionalParts' in harness.state.sent[0]).toBe(false);
+  });
+});
+
 describe('startConsultation fork lifecycle', () => {
   test('forks, hides, marks, locks down, dispatches, and cleans up in order', async () => {
     const harness = createHarness();

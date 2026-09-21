@@ -166,10 +166,24 @@ acting turn.
    so nothing else touches it either.
 7. The advisor prompt is sent headlessly through `opencodeClient.sendMessage`
    with the exact provider, model, variant, and agent, the parent message text,
-   its attachments, and `CONSULT_ADVISOR_SYSTEM_PROMPT` as `system`. The send
+   its attachments, the same captured context parts the acting turn receives
+   (instructions as synthetic parts, context parts with their metadata, and
+   synthetic parts — `queuedContextToParts(takenItem.context)` computed by the
+   submission), and `CONSULT_ADVISOR_SYSTEM_PROMPT` as `system`. The send
    bypasses `useSessionUIStore.sendMessage` and `routeMessage`, so no session
    knowledge is resolved for advisor sessions and the parent's composer,
    selection stores, and queue state are never touched.
+
+   Advisor-vs-acting input differences, recorded explicitly:
+
+   - context parts and attachments: identical to the acting turn (REQ-4);
+   - standing session knowledge: the acting turn appends the server-resolved
+     pending knowledge (`sessionKnowledgeRuntime.resolvePendingForSession`);
+     advisors do not see it. This is an **open difference to be decided**, not
+     a silent bound;
+   - command/skill expansion: unreachable for consult — slash-command composer
+     input is refused before a consult starts, so advisors never need the
+     command-route template expansion the acting dispatch may perform.
 8. `waitForConsultAdvisorCompletion` reads the fork transcript tail until the
    trailing assistant message after the sent user message has
    `time.completed`. Visible non-empty text is a success; a completed message

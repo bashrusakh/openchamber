@@ -552,6 +552,28 @@ describe("server-owned message queue", () => {
     }
   })
 
+  test("addToQueue resolves with the authoritative server item, not the optimistic id", async () => {
+    respond = () => json({ revision: 5, session: session([serverItem("srv-9", "authoritative")]), item: serverItem("srv-9", "authoritative") })
+    const queued = await useMessageQueueStore.getState().addToQueue(target, {
+      content: "authoritative",
+      sendConfig: { providerID: "p", modelID: "m" },
+    })
+    expect(queued?.id).toBe("srv-9")
+    expect(queued?.id.startsWith("queued-")).toBe(false)
+    expect(useMessageQueueStore.getState().queuedMessages[key]?.map((message) => message.id)).toEqual(["srv-9"])
+  })
+
+  test("addToQueue resolves undefined when the server omits the item (old server)", async () => {
+    respond = () => json({ revision: 5, session: session([serverItem("srv-9", "authoritative")]) })
+    const queued = await useMessageQueueStore.getState().addToQueue(target, {
+      content: "authoritative",
+      sendConfig: { providerID: "p", modelID: "m" },
+    })
+    // Never the optimistic local id: the caller must not claim an id the
+    // server does not know.
+    expect(queued).toBeUndefined()
+  })
+
   test("dispatchConsultItem throws on non-2xx (malformed or unexpected failures)", async () => {
     respond = () => new Response(JSON.stringify({ error: "consult dispatch failed: boom" }), { status: 500 })
     await expect(useMessageQueueStore.getState().dispatchConsultItem(target, "q1", "consult:run-1")).rejects.toThrow("boom")

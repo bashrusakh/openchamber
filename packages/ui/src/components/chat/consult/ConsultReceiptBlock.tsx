@@ -11,7 +11,12 @@ import {
   type ConsultReceiptAdvisor,
 } from '@/lib/consult/synthesis';
 import { cn } from '@/lib/utils';
-import { consultStatusLabelKey, consultStatusPresentation, formatConsultDuration } from './consultUi';
+import {
+  consultStatusLabelKey,
+  consultStatusPresentation,
+  consultSummaryText,
+  formatConsultDuration,
+} from './consultUi';
 
 /**
  * The Consult Models receipt block (WP2.3).
@@ -63,6 +68,9 @@ const ConsultReceiptRow: React.FC<{ advisor: ConsultReceiptAdvisor }> = ({ advis
 
 const ConsultReceiptBlock: React.FC<{ receipt: ConsultReceipt }> = ({ receipt }) => {
   const { t } = useI18n();
+  // The persisted per-advisor statuses aggregated the same way the panel
+  // summarizes a finished run ("2 Answered · 1 Timed out").
+  const summaryText = consultSummaryText(t, receipt.advisors);
 
   return (
     <div
@@ -77,6 +85,11 @@ const ConsultReceiptBlock: React.FC<{ receipt: ConsultReceipt }> = ({ receipt })
         <span aria-hidden="true">·</span>
         <span className="min-w-0 truncate">{t('chat.consult.receipt.acting', { model: receipt.acting })}</span>
       </div>
+      {summaryText ? (
+        <div className="pt-0.5 typography-micro text-muted-foreground" data-consult-receipt-summary>
+          {summaryText}
+        </div>
+      ) : null}
       {receipt.degraded ? (
         <div className="pt-1 typography-micro text-[var(--status-warning-text)]">
           {t('chat.consult.receipt.degraded')}

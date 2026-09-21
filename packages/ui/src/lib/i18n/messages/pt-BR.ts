@@ -3449,6 +3449,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.dialog.actions.submit': 'Consultar e enviar',
   'chat.consult.dialog.actions.submitting': 'Iniciando…',
   'chat.consult.dialog.noAdvisorAgent': 'Nenhum agente principal está disponível para os consultores',
+  'chat.consult.panel.ready': '{ready} / {total} prontos',
+  'chat.consult.summary.segment': '{count} {status}',
   'chat.consult.panel.title': 'Consultar modelos',
   'chat.consult.panel.phase.waitingAdmission': 'Aguardando a fila e a sessão ficar ociosa…',
   'chat.consult.panel.phase.consulting': 'Consultando {count} consultores…',

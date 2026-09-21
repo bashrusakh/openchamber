@@ -53,6 +53,25 @@ const renderReceiptPart = async (metadata: TextPart['metadata'] | null | undefin
   };
 };
 
+test('renders the status segment summary under the title', async () => {
+  const view = await renderReceiptPart({
+    [CONSULT_RECEIPT_METADATA_KEY]: {
+      ...receipt,
+      advisors: [
+        { model: 'anthropic/claude-sonnet-4', status: 'ok', durationMs: 9_000 },
+        { model: 'openai/gpt-5.5', status: 'ok', durationMs: 4_000 },
+        { model: 'google/gemini-2.5', status: 'timeout', durationMs: 120_000 },
+      ],
+    },
+  });
+  try {
+    const summary = view.container.querySelector('[data-consult-receipt-summary]');
+    expect(summary?.textContent).toBe('2 Answered · 1 Timed out');
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test('renders the compact receipt carried by a text part', async () => {
   const view = await renderReceiptPart({ [CONSULT_RECEIPT_METADATA_KEY]: receipt });
   try {

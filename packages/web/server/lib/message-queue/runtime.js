@@ -899,7 +899,31 @@ export function createMessageQueueRuntime({
     // The session may already be idle (queued from a busy-looking composer
     // right as the turn ended); the tick verifies before sending.
     armDispatch(sessionId);
-    return { ...result, itemId: item.id };
+    // The authoritative created item rides the response, so a caller never
+    // has to re-derive it from a snapshot diff.
+    return { ...result, itemId: item.id, item };
+  };
+
+  /**
+   * Manual removal is a full cancellation of the removed consult items'
+   * reservations: the item's own claim owner hold is cleared in the same
+   * mutation (the stored owner is already the hold-map key; the owner-less
+   * legacy slot included). Other owners' holds and normal items are
+   * untouched.
+   */
+  const releaseClaimsOfRemovedItems = (sessionId, removedItems) => {
+    const owners = liveHoldOwners(sessionId);
+    if (!owners) return;
+    let changed = false;
+    for (const item of removedItems) {
+      if (item.kind !== CONSULT_ITEM_KIND || !item.claimed) continue;
+      const owner = asNonEmptyString(item.claimed.owner);
+      if (owners.delete(owner)) changed = true;
+    }
+    if (!changed) return;
+    if (owners.size === 0) holds.delete(sessionId);
+    // Removing the item may make the queue dispatchable again.
+    armDispatch(sessionId);
   };
 
   const remove = async (sessionIdInput, itemId) => {
@@ -907,10 +931,12 @@ export function createMessageQueueRuntime({
     await load();
     if (sending.get(sessionId) === itemId) throw httpError('message is being sent', 409);
     const queue = queues.get(sessionId);
-    if (!queue || !queue.items.some((item) => item.id === itemId)) {
+    const removed = queue?.items.find((item) => item.id === itemId);
+    if (!queue || !removed) {
       return { revision, session: sessionSnapshot(sessionId) };
     }
     setQueueItems(sessionId, queue.directory, queue.items.filter((item) => item.id !== itemId));
+    releaseClaimsOfRemovedItems(sessionId, [removed]);
     return commit(sessionId);
   };
 
@@ -971,7 +997,9 @@ export function createMessageQueueRuntime({
     // Never drop a message already handed to OpenCode: its send resolves and
     // must find its entry.
     const sendingId = sending.get(sessionId) ?? null;
+    const removed = queue.items.filter((item) => item.id !== sendingId);
     setQueueItems(sessionId, queue.directory, queue.items.filter((item) => item.id === sendingId));
+    releaseClaimsOfRemovedItems(sessionId, removed);
     clearTimer(sessionId);
     return commit(sessionId);
   };
@@ -1119,42 +1147,59 @@ export function createMessageQueueRuntime({
   const CONSULT_DELIVERY_TAIL_LIMIT = 20;
 
   /**
-   * The user-message ids in the parent tail, read the way `isSessionIdle`
-   * does. User-only on purpose: those are the messages a dispatch creates,
-   * and the smaller set is cheaper to reason about. Returns null when the
-   * read fails (indeterminate).
+   * The acting turn's receipt runId, extracted from the item's consult
+   * payload metadata. This is the only non-heuristic correlation between a
+   * failed prompt and the user message it created; null means correlation is
+   * impossible (no text carrier, no metadata) and the outcome must never
+   * become 'no' from a timeout alone.
    */
-  const readUserMessageIds = async (sessionId, directory) => {
+  const readConsultReceiptRunId = (item) => {
+    const carrier = asRecord(item.consult?.textPartMetadata);
+    const receipt = asRecord(carrier?.openchamberConsultReceipt);
+    // The UI receipt contract (`synthesis.ts` `consultReceiptSchema`) spells
+    // this field `runID`; the carrier key is `openchamberConsultReceipt`.
+    return asNonEmptyString(receipt?.runID) || null;
+  };
+
+  /**
+   * Marker correlation for an ambiguous prompt failure: read the parent tail
+   * the way `isSessionIdle` does and look for a user message whose text part
+   * metadata carries this dispatch's receipt runId. Returns true (marker
+   * found), false (the read succeeded and no marker is present), or null
+   * (the read failed — never guess).
+   */
+  const hasConsultDeliveryMarker = async (sessionId, directory, runId) => {
     const messages = asList(await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message`, {
       directory,
       query: { limit: String(CONSULT_DELIVERY_TAIL_LIMIT) },
     }).catch(() => null));
     if (!messages) return null;
-    const ids = new Set();
     for (const entry of messages) {
-      const info = asRecord(asRecord(entry)?.info);
+      const record = asRecord(entry);
+      const info = asRecord(record?.info);
       if (!info || info.role !== 'user') continue;
-      const id = asNonEmptyString(info.id);
-      if (id) ids.add(id);
+      const parts = asList(record?.parts) ?? [];
+      for (const part of parts) {
+        const metadata = asRecord(asRecord(part)?.metadata);
+        const receipt = asRecord(metadata?.openchamberConsultReceipt);
+        // Same field as the reader above (the UI's `runID`).
+        if (asNonEmptyString(receipt?.runID) === runId) return true;
+      }
     }
-    return ids;
+    return false;
   };
 
   /**
-   * Delivery confirmation for an ambiguous prompt failure: poll the parent
-   * tail for a user message id that was not present before the send. Returns
-   * true (a new message landed), false (every read succeeded and none is
-   * new), or null (the pre-read or a poll failed — never guess).
+   * Poll for this dispatch's delivery marker. Returns true (found), false
+   * (every read succeeded, none carries the marker), or null (any read
+   * failed — indeterminable, never guessed).
    */
-  const confirmConsultDelivery = async (sessionId, directory, knownUserMessageIds) => {
-    if (!knownUserMessageIds) return null;
+  const confirmConsultDelivery = async (sessionId, directory, runId) => {
     for (let attempt = 0; attempt < CONSULT_DELIVERY_CONFIRM_ATTEMPTS; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, CONSULT_DELIVERY_CONFIRM_DELAY_MS));
-      const ids = await readUserMessageIds(sessionId, directory);
-      if (!ids) return null;
-      for (const id of ids) {
-        if (!knownUserMessageIds.has(id)) return true;
-      }
+      const found = await hasConsultDeliveryMarker(sessionId, directory, runId);
+      if (found === null) return null;
+      if (found) return true;
     }
     return false;
   };
@@ -1219,9 +1264,9 @@ export function createMessageQueueRuntime({
 
     sending.set(sessionId, item.id);
     broadcast(sessionId);
-    // Snapshot the user-message ids before the send so a confirmation can
-    // prove a NEW message landed; a failed snapshot disables confirmation.
-    const knownUserMessageIds = await readUserMessageIds(sessionId, directory);
+    // The receipt runId is this acting turn's identity in the parent
+    // transcript; null means correlation is impossible (see below).
+    const consultRunId = readConsultReceiptRunId(item);
     try {
       const fileParts = item.attachments.map(toFilePart);
       const contextParts = item.context.flatMap(toContextParts);
@@ -1254,8 +1299,12 @@ export function createMessageQueueRuntime({
       sending.delete(sessionId);
       console.warn(`[message-queue] consult send to ${sessionId} failed:`, error?.message ?? error);
       // The prompt may have been accepted before the failure surfaced: poll
-      // the parent tail for the user message id this dispatch created.
-      const delivered = await confirmConsultDelivery(sessionId, directory, knownUserMessageIds);
+      // the parent tail for this acting turn's receipt marker. Correlation is
+      // only possible with a runId; without one a timeout must never become
+      // 'no' — only an explicit HTTP rejection can prove non-acceptance.
+      const delivered = consultRunId
+        ? await confirmConsultDelivery(sessionId, directory, consultRunId)
+        : null;
       if (delivered === true) {
         // Landed despite the failed response: the dispatch succeeded.
         removeItem();
@@ -1269,17 +1318,33 @@ export function createMessageQueueRuntime({
         console.log(`[message-queue] consult send to ${sessionId} landed after a reported failure`);
         return { status: 'dispatched', item, delivery: 'confirmed-after-failure' };
       }
-      if (delivered === false) {
-        // Definite failure: the prompt never landed, so the item is removed
-        // and the owner hold is released; no raw delivery and no re-queue.
+      // A read failure is always indeterminate, even with an HTTP status: the
+      // transcript could not be checked, so acceptance cannot be disproven.
+      const readFailed = delivered === null && consultRunId !== null;
+      // 'no' requires PROVABLE non-acceptance, never just a rejection status:
+      // an HTTP 4xx means the server rejected the request before accepting it,
+      // and a connection-level failure means the request never reached the
+      // server. A 5xx may have been accepted before the error surfaced, and a
+      // timeout/abort or an unknown error shape proves nothing.
+      const rejectionStatus = asCount(asRecord(error)?.status);
+      const connectionCode = asNonEmptyString(asRecord(asRecord(error)?.cause)?.code);
+      const neverAccepted = (
+        (rejectionStatus !== null && rejectionStatus >= 400 && rejectionStatus < 500)
+        || connectionCode === 'ECONNREFUSED'
+        || connectionCode === 'ENOTFOUND'
+        || connectionCode === 'EAI_AGAIN'
+      );
+      if (!readFailed && neverAccepted) {
+        // Proven non-acceptance: with correlation the marker reads also found
+        // nothing; without a runId this proof is the only path to 'no'.
         removeItem();
         releaseOwnerHold();
         commit(sessionId);
         return { status: 'send-failed', delivered: 'no' };
       }
-      // Indeterminate (the tail was unreadable): keep the item, the claim, and
-      // the hold so the owner can retry or the reservation can lapse into a
-      // cleared claim; never guess a removal.
+      // Indeterminate: an unreadable tail, a 5xx, a timeout/abort, or any
+      // unclassifiable failure. Keep the item, the claim, and the hold; never
+      // guess a removal, and never derive 'no' from a timeout.
       broadcast(sessionId);
       return { status: 'send-failed', delivered: 'unknown' };
     }
@@ -1449,7 +1514,7 @@ export function registerMessageQueueRoutes(app, runtime) {
   app.post('/api/message-queue/sessions/:sessionId/items/:itemId/payload', async (req, res) => {
     try {
       await runtime.load();
-      res.json(runtime.setConsultPayload(req.params.sessionId, req.params.itemId, req.body?.owner, req.body?.consult));
+      res.json(await runtime.setConsultPayload(req.params.sessionId, req.params.itemId, req.body?.owner, req.body?.consult));
     } catch (error) {
       respondError(res, error, 'Failed to update consult payload');
     }

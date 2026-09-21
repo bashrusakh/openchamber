@@ -3446,6 +3446,8 @@ export const dict = {
   'chat.consult.dialog.actions.submit': 'Consulter et envoyer',
   'chat.consult.dialog.actions.submitting': 'Démarrage…',
   'chat.consult.dialog.noAdvisorAgent': 'Aucun agent principal n’est disponible pour les conseillers',
+  'chat.consult.panel.ready': '{ready} / {total} prêts',
+  'chat.consult.summary.segment': '{count} {status}',
   'chat.consult.panel.title': 'Consulter des modèles',
   'chat.consult.panel.phase.waitingAdmission': 'En attente de la file et d’une session inactive…',
   'chat.consult.panel.phase.consulting': 'Consultation de {count} conseillers…',

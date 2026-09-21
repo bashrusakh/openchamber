@@ -3448,6 +3448,8 @@ export const dict = {
   'chat.consult.dialog.actions.submit': 'Consult & send',
   'chat.consult.dialog.actions.submitting': 'Starting…',
   'chat.consult.dialog.noAdvisorAgent': 'No primary agent is available for advisors',
+  'chat.consult.panel.ready': '{ready} / {total} ready',
+  'chat.consult.summary.segment': '{count} {status}',
   'chat.consult.panel.title': 'Consult models',
   'chat.consult.panel.phase.waitingAdmission': 'Waiting for the queue and an idle session…',
   'chat.consult.panel.phase.consulting': 'Consulting {count} advisors…',

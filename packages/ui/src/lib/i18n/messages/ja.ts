@@ -3448,6 +3448,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.dialog.actions.submit': '相談して送信',
   'chat.consult.dialog.actions.submitting': '開始中…',
   'chat.consult.dialog.noAdvisorAgent': '相談先に使用できるプライマリエージェントがありません',
+  'chat.consult.panel.ready': '{ready} / {total} 完了',
+  'chat.consult.summary.segment': '{count} {status}',
   'chat.consult.panel.title': 'モデルに相談',
   'chat.consult.panel.phase.waitingAdmission': 'キューとセッションのアイドル状態を待っています…',
   'chat.consult.panel.phase.consulting': '{count} 件のモデルに相談中…',

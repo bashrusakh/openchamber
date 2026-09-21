@@ -235,6 +235,11 @@ const serverSessionResponseSchema = z.object({
 });
 
 const serverTakeResponseSchema = serverSessionResponseSchema.extend({ item: serverItemSchema });
+/**
+ * The enqueue response carries the authoritative created item; an older
+ * server may omit it, in which case the optimistic local message is returned.
+ */
+const serverEnqueueResponseSchema = serverSessionResponseSchema.extend({ item: serverItemSchema.optional() });
 const serverTakeAllResponseSchema = serverSessionResponseSchema.extend({ items: z.array(serverItemSchema) });
 const serverClaimResponseSchema = z.object({ claimed: z.literal(true), item: serverItemSchema });
 /**
@@ -448,7 +453,13 @@ interface MessageQueueState {
 }
 
 interface MessageQueueActions {
-    addToQueue: (target: MessageQueueTarget, message: QueuedMessageInput) => Promise<void>;
+    /**
+     * Resolves with the authoritative queued item; undefined when the
+     * server-owned path succeeded but the response carried no item (an older
+     * server), so callers never mistake a non-authoritative id for one. Local
+     * (VS Code) mode resolves the optimistic message.
+     */
+    addToQueue: (target: MessageQueueTarget, message: QueuedMessageInput) => Promise<QueuedMessage | undefined>;
     removeFromQueue: (target: MessageQueueTarget, messageId: string) => void;
     reorderQueue: (target: MessageQueueTarget, fromId: string, toId: string) => void;
     /** Removes the message and returns it in full, attachments included. */
@@ -655,7 +666,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                             };
                         });
 
-                        if (!isServerOwnedMessageQueue()) return;
+                        if (!isServerOwnedMessageQueue()) return queuedMessage;
                         if (!message.sendConfig) {
                             set((state) => removeMessageLocally(state, key, id));
                             throw new Error('A queued message needs a provider and model to be delivered later.');
@@ -663,7 +674,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         const historyIdentity = createInputHistoryIdentity(target.runtimeKey, target.directory, target.sessionId);
                         const historySubmission = createInputHistorySubmission(message.content, message.attachments ?? []);
                         try {
-                            const result = await requestJson(serverSessionResponseSchema, `${sessionPath(target.sessionId)}/items`, jsonInit('POST', {
+                            const result = await requestJson(serverEnqueueResponseSchema, `${sessionPath(target.sessionId)}/items`, jsonInit('POST', {
                                 directory: target.directory,
                                 item: toServerItemInput(message, message.sendConfig),
                             }));
@@ -673,6 +684,12 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                             if (historyIdentity) {
                                 useInputHistoryStore.getState().appendSubmissions(historyIdentity, [historySubmission]);
                             }
+                            // The authoritative created item: callers never have
+                            // to re-derive the id from a snapshot diff. An older
+                            // server that omits it yields undefined — never the
+                            // optimistic local id, which the server would not
+                            // recognize.
+                            return result.item ? toQueuedMessage(result.item) : undefined;
                         } catch (error) {
                             set((state) => removeMessageLocally(state, key, id));
                             throw error;

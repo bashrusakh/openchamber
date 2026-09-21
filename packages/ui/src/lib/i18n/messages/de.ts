@@ -3446,6 +3446,8 @@ export const dict = {
   'chat.consult.dialog.actions.submit': 'Befragen & senden',
   'chat.consult.dialog.actions.submitting': 'Wird gestartet…',
   'chat.consult.dialog.noAdvisorAgent': 'Für Beratermodelle ist kein primärer Agent verfügbar',
+  'chat.consult.panel.ready': '{ready} / {total} bereit',
+  'chat.consult.summary.segment': '{count} {status}',
   'chat.consult.panel.title': 'Modelle befragen',
   'chat.consult.panel.phase.waitingAdmission': 'Warte auf die Warteschlange und eine inaktive Sitzung…',
   'chat.consult.panel.phase.consulting': '{count} Beratermodelle werden befragt…',

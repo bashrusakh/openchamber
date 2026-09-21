@@ -171,6 +171,40 @@ export const consultUnavailableLabelKey = (reason: ConsultUnavailableReason): I1
   }
 };
 
+/**
+ * How many advisor rows are finished. `queued` and `running` are the only
+ * pre-terminal states, so everything else counts as ready, including timeouts,
+ * failures, and cancellations: ready means no longer waiting, not successful.
+ */
+export const consultRunReadyCount = (advisors: readonly { status: ConsultAdvisorRunStatus }[]): number =>
+  advisors.filter((advisor) => advisor.status !== 'queued' && advisor.status !== 'running').length;
+
+/**
+ * The run's final aggregate: `{count} {statusLabel}` segments joined with
+ * ` · `, in a deterministic order, zero counts skipped. Labels reuse the
+ * existing per-status vocabulary, so the panel and the receipt read the same.
+ */
+const CONSULT_SUMMARY_STATUS_ORDER: readonly ConsultAdvisorRunStatus[] = [
+  'ok',
+  'failed',
+  'timeout',
+  'empty',
+  'cancelled',
+];
+
+export const consultSummaryText = (
+  t: (key: I18nKey, params?: I18nParams) => string,
+  advisors: readonly { status: ConsultAdvisorRunStatus }[],
+): string | null => {
+  const segments: string[] = [];
+  for (const status of CONSULT_SUMMARY_STATUS_ORDER) {
+    const count = advisors.filter((advisor) => advisor.status === status).length;
+    if (count === 0) continue;
+    segments.push(t('chat.consult.summary.segment', { count, status: t(consultStatusLabelKey(status)) }));
+  }
+  return segments.length > 0 ? segments.join(' · ') : null;
+};
+
 export const consultStatusLabelKey = (status: ConsultAdvisorRunStatus): I18nKey => {
   switch (status) {
     case 'queued':

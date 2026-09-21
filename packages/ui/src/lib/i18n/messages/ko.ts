@@ -3448,6 +3448,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.dialog.actions.submit': '자문 후 전송',
   'chat.consult.dialog.actions.submitting': '시작 중…',
   'chat.consult.dialog.noAdvisorAgent': '자문에 사용할 기본 에이전트가 없습니다',
+  'chat.consult.panel.ready': '{ready} / {total} 완료',
+  'chat.consult.summary.segment': '{count} {status}',
   'chat.consult.panel.title': '모델에 자문',
   'chat.consult.panel.phase.waitingAdmission': '큐와 세션 유휴 상태를 기다리는 중…',
   'chat.consult.panel.phase.consulting': '{count}개 모델에 자문하는 중…',

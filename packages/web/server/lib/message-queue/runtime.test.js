@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMessageQueueRuntime, parseQueuedItemInput } from './runtime.js';
+import { createMessageQueueRuntime, parseQueuedItemInput, registerMessageQueueRoutes } from './runtime.js';
 
 const SESSION = 'ses_queue_test_1';
 const DIRECTORY = '/repo';
@@ -40,6 +40,12 @@ const createOpenCode = () => {
     failNext: null,
     /** Next prompt_async fails (one-shot); optionally takes message reads with it. */
     failPromptOnce: false,
+    /** Next prompt_async rejects like a network error (no HTTP status, one-shot). */
+    failPromptNetworkOnce: false,
+    /** Next prompt_async answers this HTTP status (one-shot). */
+    failPromptStatusOnce: null,
+    /** Next prompt_async rejects with a connection-level cause code (one-shot). */
+    failPromptConnectionOnce: null,
     failMessageReadsAfterPromptFailure: false,
     /** While set, every message-tail read fails. */
     failMessageReads: false,
@@ -73,6 +79,23 @@ const createOpenCode = () => {
         state.failPromptOnce = false;
         if (state.failMessageReadsAfterPromptFailure) state.failMessageReads = true;
         return new Response('boom', { status: 500 });
+      }
+      if (state.failPromptNetworkOnce) {
+        state.failPromptNetworkOnce = false;
+        if (state.failMessageReadsAfterPromptFailure) state.failMessageReads = true;
+        throw new TypeError('fetch failed');
+      }
+      if (state.failPromptStatusOnce !== null) {
+        const status = state.failPromptStatusOnce;
+        state.failPromptStatusOnce = null;
+        if (state.failMessageReadsAfterPromptFailure) state.failMessageReads = true;
+        return new Response('boom', { status });
+      }
+      if (state.failPromptConnectionOnce) {
+        const code = state.failPromptConnectionOnce;
+        state.failPromptConnectionOnce = null;
+        if (state.failMessageReadsAfterPromptFailure) state.failMessageReads = true;
+        throw Object.assign(new Error('fetch failed'), { cause: { code } });
       }
       state.sent.push({ path: pathname, body: JSON.parse(init.body) });
       return new Response(null, { status: 204 });
@@ -739,6 +762,53 @@ describe('message queue runtime', () => {
     });
   });
 
+  describe('manual removal clears the removed claim owner hold (REQ-2)', () => {
+    it('removing a claimed consult item releases its owner hold', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult' }));
+      runtime.setHold(SESSION, true, 60_000, 'consult:other');
+      await runtime.claim(SESSION, itemId, 'consult:run-1', 60_000);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+
+      await runtime.remove(SESSION, itemId);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+      // The unrelated owner's hold is untouched.
+      expect(runtime.setHold(SESSION, false, undefined, 'consult:other')).toMatchObject({ held: false });
+    });
+
+    it('removing a normal item leaves holds untouched', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const consult = await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult' }));
+      const normal = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+      await runtime.claim(SESSION, consult.itemId, 'consult:run-1', 60_000);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+
+      await runtime.remove(SESSION, normal.itemId);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+    });
+
+    it("clear releases only the removed consult items' claim owners", async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const first = await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult', content: 'one' }));
+      await runtime.claim(SESSION, first.itemId, 'consult:run-1', 60_000);
+      runtime.setHold(SESSION, true, 60_000, 'other-feature');
+      const second = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+
+      await runtime.clear(SESSION);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+      // The unrelated owner survived the clear.
+      expect(runtime.setHold(SESSION, false, undefined, 'other-feature')).toMatchObject({ held: false });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      void second;
+    });
+  });
+
   describe('hasActiveConsultReservation', () => {
     it('is true only while a claimed consult item holds a live reservation', async () => {
       let clock = 0;
@@ -911,17 +981,23 @@ describe('message queue runtime', () => {
       expect((await pending).status).toBe('dispatched');
     });
 
-    it('confirms a delivery after an ambiguous prompt failure when a NEW user message appears', async () => {
+    it('confirms the delivery when the acting turn\'s marker appears during the polling window', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
       openCode.state.statuses = {};
-      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+      }));
       await runtime.claim(SESSION, itemId, 'consult:run-1');
-      // Pre-read: a prior user message. Then the prompt fails, one poll still
-      // shows only the prior message, and the second poll shows the new one.
-      const prior = { info: { id: 'msg-prior', role: 'user', time: { created: Date.now() } } };
-      const landed = { info: { id: 'msg-new', role: 'user', time: { created: Date.now() } } };
-      openCode.state.messageReadTails = [[prior], [prior], [prior, landed]];
+      const other = { info: { id: 'msg-other', role: 'user' }, parts: [{ type: 'text', text: 'another client' }] };
+      // Mirrors `toConsultReceiptMetadata(buildConsultReceipt(...))` from the
+      // UI contract: carrier key `openchamberConsultReceipt`, field `runID`.
+      const marker = {
+        info: { id: 'msg-marker', role: 'user' },
+        parts: [{ type: 'text', text: 'the consult', metadata: { openchamberConsultReceipt: { runID: 'run-1' } } }],
+      };
+      // Poll 1 and 2 miss, poll 3 finds this turn's marker.
+      openCode.state.messageReadTails = [[other], [other], [other, marker]];
       openCode.state.failPromptOnce = true;
       const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
       expect(result).toMatchObject({ status: 'dispatched', delivery: 'confirmed-after-failure' });
@@ -930,87 +1006,136 @@ describe('message queue runtime', () => {
       expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
     });
 
-    it('a recent prior user message is never mistaken for the dispatch', async () => {
+    it('another client\'s new user message never counts; an HTTP 400 proves non-acceptance', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
       openCode.state.statuses = {};
-      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+      }));
       await runtime.claim(SESSION, itemId, 'consult:run-1');
-      // The same recent user message is present before the send and after it:
-      // id-difference, not time, decides; nothing new means not delivered.
-      const prior = { info: { id: 'msg-prior', role: 'user', time: { created: Date.now() } } };
-      openCode.state.tail = [prior];
-      openCode.state.failPromptOnce = true;
+      // A brand-new user message exists, but it carries no matching marker.
+      openCode.state.tail = [{ info: { id: 'msg-other', role: 'user' }, parts: [{ type: 'text', text: 'another client' }] }];
+      openCode.state.failPromptStatusOnce = 400;
       const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      // A 4xx is the server rejecting before acceptance: proven non-acceptance
+      // plus correlated reads without a marker → definite failure.
       expect(result).toEqual({ status: 'send-failed', delivered: 'no' });
       expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
     });
 
-    it('finds the landed user message outside the last two messages', async () => {
+    it('an HTTP 500 without a marker stays unknown (a 5xx may have been accepted)', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
       openCode.state.statuses = {};
-      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+      }));
       await runtime.claim(SESSION, itemId, 'consult:run-1');
-      // The landed user message sits third-from-last: it is outside the
-      // idle check's two-message window but inside the confirmation window.
-      const prior = { info: { id: 'msg-prior', role: 'user' } };
-      const landed = { info: { id: 'msg-new', role: 'user' } };
-      const assistant = (id) => ({ info: { id, role: 'assistant' } });
-      const wideTail = [
-        prior,
-        ...Array.from({ length: 17 }, (_, index) => assistant(`a-${index}`)),
-        landed,
-        assistant('a-last'),
-      ];
-      // Read 1 is the idle check, read 2 the pre-send snapshot (both narrow);
-      // the polls then see the wide tail with the landed message.
-      openCode.state.messageReadTails = [[prior], [prior], wideTail];
-      openCode.state.failPromptOnce = true;
+      openCode.state.tail = [{ info: { id: 'msg-other', role: 'user' }, parts: [{ type: 'text', text: 'another client' }] }];
+      openCode.state.failPromptStatusOnce = 500;
       const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
-      expect(result).toMatchObject({ status: 'dispatched', delivery: 'confirmed-after-failure' });
-      // The confirmation reads with the wider limit, not the idle check's.
-      const messageLimits = openCode.fetchImpl.mock.calls
-        .map(([url]) => new URL(url))
-        .filter((url) => url.pathname.endsWith('/message'))
-        .map((url) => url.searchParams.get('limit'));
-      expect(messageLimits).toContain('20');
-      expect(messageLimits).toContain('2');
-    });
-
-    it('a failed pre-read makes the outcome unknown instead of guessing', async () => {
-      const { runtime, openCode } = createRuntime();
-      runtime.start();
-      openCode.state.statuses = {};
-      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
-      await runtime.claim(SESSION, itemId, 'consult:run-1');
-      // The next read is the dispatch's idle check; the one after is the
-      // pre-send snapshot, which is the one that must fail.
-      openCode.state.failMessageReadsOnCall = openCode.state.messageReadCalls + 2;
-      openCode.state.failPromptOnce = true;
-      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      // The tester's falsification case: a 5xx can be accepted before the
+      // error surfaces, so the outcome must stay unknown.
       expect(result).toEqual({ status: 'send-failed', delivered: 'unknown' });
       expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+      expect(runtime.sessionSnapshot(SESSION).items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
     });
 
-    it('removes the item on a definite prompt failure with no delivered message', async () => {
+    it('a connection-refused failure proves non-acceptance', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
       openCode.state.statuses = {};
-      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+      }));
       await runtime.claim(SESSION, itemId, 'consult:run-1');
-      openCode.state.failPromptOnce = true;
+      openCode.state.tail = [];
+      openCode.state.failPromptConnectionOnce = 'ECONNREFUSED';
       const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
       expect(result).toEqual({ status: 'send-failed', delivered: 'no' });
       expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
       expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
     });
 
+    it('a timeout/abort without a status or cause code stays unknown', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+      }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.failPromptNetworkOnce = true;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toEqual({ status: 'send-failed', delivered: 'unknown' });
+      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+
+    it('the same non-marker message with a network error stays unknown', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+      }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.tail = [{ info: { id: 'msg-other', role: 'user' }, parts: [{ type: 'text', text: 'another client' }] }];
+      openCode.state.failPromptNetworkOnce = true;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      // No HTTP status means acceptance cannot be disproven: never 'no'.
+      expect(result).toEqual({ status: 'send-failed', delivered: 'unknown' });
+      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+      expect(runtime.sessionSnapshot(SESSION).items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+    });
+
+    it('an uncorrelatable acting message never becomes no from a timeout alone', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      // No textPartMetadata at all: correlation is impossible.
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({ consult: { system: 'be terse' } }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.failPromptNetworkOnce = true;
+      const first = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(first).toEqual({ status: 'send-failed', delivered: 'unknown' });
+      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+
+    it('an uncorrelatable acting message with a 5xx stays unknown', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({ consult: { system: 'be terse' } }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.failPromptStatusOnce = 500;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toEqual({ status: 'send-failed', delivered: 'unknown' });
+      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+
+    it('an uncorrelatable acting message with a 4xx is a definite no', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({ consult: { system: 'be terse' } }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.failPromptStatusOnce = 400;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toEqual({ status: 'send-failed', delivered: 'no' });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+    });
+
     it('keeps the item, claim, and hold when the failure cannot be classified (tail unreadable)', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
       openCode.state.statuses = {};
-      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      // Correlation is possible (a runId is present) but every marker read
+      // fails: indeterminate, never a guessed removal.
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+      }));
       await runtime.claim(SESSION, itemId, 'consult:run-1');
       openCode.state.failPromptOnce = true;
       openCode.state.failMessageReadsAfterPromptFailure = true;
@@ -1256,5 +1381,132 @@ describe('message queue runtime', () => {
       { type: 'agent', name: 'reviewer' },
     ]);
     expect(recorded).toEqual([{ sessionId: SESSION, directory: DIRECTORY, signature: 'sig-1' }]);
+  });
+});
+
+/**
+ * A minimal Express stand-in: routes are collected by method + path and can
+ * be invoked with plain request/response recorders. It exists so the route
+ * layer itself is exercised (the maintainer's payload-await defect slipped
+ * through runtime-level tests).
+ */
+const createFakeApp = () => {
+  const handlers = new Map();
+  const record = (method) => (path, handler) => {
+    handlers.set(`${method} ${path}`, handler);
+  };
+  return {
+    get: record('GET'),
+    post: record('POST'),
+    put: record('PUT'),
+    delete: record('DELETE'),
+    call: async (method, path, { params = {}, body } = {}) => {
+      const handler = handlers.get(`${method} ${path}`);
+      if (!handler) throw new Error(`no route for ${method} ${path}`);
+      const result = { status: null, body: undefined, settled: false };
+      const res = {
+        status(code) {
+          result.status = code;
+          return this;
+        },
+        json(payload) {
+          // Reject a promise passed through by mistake: res.json must receive
+          // the resolved value, never the pending runtime call.
+          if (payload instanceof Promise) {
+            throw new Error('res.json received a promise');
+          }
+          result.body = payload;
+          result.settled = true;
+          return this;
+        },
+      };
+      await handler({ params, body, query: {}, headers: {} }, res);
+      return result;
+    },
+  };
+};
+
+describe('message queue routes', () => {
+  const consultItem = (overrides = {}) => item({ kind: 'consult', consult: { system: 'be terse' }, ...overrides });
+
+  const routeSetup = async () => {
+    const harness = createRuntime();
+    harness.runtime.start();
+    const app = createFakeApp();
+    registerMessageQueueRoutes(app, harness.runtime);
+    return { ...harness, app };
+  };
+
+  it('awaits the payload mutation before responding and merges the payload', async () => {
+    const { runtime, openCode, app } = await routeSetup();
+    openCode.state.statuses = {};
+    const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+    await runtime.claim(SESSION, itemId, 'consult:run-1');
+
+    const response = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/payload', {
+      params: { sessionId: SESSION, itemId },
+      body: { owner: 'consult:run-1', consult: { system: 'payloaded' } },
+    });
+
+    expect(response.settled).toBe(true);
+    expect(response.body).toMatchObject({ ok: true, item: { id: itemId, consult: { system: 'payloaded' } } });
+    // The response never outran the mutation.
+    expect(runtime.sessionSnapshot(SESSION).items[0].consult).toEqual({ system: 'payloaded' });
+  });
+
+  it('maps a foreign-owner payload refusal to a 4xx JSON error', async () => {
+    const { runtime, openCode, app } = await routeSetup();
+    openCode.state.statuses = {};
+    const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+    await runtime.claim(SESSION, itemId, 'consult:run-1');
+
+    const response = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/payload', {
+      params: { sessionId: SESSION, itemId },
+      body: { owner: 'consult:other', consult: { system: 'nope' } },
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.body?.error).toContain('not-claiming');
+    expect(runtime.sessionSnapshot(SESSION).items[0].consult).toEqual({ system: 'be terse' });
+  });
+
+  it('serves the claim route with the claimed item and a refusal status', async () => {
+    const { runtime, openCode, app } = await routeSetup();
+    openCode.state.statuses = {};
+    const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+
+    const claimed = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/claim', {
+      params: { sessionId: SESSION, itemId },
+      body: { owner: 'consult:run-1', ttlMs: 60_000 },
+    });
+    expect(claimed.settled).toBe(true);
+    expect(claimed.body).toMatchObject({ claimed: true, item: { id: itemId, claimed: { owner: 'consult:run-1' } } });
+
+    const refused = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/claim', {
+      params: { sessionId: SESSION, itemId },
+      body: { owner: 'consult:other' },
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body?.error).toContain('already-claimed');
+  });
+
+  it('serves the dispatch-consult route with the structured outcome', async () => {
+    const { runtime, openCode, app } = await routeSetup();
+    openCode.state.statuses = {};
+    const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+    await runtime.claim(SESSION, itemId, 'consult:run-1');
+
+    const dispatched = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/dispatch-consult', {
+      params: { sessionId: SESSION, itemId },
+      body: { owner: 'consult:run-1' },
+    });
+    expect(dispatched.status).toBeNull();
+    expect(dispatched.body).toMatchObject({ status: 'dispatched', item: { id: itemId } });
+
+    const missing = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/dispatch-consult', {
+      params: { sessionId: SESSION, itemId: 'queued-missing' },
+      body: { owner: 'consult:run-1' },
+    });
+    expect(missing.body).toEqual({ status: 'not-found' });
   });
 });

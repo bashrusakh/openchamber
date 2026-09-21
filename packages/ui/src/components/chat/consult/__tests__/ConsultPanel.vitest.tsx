@@ -74,6 +74,37 @@ const renderPanel = async (panelRun: ConsultRunProgress) => {
   };
 };
 
+test('a working run shows the live ready aggregate', async () => {
+  const view = await renderPanel(run({
+    phase: 'consulting',
+    advisors: [advisor(0, 'running'), advisor(1, 'ok'), advisor(2, 'timeout')],
+  }));
+  try {
+    const ready = view.container.querySelector('[data-consult-ready]');
+    // Ready counts advisors that are no longer queued/running, so a timeout is
+    // ready too: the issue mock's running + ok + timeout run reads `2 / 3 ready`.
+    expect(ready?.textContent).toBe('2 / 3 ready');
+    expect(view.container.querySelector('[data-consult-summary]')).toBeNull();
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test('a finished run replaces the ready line with the ordered summary and skips zero counts', async () => {
+  const view = await renderPanel(run({
+    phase: 'done',
+    advisors: [advisor(0, 'ok'), advisor(1, 'ok'), advisor(2, 'timeout')],
+  }));
+  try {
+    expect(view.container.querySelector('[data-consult-ready]')).toBeNull();
+    const summary = view.container.querySelector('[data-consult-summary]');
+    // Order is ok → timeout; failed/empty/cancelled are absent.
+    expect(summary?.textContent).toBe('2 Answered · 1 Timed out');
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test('waiting for admission shows the queue state, queued rows, and a cancel action', async () => {
   const view = await renderPanel(run({ phase: 'waiting-admission' }));
   try {

@@ -1,6 +1,7 @@
 import type { Agent, Message, PermissionRuleset, Provider, Session } from '@opencode-ai/sdk/v2';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { opencodeClient } from '@/lib/opencode/client';
+import type { OutgoingPart } from '@/components/chat/composer/submit/buildOutgoingMessage';
 import * as sessionActions from '@/sync/session-actions';
 import { getSyncMessages, registerSessionDirectory } from '@/sync/sync-refs';
 import { useConsultPendingHideStore } from '@/stores/useConsultPendingHideStore';
@@ -119,6 +120,12 @@ export type ConsultAdvisorSendParams = {
   agent: string;
   variant?: string;
   files?: ConsultAttachmentInput[];
+  /**
+   * The captured context parts (linked PR, file quote, synthetic parts, and
+   * their instructions) the acting turn also receives; the advisors must see
+   * the same current input. Mutable here to match the client's send contract.
+   */
+  additionalParts?: OutgoingPart[];
   directory: string;
   system: string;
   runtimeKey: string;
@@ -307,6 +314,8 @@ export type StartConsultationInput = {
   /** The acting user message the advisors must answer. */
   messageText: string;
   attachments?: readonly ConsultAttachmentInput[];
+  /** Captured context parts accompanying the message (same as the acting turn). */
+  additionalParts?: readonly OutgoingPart[];
   mode?: ConsultationMode;
   /** Per-advisor deadline, default 120 s. */
   timeoutMs?: number;
@@ -671,6 +680,9 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
       };
       const variant = advisor.selection.variant?.trim();
       if (variant) params.variant = variant;
+      if (input.additionalParts && input.additionalParts.length > 0) {
+        params.additionalParts = [...input.additionalParts];
+      }
 
       const userMessageID = await deps.client.sendMessage(params);
       const outcome = await waitForConsultAdvisorCompletion(completionDeps, {

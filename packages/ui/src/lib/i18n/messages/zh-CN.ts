@@ -3449,6 +3449,8 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.dialog.actions.submit': '咨询并发送',
   'chat.consult.dialog.actions.submitting': '正在启动…',
   'chat.consult.dialog.noAdvisorAgent': '没有可用于顾问的主代理',
+  'chat.consult.panel.ready': '{ready} / {total} 已完成',
+  'chat.consult.summary.segment': '{count} {status}',
   'chat.consult.panel.title': '咨询模型',
   'chat.consult.panel.phase.waitingAdmission': '正在等待队列与会话空闲…',
   'chat.consult.panel.phase.consulting': '正在咨询 {count} 个顾问…',

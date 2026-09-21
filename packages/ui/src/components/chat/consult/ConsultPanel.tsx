@@ -8,8 +8,10 @@ import { cn } from '@/lib/utils';
 import type { ConsultAdvisorProgress, ConsultRunPhase, ConsultRunProgress } from '@/stores/useConsultStore';
 import { ComposerFloatingPanel } from '../composer/ui/ComposerFloatingPanel';
 import {
+  consultRunReadyCount,
   consultStatusLabelKey,
   consultStatusPresentation,
+  consultSummaryText,
   formatConsultDuration,
   isConsultRunCancellable,
   isConsultRunTerminal,
@@ -86,6 +88,10 @@ export function ConsultPanel({ run, onCancel, onDismiss }: ConsultPanelProps) {
   const cancellable = isConsultRunCancellable(run.phase);
   const terminal = isConsultRunTerminal(run.phase);
   const phaseLabel = t(CONSULT_PHASE_LABEL_KEYS[run.phase], { count: run.advisors.length });
+  // Working phases show the live aggregate; a terminal run replaces it with
+  // the final segment summary (same labels the receipt uses).
+  const readyCount = consultRunReadyCount(run.advisors);
+  const summaryText = terminal ? consultSummaryText(t, run.advisors) : null;
 
   return (
     <ComposerFloatingPanel
@@ -135,6 +141,17 @@ export function ConsultPanel({ run, onCancel, onDismiss }: ConsultPanelProps) {
       )}
     >
       <div className="flex flex-col gap-0.5 px-3 pb-2">
+        {terminal ? (
+          summaryText ? (
+            <div className="pb-1 typography-meta text-muted-foreground" data-consult-summary>
+              {summaryText}
+            </div>
+          ) : null
+        ) : (
+          <div className="pb-1 typography-meta text-muted-foreground" data-consult-ready>
+            {t('chat.consult.panel.ready', { ready: readyCount, total: run.advisors.length })}
+          </div>
+        )}
         {run.degraded ? (
           <div className="pb-1 typography-micro text-[var(--status-warning-text)]">
             {t('chat.consult.panel.degraded')}

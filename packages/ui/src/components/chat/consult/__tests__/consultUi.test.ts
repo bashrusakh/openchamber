@@ -75,6 +75,15 @@ const localeDictionaries = {
 
 const AUTO_REVIEW_LABEL_KEY = 'chat.consult.unavailable.autoReview' as const;
 
+/**
+ * Every locale dictionary carries the same key domain as English (parity is
+ * asserted by `messages.test.ts`), so this typed reader lets the locale loops
+ * index by a known key without assertions and still answers `undefined` when a
+ * key is genuinely absent.
+ */
+const readLocaleKey = (dictionary: Partial<Record<I18nKey, string>>, key: I18nKey): string | undefined =>
+  dictionary[key];
+
 describe('resolveConsultAvailability', () => {
   beforeEach(() => {
     mechanismCapability = { available: true, assurance: 'unverified' };
@@ -249,17 +258,27 @@ describe('consult unavailable reason localization', () => {
   });
 
   test('the version reasons are translated in every locale (F3)', () => {
-    for (const key of ['chat.consult.unavailable.checkingVersion', 'chat.consult.unavailable.versionUnknown', 'chat.consult.unavailable.versionUnsupported'] as const) {
-      for (const [locale, dictionary] of Object.entries(localeDictionaries)) {
-        const label = dictionary[key as keyof typeof dictionary] as string | undefined;
+    for (const key of ['chat.consult.panel.ready', 'chat.consult.summary.segment', 'chat.consult.unavailable.checkingVersion', 'chat.consult.unavailable.versionUnknown', 'chat.consult.unavailable.versionUnsupported'] as const) {
+      for (const dictionary of Object.values(localeDictionaries)) {
+        const label = readLocaleKey(dictionary, key);
         expect(label?.length ?? 0).toBeGreaterThan(0);
-        if (locale !== 'en') expect(label).not.toBe(enDict[key as keyof typeof enDict]);
+      }
+    }
+    // Prose keys must not ship the English placeholder. `summary.segment` is
+    // deliberately placeholder-only in every locale (the status label inside
+    // it is what gets translated), so it is covered by presence alone.
+    for (const key of ['chat.consult.panel.ready', 'chat.consult.unavailable.checkingVersion', 'chat.consult.unavailable.versionUnknown', 'chat.consult.unavailable.versionUnsupported'] as const) {
+      for (const [locale, dictionary] of Object.entries(localeDictionaries)) {
+        if (locale === 'en') continue;
+        expect(readLocaleKey(dictionary, key)).not.toBe(enDict[key]);
       }
     }
     // Both strings name the version placeholder, which the action button
     // fills with the verified floor.
     expect(enDict['chat.consult.unavailable.versionUnknown']).toContain('{version}');
     expect(enDict['chat.consult.unavailable.versionUnsupported']).toContain('{minVersion}');
+    expect(enDict['chat.consult.panel.ready']).toBe('{ready} / {total} ready');
+    expect(enDict['chat.consult.summary.segment']).toBe('{count} {status}');
   });
 });
 

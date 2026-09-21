@@ -130,8 +130,10 @@ type HarnessState = {
   heartbeatActive: boolean;
   heartbeatIntervals: number[];
   heartbeats: Array<() => void>;
-  /** Items pushed into the projection right after the enqueue append. */
-  foreignAppends: QueuedMessage[];
+  /** addToQueue answers undefined (no authoritative id). */
+  enqueueReturnsNothing: boolean;
+  /** The enqueued item is dropped from the projection before addToQueue returns. */
+  discardEnqueuedItem: boolean;
   /** When set, `takeForSend` resolves with nothing (the item vanished). */
   takeEmpty: boolean;
   holdFailure: boolean;
@@ -155,6 +157,8 @@ type HarnessState = {
   /** When set, verifyCapability answers this refusal. */
   capabilityRefusal: { available: false; reason: string; message?: string } | null;
   capabilityChecks: number;
+  /** One-shot: the next runs.finish throws (exercises the outer catch). */
+  finishFailureOnce: Error | null;
   /** Every `runs.updateAdvisor` call in order (F5 live advisor rows). */
   advisorUpdates: Array<{ runId: string; index: number; status?: string; durationMs?: number; reason?: string }>;
   status: 'idle' | 'busy' | 'retry';
@@ -193,7 +197,8 @@ const createHarness = (): Harness => {
     heartbeatActive: false,
     heartbeatIntervals: [],
     heartbeats: [],
-    foreignAppends: [],
+    enqueueReturnsNothing: false,
+    discardEnqueuedItem: false,
     takeEmpty: false,
     holdFailure: false,
     addFailure: null,
@@ -212,6 +217,7 @@ const createHarness = (): Harness => {
     prevalidationRefusal: null,
     capabilityRefusal: null,
     capabilityChecks: 0,
+    finishFailureOnce: null,
     advisorUpdates: [],
     status: 'idle',
     statusFailure: null,
@@ -249,7 +255,10 @@ const createHarness = (): Harness => {
         if (message.attachments && message.attachments.length > 0) item.attachments = message.attachments;
         if (message.context && message.context.length > 0) item.context = message.context;
         state.queueItems.push(item);
-        for (const foreign of state.foreignAppends) state.queueItems.push({ ...foreign });
+        if (state.discardEnqueuedItem) {
+          state.queueItems = state.queueItems.filter((entry) => entry.id !== item.id);
+        }
+        return state.enqueueReturnsNothing ? undefined : item;
       },
       removeFromQueue: (target, messageId) => {
         state.events.push(`queue:remove:${messageId}`);
@@ -326,6 +335,11 @@ const createHarness = (): Harness => {
         state.phaseLog.push(`${runId}:${phase}`);
       },
       finish: (parentSessionId, runId, summary: ConsultRunFinish) => {
+        if (state.finishFailureOnce) {
+          const failure = state.finishFailureOnce;
+          state.finishFailureOnce = null;
+          throw failure;
+        }
         const current = state.runs.get(parentSessionId);
         if (!current || current.runId !== runId) return;
         current.phase = summary.phase;
@@ -673,23 +687,67 @@ describe('queue admission', () => {
     expect(harness.state.holds).toEqual([true, false]);
   });
 
-  test('an unattributable concurrent append is never taken and is left queued', async () => {
+  test('advisors receive the same current-message context parts as the acting turn (REQ-4)', async () => {
     const harness = createHarness();
-    harness.state.status = 'busy';
-    // Two foreign appends with the same content land with the enqueue, so the
-    // pre-enqueue snapshot cannot attribute any of the three ids.
-    harness.state.foreignAppends = [
-      { id: 'foreign-a', content: baseInput().message.content, text: 'x', createdAt: 0 },
-      { id: 'foreign-b', content: baseInput().message.content, text: 'y', createdAt: 0 },
+    const metadata = { openchamberContext: { kind: 'file-quote' as const, fileLabel: 'src/app.ts', quote: 'const value = 1;', text: 'Why?' } };
+    const context = [
+      { kind: 'context' as const, text: 'the quoted fragment', metadata, instructions: 'how to read it' },
+      { kind: 'synthetic' as const, text: 'conflict payload' },
     ];
-    const handle = harness.submit(baseInput());
+    const handle = harness.submit(baseInput({ message: { ...baseInput().message, context } }));
     await harness.flush();
 
+    const advisorInput = harness.state.startInputs[0];
+    expect(advisorInput.messageText).toBe('What should we do next?');
+    // The instruction goes out as its own synthetic part before the context
+    // part, which keeps its metadata; a synthetic context part stays synthetic.
+    expect(advisorInput.additionalParts).toEqual([
+      { text: 'how to read it', synthetic: true },
+      { text: 'the quoted fragment', synthetic: true, metadata },
+      { text: 'conflict payload', synthetic: true },
+    ]);
+
+    harness.lastConsultation().resolve(consultationResult());
+    const result = await handle.result;
+    expect(result.status).toBe('dispatched');
+  });
+
+  test('the authoritative id returned by addToQueue flows into the claim', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    // The fake returns q-1; the claim must target exactly that id.
+    expect(harness.state.events).toContain('queue:claim:q-1:consult:run-1');
+    harness.lastConsultation().resolve(consultationResult());
+    const result = await handle.result;
+    expect(result.status).toBe('dispatched');
+  });
+
+  test('addToQueue without an id fails clearly and never guesses one', async () => {
+    const harness = createHarness();
+    harness.state.status = 'busy';
+    harness.state.enqueueReturnsNothing = true;
+    const handle = harness.submit(baseInput());
+    await harness.flush();
     const result = await handle.result;
 
     expect(result.status).toBe('failed');
     if (result.status !== 'failed') throw new Error('expected a failure');
-    expect(result.queueItemRestored).toBe(true);
+    expect(result.error).toContain('could not be identified');
+    expect(result.queueItemRestored).toBe(false);
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.holds).toEqual([true, false]);
+  });
+
+  test('an item gone from the projection right after the enqueue is delivered-raw', async () => {
+    const harness = createHarness();
+    harness.state.status = 'busy';
+    harness.state.discardEnqueuedItem = true;
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result).toEqual({ status: 'delivered-raw', runId: 'run-1', queueItemRestored: false });
     expect(harness.state.claims).toBe(0);
     expect(harness.state.holds).toEqual([true, false]);
   });
@@ -981,7 +1039,7 @@ describe('dispatch', () => {
     expect(harness.state.phaseLog).toContain('run-1:finish:done');
   });
 
-  test('a failed dispatch marks the run failed and releases the hold', async () => {
+  test('a failed dispatch request keeps the server-owned lease and marks the run failed', async () => {
     const harness = createHarness();
     harness.state.dispatchConsultFailure = new Error('prompt rejected');
     const handle = harness.submit(baseInput());
@@ -991,10 +1049,14 @@ describe('dispatch', () => {
     const result = await handle.result;
 
     expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
     expect(errorOf(result)).toContain('prompt rejected');
-    // The dispatch route failed, so the submission releases its own hold; the
-    // item stays queued (claimed) until the sweep reverts it.
-    expect(harness.state.holds).toEqual([true, true, false]);
+    // REQ-2: a thrown dispatch request is ambiguous, so the release stays
+    // server-owned (the lease protects the possibly-running send) and the
+    // item + claim remain queued.
+    expect(result.uncertain).toBe(true);
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
     expect(harness.state.phaseLog).toContain('run-1:finish:failed');
   });
 });
@@ -1206,9 +1268,33 @@ describe('cancellation and failures', () => {
     if (result.status !== 'failed') throw new Error('expected a failure');
     expect(result.uncertain).toBe(true);
     expect(result.queueItemRestored).toBe(false);
-    // The server kept the item and the claim; the submission releases only its
-    // own hold and never restores the capture.
+    // REQ-2: the server-owned lease keeps the hold; the submission must NOT
+    // release it (the proxy prompt gate depends on it) and stops only the
+    // heartbeat. The item + claim stay.
     expect(harness.state.queueItems).toHaveLength(1);
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
+    await harness.tickHeartbeat();
+    expect(harness.state.holds).toEqual([true, true]);
+  });
+
+  test('an unexpected error reaching the outer catch releases the hold and stays terminal', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    // Force a pre-dispatch failure whose terminal bookkeeping call then
+    // throws once; the submission's outer catch must still finish the run and
+    // release its own hold (the dispatch never started).
+    harness.state.payloadFailure = new Error('payload exploded');
+    harness.state.finishFailureOnce = new Error('run store exploded');
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(errorOf(result)).toContain('run store exploded');
+    expect(result.uncertain).toBeUndefined();
     expect(harness.state.holds).toEqual([true, true, false]);
   });
 
@@ -1226,6 +1312,9 @@ describe('cancellation and failures', () => {
     expect(result.uncertain).toBe(true);
     expect(errorOf(result)).toContain('relay dropped the response');
     expect(harness.state.queueItems).toHaveLength(1);
+    // The lease stays server-owned; nothing releases after the uncertain path.
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
   });
 
   test('a not-found outcome is a definite failure', async () => {

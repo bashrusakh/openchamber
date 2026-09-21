@@ -3446,6 +3446,8 @@ export const dict = {
   'chat.consult.dialog.actions.submit': 'Danış ve gönder',
   'chat.consult.dialog.actions.submitting': 'Başlatılıyor…',
   'chat.consult.dialog.noAdvisorAgent': 'Danışmanlar için kullanılabilir bir birincil ajan yok',
+  'chat.consult.panel.ready': '{ready} / {total} hazır',
+  'chat.consult.summary.segment': '{count} {status}',
   'chat.consult.panel.title': 'Modellere danış',
   'chat.consult.panel.phase.waitingAdmission': 'Kuyruk ve oturumun boşta olması bekleniyor…',
   'chat.consult.panel.phase.consulting': '{count} danışmana soruluyor…',
