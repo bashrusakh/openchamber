@@ -144,7 +144,10 @@ const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs,
     if (settled) return;
     settled = true;
     cleanup();
-    void Promise.resolve(termination).then(() => callback(value));
+    void Promise.resolve(termination).then(
+      () => callback(value),
+      (terminationFailure) => reject(terminationFailure),
+    );
   };
   const requestTermination = (error) => {
     if (terminationRequested) return;
@@ -152,8 +155,9 @@ const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs,
     terminationError = error;
     try {
       termination = killProcessTree(child, { spawn, platform });
-    } catch {
-      // The process may already have exited.
+      void termination.catch((terminationFailure) => finish(reject, terminationFailure));
+    } catch (terminationFailure) {
+      finish(reject, terminationFailure);
     }
   };
   const onAbort = () => requestTermination(new Error('Git clone was cancelled'));

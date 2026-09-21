@@ -294,6 +294,37 @@ describe('Git execution service', () => {
     }]);
   });
 
+  it('does not fall back to raw Git for an unsupported repository root', async () => {
+    const raw = {
+      getDiff: async () => 'must not read the whole tree',
+      getStatus: async () => ({ current: 'root', files: ['must not scan'] }),
+    };
+    const service = createGitExecutionService({
+      raw,
+      resolver: {
+        resolve: async () => ({
+          isRepository: false,
+          requestedDirectory: '/home/user/project',
+          reason: 'unsupported-repository-root',
+          unsupportedRoot: 'home',
+        }),
+      },
+    });
+
+    await expect(service.isGitRepository('/home/user/project')).resolves.toBe(false);
+    await expect(service.getDiff('/home/user/project')).rejects.toMatchObject({
+      code: 'GIT_NOT_A_REPOSITORY',
+      reason: 'not-a-repository',
+    });
+    await expect(service.getStatus('/home/user/project')).resolves.toEqual({
+      isGitRepository: false,
+      files: [],
+      branch: null,
+      ahead: 0,
+      behind: 0,
+    });
+  });
+
   it('propagates a missing Git executable discovery failure', async () => {
     const failure = Object.assign(new Error('Git executable is unavailable'), {
       code: 'ENOENT',

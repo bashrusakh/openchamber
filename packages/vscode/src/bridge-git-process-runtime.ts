@@ -141,6 +141,9 @@ export const createGitProcessRuntime = ({
       env: { ...env, ...getGitExecutionEnv() },
     });
     activeProcesses.add(process);
+    const forgetProcess = () => { activeProcesses.delete(process); };
+    void process.closed.then(forgetProcess);
+    void process.failedTermination.then(forgetProcess);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -187,18 +190,21 @@ export const createGitProcessRuntime = ({
     options.signal?.addEventListener('abort', onAbort, { once: true });
     process.child.stdout?.on('data', (data: Buffer) => appendOutput('stdout', data));
     process.child.stderr?.on('data', (data: Buffer) => appendOutput('stderr', data));
+    if (options.timeoutMs && options.timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        termination = process.terminate();
+        void termination.catch(() => undefined);
+      }, options.timeoutMs);
+    }
     try {
-      const exit = await new Promise<Awaited<typeof process.closed>>((resolve, reject) => {
-        void process.closed.then(resolve);
-        if (options.timeoutMs && options.timeoutMs > 0) {
-          timer = setTimeout(() => {
-            timedOut = true;
-            termination = process.terminate();
-            void termination.catch(reject);
-          }, options.timeoutMs);
-        }
-      });
-      await termination;
+      const exit = await Promise.race([
+        process.closed,
+        process.failedTermination.then((error) => Promise.reject(error)),
+      ]);
+      if (process.termination) {
+        await process.termination;
+      }
       if (timedOut) {
         return {
           stdout,
@@ -232,7 +238,8 @@ export const createGitProcessRuntime = ({
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', onAbort);
-      void process.closed.then(() => activeProcesses.delete(process));
+      void process.closed.then(forgetProcess);
+      void process.failedTermination.then(forgetProcess);
     }
   };
 

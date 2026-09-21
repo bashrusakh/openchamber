@@ -82,6 +82,26 @@ const fallbackContext = (directory: string): GitExecutionContext => ({
   worktreeId: directory,
 });
 
+type UnsupportedRepositoryContext = Extract<GitResolvedContext, { reason: 'unsupported-repository-root' }>;
+
+const isUnsupportedRepositoryContext = (
+  context: GitResolvedContext,
+): context is UnsupportedRepositoryContext => (
+  context.isRepository === false && context.reason === 'unsupported-repository-root'
+);
+
+const unsupportedRepositoryError = (context: UnsupportedRepositoryContext): Error => Object.assign(
+  new Error(`Git repository root is unsupported (${context.unsupportedRoot})`),
+  {
+    code: 'GIT_NOT_A_REPOSITORY',
+    reason: 'not-a-repository',
+    details: {
+      reason: 'not-a-repository',
+      unsupportedRoot: context.unsupportedRoot,
+    },
+  },
+);
+
 export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = {}) => {
   const coordinator = options.coordinator || createGitExecutionCoordinator();
   const resolver = options.resolver || createGitContextResolver({
@@ -130,6 +150,9 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
       ));
     }
     if (!context.isRepository) {
+      if (isUnsupportedRepositoryContext(context)) {
+        throw unsupportedRepositoryError(context);
+      }
       return runWithGitExecutionScope(kind === GIT_OPERATION_KIND.READ, () => task(
         fallbackLease({
           isRepository: true,
@@ -158,6 +181,7 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
       signal?: AbortSignal;
       queueTimeoutMs?: number;
       projectResult?: (value: T, requestedMode: GitStatusMode, sourceMode: GitStatusMode) => R;
+      unsupportedRepositoryResult?: () => R;
     } = {},
   ): Promise<R> => {
     const requestedMode = options.mode === 'light' ? 'light' : 'full';
@@ -184,6 +208,12 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
       return value as R;
     }
     if (!context.isRepository) {
+      if (isUnsupportedRepositoryContext(context)) {
+        if (options.unsupportedRepositoryResult) {
+          return options.unsupportedRepositoryResult();
+        }
+        return Promise.reject(unsupportedRepositoryError(context));
+      }
       const value = await runWithGitExecutionScope(true, () => task(requestedMode, options.signal));
       if (options.projectResult) {
         return options.projectResult(value, requestedMode, requestedMode);
@@ -256,6 +286,9 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
   ): Promise<T> => (
     discover(directory, { signal: options.signal }).then((context) => {
       if (!context.isRepository) {
+        if (isUnsupportedRepositoryContext(context)) {
+          throw unsupportedRepositoryError(context);
+        }
         return runDirectoryFallbackRead(directory, task);
       }
       return coordinator.run({

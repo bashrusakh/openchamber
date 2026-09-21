@@ -132,7 +132,8 @@ The following functions are internal helpers used by exported functions:
 - `resolveBranchForExistingMode(...)`: Resolve branch for existing-mode worktree creation.
 - `applyUpstreamConfiguration(...)`: Set upstream tracking for new branches.
 - `runPostCheckoutHook(directory)`: Invoke the worktree's `post-checkout` hook after population, because `git worktree add --no-checkout` and the bootstrap's `git reset --hard` never run git hooks. Runs with git's standard arguments and the worktree as cwd; skips missing/non-executable hooks and never throws on hook failure.
-- `process-tree.js`: Shared ownership helpers for detached Git process groups and descendant termination on cancellation, timeout, or output limits. Windows tree termination is awaitable; clone cleanup, Gitignore reads, and bounded listings do not settle or release their owning work until the `taskkill /T /F` lifecycle completes.
+- `process-tree.js`: Shared ownership helpers for detached Git process groups and descendant termination on cancellation, timeout, or output limits. Windows tree termination is awaitable; clone cleanup, Gitignore reads, and bounded listings do not settle or release their owning work until the `taskkill /T /F` lifecycle completes. A failed command gets a bounded root-only fallback and rejects with descendant termination unconfirmed rather than reporting success.
+- `repository-root.js`: Shared guard that classifies repositories rooted at the user's home directory or a filesystem root as unsupported before facade admission or raw fallback.
 - And various other internal helpers for Git command execution and parsing.
 
 ### Execution Coordination

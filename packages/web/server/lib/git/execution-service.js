@@ -10,6 +10,7 @@ import {
 import {
   runWithGitExecutionScope,
 } from './execution-scope.js';
+import { isUnsupportedRepositoryContext } from './repository-root.js';
 
 const operation = Object.freeze({
   read: GIT_OPERATION_KIND.READ,
@@ -120,6 +121,27 @@ const errorText = (error) => [
   error?.stdout,
   error,
 ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
+
+const unsupportedRepositoryError = (context) => Object.assign(
+  new Error(`Git repository root is unsupported (${context.unsupportedRoot})`),
+  {
+    code: 'GIT_NOT_A_REPOSITORY',
+    reason: 'not-a-repository',
+    details: {
+      reason: 'not-a-repository',
+      unsupportedRoot: context.unsupportedRoot,
+      repositoryRoot: context.topLevel,
+    },
+  },
+);
+
+const unsupportedRepositoryStatus = () => ({
+  isGitRepository: false,
+  files: [],
+  branch: null,
+  ahead: 0,
+  behind: 0,
+});
 
 const normalizeDiscoveryCode = (value) => {
   if (value === undefined || value === null) return {};
@@ -265,6 +287,9 @@ export const createGitExecutionService = (dependencies = {}) => {
     }
     const context = await resolver.resolve(directory, { signal: options.signal });
     if (!context.isRepository) {
+      if (isUnsupportedRepositoryContext(context)) {
+        throw unsupportedRepositoryError(context);
+      }
       return runWithGitExecutionScope(kind === GIT_OPERATION_KIND.READ, () => raw[name](...args));
     }
     let network = options.network ?? networkOperations.has(name);
@@ -303,6 +328,9 @@ export const createGitExecutionService = (dependencies = {}) => {
   const runStatus = async (directory, options) => {
     const context = await resolver.resolve(directory, { signal: options?.signal });
     if (!context.isRepository) {
+      if (isUnsupportedRepositoryContext(context)) {
+        return runWithGitExecutionScope(true, unsupportedRepositoryStatus);
+      }
       return runWithGitExecutionScope(true, () => raw.getStatus(directory, options));
     }
     const statusMode = options?.mode === 'light' ? 'light' : 'full';
@@ -324,6 +352,9 @@ export const createGitExecutionService = (dependencies = {}) => {
   const withRawRead = (directory, task, options = {}) => (
     resolver.resolve(directory, { signal: options.signal }).then((context) => {
       if (!context.isRepository) {
+        if (isUnsupportedRepositoryContext(context)) {
+          throw unsupportedRepositoryError(context);
+        }
         return runWithGitExecutionScope(true, task);
       }
       return coordinator.run({

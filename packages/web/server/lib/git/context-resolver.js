@@ -5,6 +5,7 @@ import {
   GitExecutionCancelledError,
   GitExecutionOverloadedError,
 } from './execution-errors.js';
+import { unsupportedRepositoryRootReason } from './repository-root.js';
 
 const DEFAULTS = Object.freeze({
   discoveryConcurrency: 8,
@@ -184,7 +185,10 @@ const createDiscoveryError = (result, cwd) => {
 };
 
 const isPathWithin = (candidate, parent) => (
-  candidate === parent || candidate.startsWith(`${parent}${path.sep}`)
+  candidate === parent
+  || (parent === path.parse(parent).root
+    ? candidate.startsWith(parent)
+    : candidate.startsWith(`${parent}${path.sep}`))
 );
 
 const isPathIdentity = (value) => (
@@ -469,6 +473,15 @@ export class GitContextResolver {
     }
     if (signal?.aborted) {
       throw abortError(signal);
+    }
+    const unsupportedRoot = unsupportedRepositoryRootReason(context.topLevel);
+    if (unsupportedRoot) {
+      return {
+        isRepository: false,
+        requestedDirectory,
+        reason: 'unsupported-repository-root',
+        unsupportedRoot,
+      };
     }
     const fingerprint = await this.getPathFingerprint(context);
     if (signal?.aborted) {

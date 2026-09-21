@@ -152,6 +152,14 @@ export const createGitExecutionService = ({
         mode,
         signal: options?.signal,
         queueTimeoutMs: options?.queueTimeoutMs,
+        unsupportedRepositoryResult: () => ({
+          current: '',
+          tracking: null,
+          ahead: 0,
+          behind: 0,
+          files: [],
+          isClean: true,
+        }),
       },
     );
   };
