@@ -133,6 +133,50 @@ describe('web Gitignore reader', () => {
     await expect(pending).rejects.toThrow(/timed out/i);
   });
 
+  it('reports blocked cleanup when taskkill succeeds without a root close', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = createChild();
+      child.pid = 1234;
+      let taskkill;
+      const spawn = vi.fn((command) => {
+        if (command === 'taskkill') {
+          taskkill = new EventEmitter();
+          return taskkill;
+        }
+        return child;
+      });
+      const reader = createGitIgnoreReader({
+        spawn,
+        resolveGitBinaryForSpawn: () => 'git',
+        platform: 'win32',
+        timeoutMs: 1,
+      });
+
+      const pending = reader.getIgnoredNames('/repo', ['dist']);
+      const outcome = pending.then(
+        (value) => ({ ok: true, value }),
+        (error) => ({ ok: false, error }),
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      expect(taskkill).toBeTruthy();
+      taskkill.emit('close', 0, null);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(outcome).resolves.toMatchObject({
+        ok: false,
+        error: {
+          code: 'ERR_PROCESS_TREE_TERMINATION',
+          descendantsTerminated: false,
+          cleanupBlocked: true,
+          rootClosed: false,
+        },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves permission failures instead of treating them as no matches', async () => {
     const child = createChild();
     const spawn = vi.fn(() => {

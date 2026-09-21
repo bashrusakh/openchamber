@@ -95,6 +95,11 @@ const isRead = (kind) => kind === GIT_OPERATION_KIND.READ;
 const isCommonBarrier = (kind) => (
   kind === GIT_OPERATION_KIND.COMMON_WRITE || kind === GIT_OPERATION_KIND.TOPOLOGY_WRITE
 );
+const hasUnconfirmedProcessCleanup = (value) => (
+  value?.cleanupBlocked === true
+  || value?.error?.cleanupBlocked === true
+  || (value?.code === 'ERR_PROCESS_TREE_TERMINATION' && value?.descendantsTerminated === false)
+);
 
 const operationTargetsSameWorktree = (left, right) => (
   Boolean(left.targetWorktree) && Boolean(right.targetWorktree)
@@ -424,10 +429,17 @@ export class GitExecutionCoordinator {
     Promise.resolve()
       .then(() => entry.task(lease))
       .then(
-        (value) => this.settleEntry(entry, entry.resolve, value),
-        (error) => this.settleEntry(entry, entry.reject, error),
+        (value) => {
+          if (hasUnconfirmedProcessCleanup(value)) entry.cleanupBlocked = true;
+          this.settleEntry(entry, entry.resolve, value);
+        },
+        (error) => {
+          if (hasUnconfirmedProcessCleanup(error)) entry.cleanupBlocked = true;
+          this.settleEntry(entry, entry.reject, error);
+        },
       )
       .finally(() => {
+        if (entry.cleanupBlocked) return;
         lease.active = false;
         this.activeEntries.delete(entry);
         entry.contextState.active.delete(entry);
@@ -795,10 +807,17 @@ export class GitExecutionCoordinator {
     Promise.resolve()
       .then(() => entry.task(lease))
       .then(
-        (value) => this.settleEntry(entry, entry.resolve, value),
-        (error) => this.settleEntry(entry, entry.reject, error),
+        (value) => {
+          if (hasUnconfirmedProcessCleanup(value)) entry.cleanupBlocked = true;
+          this.settleEntry(entry, entry.resolve, value);
+        },
+        (error) => {
+          if (hasUnconfirmedProcessCleanup(error)) entry.cleanupBlocked = true;
+          this.settleEntry(entry, entry.reject, error);
+        },
       )
       .finally(() => {
+        if (entry.cleanupBlocked) return;
         lease.releaseNetwork();
         lease.active = false;
         cloneLeaseEntries.delete(lease);

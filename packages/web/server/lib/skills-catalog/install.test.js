@@ -192,4 +192,45 @@ describe('skills catalog repository installation', () => {
     });
     await expect(fs.stat(runner.getTempBase())).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('retains the temporary clone and skips fallback when cleanup is unconfirmed', async () => {
+    const workingDirectory = await createWorkingDirectory();
+    const runner = createInstallRunner();
+    const runGit = async (args, options) => {
+      const result = await runner.runGit(args, options);
+      if (args[0] === 'clone' && args.includes('--filter=blob:none')) {
+        return {
+          ...result,
+          ok: false,
+          cleanupBlocked: true,
+          descendantsTerminated: false,
+        };
+      }
+      return result;
+    };
+
+    try {
+      await expect(installSkillsFromRepository({
+        source: 'owner/repository',
+        scope: 'project',
+        targetSource: 'opencode',
+        workingDirectory,
+        userSkillDir: path.join(workingDirectory, 'user-skills'),
+        selections: [{ skillDir: 'skills/example' }],
+        runGit,
+      })).resolves.toMatchObject({
+        ok: false,
+        cleanupBlocked: true,
+        error: {
+          kind: 'networkError',
+          cleanupBlocked: true,
+          descendantsTerminated: false,
+        },
+      });
+      expect(runner.calls.filter(({ args }) => args[0] === 'clone')).toHaveLength(1);
+      await expect(fs.stat(runner.getTempBase())).resolves.toBeTruthy();
+    } finally {
+      await fs.rm(runner.getTempBase(), { recursive: true, force: true });
+    }
+  });
 });

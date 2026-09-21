@@ -1,5 +1,10 @@
 import { buildSshCommand, getGitBinary } from '../git/service.js';
-import { execFileProcessTree } from '../git/process-tree.js';
+import {
+  execFileProcessTree,
+  isProcessTreeCleanupBlocked,
+} from '../git/process-tree.js';
+
+export { isProcessTreeCleanupBlocked };
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
@@ -62,7 +67,7 @@ export async function runGit(args, options = {}) {
     const stderr = typeof err?.stderr === 'string' ? err.stderr : '';
     const message = err instanceof Error ? err.message : String(err);
 
-    return {
+    const result = {
       ok: false,
       stdout,
       stderr,
@@ -70,6 +75,9 @@ export async function runGit(args, options = {}) {
       code: err?.code ?? null,
       signal: typeof err?.signal === 'string' ? err.signal : null,
     };
+    if (err?.descendantsTerminated === false) result.descendantsTerminated = false;
+    if (err?.cleanupBlocked === true) result.cleanupBlocked = true;
+    return result;
   }
 }
 

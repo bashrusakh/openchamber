@@ -4,6 +4,7 @@ import path from 'path';
 
 import {
   assertGitAvailable,
+  isProcessTreeCleanupBlocked,
   looksLikeAuthError,
   runGit,
   runWithGitCloneReservation,
@@ -102,6 +103,10 @@ async function cloneRepo({ cloneUrl, identity, tempDir, runGitCommand }) {
   const result = await runGitCommand(preferred, { identity, timeoutMs: 90_000 });
   if (result.ok) return { ok: true };
 
+  if (isProcessTreeCleanupBlocked(result)) {
+    return { ok: false, error: result, cleanupBlocked: true };
+  }
+
   await safeRm(tempDir);
   const fallbackResult = await runGitCommand(fallback, { identity, timeoutMs: 90_000 });
   if (fallbackResult.ok) return { ok: true };
@@ -109,6 +114,7 @@ async function cloneRepo({ cloneUrl, identity, tempDir, runGitCommand }) {
   return {
     ok: false,
     error: fallbackResult,
+    cleanupBlocked: isProcessTreeCleanupBlocked(fallbackResult),
   };
 }
 
@@ -226,7 +232,9 @@ export async function installSkillsFromRepository({
 
   const tempBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openchamber-skills-install-'));
   let cleaned = false;
+  let cleanupBlocked = false;
   const cleanup = async () => {
+    if (cleanupBlocked) return;
     if (cleaned) return;
     cleaned = true;
     await safeRm(tempBase);
@@ -246,6 +254,19 @@ export async function installSkillsFromRepository({
         runGitCommand: runConfiguredGit,
       });
       if (!cloned.ok) {
+        if (cloned.cleanupBlocked) {
+          cleanupBlocked = true;
+          return {
+            ok: false,
+            error: {
+              kind: 'networkError',
+              message: 'Git process cleanup was not confirmed; temporary clone retained',
+              cleanupBlocked: true,
+              descendantsTerminated: false,
+            },
+            cleanupBlocked: true,
+          };
+        }
         const msg = `${cloned.error?.stderr || ''}\n${cloned.error?.message || ''}`.trim();
         if (looksLikeAuthError(msg)) {
           return { ok: false, error: { kind: 'authRequired', message: 'Authentication required to access this repository', sshOnly: true } };
@@ -254,14 +275,53 @@ export async function installSkillsFromRepository({
       }
 
       // Selective checkout for only requested skill dirs.
-      await runConfiguredGit(['-C', tempBase, 'sparse-checkout', 'init', '--cone'], { identity, timeoutMs: 15_000 });
+      const sparseInit = await runConfiguredGit(['-C', tempBase, 'sparse-checkout', 'init', '--cone'], { identity, timeoutMs: 15_000 });
+      if (isProcessTreeCleanupBlocked(sparseInit)) {
+        cleanupBlocked = true;
+        return {
+          ok: false,
+          error: {
+            kind: 'networkError',
+            message: 'Git process cleanup was not confirmed; temporary clone retained',
+            cleanupBlocked: true,
+            descendantsTerminated: false,
+          },
+          cleanupBlocked: true,
+        };
+      }
       const setResult = await runConfiguredGit(['-C', tempBase, 'sparse-checkout', 'set', ...requestedDirs], { identity, timeoutMs: 30_000 });
       if (!setResult.ok) {
+        if (isProcessTreeCleanupBlocked(setResult)) {
+          cleanupBlocked = true;
+          return {
+            ok: false,
+            error: {
+              kind: 'networkError',
+              message: 'Git process cleanup was not confirmed; temporary clone retained',
+              cleanupBlocked: true,
+              descendantsTerminated: false,
+            },
+            cleanupBlocked: true,
+          };
+        }
         return { ok: false, error: { kind: 'unknown', message: setResult.stderr || setResult.message || 'Failed to configure sparse checkout' } };
       }
 
       const checkoutResult = await runConfiguredGit(['-C', tempBase, 'checkout', '--force', 'HEAD'], { identity, timeoutMs: 60_000 });
       if (!checkoutResult.ok) {
+        if (isProcessTreeCleanupBlocked(checkoutResult)) {
+          cleanupBlocked = true;
+          return {
+            ok: false,
+            error: {
+              kind: 'networkError',
+              message: 'Git process cleanup was not confirmed; temporary clone retained',
+              cleanupBlocked: true,
+              descendantsTerminated: false,
+            },
+            cleanupBlocked: true,
+          };
+        }
         return { ok: false, error: { kind: 'unknown', message: checkoutResult.stderr || checkoutResult.message || 'Failed to checkout repository' } };
       }
 
@@ -316,6 +376,12 @@ export async function installSkillsFromRepository({
       }
 
       return { ok: true, installed, skipped };
+    } catch (error) {
+      // A custom runner may surface the shared termination error directly
+      // instead of returning runGit's structured result. Preserve the clone
+      // until that owned process lifecycle is known to be closed.
+      if (isProcessTreeCleanupBlocked(error)) cleanupBlocked = true;
+      throw error;
     } finally {
       await cleanup();
     }

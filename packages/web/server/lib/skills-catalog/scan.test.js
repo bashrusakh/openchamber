@@ -209,4 +209,39 @@ describe('skills catalog repository scanning', () => {
     ]);
     await expect(fs.stat(runner.getTempBase())).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('retains the temporary clone and skips fallback when cleanup is unconfirmed', async () => {
+    const runner = createGitRunner();
+    const runGit = async (args, options) => {
+      const result = await runner.runGit(args, options);
+      if (args[0] === 'clone' && args.includes('--filter=blob:none')) {
+        return {
+          ...result,
+          ok: false,
+          cleanupBlocked: true,
+          descendantsTerminated: false,
+        };
+      }
+      return result;
+    };
+
+    try {
+      await expect(scanSkillsRepository({
+        source: 'owner/repository',
+        runGit,
+      })).resolves.toMatchObject({
+        ok: false,
+        cleanupBlocked: true,
+        error: {
+          kind: 'networkError',
+          cleanupBlocked: true,
+          descendantsTerminated: false,
+        },
+      });
+      expect(runner.calls.filter(({ args }) => args[0] === 'clone')).toHaveLength(1);
+      await expect(fs.stat(runner.getTempBase())).resolves.toBeTruthy();
+    } finally {
+      await fs.rm(runner.getTempBase(), { recursive: true, force: true });
+    }
+  });
 });
