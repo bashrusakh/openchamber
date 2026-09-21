@@ -1,6 +1,5 @@
 import type { TextPartInput } from '@opencode-ai/sdk/v2/client';
 import { resolveQueuedSessionStatusType } from '@/hooks/useQueuedMessageAutoSend';
-import { queuedContextToParts } from '@/components/chat/composer/submit/buildOutgoingMessage';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import {
   createMessageQueueTarget,
@@ -20,7 +19,6 @@ import {
   type ConsultRunStartInput,
 } from '@/stores/useConsultStore';
 import { useAutoReviewStore } from '@/stores/useAutoReviewStore';
-import { useSessionUIStore } from '@/sync/session-ui-store';
 import type { AttachedFile } from '@/stores/types/sessionTypes';
 import {
   ConsultationRefusedError,

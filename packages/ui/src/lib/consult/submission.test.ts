@@ -267,7 +267,7 @@ const createHarness = (): Harness => {
         if (!item) throw new Error('cannot update consult payload: not found');
         item.consult = { ...item.consult, ...consult };
       },
-      dispatchConsultItem: async (target, messageId, owner) => {
+      dispatchConsultItem: async (target, messageId) => {
         state.events.push(`queue:dispatch-consult:${messageId}`);
         state.dispatchConsultCalls += 1;
         if (state.dispatchConsultBusy) return null;
@@ -414,8 +414,6 @@ const foreignItem = (id: string): QueuedMessage => ({
   text: 'someone else queued this',
   createdAt: 0,
 });
-
-const receiptCarrier = (turn: ConsultActingTurn) => turn.textPartMetadata?.openchamberConsultReceipt;
 
 const errorOf = (result: ConsultSubmissionResult): string => {
   if (result.status === 'failed' || result.status === 'refused') return result.error;

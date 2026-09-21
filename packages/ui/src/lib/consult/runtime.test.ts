@@ -877,7 +877,7 @@ describe('live advisor events (F5)', () => {
     const harness = createHarness();
     harness.state.holdForks = true;
     const events: Array<{ index: number; phase: string; status?: string }> = [];
-    const handle = harness.runtime.startConsultation(baseInput({
+    harness.runtime.startConsultation(baseInput({
       onAdvisor: (event) => events.push(event),
     }));
     await harness.flush();
