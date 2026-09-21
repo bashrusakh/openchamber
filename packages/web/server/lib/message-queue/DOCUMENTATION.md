@@ -183,9 +183,9 @@ broadcasts, and the JSON round-trip.
 normal item is deliverable only while every item before it is a consult item
 whose claim owner still holds a live reservation. A claimed consult therefore
 blocks the items queued behind it (FIFO is preserved — the normal item never
-jumps ahead), and a consult item whose reservation lapsed blocks until the
-expiry sweep reverts it. Consult items are never tick-delivered; a stale claim
-never lets a consult go out raw.
+jumps ahead), and a consult item whose reservation lapsed keeps blocking even
+after the sweep clears the claim: the item stays a consult item and is never
+tick-delivered. A consult message never goes out raw.
 
 ### Reserving and dispatching
 
@@ -200,28 +200,75 @@ the claim flow may refine the system prompt or text metadata between claim
 and dispatch.
 
 `dispatchConsult(sessionId, itemId, owner)` sends the consult item on the
-owner's explicit request: it verifies the claim and a live reservation
-(extended to the 10-min cap at entry), waits for idleness on the same gate
-(bounded polling, 60 s cap → 409; a busy answer returns
-`{ dispatched: false }` → 409), and re-verifies item/claim/hold/sending
-after every await — a lapsed reservation or removed item fails with 409
-instead of dispatching. The prompt body is built exactly as `sendItem` builds
-it, plus a top-level `system` and the consult metadata attached to the
-primary text part the way a context part carries its metadata; it always
-takes the prompt route. Success removes the item and releases the owner's
-hold; a prompt failure records the tick-style retry backoff, re-arms, keeps
-the item, and surfaces as 502.
+owner's explicit request and answers every control-flow case as a structured
+outcome under HTTP 200 (only malformed requests are 400 and unexpected
+failures 500):
 
-### Sweep and restart revert
+| Outcome | Meaning |
+|---|---|
+| `{ status: 'dispatched', item }` | sent and removed; the owner hold was released and the result committed/broadcast. A `delivery: 'confirmed-after-failure'` marks a send whose response failed but whose user message was found in the parent tail. |
+| `{ status: 'busy' }` | the session was busy at entry or the bounded idle wait (60 s) expired; the claim and item are untouched. |
+| `{ status: 'claim-lost' }` | the item has no claim, another owner claims it, or the reservation hold is not live (checked at entry and after every await). |
+| `{ status: 'not-found' }` | the item does not exist. |
+| `{ status: 'not-consult' }` | the item is not a consult item. |
+| `{ status: 'sending' }` | the session already has an item in flight. |
+| `{ status: 'send-failed', delivered: 'no' }` | the prompt definitely did not land; the item was removed and the hold released. |
+| `{ status: 'send-failed', delivered: 'unknown' }` | the prompt may or may not have landed; the item, claim, and hold stay reserved for a retry. |
 
-The expiry sweep (`pruneExpiredHolds`, running on every hold mutation and
-from the tick/snapshot read paths) reverts any consult item whose claim owner
-lost its hold: `claimed`, `kind`, and `consult` are dropped, the message
-content (text, attachments, context, sendConfig, contextPreview) stays, and
-the revert is committed and broadcast — the next tick delivers it as a normal
-item. Holds are memory-only, so on startup every persisted consult item is
-reverted to a normal item before the queue goes live: no reservation survives
-a restart.
+Before the prompt the dispatch snapshots the parent tail's user-message ids
+(the read `isSessionIdle` uses; user-only, since those are the messages a
+dispatch creates). A prompt failure does not immediately decide the outcome:
+the dispatch polls the tail up to four times, ~400 ms apart (~1.6 s total),
+for a user-message id that was not in the snapshot. A new id means the send
+landed: `dispatched` with `delivery: 'confirmed-after-failure'` — the item is
+removed and the hold released exactly like a normal success. Every poll
+succeeding with no new id is a definite failure: the item is removed and the
+hold released without any raw or queued re-delivery. If the pre-send snapshot
+or any poll fails, the outcome is `unknown` (never guessed): the item, the
+claim, and the hold stay reserved, and the owner retries the dispatch. A
+recent prior user message is never mistaken for the dispatch — the check is
+id-difference, not time. There is no tick-side retry bookkeeping for consult
+dispatches — the owner drives retries.
+
+The prompt body is built exactly as `sendItem` builds it, plus a top-level
+`system` and the consult metadata attached to the primary text part the way a
+context part carries its metadata; it always takes the prompt route. The
+metadata carrier must be a text part: an attachment-only consult message
+dispatches normally but carries no receipt (OpenCode's file parts have no
+metadata field).
+
+### Parent-session prompt gate
+
+`hasActiveConsultReservation(sessionId)` is true while the session's queue
+holds at least one consult item whose claim owner still has a live hold (the
+same lazy-pruning hold read the rest of the runtime uses; items are never
+mutated). The OpenCode proxy mounts a fail-open gate on `/api` before the
+forwarding handler: a POST to `/session/<id>/prompt_async`, `/message`,
+`/prompt`, or `/command` for a reserved session is answered
+`409 { error: 'consult-reservation', … }` and never forwarded, so another
+OpenChamber surface (or a script) cannot start a turn in a session a Consult
+Models run owns. Other methods and routes pass through untouched, and a gate
+failure logs and fails open. The queue's own dispatch is unaffected: it calls
+OpenCode directly through `openCodeFetch` (built from `buildOpenCodeUrl`), not
+through the `/api` proxy.
+
+### Sweep and restart
+
+A consult item never turns back into a normal item: the user's consult intent
+survives a lapsed reservation and a server restart. The expiry sweep
+(`pruneExpiredHolds`, running on every hold mutation and from the
+tick/snapshot read paths) clears a lapsed claim: `claimed` and the stale
+`consult` payload are dropped, `kind: 'consult'` stays, and the cleared claim
+is committed and broadcast. The item keeps its message content (text,
+attachments, context, sendConfig, contextPreview) and keeps blocking the queue
+— the generic dispatcher still refuses to send it. Holds are memory-only, so
+on startup every persisted consult item is restored unclaimed (stale `claimed`
+and `consult` dropped, kind kept) and is likewise never tick-delivered. A
+stuck consult item is removed only by an explicit user action (`remove`/
+`clear`); `take` refuses consult items with a 409 `consult-item` reason and
+`takeAll` skips them, so a raw-send client can never lose the consult intent.
+This is the no-raw-delivery guarantee: a consult message is either dispatched
+through its own route or deleted by the user.
 
 ## Routes (`/api/message-queue`)
 
@@ -233,14 +280,14 @@ allowlists.
 | `GET /api/message-queue` | Full snapshot `{ revision, sessions[] }` |
 | `POST .../sessions/:id/items` | Append `{ directory, item }`; returns `{ revision, session, itemId }` and arms a dispatch (the session may already be idle) |
 | `DELETE .../sessions/:id/items/:itemId` | Remove; `409` while that item is in flight |
-| `POST .../sessions/:id/items/:itemId/take` | Remove and return the full item (payloads included); `404`/`409` |
-| `POST .../sessions/:id/take` | Remove and return every item not in flight, in order |
+| `POST .../sessions/:id/items/:itemId/take` | Remove and return the full item (payloads included); `404`/`409` (consult items refuse with `consult-item`) |
+| `POST .../sessions/:id/take` | Remove and return every normal item not in flight, in order (consult items are skipped) |
 | `PUT .../sessions/:id/order` | `{ itemIds }` must be a complete permutation |
 | `DELETE .../sessions/:id` | Clear; the in-flight item stays |
 | `PUT .../sessions/:id/hold` | `{ held, ttlMs?, owner? }`; per-owner TTL, held while any owner is live |
 | `POST .../sessions/:id/items/:itemId/claim` | `{ owner?, ttlMs? }`; reserve the head consult item; `409` reasons: `not found`, `not-consult`, `not-head`, `sending`, `already-claimed`, `not-idle` |
 | `POST .../sessions/:id/items/:itemId/payload` | `{ owner?, consult }`; merge the claimed item's consult payload; `409`: `not found`/`not-consult`/`not-claiming`/`sending`, `400` on size violations |
-| `POST .../sessions/:id/items/:itemId/dispatch-consult` | `{ owner? }`; dispatch the claimed consult item on its dedicated route; `409`: `not found`/`not-consult`/`not-claiming`/`sending`/`lost`/`not-idle`/`busy`, `502` on prompt failure |
+| `POST .../sessions/:id/items/:itemId/dispatch-consult` | `{ owner? }`; dispatch the claimed consult item on its dedicated route; always `200` with a structured outcome (`dispatched`/`busy`/`claim-lost`/`not-found`/`not-consult`/`sending`/`send-failed`), `400`/`500` only for malformed/unexpected errors |
 
 Every mutation broadcasts `openchamber:message-queue.updated` with
 `{ revision, session }` to all connected clients (SSE and WS), so several
@@ -255,7 +302,10 @@ session is deleted or evicted).
 
 Limits: 20 items per session, 50 sessions (oldest evicted, never one with an
 item in flight), 200k characters of content; attachment payloads are bounded
-by the route family's 50 MB JSON limit.
+by the route family's 50 MB JSON limit. When a session's queue is full, a new
+enqueue evicts the oldest **normal** item, never a consult item; if every
+slot holds a pending consultation the enqueue is refused with a `409`
+instead of silently dropping one.
 
 ## UI ownership
 

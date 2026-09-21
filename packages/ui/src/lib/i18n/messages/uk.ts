@@ -3428,6 +3428,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.autoReview': 'Поради з моделями недоступні, поки в цій сесії триває цикл код-ревʼю',
   'chat.consult.unavailable.btw': 'Поради з моделями недоступні, поки активна сесія btw',
   'chat.consult.unavailable.runtime': 'Для порад з моделями потрібна черга повідомлень сервера OpenChamber, тут вона недоступна',
+  'chat.consult.unavailable.checkingVersion': 'Перевірка версії OpenCode підключеного сервера…',
   'chat.consult.unavailable.versionUnknown': 'Для порад з моделями потрібен OpenCode {version} або новіший; не вдалося перевірити версію підключеного сервера.',
   'chat.consult.unavailable.versionUnsupported': 'Поради з моделями недоступні, бо OpenCode {version} старіша за підтримувану версію {minVersion}.',
 

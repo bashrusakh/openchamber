@@ -3444,6 +3444,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.autoReview': 'Konsultowanie modeli jest niedostępne, gdy w tej sesji trwa pętla code review',
   'chat.consult.unavailable.btw': 'Konsultowanie modeli jest niedostępne, gdy sesja btw jest aktywna',
   'chat.consult.unavailable.runtime': 'Konsultowanie modeli wymaga kolejki wiadomości serwera OpenChamber i jest tutaj niedostępne',
+  'chat.consult.unavailable.checkingVersion': 'Sprawdzanie wersji OpenCode połączonego serwera…',
   'chat.consult.unavailable.versionUnknown': 'Konsultowanie modeli wymaga OpenCode {version} lub nowszego; nie udało się zweryfikować wersji połączonego serwera.',
   'chat.consult.unavailable.versionUnsupported': 'Konsultowanie modeli jest niedostępne, ponieważ OpenCode {version} jest starsza niż obsługiwana wersja {minVersion}.',
 

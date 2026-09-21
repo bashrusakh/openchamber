@@ -42,6 +42,9 @@ type ServerReply = {
   items?: ServerItem[]
   claimed?: boolean
   dispatched?: boolean
+  status?: string
+  delivery?: string
+  delivered?: string
 }
 
 const json = (value: ServerReply, status = 200) => new Response(JSON.stringify(value), { status })
@@ -514,20 +517,43 @@ describe("server-owned message queue", () => {
     expect(calls[0]).toEqual({ method: "POST", path: "/api/message-queue/sessions/session-1/items/q1/payload", body: { owner: "consult:run-1", consult: { system: "be terse" } } })
   })
 
-  test("dispatchConsultItem resolves the removed item on success", async () => {
-    respond = () => json({ dispatched: true, item: serverItem("q1", "the consult", { kind: "consult" }) })
+  test("dispatchConsultItem projects the removed item on a dispatched outcome", async () => {
+    respond = () => json({ status: "dispatched", item: serverItem("q1", "the consult", { kind: "consult" }) })
     const dispatched = await useMessageQueueStore.getState().dispatchConsultItem(target, "q1", "consult:run-1")
     expect(calls[0]).toEqual({ method: "POST", path: "/api/message-queue/sessions/session-1/items/q1/dispatch-consult", body: { owner: "consult:run-1" } })
-    expect(dispatched).toMatchObject({ id: "q1", kind: "consult" })
+    expect(dispatched).toMatchObject({ status: "dispatched", item: { id: "q1", kind: "consult" } })
     // No second fetch: the response body is parsed from the same response.
     expect(calls).toHaveLength(1)
   })
 
-  test("dispatchConsultItem resolves null on the busy refusal and throws on other failures", async () => {
-    respond = () => new Response(JSON.stringify({ error: "cannot dispatch consult: busy" }), { status: 409 })
-    expect(await useMessageQueueStore.getState().dispatchConsultItem(target, "q1", "consult:run-1")).toBeNull()
+  test("dispatchConsultItem parses every structured outcome", async () => {
+    const outcomes = [
+      { status: "busy" },
+      { status: "claim-lost" },
+      { status: "not-found" },
+      { status: "not-consult" },
+      { status: "sending" },
+      { status: "send-failed", delivered: "no" },
+      { status: "send-failed", delivered: "unknown" },
+      { status: "dispatched" },
+      { status: "dispatched", item: serverItem("q1", "the consult"), delivery: "confirmed-after-failure" },
+    ]
+    for (const outcome of outcomes) {
+      respond = () => json(outcome)
+      const parsed = await useMessageQueueStore.getState().dispatchConsultItem(target, "q1", "consult:run-1")
+      // The item projection is mapped through toQueuedMessage; the outcome
+      // status (and its carry fields) are what the caller switches on.
+      expect(parsed.status).toBe(outcome.status)
+      if ("delivered" in outcome) expect(parsed).toMatchObject({ delivered: outcome.delivered })
+      if ("delivery" in outcome && outcome.delivery) expect(parsed).toMatchObject({ delivery: outcome.delivery })
+      if (outcome.status === "dispatched" && "item" in outcome) {
+        expect(parsed).toMatchObject({ item: { id: "q1" } })
+      }
+    }
+  })
 
-    respond = () => new Response(JSON.stringify({ error: "consult dispatch failed: boom" }), { status: 502 })
+  test("dispatchConsultItem throws on non-2xx (malformed or unexpected failures)", async () => {
+    respond = () => new Response(JSON.stringify({ error: "consult dispatch failed: boom" }), { status: 500 })
     await expect(useMessageQueueStore.getState().dispatchConsultItem(target, "q1", "consult:run-1")).rejects.toThrow("boom")
   })
 })

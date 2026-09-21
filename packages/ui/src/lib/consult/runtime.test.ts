@@ -1012,16 +1012,30 @@ describe('prevalidateConsultation (F2)', () => {
     ]);
   });
 
-  test('throws no-settled-context for an unfinished parent without creating a fork', async () => {
+  test('succeeds for an unfinished parent: the fork point is a start-time concern', async () => {
     const harness = createHarness();
+    // A turn is running and there is no completed assistant message yet; the
+    // pre-enqueue check must not refuse, because the parent may settle while
+    // the item waits for its claim.
     harness.state.parentMessages = [userMessage('p1'), assistantMessage('p2', undefined)];
-    const refusal = await harness.runtime.prevalidateConsultation(baseInput()).then(
-      () => null,
+    const outcome = await harness.runtime.prevalidateConsultation(baseInput()).then(
+      () => 'ok',
       (error: Error) => error,
     );
 
-    expect(refusal).toBeInstanceOf(ConsultationRefusedError);
-    if (!(refusal instanceof ConsultationRefusedError)) throw new Error('expected a refusal');
+    expect(outcome).toBe('ok');
+    expect(harness.state.forkCalls).toEqual([]);
+    expect(harness.state.sent).toEqual([]);
+    // The transcript is not even read: the surface is the only prevalidation.
+    expect(harness.state.calls).toEqual(['providers:/work', 'agents:/work']);
+  });
+
+  test('startConsultation still refuses no-settled-context in that state', async () => {
+    const harness = createHarness();
+    harness.state.parentMessages = [userMessage('p1'), assistantMessage('p2', undefined)];
+    const handle = harness.runtime.startConsultation(baseInput());
+
+    const refusal = await refusalOf(handle);
     expect(refusal.code).toBe('no-settled-context');
     expect(harness.state.forkCalls).toEqual([]);
     expect(harness.state.sent).toEqual([]);

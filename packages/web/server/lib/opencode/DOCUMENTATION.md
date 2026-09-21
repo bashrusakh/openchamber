@@ -66,7 +66,7 @@ This module provides OpenCode server integration utilities for the web server ru
   `theme-archive.js` reads selected JSON entries in memory with bounded decompression.
   JSON includes and token references stay inside the package. Each failed variant
   is reported separately so valid siblings remain available. No extension code runs.
-- `packages/web/server/lib/opencode/proxy.js`: OpenCode API/SSE forwarding and readiness-gate route registration.
+- `packages/web/server/lib/opencode/proxy.js`: OpenCode API/SSE forwarding, the readiness gate, and the consult-reservation prompt gate (POST `/session/<id>/{prompt_async,message,prompt,command}` → 409 `consult-reservation` while the message queue holds a live consult claim; fail-open, other methods/routes untouched).
 - `packages/web/server/lib/opencode/session-runtime.js`: session status/attention/activity runtime for OpenCode SSE events.
 - `packages/web/server/lib/opencode/watcher.js`: global SSE watcher runtime for push/session event fanout.
 - `packages/web/server/lib/opencode/shared.js`: shared utilities for config, markdown, skills, and git helpers.

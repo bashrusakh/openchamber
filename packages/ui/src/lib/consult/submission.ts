@@ -1,9 +1,10 @@
-import type { TextPartInput } from '@opencode-ai/sdk/v2/client';
 import { resolveQueuedSessionStatusType } from '@/hooks/useQueuedMessageAutoSend';
 import { getRuntimeKey } from '@/lib/runtime-switch';
+import { CONSULT_MIN_OPENCODE_VERSION, resolveConsultLiveCapability } from '@/lib/consult/capability';
 import {
   createMessageQueueTarget,
   useMessageQueueStore,
+  type ConsultDispatchOutcome,
   type MessageQueueTarget,
   type QueuedContextPart,
   type QueuedMessage,
@@ -80,10 +81,10 @@ import {
  *   own captured payload and nothing is sent;
  * - cancel before admission removes the item and releases the hold; the caller
  *   restores the composer from its own captured payload and nothing is sent;
- * - the item leaving the queue without this submission taking it (the hold
- *   lapsed and the server delivered it raw, or another client removed it) is
- *   `delivered-raw`: the caller must not restore the composer and must not
- *   re-send, because the message is already delivered or no longer queued;
+ * - the item leaving the queue without this submission claiming and
+ *   dispatching it (another client removed it, for example) is
+ *   `delivered-raw`: a consult item is never delivered as a normal send, so
+ *   the caller must not restore the composer and must not re-send;
  * - a refusal or failure AFTER the claim removes the consult item and releases
  *   the hold — the message is never re-queued for a normal delivery;
  *   `queueItemRestored` stays `false` and the caller restores the composer;
@@ -100,10 +101,11 @@ import {
  *   anything is queued or held.
  *
  * The honest hole (plan section 6, D5): if the UI disappears mid-consult, the
- * heartbeat dies with it, the hold expires, and the server delivers the raw
- * message without the consultation. This module still cannot close that hole
- * client-side, but it now detects the outcome (`delivered-raw`) instead of
- * reporting a cancel that would restore the composer and duplicate the send.
+ * heartbeat dies with it and the hold expires; the consult item stays queued
+ * (unclaimed, kind kept) and is never delivered as a normal send. The module
+ * detects the item leaving the queue without this run (`delivered-raw`)
+ * instead of reporting a cancel that would restore the composer and duplicate
+ * the send; a stranded item is recovered by removal or a fresh consultation.
  *
  * The module is dependency-injected (`createConsultSubmission`) so every
  * branch - hold acquisition order, heartbeat, head wait, idle wait, claim,
@@ -125,7 +127,7 @@ export const CONSULT_HOLD_REASSERT_MS = 2 * 60 * 1000;
 
 const RUNTIME_CHANGED_MESSAGE = 'The runtime changed before the consultation was dispatched.';
 const DELIVERED_RAW_MESSAGE =
-  'The queued consult message was delivered without a consultation before it could be taken.';
+  'The queued consult message left the queue before this consultation could dispatch it.';
 const AUTO_REVIEW_ACTIVE_MESSAGE =
   'A consultation cannot start while the automatic review loop is running for this session.';
 
@@ -197,7 +199,7 @@ export type ConsultSubmissionResult =
      * An advisor-runtime refusal code, or `auto-review-active` for the
      * admission-time refusal raised by this module.
      */
-    code: ConsultationRefusalCode | 'auto-review-active';
+    code: ConsultationRefusalCode | 'auto-review-active' | 'capability-unavailable';
     error: string;
     rejections: readonly ConsultAdvisorRejection[];
     queueItemRestored: boolean;
@@ -208,14 +210,21 @@ export type ConsultSubmissionResult =
     error: string;
     queueItemRestored: boolean;
     consultation?: ConsultationResult;
+    /**
+     * The dispatch outcome is unconfirmed (an in-flight send, an
+     * indeterminate failure, or a transport error): the composer must not
+     * restore the capture because the message may already be on its way.
+     */
+    uncertain?: boolean;
   }
   | {
     /**
-     * The consult item left the server queue without this submission taking
-     * it: the server delivered the raw message (a lost or expired hold) or
-     * another client removed it. The caller must not restore the composer and
-     * must not re-send — the message is already delivered or no longer queued —
-     * and should tell the user the consultation did not happen.
+     * The consult item left the server queue without this submission
+     * dispatching it (for example another client removed it). A consult item
+     * is only ever sent by its own dispatch route, so it cannot have gone out
+     * raw as a normal message; the caller must not restore the composer and
+     * must not re-send, and should tell the user the consultation did not
+     * happen.
      */
     status: 'delivered-raw';
     runId: string;
@@ -232,33 +241,6 @@ export type ConsultSubmissionHandle = {
    * advisor runtime. Unavailable once the acting turn is being dispatched.
    */
   cancel: () => void;
-};
-
-/**
- * The acting send's settled payload, as the submission builds it. The live
- * wiring no longer sends it through `useSessionUIStore.sendMessage`: the
- * system prompt and receipt metadata go to the claimed consult item via
- * `setConsultItemPayload`, and the item is sent by `dispatchConsultItem` (the
- * server's dedicated consult route). The fields remain because injected
- * submissions may still deliver a turn themselves.
- */
-export type ConsultActingTurn = {
-  parentSessionId: string;
-  directory: string;
-  target: MessageQueueTarget;
-  runtimeKey: string;
-  message: {
-    content: string;
-    text: string;
-    agentMentionName?: string;
-    attachments?: AttachedFile[];
-    context: readonly QueuedContextPart[];
-  };
-  sendConfig: ConsultSubmissionSendConfig;
-  /** Turn-scoped guidance; the original message text is not modified. */
-  system: string;
-  /** Bounded receipt carrier for the acting user message's primary text part. */
-  textPartMetadata: TextPartInput['metadata'];
 };
 
 /** A queue item as `addToQueue` accepts it (mirrors the composer's capture). */
@@ -286,8 +268,8 @@ export type ConsultSubmissionQueue = {
     owner: string | undefined,
     consult: { system?: string; textPartMetadata?: unknown },
   ) => Promise<void>;
-  /** Dispatches the claimed consult item; `null` means busy/not-idle (the item stays queued). */
-  dispatchConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string) => Promise<QueuedMessage | null>;
+  /** Dispatches the claimed consult item; answers every control-flow case with a structured outcome. */
+  dispatchConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string) => Promise<ConsultDispatchOutcome>;
   getQueueForTarget: (target: MessageQueueTarget) => readonly QueuedMessage[];
   /** `owner` scopes the hold so it never clears another feature's hold. */
   setServerHold: (sessionId: string, held: boolean, owner?: string) => Promise<void>;
@@ -328,8 +310,6 @@ export type ConsultSubmissionDeps = {
   queue: ConsultSubmissionQueue;
   runs: ConsultSubmissionRunStore;
   runtime: ConsultSubmissionRuntime;
-  /** Dispatches the original message into the parent with the guidance. */
-  sendActingTurn: (turn: ConsultActingTurn) => Promise<void>;
   /** Live status used for admission; defaults to the queue gate's resolver. */
   resolveSessionStatus: (sessionId: string, directory: string) => ConsultSessionStatus;
   /**
@@ -338,6 +318,12 @@ export type ConsultSubmissionDeps = {
    * runs; defaults to `useAutoReviewStore.getState().isRunningForSession`.
    */
   isAutoReviewRunning: (sessionId: string) => boolean;
+  /**
+   * Server capability re-check (F3 close-out): the UI gate is not the only
+   * boundary, so every submission re-verifies the connected server before it
+   * holds or enqueues anything. Defaults to `resolveConsultLiveCapability`.
+   */
+  verifyCapability: () => Promise<{ available: true } | { available: false; reason: string; message?: string }>;
   runtimeKey: () => string;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
@@ -366,7 +352,14 @@ type SubmissionCapture = {
   heartbeatStop: (() => void) | null;
   cancelled: boolean;
   runtimeStarted: boolean;
+  /** True only while a dispatch request is actually in flight. */
   dispatching: boolean;
+  /**
+   * A cancel that arrived while a dispatch request was in flight: ignored for
+   * that request (it may already be sending), applied after it settles unless
+   * the outcome was `dispatched`.
+   */
+  cancelRequested: boolean;
   terminal: boolean;
 };
 
@@ -617,8 +610,8 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
           await deps.sleep(admissionPollMs);
           continue;
         }
-        // The item vanished while the claim was refused: the hold lapsed and
-        // the server delivered the raw message, or another client removed it.
+        // The item vanished while the claim was refused: another client
+        // removed it (a consult item is never delivered raw by the server).
         throw error;
       }
     }
@@ -631,6 +624,32 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
   ): Promise<ConsultSubmissionResult> => {
     const { parentSessionId } = input;
     const { runId } = capture;
+
+    // The submission is the last boundary: even a caller that bypassed the
+    // composer's live gate must not hold or enqueue on an unverified server.
+    let capability: { available: true } | { available: false; reason: string; message?: string };
+    try {
+      capability = await deps.verifyCapability();
+    } catch (error) {
+      capability = {
+        available: false,
+        reason: 'version-unknown',
+        message: `The connected server could not be verified: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    if (!capability.available) {
+      const error = capability.message
+        ?? `Consult Models needs OpenCode ${CONSULT_MIN_OPENCODE_VERSION} or newer; the connected server could not be verified (${capability.reason}).`;
+      deps.runs.finish(parentSessionId, runId, { phase: 'failed', error });
+      return {
+        status: 'refused',
+        runId,
+        code: 'capability-unavailable',
+        error,
+        rejections: [],
+        queueItemRestored: false,
+      };
+    }
 
     // Auto-review owns the parent and drives it through the queue only: a
     // consult must not enqueue, hold, or dispatch while that loop runs.
@@ -753,7 +772,7 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     try {
       await deps.queue.setServerHold(parentSessionId, true, consultHoldOwner(runId));
     } catch (error) {
-      // Without the hold the server may deliver the raw message; nothing was
+      // Without the hold the reservation cannot be trusted; nothing was
       // enqueued, so there is nothing to clean up.
       await releaseHold(capture);
       return fail(`Could not hold the session queue for the consult: ${error instanceof Error ? error.message : String(error)}`);
@@ -804,8 +823,8 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       if (admission === 'runtime-changed') return finishRuntimeChanged();
       if (admission === 'item-removed') {
         // The item left the queue while this submission was waiting for
-        // admission: the hold lapsed and the server delivered the raw message,
-        // or another client removed it. Never restore and never re-send.
+        // admission: another client removed it (the server never delivers a
+        // consult item raw). Never restore and never re-send.
         await releaseHold(capture);
         return finishDeliveredRaw();
       }
@@ -835,18 +854,18 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       if (!runtimeMatches(capture, deps)) return finishRuntimeChanged();
       const message = error instanceof Error ? error.message : String(error);
       // A 'not found' refusal with the item gone from the projection means
-      // the item left the queue without this submission claiming it: the
-      // hold lapsed and the server delivered the raw message, or another
-      // client removed it. Never restore the composer (a duplicate send)
-      // and never re-send — delivered-raw semantics, like the admission
-      // watcher's item-removed outcome.
+      // the item left the queue without this submission claiming it (another
+      // client removed it). Never restore the composer (a duplicate send) and
+      // never re-send — delivered-raw semantics, like the admission watcher's
+      // item-removed outcome.
       const itemGone = !deps.queue.getQueueForTarget(target).some((entry) => entry.id === itemId);
       if (itemGone && /not found/.test(message)) {
         await releaseHold(capture);
         return finishDeliveredRaw();
       }
       // The claim may not have marked the item; releasing the hold lets the
-      // sweep revert the item for normal delivery instead of stranding it.
+      // sweep clear a stale claim. The item keeps `kind: 'consult'`, so it is
+      // never delivered as a normal send — the caller restores the composer.
       await releaseHold(capture);
       return fail(`Could not claim the queued consult item: ${message}`);
     }
@@ -855,7 +874,7 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     const takenItem = claimedItem;
     if (!takenItem) {
       // The claim resolved with nothing: the item left the queue without
-      // reaching this submission, so it may already be delivered raw.
+      // reaching this submission (another client removed it).
       await releaseHold(capture);
       return finishDeliveredRaw();
     }
@@ -922,7 +941,8 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     if (!runtimeMatches(capture, deps)) return finishRuntimeChanged(consultation);
     if (consultation.status === 'cancelled') {
       // The claimed item must never survive a cancel: remove it so it cannot
-      // be dispatched or revert to a normal send.
+      // be dispatched later; a consult item is never delivered as a normal
+      // send.
       if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
       await releaseHold(capture);
       return finishCancelled(consultation);
@@ -944,15 +964,15 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       degraded,
     });
     deps.runs.setPhase(parentSessionId, runId, 'dispatching');
-    capture.dispatching = true;
+    const consultPayload = {
+      system: buildConsultSynthesisSystem(consultation.blocks),
+      textPartMetadata: toConsultReceiptMetadata(receipt),
+    };
     // The consult payload (synthesis system + receipt metadata) is merged onto
     // the claimed item first, so the dispatch route sends the settled
     // consultation with the item's own content.
     try {
-      await deps.queue.setConsultItemPayload(target, itemId, consultHoldOwner(capture.runId), {
-        system: buildConsultSynthesisSystem(consultation.blocks),
-        textPartMetadata: toConsultReceiptMetadata(receipt),
-      });
+      await deps.queue.setConsultItemPayload(target, itemId, consultHoldOwner(capture.runId), consultPayload);
     } catch (error) {
       return settleWithoutDispatch(
         itemId,
@@ -961,20 +981,115 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       );
     }
 
+    /**
+     * The dispatch outcome is unconfirmed: the message may already be on its
+     * way, so the capture is never restored and the item is left to the
+     * server/owner. The composer keeps its capture cleared.
+     */
+    const settleUncertain = async (error: string): Promise<ConsultSubmissionResult> => {
+      await releaseHold(capture);
+      deps.runs.finish(parentSessionId, runId, { phase: 'failed', error });
+      return { status: 'failed', runId, error, queueItemRestored: false, uncertain: true };
+    };
+
     // The acting turn goes through the consult item's own dispatch route: the
     // server verifies the claim, waits for idleness, sends the item with its
-    // merged payload, removes it, and releases this owner's hold. A `null`
-    // resolution is a busy refusal: the server kept the item, and the caller
-    // (the composer flow) re-polls; the run has nothing to dispatch here.
-    try {
-      const dispatched = await deps.queue.dispatchConsultItem(target, itemId, consultHoldOwner(capture.runId));
-      if (dispatched === null) {
-        await releaseHold(capture);
-        return fail('The session stayed busy; the consult message remains queued for its next dispatch attempt.');
+    // merged payload, removes it, and releases this owner's hold. Every
+    // control-flow answer is a structured outcome: busy is retryable, a lost
+    // claim is re-established and the payload re-set, and a definite failure
+    // removes the item while an ambiguous one keeps it reserved.
+    let reclaims = 0;
+    for (;;) {
+      // A cancel recorded while a dispatch request was in flight is applied
+      // here, once that request has settled without reporting `dispatched`.
+      if (capture.cancelRequested && !capture.cancelled) {
+        capture.cancelled = true;
+        stopHoldHeartbeat(capture);
+        deps.runs.cancel(parentSessionId, runId);
+        if (capture.runtimeStarted && runtimeMatches(capture, deps)) {
+          void deps.runtime.cancel(runId);
+        }
       }
-    } catch (error) {
-      await releaseHold(capture);
-      return fail(`The acting message could not be sent: ${error instanceof Error ? error.message : String(error)}`);
+      if (capture.cancelled || deps.runs.currentPhase(parentSessionId, runId) === 'cancelled') {
+        if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
+        await releaseHold(capture);
+        return finishCancelled(consultation);
+      }
+      if (!runtimeMatches(capture, deps)) return finishRuntimeChanged(consultation);
+      if (deps.isAutoReviewRunning(parentSessionId)) {
+        if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
+        await releaseHold(capture);
+        return finishCancelled(consultation);
+      }
+
+      let outcome: ConsultDispatchOutcome;
+      // Only a request that is actually in flight blocks cancellation; the
+      // waiting between attempts stays cancellable.
+      capture.dispatching = true;
+      try {
+        outcome = await deps.queue.dispatchConsultItem(target, itemId, consultHoldOwner(capture.runId));
+      } catch (error) {
+        capture.dispatching = false;
+        return settleUncertain(
+          `The acting message could not be sent: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      capture.dispatching = false;
+
+      if (outcome.status === 'dispatched') break;
+      if (outcome.status === 'busy') {
+        // Not terminal: the server kept the item; wait out the busy window and
+        // retry after re-checking cancel/runtime/auto-review above.
+        await deps.sleep(750);
+        continue;
+      }
+      if (outcome.status === 'claim-lost') {
+        if (reclaims >= 3) {
+          return settleWithoutDispatch(
+            itemId,
+            'The consult reservation could not be re-established; the message was not sent.',
+            null,
+          );
+        }
+        reclaims += 1;
+        try {
+          await waitForClaim(input, target, capture, itemId);
+        } catch (error) {
+          return settleWithoutDispatch(
+            itemId,
+            `The consult reservation could not be re-established: ${error instanceof Error ? error.message : String(error)}`,
+            null,
+          );
+        }
+        // The fresh claim needs the settled payload again before the retry.
+        try {
+          await deps.queue.setConsultItemPayload(target, itemId, consultHoldOwner(capture.runId), consultPayload);
+        } catch (error) {
+          return settleWithoutDispatch(
+            itemId,
+            `The consult payload could not be updated: ${error instanceof Error ? error.message : String(error)}`,
+            null,
+          );
+        }
+        continue;
+      }
+      if (outcome.status === 'sending') {
+        return settleUncertain(
+          'Another dispatch is already in flight for this consult message, so the outcome is unconfirmed; check the session before retrying.',
+        );
+      }
+      if (outcome.status === 'send-failed' && outcome.delivered === 'unknown') {
+        return settleUncertain(
+          'The consult message could not be confirmed as sent. It stays queued as a consult item and will never be sent without a new consultation; check the session.',
+        );
+      }
+      // not-found / not-consult / send-failed 'no': the message was not sent
+      // and (where the server removed it) is no longer queued — a definite
+      // failure the caller restores.
+      const detail = outcome.status === 'send-failed'
+        ? `the server reported it was not delivered (${outcome.delivered})`
+        : `the server answered ${outcome.status}`;
+      return settleWithoutDispatch(itemId, `The acting message could not be sent: ${detail}.`, null);
     }
 
     // The server already removed the item and released this owner's hold on a
@@ -1019,11 +1134,19 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       cancelled: false,
       runtimeStarted: false,
       dispatching: false,
+      cancelRequested: false,
       terminal: false,
     };
 
     const cancel = (): void => {
-      if (capture.cancelled || capture.dispatching || capture.terminal) return;
+      if (capture.cancelled || capture.terminal) return;
+      if (capture.dispatching) {
+        // A dispatch request is in flight and may already be sending: the
+        // cancel is recorded and applied after the request settles, unless it
+        // comes back `dispatched` (then the turn happened and stands).
+        capture.cancelRequested = true;
+        return;
+      }
       capture.cancelled = true;
       // The heartbeat stops now; the run task releases the hold itself on the
       // path it takes after observing the cancellation.
@@ -1099,19 +1222,13 @@ const defaultDeps = (): ConsultSubmissionDeps => ({
       await consultRuntime.prevalidateConsultation(input);
     },
   },
-  // The acting turn no longer goes through useSessionUIStore.sendMessage:
-  // the payload route carries the synthesis system and receipt metadata onto
-  // the claimed consult item, and dispatchConsultItem asks the server to send
-  // it on the item's own route (which also removes it and releases the hold).
-  // The default implementation is unused by the new flow but kept as a thin
-  // adapter for injected turns: it maps the turn onto the queue dispatch.
-  sendActingTurn: async (turn) => {
-    const queue = useMessageQueueStore.getState();
-    const dispatched = await queue.dispatchConsultItem(turn.target, turn.message.text ? turn.target.sessionId : turn.target.sessionId, undefined);
-    if (dispatched === null) throw new Error('The session stayed busy; the consult message remains queued.');
-  },
   resolveSessionStatus: resolveQueuedSessionStatusType,
   isAutoReviewRunning: (sessionId) => useAutoReviewStore.getState().isRunningForSession(sessionId),
+  verifyCapability: async () => {
+    const capability = await resolveConsultLiveCapability();
+    if (capability.available) return { available: true };
+    return { available: false, reason: capability.reason };
+  },
   runtimeKey: getRuntimeKey,
   now: () => Date.now(),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),

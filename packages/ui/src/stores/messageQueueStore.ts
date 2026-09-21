@@ -238,14 +238,36 @@ const serverTakeResponseSchema = serverSessionResponseSchema.extend({ item: serv
 const serverTakeAllResponseSchema = serverSessionResponseSchema.extend({ items: z.array(serverItemSchema) });
 const serverClaimResponseSchema = z.object({ claimed: z.literal(true), item: serverItemSchema });
 /**
- * The consult dispatch route's own body: `{ dispatched: true, item }` on
- * success (the item is the removed consult item), and a refusal is a
- * non-2xx status (409 busy/not-idle keeps the item; the caller re-polls).
+ * The consult dispatch route answers every control-flow case with HTTP 200
+ * and a structured outcome; only malformed requests or unexpected failures
+ * are non-2xx. `dispatched` carries the removed item; `busy`/`claim-lost`/
+ * `sending` leave the claim and item untouched; `send-failed` says whether
+ * the prompt landed (`no`), did not (`unknown` is indeterminate and keeps the
+ * item reserved).
  */
-const serverConsultDispatchResponseSchema = z.object({
-  dispatched: z.literal(true),
-  item: serverItemSchema.optional(),
-});
+const serverConsultDispatchResponseSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('dispatched'),
+    item: serverItemSchema.optional(),
+    delivery: z.literal('confirmed-after-failure').optional(),
+  }),
+  z.object({ status: z.literal('busy') }),
+  z.object({ status: z.literal('claim-lost') }),
+  z.object({ status: z.literal('not-found') }),
+  z.object({ status: z.literal('not-consult') }),
+  z.object({ status: z.literal('sending') }),
+  z.object({ status: z.literal('send-failed'), delivered: z.enum(['no', 'unknown']) }),
+]);
+
+/** The store-facing dispatch outcome: the server body with the item projected. */
+export type ConsultDispatchOutcome =
+  | { status: 'dispatched'; item?: QueuedMessage; delivery?: 'confirmed-after-failure' }
+  | { status: 'busy' }
+  | { status: 'claim-lost' }
+  | { status: 'not-found' }
+  | { status: 'not-consult' }
+  | { status: 'sending' }
+  | { status: 'send-failed'; delivered: 'no' | 'unknown' };
 
 /** Error body of a refused consult route: `{ error: 'cannot claim ...: <reason>' }`. */
 const serverConsultErrorSchema = z.object({ error: z.string() });
@@ -459,10 +481,10 @@ interface MessageQueueActions {
     setConsultItemPayload: (target: MessageQueueTarget, messageId: string, owner: string | undefined, consult: ConsultPayload) => Promise<void>;
     /**
      * Server-owned queue: dispatch the claimed consult item on its dedicated
-     * route. Resolves with the removed item on success; `null` on a
-     * `busy`/`not-idle` refusal (the item stays queued — the caller re-polls).
+     * route. Every control-flow answer is a structured outcome; non-2xx is
+     * reserved for malformed/unexpected failures and throws.
      */
-    dispatchConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string) => Promise<QueuedMessage | null>;
+    dispatchConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string) => Promise<ConsultDispatchOutcome>;
     resetForRuntimeSwitch: (previousRuntimeKey: string | null | undefined) => void;
 }
 
@@ -934,22 +956,23 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     },
 
                     dispatchConsultItem: async (target, messageId, owner) => {
-                        if (!isServerOwnedMessageQueue()) return null;
+                        if (!isServerOwnedMessageQueue()) return { status: 'not-found' };
                         const body: Extract<ServerQueueRequestBody, { owner?: string; ttlMs?: number }> = {};
                         if (owner) body.owner = owner;
                         const response = await runtimeFetch(
                             `${sessionPath(target.sessionId)}/items/${encodeURIComponent(messageId)}/dispatch-consult`,
                             jsonInit('POST', body),
                         );
-                        if (response.status === 409) {
-                            // busy / not-idle: the server kept the item; the caller re-polls.
-                            return null;
-                        }
+                        // Non-2xx is reserved for malformed/unexpected failures;
+                        // every control-flow answer is a 200 structured body.
                         if (!response.ok) throw consultReasonError(response.status, await response.json().then((raw) => serverConsultErrorSchema.safeParse(raw)).then((parsed) => parsed.success ? parsed.data : null).catch(() => null));
-                        // The dispatch route's own body carries the removed
-                        // item; no second fetch, the body is already in hand.
                         const result = serverConsultDispatchResponseSchema.parse(await response.json());
-                        return result.item ? toQueuedMessage(result.item) : null;
+                        if (result.status !== 'dispatched') return result;
+                        const outcome: ConsultDispatchOutcome = result.item
+                            ? { status: 'dispatched', item: toQueuedMessage(result.item) }
+                            : { status: 'dispatched' };
+                        if (result.delivery) outcome.delivery = result.delivery;
+                        return outcome;
                     },
 
                     resetForRuntimeSwitch: (previousRuntimeKey) => {

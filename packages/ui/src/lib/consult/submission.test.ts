@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { MessageQueueTarget, QueuedContextPart, QueuedMessage } from '@/stores/messageQueueStore';
+import type { ConsultDispatchOutcome, MessageQueueTarget, QueuedContextPart, QueuedMessage } from '@/stores/messageQueueStore';
 import type { AttachedFile } from '@/stores/types/sessionTypes';
 import type { ConsultRunFinish, ConsultRunPhase, ConsultRunStartInput } from '@/stores/useConsultStore';
 import { createContextPart } from '@/lib/messages/contextParts';
@@ -13,7 +13,6 @@ import {
 import {
   CONSULT_HOLD_REASSERT_MS,
   createConsultSubmission,
-  type ConsultActingTurn,
   type ConsultSubmissionDeps,
   type ConsultSubmissionResult,
   type SubmitConsultMessageInput,
@@ -146,9 +145,16 @@ type HarnessState = {
   payloadFailure: Error | null;
   dispatchConsultCalls: number;
   dispatchConsultBusy: boolean;
+  /** When set, the next dispatch answers this exact structured outcome. */
+  dispatchConsultOutcome: ConsultDispatchOutcome | null;
+  /** When set, the next dispatch request waits on this gate. */
+  dispatchConsultGate: { promise: Promise<ConsultDispatchOutcome> } | null;
   dispatchConsultFailure: Error | null;
   prevalidations: Array<{ parentSessionId: string; directory: string }>;
   prevalidationRefusal: Error | null;
+  /** When set, verifyCapability answers this refusal. */
+  capabilityRefusal: { available: false; reason: string; message?: string } | null;
+  capabilityChecks: number;
   /** Every `runs.updateAdvisor` call in order (F5 live advisor rows). */
   advisorUpdates: Array<{ runId: string; index: number; status?: string; durationMs?: number; reason?: string }>;
   status: 'idle' | 'busy' | 'retry';
@@ -158,8 +164,6 @@ type HarnessState = {
   startInputs: StartConsultationInput[];
   consultations: Array<Deferred<ConsultationResult>>;
   runtimeCancels: string[];
-  dispatches: ConsultActingTurn[];
-  dispatchFailure: Error | null;
   runs: Map<string, { runId: string; phase: ConsultRunPhase }>;
   phaseLog: string[];
   startRunInputs: ConsultRunStartInput[];
@@ -201,9 +205,13 @@ const createHarness = (): Harness => {
     payloadFailure: null,
     dispatchConsultCalls: 0,
     dispatchConsultBusy: false,
+    dispatchConsultOutcome: null,
+    dispatchConsultGate: null,
     dispatchConsultFailure: null,
     prevalidations: [],
     prevalidationRefusal: null,
+    capabilityRefusal: null,
+    capabilityChecks: 0,
     advisorUpdates: [],
     status: 'idle',
     statusFailure: null,
@@ -212,8 +220,6 @@ const createHarness = (): Harness => {
     startInputs: [],
     consultations: [],
     runtimeCancels: [],
-    dispatches: [],
-    dispatchFailure: null,
     runs: new Map(),
     phaseLog: [],
     startRunInputs: [],
@@ -270,12 +276,23 @@ const createHarness = (): Harness => {
       dispatchConsultItem: async (target, messageId) => {
         state.events.push(`queue:dispatch-consult:${messageId}`);
         state.dispatchConsultCalls += 1;
-        if (state.dispatchConsultBusy) return null;
+        if (state.dispatchConsultGate) {
+          const gate = state.dispatchConsultGate;
+          state.dispatchConsultGate = null;
+          return gate.promise;
+        }
+        if (state.dispatchConsultBusy) return { status: 'busy' };
+        if (state.dispatchConsultOutcome) {
+          // One-shot: the retry paths must observe the next real outcome.
+          const outcome = state.dispatchConsultOutcome;
+          state.dispatchConsultOutcome = null;
+          return outcome;
+        }
         if (state.dispatchConsultFailure) throw state.dispatchConsultFailure;
         const item = state.queueItems.find((entry) => entry.id === messageId);
-        if (!item) throw new Error('cannot dispatch consult: not found');
+        if (!item) return { status: 'not-found' };
         state.queueItems = state.queueItems.filter((entry) => entry.id !== messageId);
-        return item;
+        return { status: 'dispatched', item };
       },
       getQueueForTarget: (target) => {
         state.events.push(`queue:read:${target.sessionId}`);
@@ -352,16 +369,16 @@ const createHarness = (): Harness => {
         if (state.prevalidationRefusal) throw state.prevalidationRefusal;
       },
     },
-    sendActingTurn: async (turn) => {
-      state.events.push('dispatch');
-      if (state.dispatchFailure) throw state.dispatchFailure;
-      state.dispatches.push(turn);
-    },
     resolveSessionStatus: () => {
       if (state.statusFailure) throw state.statusFailure;
       return state.status;
     },
     isAutoReviewRunning: () => state.autoReviewRunning,
+    verifyCapability: async () => {
+      state.capabilityChecks += 1;
+      if (state.capabilityRefusal) return state.capabilityRefusal;
+      return { available: true };
+    },
     runtimeKey: () => state.runtimeKey,
     now: () => state.now,
     sleep: async (ms) => {
@@ -627,7 +644,6 @@ describe('queue admission', () => {
 
     expect(result).toEqual({ status: 'delivered-raw', runId: 'run-1', queueItemRestored: false });
     expect(harness.state.claims).toBe(0);
-    expect(harness.state.dispatches).toHaveLength(0);
     // Never re-sent and never restored.
     expect(harness.state.queued).toHaveLength(enqueuedCount);
     expect(harness.state.events).not.toContain('queue:remove:q-1');
@@ -652,7 +668,6 @@ describe('queue admission', () => {
     expect(result.status).toBe('delivered-raw');
     if (result.status !== 'delivered-raw') throw new Error('expected delivered-raw');
     expect(result.queueItemRestored).toBe(false);
-    expect(harness.state.dispatches).toHaveLength(0);
     // Never restored and never re-sent.
     expect(harness.state.queued).toHaveLength(1);
     expect(harness.state.holds).toEqual([true, false]);
@@ -676,7 +691,6 @@ describe('queue admission', () => {
     if (result.status !== 'failed') throw new Error('expected a failure');
     expect(result.queueItemRestored).toBe(true);
     expect(harness.state.claims).toBe(0);
-    expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.holds).toEqual([true, false]);
   });
 
@@ -737,7 +751,35 @@ describe('auto-review exclusion', () => {
     expect(harness.state.heartbeatActive).toBe(false);
     expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
-    expect(harness.state.dispatches).toHaveLength(0);
+  });
+
+  test('a capability refusal happens before anything is held or queued', async () => {
+    const harness = createHarness();
+    harness.state.capabilityRefusal = { available: false, reason: 'version-unsupported' };
+    const handle = harness.submit(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('refused');
+    if (result.status !== 'refused') throw new Error('expected a refusal');
+    expect(result.code).toBe('capability-unavailable');
+    expect(result.error).toContain('1.18.29');
+    expect(result.rejections).toEqual([]);
+    expect(result.queueItemRestored).toBe(false);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.queued).toEqual([]);
+    expect(harness.state.claims).toBe(0);
+  });
+
+  test('a verified capability proceeds into the normal flow', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    expect(harness.state.capabilityChecks).toBe(1);
+    expect(harness.state.holds.length).toBeGreaterThanOrEqual(1);
+    expect(harness.state.holds[0]).toBe(true);
+    harness.lastConsultation().resolve(consultationResult());
+    const result = await handle.result;
+    expect(result.status).toBe('dispatched');
   });
 
   test('a prevalidation refusal happens before the hold and the enqueue', async () => {
@@ -766,7 +808,6 @@ describe('auto-review exclusion', () => {
     expect(harness.state.queueItems).toEqual([]);
     expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
-    expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.phaseLog).toContain('run-1:finish:failed');
   });
 
@@ -792,7 +833,6 @@ describe('auto-review exclusion', () => {
     expect(harness.state.events).toContain('queue:remove:q-1');
     expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
-    expect(harness.state.dispatches).toHaveLength(0);
     // Exactly one release, with the heartbeat stopped by it.
     expect(harness.state.holds).toEqual([true, false]);
     expect(harness.state.holdOwners).toEqual(['consult:run-1', 'consult:run-1']);
@@ -824,7 +864,6 @@ describe('auto-review exclusion', () => {
     expect(result.status).toBe('cancelled');
     expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
-    expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.queueItems).toEqual([]);
   });
 });
@@ -879,7 +918,6 @@ describe('dispatch', () => {
     expect(harness.state.queueItems).toEqual([]);
     expect(harness.state.events).toContain(`queue:payload:q-1`);
     expect(harness.state.events).toContain(`queue:dispatch-consult:q-1`);
-    expect(harness.state.dispatches).toHaveLength(0);
 
     // Hold lifecycle: asserted at enqueue, re-asserted for the fan-out, and
     // released by the server on the successful dispatch (no extra release).
@@ -954,7 +992,6 @@ describe('dispatch', () => {
 
     expect(result.status).toBe('failed');
     expect(errorOf(result)).toContain('prompt rejected');
-    expect(harness.state.dispatches).toHaveLength(0);
     // The dispatch route failed, so the submission releases its own hold; the
     // item stays queued (claimed) until the sweep reverts it.
     expect(harness.state.holds).toEqual([true, true, false]);
@@ -984,7 +1021,6 @@ describe('cancellation and failures', () => {
     expect(harness.state.holds).toEqual([true, false]);
     expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
-    expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.phaseLog).toContain('run-1:finish:cancelled');
   });
 
@@ -1005,7 +1041,6 @@ describe('cancellation and failures', () => {
     const result = await handle.result;
 
     expect(result.status).toBe('cancelled');
-    expect(harness.state.dispatches).toHaveLength(0);
     // The claimed item is removed so it can never be dispatched or revert to
     // a normal send; the hold is released (the caller restores the composer).
     expect(harness.state.queueItems).toEqual([]);
@@ -1033,6 +1068,178 @@ describe('cancellation and failures', () => {
     expect(harness.state.payloadCalls).toHaveLength(1);
     const metadata = harness.state.payloadCalls[0].textPartMetadata as { openchamberConsultReceipt?: { degraded?: boolean } };
     expect(metadata.openchamberConsultReceipt?.degraded).toBe(true);
+    expect(harness.state.queueItems).toEqual([]);
+  });
+
+  test('a busy outcome retries the dispatch until it succeeds', async () => {
+    const harness = createHarness();
+    harness.state.dispatchConsultBusy = true;
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    let settled = false;
+    void handle.result.then(() => { settled = true; });
+
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    // Still retrying: busy is not terminal.
+    expect(harness.state.dispatchConsultCalls).toBeGreaterThanOrEqual(1);
+    expect(settled).toBe(false);
+    harness.state.dispatchConsultBusy = false;
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('dispatched');
+    expect(harness.state.dispatchConsultCalls).toBeGreaterThanOrEqual(2);
+    expect(harness.state.queueItems).toEqual([]);
+  });
+
+  test('cancel during the busy retry wait reaches terminal: item removed, hold released', async () => {
+    const harness = createHarness();
+    harness.state.dispatchConsultBusy = true;
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    let settled = false;
+    void handle.result.then(() => { settled = true; });
+    expect(settled).toBe(false);
+
+    handle.cancel();
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('cancelled');
+    expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.events).toContain('queue:remove:q-1');
+    expect(harness.state.holds.at(-1)).toBe(false);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('cancel during an in-flight dispatch that then dispatches reports dispatched', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    let resolveGate: (outcome: ConsultDispatchOutcome) => void = () => undefined;
+    harness.state.dispatchConsultGate = {
+      promise: new Promise<ConsultDispatchOutcome>((resolve) => {
+        resolveGate = resolve;
+      }),
+    };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    // The request is in flight: the cancel is recorded, not applied.
+    handle.cancel();
+    expect(harness.state.runtimeCancels).toEqual([]);
+    resolveGate({ status: 'dispatched' });
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('dispatched');
+    // The server released the hold; the submission never issued its own.
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('a lost claim is re-established with a fresh payload and the dispatch retried', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    const claimsBefore = harness.state.claims;
+    harness.state.dispatchConsultOutcome = { status: 'claim-lost' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('dispatched');
+    // Re-claim + payload re-set + retry.
+    expect(harness.state.claims).toBe(claimsBefore + 1);
+    expect(harness.state.payloadCalls).toHaveLength(2);
+    expect(harness.state.dispatchConsultCalls).toBe(2);
+    expect(harness.state.queueItems).toEqual([]);
+  });
+
+  test('a terminal re-claim refusal after claim-lost is a definite failure that removes the item', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultOutcome = { status: 'claim-lost' };
+    harness.state.claimFailure = new Error('cannot claim queued message: not-consult');
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBeUndefined();
+    expect(result.queueItemRestored).toBe(false);
+    expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.holds).toEqual([true, true, false]);
+  });
+
+  test('a definite send failure removes the item and restores the composer contract', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultOutcome = { status: 'send-failed', delivered: 'no' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBeUndefined();
+    expect(result.queueItemRestored).toBe(false);
+    expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.holds).toEqual([true, true, false]);
+  });
+
+  test('an indeterminate send failure keeps the item and flags the result uncertain', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultOutcome = { status: 'send-failed', delivered: 'unknown' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(result.queueItemRestored).toBe(false);
+    // The server kept the item and the claim; the submission releases only its
+    // own hold and never restores the capture.
+    expect(harness.state.queueItems).toHaveLength(1);
+    expect(harness.state.holds).toEqual([true, true, false]);
+  });
+
+  test('a thrown dispatch error is uncertain and never restores the capture', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultFailure = new Error('relay dropped the response');
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(errorOf(result)).toContain('relay dropped the response');
+    expect(harness.state.queueItems).toHaveLength(1);
+  });
+
+  test('a not-found outcome is a definite failure', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultOutcome = { status: 'not-found' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBeUndefined();
     expect(harness.state.queueItems).toEqual([]);
   });
 
@@ -1077,7 +1284,6 @@ describe('cancellation and failures', () => {
     expect(result.status).toBe('failed');
     expect(errorOf(result)).toContain('runtime changed');
     expect(harness.state.claims).toBe(0);
-    expect(harness.state.dispatches).toHaveLength(0);
     // The item and the hold belong to the runtime that created them; the
     // heartbeat stops so nothing beats against the new runtime.
     expect(harness.state.queueItems.map((item) => item.id)).toEqual(['q-1']);
@@ -1098,7 +1304,6 @@ describe('cancellation and failures', () => {
 
     expect(result.status).toBe('failed');
     expect(errorOf(result)).toContain('runtime changed');
-    expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.holds).toEqual([true, true]);
   });
 
@@ -1117,7 +1322,6 @@ describe('cancellation and failures', () => {
     expect(result.status).toBe('failed');
     expect(errorOf(result)).toContain('advisor transport collapsed');
     expect(result).toMatchObject({ queueItemRestored: false });
-    expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.queueItems).toEqual([]);
     expect(harness.state.events).toContain('queue:remove:q-1');
     expect(harness.state.holds).toEqual([true, true, false]);
@@ -1149,7 +1353,6 @@ describe('cancellation and failures', () => {
     // The consult item was claimed, so refusal removes it instead of
     // re-queueing it; the caller restores the composer.
     expect(result.queueItemRestored).toBe(false);
-    expect(harness.state.dispatches).toHaveLength(0);
 
     expect(harness.state.queueItems).toEqual([]);
     expect(harness.state.events).toContain('queue:remove:q-1');
@@ -1172,7 +1375,6 @@ describe('cancellation and failures', () => {
     expect(result.status).toBe('cancelled');
     // The claimed message is removed, never restored for normal delivery.
     expect(harness.state.queueItems).toEqual([]);
-    expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.holds).toEqual([true, true, false]);
   });
 
@@ -1185,7 +1387,6 @@ describe('cancellation and failures', () => {
 
     expect(result.status).toBe('failed');
     expect(errorOf(result)).toContain('claim request failed');
-    expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.holds).toEqual([true, false]);
   });
 
@@ -1247,6 +1448,5 @@ describe('cancellation and failures', () => {
 
     const result = await handle.result;
     expect(result.runId).toBe(handle.runId);
-    expect(harness.state.dispatches).toHaveLength(0);
   });
 });

@@ -52,6 +52,7 @@ export type ConsultSubmissionCapture = Omit<SubmitConsultMessageInput, 'advisors
 export type ConsultUnavailableReason =
   | 'no-session'
   | 'unsupported-runtime'
+  | 'checking-version'
   | 'version-unknown'
   | 'version-unsupported'
   | 'consult-active'
@@ -104,21 +105,31 @@ export const resolveConsultAvailability = (
 };
 
 /**
+ * The fail-closed starting state for the live capability hook: the runtime
+ * gate's refusal wins, and a runtime that could support consults starts as
+ * `checking-version` (the action stays disabled) until the version read
+ * settles. The hook must never expose `assurance: 'unverified'`.
+ */
+export const initialConsultCapability = (
+  runtimeGate: ConsultMechanismCapability = resolveConsultMechanismCapability(),
+): ConsultMechanismCapability => (
+  runtimeGate.available ? { available: false, reason: 'checking-version' } : runtimeGate
+);
+
+/**
  * The live server capability for the composer (F3): runtime gate + OpenCode
- * version, resolved once per mount and refetchable. Until it settles the
- * action keeps the synchronous runtime gate's answer, so a VS Code runtime is
- * disabled immediately while a server-queue runtime briefly shows the
- * conservative unverified state before the version lands.
+ * version, resolved once per mount and refetchable. The hook never surfaces
+ * `assurance: 'unverified'`: a server-queue runtime starts fail-closed as
+ * `checking-version` (the action stays disabled) until the version read
+ * settles, and only a verified version makes it available.
  */
 export const useConsultLiveCapability = () => {
-  const [capability, setCapability] = React.useState<ConsultMechanismCapability>(
-    () => resolveConsultMechanismCapability(),
-  );
+  const [capability, setCapability] = React.useState<ConsultMechanismCapability>(initialConsultCapability);
   const [generation, setGeneration] = React.useState(0);
 
   React.useEffect(() => {
     let stale = false;
-    setCapability(resolveConsultMechanismCapability());
+    setCapability(initialConsultCapability());
     resolveConsultLiveCapability()
       .then((resolved) => {
         if (!stale) setCapability(resolved);
@@ -141,6 +152,8 @@ export const consultUnavailableLabelKey = (reason: ConsultUnavailableReason): I1
       return 'chat.consult.unavailable.noSession';
     case 'unsupported-runtime':
       return 'chat.consult.unavailable.runtime';
+    case 'checking-version':
+      return 'chat.consult.unavailable.checkingVersion';
     case 'version-unknown':
       return 'chat.consult.unavailable.versionUnknown';
     case 'version-unsupported':
@@ -244,19 +257,24 @@ export const isDeliveredRawSubmission = (
  */
 type ConsultCaptureSettlement =
   | { status: 'cancelled' }
-  | { status: 'refused' | 'failed' | 'delivered-raw'; queueItemRestored: boolean };
+  | { status: 'refused' | 'delivered-raw'; queueItemRestored: boolean }
+  | { status: 'failed'; queueItemRestored: boolean; uncertain?: boolean };
 
 /**
  * Whether the composer gives its captured payload back after a settled
  * submission that did not dispatch. A cancelled run always restores. A
  * `delivered-raw` run never does: the message may already have been sent
  * without the consult, so restoring the capture could send it a second time.
- * A refusal or failure restores only when the submission did not put the
- * queue item back itself (`queueItemRestored` false).
+ * A `failed` run with `uncertain: true` (an in-flight send, an indeterminate
+ * dispatch failure, a transport error) is the same hazard and keeps the
+ * capture cleared. A refusal or definite failure restores only when the
+ * submission did not put the queue item back itself (`queueItemRestored`
+ * false).
  */
 export const consultCaptureDisposition = (result: ConsultCaptureSettlement): 'keep' | 'restore' => {
   if (result.status === 'cancelled') return 'restore';
   if (isDeliveredRawSubmission(result.status)) return 'keep';
+  if (result.status === 'failed' && result.uncertain) return 'keep';
   return result.queueItemRestored ? 'keep' : 'restore';
 };
 

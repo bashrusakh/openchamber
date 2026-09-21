@@ -3425,6 +3425,7 @@ export const dict = {
   'chat.consult.unavailable.autoReview': 'Consulter des modèles n’est pas disponible tant que la boucle de revue de code est en cours dans cette session',
   'chat.consult.unavailable.btw': 'Consulter des modèles n’est pas disponible tant qu’une session btw est active',
   'chat.consult.unavailable.runtime': 'Consulter des modèles nécessite la file de messages du serveur OpenChamber et n’est pas disponible ici',
+  'chat.consult.unavailable.checkingVersion': 'Vérification de la version d’OpenCode du serveur connecté…',
   'chat.consult.unavailable.versionUnknown': 'Consulter des modèles requiert OpenCode {version} ou plus récent ; la version du serveur connecté n’a pas pu être vérifiée.',
   'chat.consult.unavailable.versionUnsupported': 'Consulter des modèles n’est pas disponible car OpenCode {version} est antérieur à la version prise en charge {minVersion}.',
 

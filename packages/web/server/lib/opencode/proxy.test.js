@@ -5,6 +5,7 @@ import { createProxyMiddleware } from 'http-proxy-middleware';
 import { describe, expect, it } from 'vitest';
 
 import {
+  createConsultReservationGate,
   createDirectoryQueryCanonicalizer,
   createOpenCodeProxyAgent,
   normalizeForwardedDirectoryHeaders,
@@ -248,5 +249,71 @@ describe('createOpenCodeProxyAgent', () => {
       await closeServer(front);
       await closeServer(upstream);
     }
+  });
+});
+
+describe('createConsultReservationGate (WP-3)', () => {
+  const runGate = (gate, req) => {
+    const result = { next: false, status: null, body: null };
+    const res = {
+      status(code) {
+        result.status = code;
+        return this;
+      },
+      json(payload) {
+        result.body = payload;
+        return this;
+      },
+    };
+    gate(req, res, () => {
+      result.next = true;
+    });
+    return result;
+  };
+
+  it('refuses a turn-starting POST for a reserved session', () => {
+    const gate = createConsultReservationGate({ hasActiveConsultReservation: (id) => id === 'ses_reserved' });
+    for (const path of ['/session/ses_reserved/prompt_async', '/session/ses_reserved/message', '/session/ses_reserved/prompt', '/session/ses_reserved/command']) {
+      const result = runGate(gate, { method: 'POST', path });
+      expect(result.status).toBe(409);
+      expect(result.body).toEqual({
+        error: 'consult-reservation',
+        message: 'A Consult Models run holds this session; wait for it to finish before sending.',
+      });
+      expect(result.next).toBe(false);
+    }
+  });
+
+  it('decodes the session id before asking the runtime', () => {
+    const seen = [];
+    const gate = createConsultReservationGate({
+      hasActiveConsultReservation: (id) => {
+        seen.push(id);
+        return false;
+      },
+    });
+    const result = runGate(gate, { method: 'POST', path: '/session/ses%5Fx/prompt_async' });
+    expect(result.next).toBe(true);
+    expect(seen).toEqual(['ses_x']);
+  });
+
+  it('ignores other methods, other routes, and unreserved sessions', () => {
+    const gate = createConsultReservationGate({ hasActiveConsultReservation: () => false });
+    expect(runGate(gate, { method: 'GET', path: '/session/ses_x/prompt_async' }).next).toBe(true);
+    expect(runGate(gate, { method: 'POST', path: '/session/ses_x' }).next).toBe(true);
+    expect(runGate(gate, { method: 'POST', path: '/session/ses_x/message/ses_y' }).next).toBe(true);
+    expect(runGate(gate, { method: 'POST', path: '/config/settings' }).next).toBe(true);
+    expect(runGate(gate, { method: 'POST', path: '/session/ses_x/prompt_async' }).status).toBeNull();
+  });
+
+  it('fails open when the reservation lookup throws', () => {
+    const gate = createConsultReservationGate({
+      hasActiveConsultReservation: () => {
+        throw new Error('runtime exploded');
+      },
+    });
+    const result = runGate(gate, { method: 'POST', path: '/session/ses_x/prompt_async' });
+    expect(result.next).toBe(true);
+    expect(result.status).toBeNull();
   });
 });

@@ -1057,6 +1057,9 @@ const serverUtilsRuntime = createServerUtilsRuntime({
   ensureOpenCodeApiPrefix,
   getUpstreamStallTimeoutMs,
   getUiNotificationClients: () => uiNotificationClients,
+  // The message-queue runtime owns consult reservations; the proxy gate asks
+  // it before letting a direct prompt start a turn (WP-3).
+  hasActiveConsultReservation: (sessionId) => messageQueueRuntime.hasActiveConsultReservation(sessionId),
   getOpenCodePort: () => openCodePort,
   setOpenCodePortState: (value) => {
     openCodePort = value;

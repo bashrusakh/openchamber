@@ -3428,6 +3428,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.autoReview': '此会话中代码审查循环运行时不可使用模型咨询',
   'chat.consult.unavailable.btw': 'btw 会话激活时不可使用模型咨询',
   'chat.consult.unavailable.runtime': '模型咨询需要 OpenChamber 服务端消息队列，此处不可用',
+  'chat.consult.unavailable.checkingVersion': '正在检查所连接服务器的 OpenCode 版本…',
   'chat.consult.unavailable.versionUnknown': '模型咨询需要 OpenCode {version} 或更高版本；无法验证所连接服务器的版本。',
   'chat.consult.unavailable.versionUnsupported': 'OpenCode {version} 低于受支持的版本 {minVersion}，模型咨询不可用。',
 

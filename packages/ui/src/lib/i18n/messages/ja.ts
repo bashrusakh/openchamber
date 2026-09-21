@@ -3427,6 +3427,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.autoReview': 'このセッションでコードレビューループが実行中の間はモデルに相談できません',
   'chat.consult.unavailable.btw': 'btw セッションの実行中はモデルに相談できません',
   'chat.consult.unavailable.runtime': 'モデルへの相談には OpenChamber サーバーのメッセージキューが必要なため、ここでは利用できません',
+  'chat.consult.unavailable.checkingVersion': '接続先サーバーの OpenCode バージョンを確認しています…',
   'chat.consult.unavailable.versionUnknown': 'モデルへの相談には OpenCode {version} 以降が必要です。接続先サーバーのバージョンを確認できませんでした。',
   'chat.consult.unavailable.versionUnsupported': 'OpenCode {version} がサポート対象のバージョン {minVersion} より古いため、モデルへの相談は利用できません。',
 

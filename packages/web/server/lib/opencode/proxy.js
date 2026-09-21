@@ -273,6 +273,46 @@ const sanitizeSessionListPayload = (payload) => {
   return payload.map((session) => sanitizeSessionListItem(session));
 };
 
+/**
+ * The OpenCode routes that start a turn in a session. A client that bypasses
+ * the message queue (another OpenChamber surface, a script, the OpenCode TUI)
+ * must not start one while a Consult Models run holds the session.
+ */
+const CONSULT_RESERVATION_ROUTE_PATTERN = /^\/session\/([^/]+)\/(?:prompt_async|message|prompt|command)$/;
+
+/**
+ * The consult reservation gate: mounted on `/api` before the proxy, it
+ * rejects turn-starting POSTs for a session an active consult reservation
+ * holds. Fails open — a gate failure must never break the proxy — and only
+ * ever handles the exact prompt/command routes.
+ */
+export const createConsultReservationGate = (deps = {}) => {
+  const hasActiveConsultReservation = deps.hasActiveConsultReservation ?? (() => false);
+  return (req, res, next) => {
+    if (req.method !== 'POST') return next();
+    const match = CONSULT_RESERVATION_ROUTE_PATTERN.exec(req.path);
+    if (!match) return next();
+    let sessionId;
+    try {
+      sessionId = decodeURIComponent(match[1]);
+    } catch {
+      return next();
+    }
+    let reserved = false;
+    try {
+      reserved = hasActiveConsultReservation(sessionId) === true;
+    } catch (error) {
+      console.warn('[proxy] consult reservation gate failed open:', error?.message ?? error);
+      return next();
+    }
+    if (!reserved) return next();
+    res.status(409).json({
+      error: 'consult-reservation',
+      message: 'A Consult Models run holds this session; wait for it to finish before sending.',
+    });
+  };
+};
+
 export const registerOpenCodeProxy = (app, deps) => {
   const {
     fs,
@@ -289,6 +329,7 @@ export const registerOpenCodeProxy = (app, deps) => {
     getSseUpstreamStallTimeoutMs = () => SSE_UPSTREAM_STALL_TIMEOUT_MS,
     readWorktreeBootstrapStatus = getWorktreeBootstrapStatus,
     WORKTREE_READY_TIMEOUT_MS = 5 * 60 * 1000,
+    hasActiveConsultReservation = () => false,
   } = deps;
 
   if (app.get('opencodeProxyConfigured')) {
@@ -981,6 +1022,9 @@ export const registerOpenCodeProxy = (app, deps) => {
   });
 
   app.use('/api', applyProxyResponseDeadline);
+  // Turn-starting prompts for a session an active consult reservation holds
+  // are refused before they reach OpenCode (fail-open gate).
+  app.use('/api', createConsultReservationGate({ hasActiveConsultReservation }));
   app.post('/api/provider/:providerID/oauth/callback', interactiveOAuthProxy);
   // OpenCode's native MCP OAuth flow: the request blocks until the user
   // finishes authorization in the browser (up to OpenCode's 5-minute callback

@@ -38,6 +38,16 @@ const createOpenCode = () => {
     commands: [],
     sent: [],
     failNext: null,
+    /** Next prompt_async fails (one-shot); optionally takes message reads with it. */
+    failPromptOnce: false,
+    failMessageReadsAfterPromptFailure: false,
+    /** While set, every message-tail read fails. */
+    failMessageReads: false,
+    /** Fail the Nth message-tail read of this runtime (1-based). */
+    failMessageReadsOnCall: null,
+    messageReadCalls: 0,
+    /** When set, each message read shifts the next tail (last one repeats). */
+    messageReadTails: null,
   };
   const fetchImpl = vi.fn(async (url, init = {}) => {
     const { pathname } = new URL(url);
@@ -47,9 +57,27 @@ const createOpenCode = () => {
       return new Response('boom', { status: 500 });
     }
     if (pathname === '/session/status') return Response.json(state.statuses);
-    if (pathname.endsWith('/message')) return Response.json(state.tail);
+    if (pathname.endsWith('/message')) {
+      state.messageReadCalls += 1;
+      if (state.failMessageReads) return new Response('boom', { status: 500 });
+      if (state.failMessageReadsOnCall === state.messageReadCalls) return new Response('boom', { status: 500 });
+      if (state.messageReadTails && state.messageReadTails.length > 0) {
+        const next = state.messageReadTails.length > 1 ? state.messageReadTails.shift() : state.messageReadTails[0];
+        return Response.json(next);
+      }
+      return Response.json(state.tail);
+    }
     if (pathname === '/command') return Response.json(state.commands);
-    if (method === 'POST' && (pathname.endsWith('/prompt_async') || pathname.endsWith('/command'))) {
+    if (method === 'POST' && pathname.endsWith('/prompt_async')) {
+      if (state.failPromptOnce) {
+        state.failPromptOnce = false;
+        if (state.failMessageReadsAfterPromptFailure) state.failMessageReads = true;
+        return new Response('boom', { status: 500 });
+      }
+      state.sent.push({ path: pathname, body: JSON.parse(init.body) });
+      return new Response(null, { status: 204 });
+    }
+    if (method === 'POST' && pathname.endsWith('/command')) {
       state.sent.push({ path: pathname, body: JSON.parse(init.body) });
       return new Response(null, { status: 204 });
     }
@@ -544,6 +572,41 @@ describe('message queue runtime', () => {
     expect(runtime.sessionSnapshot(SESSION).items.map((entry) => entry.content)).toEqual(['follow up', 'plain']);
   });
 
+  it('evicts the oldest normal item instead of a consult item when the queue is full', async () => {
+    const { runtime, openCode } = createRuntime();
+    runtime.start();
+    openCode.state.statuses = { [SESSION]: { type: 'busy' } };
+    const consult = await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult', content: 'consult' }));
+    for (let index = 0; index < 19; index += 1) {
+      await runtime.enqueue(SESSION, DIRECTORY, item({ content: `normal-${index}`, text: `normal-${index}` }));
+    }
+    // 20 items: consult head + 19 normals; the next enqueue evicts the oldest
+    // normal item (normal-0), never the consult item.
+    await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'newest', text: 'newest' }));
+    const items = runtime.sessionSnapshot(SESSION).items;
+    expect(items).toHaveLength(20);
+    expect(items.some((entry) => entry.id === consult.itemId)).toBe(true);
+    expect(items.some((entry) => entry.content === 'normal-0')).toBe(false);
+    expect(items.at(-1)?.content).toBe('newest');
+  });
+
+  it('refuses to enqueue when a full queue holds only consult items', async () => {
+    const { runtime, openCode } = createRuntime();
+    runtime.start();
+    openCode.state.statuses = { [SESSION]: { type: 'busy' } };
+    for (let index = 0; index < 20; index += 1) {
+      await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult', content: `consult-${index}` }));
+    }
+    await expect(runtime.enqueue(SESSION, DIRECTORY, item({ content: 'overflow', text: 'overflow' }))).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('pending consultations'),
+    });
+    const items = runtime.sessionSnapshot(SESSION).items;
+    expect(items).toHaveLength(20);
+    expect(items.every((entry) => entry.kind === 'consult')).toBe(true);
+    expect(items.some((entry) => entry.content === 'overflow')).toBe(false);
+  });
+
   it('reorders only with a complete permutation', async () => {
     const { runtime } = createRuntime();
     runtime.start();
@@ -676,23 +739,90 @@ describe('message queue runtime', () => {
     });
   });
 
-  describe('dispatchConsult', () => {
+  describe('hasActiveConsultReservation', () => {
+    it('is true only while a claimed consult item holds a live reservation', async () => {
+      let clock = 0;
+      const { runtime, openCode } = createRuntime({ now: () => clock });
+      runtime.start();
+      openCode.state.statuses = {};
+      // Normal items never reserve the session.
+      await runtime.enqueue('ses_queue_test_normal', DIRECTORY, item());
+      expect(runtime.hasActiveConsultReservation('ses_queue_test_normal')).toBe(false);
+
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult' }));
+      // Unclaimed consult items are not reservations.
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+      await runtime.claim(SESSION, itemId, 'consult:run-1', 1_000);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+      expect(runtime.hasActiveConsultReservation('ses_unknown_1')).toBe(false);
+      expect(runtime.hasActiveConsultReservation('not a session id')).toBe(false);
+
+      // A lapsed hold ends the reservation (the lazy read prunes it).
+      clock = 2_000;
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+    });
+
+    it('treats an owner-less claim as a reservation while its legacy hold is live', async () => {
+      let clock = 0;
+      const { runtime, openCode } = createRuntime({ now: () => clock });
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult' }));
+      // No owner in the claim route body: the empty-string legacy slot.
+      const claimed = await runtime.claim(SESSION, itemId, undefined, 1_000);
+      expect(claimed.item.claimed).toMatchObject({ owner: '' });
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+
+      // The live legacy hold survives a sweep pass.
+      clock = 500;
+      runtime.setHold('ses_other_ownerless', true, 60_000, 'other');
+      const snapshot = runtime.sessionSnapshot(SESSION).items[0];
+      expect(snapshot.claimed).toMatchObject({ owner: '' });
+      expect(snapshot.kind).toBe('consult');
+
+      // When the legacy hold lapses, the claim is cleared (kind kept).
+      clock = 2_000;
+      runtime.setHold('ses_other_ownerless', true, 60_000, 'other');
+      const lapsed = runtime.sessionSnapshot(SESSION).items[0];
+      expect(lapsed).not.toHaveProperty('claimed');
+      expect(lapsed.kind).toBe('consult');
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+    });
+
+    it('is false after the owner releases the hold or the item is removed', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult' }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1', 60_000);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+
+      runtime.setHold(SESSION, false, undefined, 'consult:run-1');
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+
+      // Re-claim then remove the item: no reservation remains.
+      await runtime.claim(SESSION, itemId, 'consult:run-1', 60_000);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+      await runtime.remove(SESSION, itemId);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+    });
+  });
+
+  describe('dispatchConsult outcomes', () => {
     const consultItem = (overrides = {}) => item({
       kind: 'consult',
       consult: { system: 'be terse', textPartMetadata: { openchamberConsult: { model: 'glm-4.7' } } },
       ...overrides,
     });
 
-    it('waits for idle, sends with system + primary text part metadata, then cleans up', async () => {
-      const { runtime, openCode, emit, broadcasts } = createRuntime();
+    it('dispatches with system + primary text part metadata, then cleans up', async () => {
+      const { runtime, openCode, broadcasts } = createRuntime();
       runtime.start();
-      openCode.state.statuses = { [SESSION]: { type: 'busy' } };
+      openCode.state.statuses = {};
       const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
-      openCode.state.statuses = {};
       await runtime.claim(SESSION, itemId, 'consult:run-1');
-      openCode.state.statuses = {};
       const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
-      expect(result.dispatched).toBe(true);
+      expect(result.status).toBe('dispatched');
       expect(openCode.state.sent).toHaveLength(1);
       const body = openCode.state.sent[0].body;
       expect(body.system).toBe('be terse');
@@ -707,45 +837,202 @@ describe('message queue runtime', () => {
       expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
     });
 
-    it('refuses a foreign owner', async () => {
+    it('an attachment-only consult dispatches with metadata on no part', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const attachment = { id: 'a1', filename: 'shot.png', mimeType: 'image/png', size: 3, source: 'local', dataUrl: 'data:image/png;base64,AAA=' };
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        content: '',
+        text: '',
+        attachments: [attachment],
+      }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+
+      expect(result.status).toBe('dispatched');
+      expect(openCode.state.sent).toHaveLength(1);
+      const parts = openCode.state.sent[0].body.parts;
+      expect(parts).toEqual([{ type: 'file', mime: 'image/png', filename: 'shot.png', url: attachment.dataUrl }]);
+      // A file part has no metadata field: the receipt is deliberately absent.
+      expect(parts.some((part) => 'metadata' in part)).toBe(false);
+    });
+
+    it('answers not-found and not-consult as structured outcomes', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      expect(await runtime.dispatchConsult(SESSION, 'missing', 'consult:run-1')).toEqual({ status: 'not-found' });
+
+      const normal = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+      expect(await runtime.dispatchConsult(SESSION, normal.itemId, 'consult:run-1')).toEqual({ status: 'not-consult' });
+    });
+
+    it('answers claim-lost for a foreign owner and keeps the item and claim', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
       openCode.state.statuses = {};
       const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
       await runtime.claim(SESSION, itemId, 'consult:run-1');
-      await expect(runtime.dispatchConsult(SESSION, itemId, 'consult:other')).rejects.toMatchObject({
-        status: 409,
-        message: expect.stringContaining('not-claiming'),
-      });
-      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+      expect(await runtime.dispatchConsult(SESSION, itemId, 'consult:other')).toEqual({ status: 'claim-lost' });
+      expect(runtime.sessionSnapshot(SESSION).items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      expect(openCode.state.sent).toHaveLength(0);
     });
 
-    it('records a prompt failure, keeps the item, and re-arms', async () => {
-      const { runtime, openCode } = createRuntime({ retryDelayMs: () => 15 });
+    it('answers busy while the session is busy and keeps the item and claim', async () => {
+      const { runtime, openCode } = createRuntime();
       runtime.start();
       openCode.state.statuses = {};
       const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
       await runtime.claim(SESSION, itemId, 'consult:run-1');
-      openCode.state.failNext = /prompt_async$/;
-      await expect(runtime.dispatchConsult(SESSION, itemId, 'consult:run-1')).rejects.toMatchObject({ status: 502 });
+      openCode.state.statuses = { [SESSION]: { type: 'busy' } };
+      expect(await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1')).toEqual({ status: 'busy' });
+      expect(runtime.sessionSnapshot(SESSION).items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      expect(openCode.state.sent).toHaveLength(0);
+    });
+
+    it('answers sending while a dispatch is in flight and keeps the item and claim', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      let releasePrompt;
+      openCode.fetchImpl.mockImplementationOnce(async () => Response.json({}))
+        .mockImplementationOnce(async () => Response.json([]))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          releasePrompt = () => resolve(new Response(null, { status: 204 }));
+        }));
+      const pending = runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
       await settle(5);
-      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
-      // The dispatch route maps this to 502 via respondError's status pass-through.
+      expect(await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1')).toEqual({ status: 'sending' });
+      expect(runtime.sessionSnapshot(SESSION).items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      releasePrompt();
+      expect((await pending).status).toBe('dispatched');
+    });
+
+    it('confirms a delivery after an ambiguous prompt failure when a NEW user message appears', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // Pre-read: a prior user message. Then the prompt fails, one poll still
+      // shows only the prior message, and the second poll shows the new one.
+      const prior = { info: { id: 'msg-prior', role: 'user', time: { created: Date.now() } } };
+      const landed = { info: { id: 'msg-new', role: 'user', time: { created: Date.now() } } };
+      openCode.state.messageReadTails = [[prior], [prior], [prior, landed]];
+      openCode.state.failPromptOnce = true;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toMatchObject({ status: 'dispatched', delivery: 'confirmed-after-failure' });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
       expect(openCode.state.sent).toHaveLength(0);
-      // The retry re-arm fires; the tick re-verifies and still refuses to send
-      // a consult item, so the item stays queued for the owner to retry.
-      await settle(40);
-      expect(openCode.state.sent).toHaveLength(0);
+      expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
+    });
+
+    it('a recent prior user message is never mistaken for the dispatch', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // The same recent user message is present before the send and after it:
+      // id-difference, not time, decides; nothing new means not delivered.
+      const prior = { info: { id: 'msg-prior', role: 'user', time: { created: Date.now() } } };
+      openCode.state.tail = [prior];
+      openCode.state.failPromptOnce = true;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toEqual({ status: 'send-failed', delivered: 'no' });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+    });
+
+    it('finds the landed user message outside the last two messages', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // The landed user message sits third-from-last: it is outside the
+      // idle check's two-message window but inside the confirmation window.
+      const prior = { info: { id: 'msg-prior', role: 'user' } };
+      const landed = { info: { id: 'msg-new', role: 'user' } };
+      const assistant = (id) => ({ info: { id, role: 'assistant' } });
+      const wideTail = [
+        prior,
+        ...Array.from({ length: 17 }, (_, index) => assistant(`a-${index}`)),
+        landed,
+        assistant('a-last'),
+      ];
+      // Read 1 is the idle check, read 2 the pre-send snapshot (both narrow);
+      // the polls then see the wide tail with the landed message.
+      openCode.state.messageReadTails = [[prior], [prior], wideTail];
+      openCode.state.failPromptOnce = true;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toMatchObject({ status: 'dispatched', delivery: 'confirmed-after-failure' });
+      // The confirmation reads with the wider limit, not the idle check's.
+      const messageLimits = openCode.fetchImpl.mock.calls
+        .map(([url]) => new URL(url))
+        .filter((url) => url.pathname.endsWith('/message'))
+        .map((url) => url.searchParams.get('limit'));
+      expect(messageLimits).toContain('20');
+      expect(messageLimits).toContain('2');
+    });
+
+    it('a failed pre-read makes the outcome unknown instead of guessing', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // The next read is the dispatch's idle check; the one after is the
+      // pre-send snapshot, which is the one that must fail.
+      openCode.state.failMessageReadsOnCall = openCode.state.messageReadCalls + 2;
+      openCode.state.failPromptOnce = true;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toEqual({ status: 'send-failed', delivered: 'unknown' });
       expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+
+    it('removes the item on a definite prompt failure with no delivered message', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.failPromptOnce = true;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toEqual({ status: 'send-failed', delivered: 'no' });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
+    });
+
+    it('keeps the item, claim, and hold when the failure cannot be classified (tail unreadable)', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.failPromptOnce = true;
+      openCode.state.failMessageReadsAfterPromptFailure = true;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toEqual({ status: 'send-failed', delivered: 'unknown' });
+      // The item, the claim, and the hold survive: a retry dispatches cleanly.
+      const snapshot = runtime.sessionSnapshot(SESSION).items;
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      openCode.state.failMessageReads = false;
+      const retry = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(retry.status).toBe('dispatched');
+      expect(openCode.state.sent).toHaveLength(1);
     });
   });
 
   describe('expiry sweep and restart revert', () => {
     const consultItem = (overrides = {}) => item({ kind: 'consult', consult: { system: 'be terse' }, ...overrides });
 
-    it('the sweep reverts a consult item whose reservation lapsed and the next tick delivers it raw', async () => {
+    it('a lapsed reservation keeps the consult item a consult item and it is never tick-delivered', async () => {
       let clock = 0;
-      const { runtime, openCode, emit, broadcasts } = createRuntime({ now: () => clock });
+      const { runtime, openCode, emit } = createRuntime({ now: () => clock });
       runtime.start();
       const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
       await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
@@ -753,29 +1040,47 @@ describe('message queue runtime', () => {
       await runtime.claim(SESSION, itemId, 'consult:run-1', 1_000);
       expect(runtime.sessionSnapshot(SESSION).items[0].kind).toBe('consult');
 
-      // The reservation lapses; a hold mutation sweeps it and reverts the item.
+      // The reservation lapses; a hold mutation sweeps the claim away, but the
+      // consult intent survives: the kind stays, only claim and payload go.
       clock = 2_000;
       runtime.setHold('ses_other_sweep', true, 60_000, 'other');
-      expect(runtime.sessionSnapshot(SESSION).items[0]).toMatchObject({ content: 'follow up' });
-      const reverted = runtime.sessionSnapshot(SESSION).items[0];
-      expect(reverted).not.toHaveProperty('kind');
-      expect(reverted).not.toHaveProperty('consult');
-      expect(reverted).not.toHaveProperty('claimed');
+      const cleared = runtime.sessionSnapshot(SESSION).items[0];
+      expect(cleared.kind).toBe('consult');
+      expect(cleared).not.toHaveProperty('claimed');
+      expect(cleared).not.toHaveProperty('consult');
+      expect(cleared.content).toBe('follow up');
 
-      // Reverted to a normal item, the generic dispatcher delivers it raw.
+      // The stale consult item still blocks the queue: the tick sends nothing,
+      // not even the normal item queued behind it.
       emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
       await settle();
-      expect(openCode.state.sent).toHaveLength(1);
-      expect(openCode.state.sent[0].body.parts).toEqual([{ type: 'text', text: 'follow up' }]);
-      // The stale-claim broadcast (revert commit) went out before the delivery.
-      expect(broadcasts.some((event) => event.properties.revision > 0 && event.properties.session.items[0]?.kind === undefined)).toBe(true);
+      expect(openCode.state.sent).toHaveLength(0);
+      expect(runtime.sessionSnapshot(SESSION).items.map((entry) => entry.content)).toEqual(['follow up', 'plain']);
     });
 
-    it('a restart loads a persisted consult item as a normal item', async () => {
+    it('take refuses a consult item and takeAll skips it', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const consult = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      const normal = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+
+      await expect(runtime.take(SESSION, consult.itemId)).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('consult-item'),
+      });
+      const all = await runtime.takeAll(SESSION);
+      expect(all.items.map((entry) => entry.id)).toEqual([normal.itemId]);
+      // The consult item stays queued; the normal item was taken.
+      expect(runtime.sessionSnapshot(SESSION).items.map((entry) => entry.id)).toEqual([consult.itemId]);
+    });
+
+    it('a restart restores a consult item as an unclaimed consult item and tick does not deliver it', async () => {
       const dataDir = makeDataDir();
       const first = createRuntime({ dataDir });
       first.runtime.start();
-      await first.runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      const { itemId } = await first.runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await first.runtime.claim(SESSION, itemId, 'consult:run-1', 60_000);
       await first.runtime.flush();
       first.runtime.stop();
 
@@ -784,9 +1089,32 @@ describe('message queue runtime', () => {
       await second.runtime.load();
       const loaded = second.runtime.sessionSnapshot(SESSION).items[0];
       expect(loaded.content).toBe('follow up');
-      expect(loaded).not.toHaveProperty('kind');
+      expect(loaded.kind).toBe('consult');
       expect(loaded).not.toHaveProperty('consult');
       expect(loaded).not.toHaveProperty('claimed');
+
+      second.connect();
+      await settle();
+      expect(second.openCode.state.sent).toHaveLength(0);
+      expect(second.runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+
+    it('an explicit remove deletes a consult item and lets normal items flow', async () => {
+      const { runtime, openCode, emit } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const consult = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+
+      emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+      await settle();
+      expect(openCode.state.sent).toHaveLength(0);
+
+      await runtime.remove(SESSION, consult.itemId);
+      emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+      await settle();
+      expect(openCode.state.sent).toHaveLength(1);
+      expect(openCode.state.sent[0].body.parts).toEqual([{ type: 'text', text: 'plain' }]);
     });
   });
 

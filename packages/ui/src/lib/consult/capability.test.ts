@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import type { ConsultMechanismCapability } from './capability';
 import {
   CONSULT_MIN_OPENCODE_VERSION,
   isConsultVersionSupported,
@@ -75,6 +76,17 @@ describe('verifyConsultServerVersion (F3)', () => {
       .toEqual({ verified: true, version: '1.18.31' });
     expect(await verifyConsultServerVersion(async () => ({ version: '2.0.0' })))
       .toEqual({ verified: true, version: '2.0.0' });
+  });
+});
+
+describe('checking-version plumbing (WP-4)', () => {
+  test('the capability union carries the checking-version refusal', () => {
+    // The composer hook starts here; the union must accept it and the gate
+    // must never be asked to resolve it as a version answer.
+    const checking: ConsultMechanismCapability = { available: false, reason: 'checking-version' };
+    expect(checking.reason).toBe('checking-version');
+    expect(resolveConsultMechanismCapability({ serverQueueSupported: true }))
+      .toEqual({ available: true, assurance: 'unverified' });
   });
 });
 

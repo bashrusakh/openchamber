@@ -35,6 +35,7 @@ mock.module('@/lib/consult/capability', () => ({
 
 const {
   consultCaptureDisposition,
+  initialConsultCapability,
   consultStatusLabelKey,
   consultStatusPresentation,
   consultUnavailableLabelKey,
@@ -171,10 +172,29 @@ describe('resolveConsultAvailability', () => {
   });
 });
 
+describe('live capability initial state (WP-4)', () => {
+  test('a server-queue runtime starts fail-closed at checking-version', () => {
+    // Never `assurance: 'unverified'`: the action is disabled until the
+    // version read settles.
+    expect(initialConsultCapability({ available: true, assurance: 'unverified' }))
+      .toEqual({ available: false, reason: 'checking-version' });
+    expect(initialConsultCapability({ available: true, assurance: 'verified', version: '1.18.31' }))
+      .toEqual({ available: false, reason: 'checking-version' });
+    // The default reads the mocked runtime gate (server-queue capable).
+    expect(initialConsultCapability()).toEqual({ available: false, reason: 'checking-version' });
+  });
+
+  test('a runtime-gate refusal wins over the checking state', () => {
+    expect(initialConsultCapability({ available: false, reason: 'unsupported-runtime' }))
+      .toEqual({ available: false, reason: 'unsupported-runtime' });
+  });
+});
+
 describe('consult UI labels', () => {
   const reasons: readonly ConsultUnavailableReason[] = [
     'no-session',
     'unsupported-runtime',
+    'checking-version',
     'version-unknown',
     'version-unsupported',
     'consult-active',
@@ -229,7 +249,7 @@ describe('consult unavailable reason localization', () => {
   });
 
   test('the version reasons are translated in every locale (F3)', () => {
-    for (const key of ['chat.consult.unavailable.versionUnknown', 'chat.consult.unavailable.versionUnsupported'] as const) {
+    for (const key of ['chat.consult.unavailable.checkingVersion', 'chat.consult.unavailable.versionUnknown', 'chat.consult.unavailable.versionUnsupported'] as const) {
       for (const [locale, dictionary] of Object.entries(localeDictionaries)) {
         const label = dictionary[key as keyof typeof dictionary] as string | undefined;
         expect(label?.length ?? 0).toBeGreaterThan(0);
@@ -296,6 +316,10 @@ describe('consultCaptureDisposition', () => {
     // An unrestored refusal/failure gives the payload back to the composer.
     expect(consultCaptureDisposition({ status: 'refused', queueItemRestored: false })).toBe('restore');
     expect(consultCaptureDisposition({ status: 'failed', queueItemRestored: false })).toBe('restore');
+    // An uncertain failure keeps the capture cleared like delivered-raw: the
+    // dispatch outcome is unconfirmed, so restoring could send it twice.
+    expect(consultCaptureDisposition({ status: 'failed', queueItemRestored: false, uncertain: true })).toBe('keep');
+    expect(consultCaptureDisposition({ status: 'failed', queueItemRestored: true, uncertain: true })).toBe('keep');
   });
 });
 

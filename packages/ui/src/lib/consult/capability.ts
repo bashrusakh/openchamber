@@ -33,6 +33,7 @@ import { isServerOwnedMessageQueue } from '@/stores/messageQueueStore';
  */
 export type ConsultMechanismCapability =
   | { available: false; reason: 'unsupported-runtime' }
+  | { available: false; reason: 'checking-version' }
   | { available: false; reason: 'version-unknown'; version?: string }
   | { available: false; reason: 'version-unsupported'; version?: string }
   | { available: true; assurance: 'unverified' }

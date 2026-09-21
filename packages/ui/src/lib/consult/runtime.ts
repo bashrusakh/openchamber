@@ -327,11 +327,13 @@ export type ConsultRuntime = {
   /** Idempotent; returns once cancellation is recorded and forks are cleaned best-effort. */
   cancel: (runId: string) => Promise<void>;
   /**
-   * Start-time prevalidation: the same refusals `startConsultation` raises
-   * before its first fork, without creating a run or a fork. Exported through
-   * the runtime so the submission can prevalidate before queue admission.
+   * Advisor-surface prevalidation: the same refusals `startConsultation`
+   * raises before its first fork (runtime key, advisor list, surface), without
+   * creating a run or a fork and without resolving the settled-context fork
+   * point. Exported through the runtime so the submission can prevalidate
+   * before queue admission.
    */
-  prevalidateConsultation: (input: StartConsultationInput) => Promise<ConsultForkPoint>;
+  prevalidateConsultation: (input: StartConsultationInput) => Promise<void>;
 };
 
 type AdvisorState = {
@@ -768,16 +770,17 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
   };
 
   /**
-   * Start-time prevalidation without creating anything: the runtime-key check,
-   * the advisor-list check, the model/agent surface load with
-   * `validateConsultAdvisors`, and the settled-context fork-point resolution —
-   * the same checks `executeRun` performs before its first fork, in the same
-   * order, throwing the same `ConsultationRefusedError` codes. The resolved
-   * fork point is returned so `startConsultation` reuses it instead of
-   * resolving twice. Runs ahead of queue admission so an ordinary start
-   * refusal returns the message to the composer while it is still queued.
+   * Pre-enqueue prevalidation without creating anything, limited to the
+   * advisor surface: the runtime-key check, the advisor-list check, and the
+   * model/agent surface load with `validateConsultAdvisors` — the same checks
+   * `startConsultation` performs first, in the same order, throwing the same
+   * `ConsultationRefusedError` codes. The settled-context fork point is
+   * deliberately NOT resolved here: a parent with no completed assistant
+   * message may become settled while the item waits for its claim, and the
+   * post-claim refusal path (item removed, hold released, composer restored)
+   * is the contract for a still-unsettled parent.
    */
-  const prevalidateConsultation = async (input: StartConsultationInput): Promise<ConsultForkPoint> => {
+  const prevalidateConsultation = async (input: StartConsultationInput): Promise<void> => {
     const expectedRuntimeKey = input.expectedRuntimeKey;
     if (expectedRuntimeKey !== undefined && deps.runtimeKey() !== expectedRuntimeKey) {
       throw new ConsultationRefusedError('runtime-changed', 'The runtime changed before the consultation started');
@@ -808,7 +811,10 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
         validation.rejections,
       );
     }
+  };
 
+  /** The settled-context fork point, resolved inside a start (never pre-enqueue). */
+  const resolveStartForkPoint = (input: StartConsultationInput): ConsultForkPoint => {
     try {
       return resolveConsultForkPoint(deps.readParentMessages(input.parentSessionId, input.directory));
     } catch (error) {
@@ -826,7 +832,11 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
       // cancellation is already recorded, and its forks are cleaned before
       // this run creates anything.
       if (run.supersededCleanup) await run.supersededCleanup;
-      const forkPoint = await prevalidateConsultation(input);
+      await prevalidateConsultation(input);
+      // The fork point is a start-time concern, resolved after the claim (and
+      // after admission): a parent that is still running may never settle, in
+      // which case the start refuses and the submission returns the message.
+      const forkPoint = resolveStartForkPoint(input);
       if (input.assertAdmissible) await input.assertAdmissible();
       if (isAbandoned(run)) return buildResult(run, input, mode);
 

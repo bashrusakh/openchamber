@@ -356,12 +356,11 @@ export function createMessageQueueRuntime({
         .then((stored) => {
           for (const [sessionId, entry] of Object.entries(stored.sessions)) {
             // Holds are memory-only, so no persisted consult reservation can
-            // survive a restart: every loaded consult item goes back to a
-            // normal item (content kept, kind/consult/claimed dropped) before
-            // the queue goes live.
+            // survive a restart: a restored consult item comes back unclaimed,
+            // but it stays a consult item (kind kept, stale claimed/consult
+            // payload dropped) and is therefore never tick-delivered.
             for (const item of entry.items) {
               delete item.claimed;
-              delete item.kind;
               delete item.consult;
             }
             queues.set(sessionId, entry);
@@ -398,8 +397,8 @@ export function createMessageQueueRuntime({
 
   const sessionSnapshot = (sessionId) => {
     // The read path sweeps: a snapshot must not show a claim the hold map can
-    // no longer back. The revert is persisted when something changed.
-    if (revertLapsedConsultItems(sessionId)) commit(sessionId);
+    // no longer back. The cleared claim is persisted when something changed.
+    if (clearLapsedConsultClaims(sessionId)) commit(sessionId);
     const queue = queues.get(sessionId);
     return {
       sessionId,
@@ -581,7 +580,9 @@ export function createMessageQueueRuntime({
     if (knowledge.text) parts.push({ type: 'text', text: knowledge.text, synthetic: true });
     if (item.agentMention) parts.push({ type: 'agent', name: item.agentMention });
     if (textPartMetadata !== undefined) {
-      const carrier = parts.find((part) => part.type === 'text') ?? parts[0];
+      // Only a text part can carry metadata: OpenCode's file parts have no
+      // metadata field, so an attachment-only message carries no receipt.
+      const carrier = parts.find((part) => part.type === 'text');
       if (carrier) carrier.metadata = textPartMetadata;
     }
     const { providerID, modelID, agent, variant } = item.sendConfig;
@@ -645,26 +646,29 @@ export function createMessageQueueRuntime({
   };
 
   /**
-   * Consult items whose reservation died go back to normal items: the claim,
-   * the kind, and the consult payload are dropped, the message content stays.
-   * An item that was never claimed keeps waiting for its flow to claim it —
-   * only a lapsed reservation reverts. Runs inside the expiry sweep, so the
-   * tick and every hold mutation both see reverts immediately.
+   * Consult items whose reservation died lose the claim and the stale consult
+   * payload, but keep `kind: 'consult'`: the user's consult intent survives a
+   * lapsed reservation, so the item is still never handed to a raw send — the
+   * generic dispatcher skips it and only an explicit remove/clear deletes it.
+   * An item that was never claimed keeps waiting for its flow to claim it.
+   * Runs inside the expiry sweep, so the tick and every hold mutation both see
+   * the cleared claims immediately.
    */
-  const revertLapsedConsultItems = (sessionId) => {
+  const clearLapsedConsultClaims = (sessionId) => {
     const queue = queues.get(sessionId);
     if (!queue) return false;
-    let reverted = false;
+    let changed = false;
     for (const item of queue.items) {
       if (item.kind !== CONSULT_ITEM_KIND || !item.claimed) continue;
+      // The stored owner is the hold-map key as-is; the empty string is the
+      // legacy owner-less slot, which counts while its hold is live.
       const owner = asNonEmptyString(item.claimed.owner);
-      if (owner && liveHoldOwners(sessionId)?.has(owner)) continue;
+      if (liveHoldOwners(sessionId)?.has(owner)) continue;
       delete item.claimed;
-      delete item.kind;
       delete item.consult;
-      reverted = true;
+      changed = true;
     }
-    return reverted;
+    return changed;
   };
 
   /**
@@ -673,9 +677,9 @@ export function createMessageQueueRuntime({
    * dispatches (no queue, no further hold traffic) would sit in the map until
    * the process ends. Every hold mutation runs it, which bounds the map to
    * live owners (plus at most one mutation's worth of lapsed ones). A lapsed
-   * owner also ends its consult item's reservation: the item is reverted to a
-   * normal item (and committed/broadcast) so the queue cannot strand behind a
-   * claim that no longer exists.
+   * owner also ends its consult item's reservation: the claim and payload are
+   * cleared (committed/broadcast) while the item keeps kind 'consult', so it
+   * can never be delivered raw.
    */
   const pruneExpiredHolds = () => {
     const nowMs = now();
@@ -685,7 +689,7 @@ export function createMessageQueueRuntime({
         if (expiresAt <= nowMs) owners.delete(owner);
       }
       if (owners.size === 0) holds.delete(sessionId);
-      if (revertLapsedConsultItems(sessionId)) revertedSessions.add(sessionId);
+      if (clearLapsedConsultClaims(sessionId)) revertedSessions.add(sessionId);
     }
     for (const sessionId of revertedSessions) commit(sessionId);
   };
@@ -711,28 +715,51 @@ export function createMessageQueueRuntime({
 
   /**
    * Lazy expiry sweep for one session's read path: drops lapsed owners and
-   * reverts consult items whose reservation died, so a snapshot or a tick
+   * clears consult claims whose reservation died, so a snapshot or a tick
    * never sees a claim the hold map can no longer back. (Hold mutations sweep
    * every session via pruneExpiredHolds; this covers sessions that only get
    * read.)
    */
   const sweepSession = (sessionId) => {
     if (!liveHoldOwners(sessionId)) {
-      revertLapsedConsultItems(sessionId);
+      clearLapsedConsultClaims(sessionId);
       return;
     }
-    revertLapsedConsultItems(sessionId);
+    clearLapsedConsultClaims(sessionId);
   };
 
   const isHeld = (sessionId) => liveHoldOwners(sessionId) !== null;
 
   /**
+   * True while the session has a consult item whose claim owner still holds a
+   * live reservation. Read-only within the runtime (the lazy hold read prunes
+   * lapsed owners as usual; items are never mutated). The proxy's prompt gate
+   * uses this to keep direct prompt calls from starting a turn while a
+   * Consult Models run owns the session.
+   */
+  const hasActiveConsultReservation = (sessionIdInput) => {
+    const sessionId = asNonEmptyString(sessionIdInput);
+    if (!isValidSessionId(sessionId)) return false;
+    const queue = queues.get(sessionId);
+    if (!queue) return false;
+    const owners = liveHoldOwners(sessionId);
+    if (!owners) return false;
+    return queue.items.some((item) => {
+      if (item.kind !== CONSULT_ITEM_KIND || !item.claimed) return false;
+      // The stored owner is the hold-map key as-is; the empty string is the
+      // legacy owner-less slot, which counts while its hold is live.
+      return owners.has(asNonEmptyString(item.claimed.owner));
+    });
+  };
+
+  /**
    * Index of the item the generic dispatcher may send, or null. Consult items
    * are never tick-delivered — they wait for their own claim → dispatch route.
-   * The deliverable head is the first normal item, and it may not jump over a
-   * consult item whose reservation lapsed: a claim owner keeps a hold on the
-   * session, so a stale (unreserved) consult blocks everything behind it until
-   * the expiry sweep reverts it to a normal item.
+   * The deliverable head is the first normal item, and it never jumps over a
+   * consult item: a claimed consult blocks while its hold is live, and a
+   * lapsed (unreserved) one keeps blocking too — the sweep clears only the
+   * claim and payload, never the kind, so a consult item can never become a
+   * normal send.
    */
   const firstDeliverableIndex = (sessionId, items) => {
     const owners = liveHoldOwners(sessionId);
@@ -747,8 +774,9 @@ export function createMessageQueueRuntime({
 
   async function tick(sessionId) {
     if (stopped) return;
-    // The tick's read path sweeps this session: lapsed owners go, consult
-    // items with dead reservations revert to normal items here.
+    // The tick's read path sweeps this session: lapsed owners go, and the
+    // claims/payloads of consult items with dead reservations are cleared
+    // (their kind stays, so they are still never delivered by the tick).
     sweepSession(sessionId);
     const queue = queues.get(sessionId);
     if (!queue || queue.items.length === 0 || sending.has(sessionId) || isHeld(sessionId)) return;
@@ -839,7 +867,20 @@ export function createMessageQueueRuntime({
       ...parsed,
     };
     const existing = queues.get(sessionId);
-    const items = [...(existing?.items ?? []), item].slice(-MAX_ITEMS_PER_SESSION);
+    const existingItems = existing?.items ?? [];
+    let items;
+    if (existingItems.length < MAX_ITEMS_PER_SESSION) {
+      items = [...existingItems, item];
+    } else {
+      // A consult item is never silently evicted: drop the oldest normal item
+      // instead, and refuse the enqueue when every slot holds a consultation.
+      const evictIndex = existingItems.findIndex((entry) => entry.kind !== CONSULT_ITEM_KIND);
+      if (evictIndex === -1) {
+        throw httpError('cannot queue message: the queue is full of pending consultations', 409);
+      }
+      items = existingItems.filter((_, index) => index !== evictIndex);
+      items.push(item);
+    }
     queues.set(sessionId, { directory, items });
     directories.set(sessionId, directory);
     if (queues.size > MAX_SESSIONS) {
@@ -881,20 +922,28 @@ export function createMessageQueueRuntime({
     const queue = queues.get(sessionId);
     const item = queue?.items.find((entry) => entry.id === itemId);
     if (!queue || !item) throw httpError('queued message not found', 404);
+    // A consult item is only ever sent through its own dispatch route; a take
+    // would hand it to a raw-send client and lose the consult intent.
+    if (item.kind === CONSULT_ITEM_KIND) throw httpError('cannot take queued message: consult-item', 409);
     setQueueItems(sessionId, queue.directory, queue.items.filter((entry) => entry.id !== itemId));
     return { ...commit(sessionId), item };
   };
 
-  /** Removes every item not currently being sent and hands them back in order. */
+  /**
+   * Removes every normal item not currently being sent and hands them back in
+   * order. Consult items are never taken: they wait for their own dispatch
+   * route (or an explicit remove/clear by the user).
+   */
   const takeAll = async (sessionIdInput) => {
     const sessionId = requireSessionId(sessionIdInput);
     await load();
     const queue = queues.get(sessionId);
     if (!queue) return { revision, session: sessionSnapshot(sessionId), items: [] };
     const sendingId = sending.get(sessionId) ?? null;
-    const items = queue.items.filter((item) => item.id !== sendingId);
+    const items = queue.items.filter((item) => item.id !== sendingId && item.kind !== CONSULT_ITEM_KIND);
     if (items.length === 0) return { revision, session: sessionSnapshot(sessionId), items: [] };
-    setQueueItems(sessionId, queue.directory, queue.items.filter((item) => item.id === sendingId));
+    const takenIds = new Set(items.map((item) => item.id));
+    setQueueItems(sessionId, queue.directory, queue.items.filter((item) => !takenIds.has(item.id)));
     return { ...commit(sessionId), items };
   };
 
@@ -1019,7 +1068,9 @@ export function createMessageQueueRuntime({
     // reverted by that same sweep while the claim still reports success.
     // setHold caps the TTL at HOLD_MAX_TTL_MS and defaults it; a re-claim by
     // the same owner extends its existing slot instead of taking a new one.
-    setHold(sessionId, true, ttlMs, owner);
+    // An owner-less claim (empty string) maps onto the legacy hold slot by
+    // omitting the owner, matching the hold map's own normalization.
+    setHold(sessionId, true, ttlMs, owner || undefined);
     item.claimed = { owner, claimedAt: now() };
     commit(sessionId);
     return { claimed: true, item };
@@ -1057,73 +1108,140 @@ export function createMessageQueueRuntime({
    * every re-verification after an await keeps a lapsed reservation, a
    * concurrent send, or a removed item from stealing the dispatch.
    */
+  /** Gap between delivery-confirmation polls; four polls bound the wait at ~1.6 s. */
+  const CONSULT_DELIVERY_CONFIRM_DELAY_MS = 400;
+  const CONSULT_DELIVERY_CONFIRM_ATTEMPTS = 4;
+  /**
+   * Confirmation reads a wider tail than the idle check: a landed prompt's
+   * user message can fall out of a two-message window while the assistant
+   * turn streams behind it, which would falsely read as "not delivered".
+   */
+  const CONSULT_DELIVERY_TAIL_LIMIT = 20;
+
+  /**
+   * The user-message ids in the parent tail, read the way `isSessionIdle`
+   * does. User-only on purpose: those are the messages a dispatch creates,
+   * and the smaller set is cheaper to reason about. Returns null when the
+   * read fails (indeterminate).
+   */
+  const readUserMessageIds = async (sessionId, directory) => {
+    const messages = asList(await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message`, {
+      directory,
+      query: { limit: String(CONSULT_DELIVERY_TAIL_LIMIT) },
+    }).catch(() => null));
+    if (!messages) return null;
+    const ids = new Set();
+    for (const entry of messages) {
+      const info = asRecord(asRecord(entry)?.info);
+      if (!info || info.role !== 'user') continue;
+      const id = asNonEmptyString(info.id);
+      if (id) ids.add(id);
+    }
+    return ids;
+  };
+
+  /**
+   * Delivery confirmation for an ambiguous prompt failure: poll the parent
+   * tail for a user message id that was not present before the send. Returns
+   * true (a new message landed), false (every read succeeded and none is
+   * new), or null (the pre-read or a poll failed — never guess).
+   */
+  const confirmConsultDelivery = async (sessionId, directory, knownUserMessageIds) => {
+    if (!knownUserMessageIds) return null;
+    for (let attempt = 0; attempt < CONSULT_DELIVERY_CONFIRM_ATTEMPTS; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, CONSULT_DELIVERY_CONFIRM_DELAY_MS));
+      const ids = await readUserMessageIds(sessionId, directory);
+      if (!ids) return null;
+      for (const id of ids) {
+        if (!knownUserMessageIds.has(id)) return true;
+      }
+    }
+    return false;
+  };
+
+  /**
+   * The consult item's own dispatch route: it was never going to be sent by
+   * the generic tick, so the claim owner asks for it explicitly. Every
+   * control-flow answer is a structured outcome (HTTP 200) instead of a
+   * thrown status: the caller decides whether to re-poll. The session must go
+   * idle first — the same isSessionIdle gate the tick applies — and every
+   * re-verification after an await keeps a lapsed reservation, a concurrent
+   * send, or a removed item from stealing the dispatch.
+   */
   const dispatchConsult = async (sessionIdInput, itemId, ownerInput) => {
     const sessionId = requireSessionId(sessionIdInput);
     await load();
     const owner = parseHoldOwner(ownerInput);
-    const findItem = () => {
+
+    /**
+     * Entry order: not-found → not-consult → claim-lost → sending. A missing
+     * claim, another owner, or a lapsed reservation all read as claim-lost;
+     * nothing is mutated on any refusal.
+     */
+    const inspect = () => {
       const queue = queues.get(sessionId);
-      const item = queue?.items.find((entry) => entry.id === itemId) ?? null;
-      if (!item || item.kind !== CONSULT_ITEM_KIND) return null;
-      return item;
-    };
-    const verifyClaim = (item) => {
-      if (!item.claimed || item.claimed.owner !== owner) throw httpError('cannot dispatch consult: not-claiming', 409);
-      if (sending.has(sessionId)) throw httpError('cannot dispatch consult: sending', 409);
-      if (!liveHoldOwners(sessionId)?.has(owner)) throw httpError('cannot dispatch consult: lost', 409);
+      const item = queue ? queue.items.find((entry) => entry.id === itemId) : null;
+      if (!item) return { kind: 'not-found' };
+      if (item.kind !== CONSULT_ITEM_KIND) return { kind: 'not-consult' };
+      if (!item.claimed || item.claimed.owner !== owner) return { kind: 'claim-lost' };
+      if (sending.has(sessionId)) return { kind: 'sending' };
+      if (!liveHoldOwners(sessionId)?.has(owner)) return { kind: 'claim-lost' };
+      return { kind: 'ok', item, queue };
     };
 
-    const item = findItem();
-    if (!item) throw httpError('cannot dispatch consult: not found', 409);
-    if (item.kind !== CONSULT_ITEM_KIND) throw httpError('cannot dispatch consult: not-consult', 409);
-    verifyClaim(item);
+    const entry = inspect();
+    if (entry.kind !== 'ok') return { status: entry.kind };
+    const item = entry.item;
+    const directory = entry.queue.directory;
     // The dispatch itself is the reservation's last use: extend it to the cap
     // so the wait-for-idle below cannot be starved by a TTL the owner set low.
-    setHold(sessionId, true, HOLD_MAX_TTL_MS, owner);
+    // An owner-less claim keeps using the legacy hold slot.
+    setHold(sessionId, true, HOLD_MAX_TTL_MS, owner || undefined);
 
+    // Bounded idle wait. Busy at entry or on expiry leaves the claim and the
+    // item untouched, so the owner can retry the dispatch later.
     const deadline = now() + CONSULT_DISPATCH_IDLE_CAP_MS;
-    let idle = null;
-    while (idle !== true) {
-      idle = await isSessionIdle(sessionId, queues.get(sessionId)?.directory);
-      if (idle === false) return { dispatched: false, reason: 'busy' };
-      // Unknown (failed status read) keeps waiting like the tick's re-arm,
-      // bounded so a permanently unreachable OpenCode fails the dispatch.
-      if (idle === null) {
-        if (now() >= deadline) throw httpError('cannot dispatch consult: not-idle', 409);
-        await new Promise((resolve) => setTimeout(resolve, CONSULT_DISPATCH_POLL_MS));
-      }
-      // The queue may have moved under us: same item, same claim, still held.
-      const current = findItem();
-      if (!current || current.id !== item.id || current.claimed?.owner !== owner) {
-        throw httpError('cannot dispatch consult: not found', 409);
-      }
-      verifyClaim(current);
+    for (;;) {
+      const idle = await isSessionIdle(sessionId, directory);
+      const state = inspect();
+      if (state.kind !== 'ok') return { status: state.kind };
+      if (idle === true) break;
+      if (idle === false) return { status: 'busy' };
+      if (now() >= deadline) return { status: 'busy' };
+      await new Promise((resolve) => setTimeout(resolve, CONSULT_DISPATCH_POLL_MS));
     }
 
-    const directory = queues.get(sessionId)?.directory;
+    const removeItem = () => {
+      const after = queues.get(sessionId);
+      if (after) setQueueItems(sessionId, after.directory, after.items.filter((entry) => entry.id !== item.id));
+    };
+    const releaseOwnerHold = () => setHold(sessionId, false, undefined, owner || undefined);
+
     sending.set(sessionId, item.id);
     broadcast(sessionId);
+    // Snapshot the user-message ids before the send so a confirmation can
+    // prove a NEW message landed; a failed snapshot disables confirmation.
+    const knownUserMessageIds = await readUserMessageIds(sessionId, directory);
     try {
       const fileParts = item.attachments.map(toFilePart);
       const contextParts = item.context.flatMap(toContextParts);
       const command = await resolveSlashCommand(item.text, directory);
       // A consult prompt always takes the prompt route: its system/metadata
       // extras have no command-route equivalent.
-    const { body } = await buildPromptBody(item, {
-      sessionId,
-      directory,
-      fileParts,
-      contextParts,
-      command: command && command.isSkill ? command : null,
-      system: item.consult?.system ?? '',
-      textPartMetadata: item.consult?.textPartMetadata,
-    });
-    await resolvePromptBody?.(body, { sessionId, directory });
-    await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/prompt_async`, { directory, method: 'POST', body });
-      const after = queues.get(sessionId);
-      if (after) setQueueItems(sessionId, after.directory, after.items.filter((entry) => entry.id !== item.id));
+      const { body } = await buildPromptBody(item, {
+        sessionId,
+        directory,
+        fileParts,
+        contextParts,
+        command: command && command.isSkill ? command : null,
+        system: item.consult?.system ?? '',
+        textPartMetadata: item.consult?.textPartMetadata,
+      });
+      await resolvePromptBody?.(body, { sessionId, directory });
+      await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/prompt_async`, { directory, method: 'POST', body });
+      removeItem();
       sending.delete(sessionId);
-      setHold(sessionId, false, undefined, owner);
+      releaseOwnerHold();
       commit(sessionId);
       try {
         onPromptSent?.(sessionId);
@@ -1131,19 +1249,39 @@ export function createMessageQueueRuntime({
         // bookkeeping only
       }
       console.log(`[message-queue] sent consult message to ${sessionId}`);
-      return { dispatched: true, item };
+      return { status: 'dispatched', item };
     } catch (error) {
-      // Tick-style failure handling: the item stays queued, the backoff is
-      // recorded, and the retry loop is re-armed (a consult item is never
-      // tick-delivered, so the re-arm only re-verifies; the owner retries).
       sending.delete(sessionId);
-      const count = (failures.get(sessionId)?.itemId === item.id ? failures.get(sessionId).failures : 0) + 1;
-      const nextAttemptAt = now() + retryDelayMs(count);
-      failures.set(sessionId, { itemId: item.id, failures: count, nextAttemptAt });
-      console.warn(`[message-queue] consult send to ${sessionId} failed (attempt ${count}):`, error?.message ?? error);
+      console.warn(`[message-queue] consult send to ${sessionId} failed:`, error?.message ?? error);
+      // The prompt may have been accepted before the failure surfaced: poll
+      // the parent tail for the user message id this dispatch created.
+      const delivered = await confirmConsultDelivery(sessionId, directory, knownUserMessageIds);
+      if (delivered === true) {
+        // Landed despite the failed response: the dispatch succeeded.
+        removeItem();
+        releaseOwnerHold();
+        commit(sessionId);
+        try {
+          onPromptSent?.(sessionId);
+        } catch {
+          // bookkeeping only
+        }
+        console.log(`[message-queue] consult send to ${sessionId} landed after a reported failure`);
+        return { status: 'dispatched', item, delivery: 'confirmed-after-failure' };
+      }
+      if (delivered === false) {
+        // Definite failure: the prompt never landed, so the item is removed
+        // and the owner hold is released; no raw delivery and no re-queue.
+        removeItem();
+        releaseOwnerHold();
+        commit(sessionId);
+        return { status: 'send-failed', delivered: 'no' };
+      }
+      // Indeterminate (the tail was unreadable): keep the item, the claim, and
+      // the hold so the owner can retry or the reservation can lapse into a
+      // cleared claim; never guess a removal.
       broadcast(sessionId);
-      armDispatch(sessionId, nextAttemptAt - now());
-      throw httpError(`consult dispatch failed: ${error?.message ?? error}`, 502);
+      return { status: 'send-failed', delivered: 'unknown' };
     }
   };
 
@@ -1226,6 +1364,7 @@ export function createMessageQueueRuntime({
     claim,
     setConsultPayload,
     dispatchConsult,
+    hasActiveConsultReservation,
     processPayload,
     start,
     stop,
@@ -1319,12 +1458,9 @@ export function registerMessageQueueRoutes(app, runtime) {
   app.post('/api/message-queue/sessions/:sessionId/items/:itemId/dispatch-consult', async (req, res) => {
     try {
       await runtime.load();
-      const result = await runtime.dispatchConsult(req.params.sessionId, req.params.itemId, req.body?.owner);
-      if (result?.dispatched === false) {
-        res.status(409).json({ error: 'cannot dispatch consult: busy' });
-        return;
-      }
-      res.json(result);
+      // Every control-flow answer is a structured outcome carried by HTTP 200;
+      // only malformed requests (400) or unexpected failures (500) are errors.
+      res.json(await runtime.dispatchConsult(req.params.sessionId, req.params.itemId, req.body?.owner));
     } catch (error) {
       respondError(res, error, 'Failed to dispatch consult message');
     }

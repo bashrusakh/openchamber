@@ -3427,6 +3427,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.autoReview': '이 세션에서 코드 리뷰 루프가 실행되는 동안에는 모델 자문을 사용할 수 없습니다',
   'chat.consult.unavailable.btw': 'btw 세션이 활성화된 동안에는 모델 자문을 사용할 수 없습니다',
   'chat.consult.unavailable.runtime': '모델 자문에는 OpenChamber 서버 메시지 큐가 필요하며 여기서는 사용할 수 없습니다',
+  'chat.consult.unavailable.checkingVersion': '연결된 서버의 OpenCode 버전을 확인하는 중…',
   'chat.consult.unavailable.versionUnknown': '모델 자문에는 OpenCode {version} 이상이 필요합니다. 연결된 서버의 버전을 확인할 수 없습니다.',
   'chat.consult.unavailable.versionUnsupported': 'OpenCode {version}이(가) 지원 버전 {minVersion}보다 낮아 모델 자문을 사용할 수 없습니다.',
 

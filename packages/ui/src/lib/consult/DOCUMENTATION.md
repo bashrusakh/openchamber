@@ -59,6 +59,16 @@ per-advisor `rejections`, which the composer renders as one localized toast
 line per rejected advisor (`formatConsultRejections`); the dialog is already
 closed when a refusal settles.
 
+The pre-enqueue prevalidation (`prevalidateConsultation`, called by the
+submission before any hold or queue item exists) checks the advisor surface
+only: runtime key, non-empty advisor list, and
+`validateConsultAdvisors` over the loaded provider/agent catalog. It
+deliberately does **not** resolve the settled fork point, so a parent whose
+turn is still running is not refused pre-enqueue: 'no-settled-context' is a
+start-time refusal raised inside `startConsultation` after the claim, where
+the submission's post-claim contract (remove the consult item, release the
+hold, return the message to the composer) applies.
+
 ## What is stored where (retention contract, F4)
 
 - Advisor fork transcripts exist for the fan-out and are deleted after
@@ -71,7 +81,10 @@ closed when a refusal settles.
   persisted with the parent session and is visible in its API/export/share
   surface. The ordinary chat UI does not render it as message content.
 - The receipt is persisted as bounded text-part metadata on the acting user
-  message and rides the session's data the same way.
+  message and rides the session's data the same way. An attachment-only
+  consult message carries no receipt: OpenCode's file parts have no metadata
+  field, so the metadata is only ever attached to a text part (the server
+  bound is documented in the message-queue module).
 - Advisor identities are not part of the synthesis text or the receipt's
   blocks; provenance stays in the run store and the receipt's advisor rows.
 
