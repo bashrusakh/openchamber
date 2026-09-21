@@ -3430,6 +3430,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.checkingVersion': '正在檢查所連線伺服器的 OpenCode 版本…',
   'chat.consult.unavailable.versionUnknown': '模型諮詢需要 OpenCode {version} 或更新版本；無法驗證所連線伺服器的版本。',
   'chat.consult.unavailable.versionUnsupported': 'OpenCode {version} 低於支援的版本 {minVersion}，模型諮詢無法使用。',
+  'chat.consult.unavailable.backendProtocol': '模型諮詢需要更新的 OpenChamber 伺服器：所連線的後端不支援諮詢佇列協定。',
 
   'chat.consult.dialog.title': '諮詢模型',
   'chat.consult.dialog.description': '先向其他模型提出相同的問題。它們的回答可能會作為僅用於一輪的私密提示加入；回覆仍由目前的執行模型撰寫。',

@@ -74,6 +74,7 @@ const localeDictionaries = {
 } as const;
 
 const AUTO_REVIEW_LABEL_KEY = 'chat.consult.unavailable.autoReview' as const;
+const BACKEND_PROTOCOL_LABEL_KEY = 'chat.consult.unavailable.backendProtocol' as const;
 
 /**
  * Every locale dictionary carries the same key domain as English (parity is
@@ -206,6 +207,8 @@ describe('consult UI labels', () => {
     'checking-version',
     'version-unknown',
     'version-unsupported',
+    'protocol-missing',
+    'protocol-unsupported',
     'consult-active',
     'auto-review-active',
     'btw-active',
@@ -216,7 +219,14 @@ describe('consult UI labels', () => {
   test('every unavailable reason maps to a distinct English string', () => {
     const labels = reasons.map((reason) => enDict[consultUnavailableLabelKey(reason)]);
     expect(labels.every((label) => label.length > 0)).toBe(true);
-    expect(new Set(labels).size).toBe(reasons.length);
+    // The two backend-protocol refusals deliberately share one message, so
+    // the union has exactly one fewer distinct label than reasons.
+    expect(new Set(labels).size).toBe(reasons.length - 1);
+  });
+
+  test('both backend protocol refusals map to the backend protocol message', () => {
+    expect(consultUnavailableLabelKey('protocol-missing')).toBe(BACKEND_PROTOCOL_LABEL_KEY);
+    expect(consultUnavailableLabelKey('protocol-unsupported')).toBe(BACKEND_PROTOCOL_LABEL_KEY);
   });
 
   const statuses: readonly ConsultAdvisorRunStatus[] = [
@@ -254,6 +264,15 @@ describe('consult unavailable reason localization', () => {
       expect(label.length).toBeGreaterThan(0);
       // No English placeholder may ship in a non-English dictionary.
       if (locale !== 'en') expect(label).not.toBe(enDict[AUTO_REVIEW_LABEL_KEY]);
+    }
+  });
+
+  test('the backend protocol reason is translated in every locale', () => {
+    for (const [locale, dictionary] of Object.entries(localeDictionaries)) {
+      const label = readLocaleKey(dictionary, BACKEND_PROTOCOL_LABEL_KEY);
+      expect(label?.length ?? 0).toBeGreaterThan(0);
+      // No English placeholder may ship in a non-English dictionary.
+      if (locale !== 'en') expect(label).not.toBe(enDict[BACKEND_PROTOCOL_LABEL_KEY]);
     }
   });
 

@@ -3,6 +3,7 @@ import type { ConsultDispatchOutcome, MessageQueueTarget, QueuedContextPart, Que
 import type { AttachedFile } from '@/stores/types/sessionTypes';
 import type { ConsultRunFinish, ConsultRunPhase, ConsultRunStartInput } from '@/stores/useConsultStore';
 import { createContextPart } from '@/lib/messages/contextParts';
+import { CONSULT_BACKEND_PROTOCOL_VERSION } from './capability';
 import {
   ConsultationRefusedError,
   type ConsultationHandle,
@@ -821,10 +822,61 @@ describe('auto-review exclusion', () => {
     if (result.status !== 'refused') throw new Error('expected a refusal');
     expect(result.code).toBe('capability-unavailable');
     expect(result.error).toContain('1.18.29');
+    expect(result.error).toContain('OpenCode');
     expect(result.rejections).toEqual([]);
     expect(result.queueItemRestored).toBe(false);
     expect(harness.state.holds).toEqual([]);
     expect(harness.state.queued).toEqual([]);
+    expect(harness.state.claims).toBe(0);
+  });
+
+  test('a missing backend consult protocol refuses with a backend diagnosis, never an OpenCode one', async () => {
+    const harness = createHarness();
+    // The OpenCode version would pass; only the backend protocol is absent.
+    harness.state.capabilityRefusal = { available: false, reason: 'protocol-missing' };
+    const handle = harness.submit(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('refused');
+    if (result.status !== 'refused') throw new Error('expected a refusal');
+    expect(result.code).toBe('capability-unavailable');
+    // The reason decides the diagnosis: name the backend consult protocol, not
+    // an OpenCode version that was never the problem.
+    expect(result.error).toContain('OpenChamber backend');
+    expect(result.error).toContain('consult queue protocol');
+    expect(result.error).not.toContain('OpenCode');
+    expect(result.rejections).toEqual([]);
+    expect(result.queueItemRestored).toBe(false);
+
+    // The gate runs before the hold and the enqueue: no hold, no claim, no add.
+    expect(harness.state.capabilityChecks).toBe(1);
+    expect(harness.state.queued).toHaveLength(0);
+    expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.holdCalls).toEqual([]);
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('an old backend consult protocol refuses naming the required protocol version, no enqueue', async () => {
+    const harness = createHarness();
+    harness.state.capabilityRefusal = { available: false, reason: 'protocol-unsupported' };
+    const handle = harness.submit(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('refused');
+    if (result.status !== 'refused') throw new Error('expected a refusal');
+    expect(result.code).toBe('capability-unavailable');
+    expect(result.error).toContain('OpenChamber backend');
+    expect(result.error).toContain('consult protocol');
+    expect(result.error).toContain(`version ${CONSULT_BACKEND_PROTOCOL_VERSION}`);
+    expect(result.error).not.toContain('OpenCode');
+    expect(result.queueItemRestored).toBe(false);
+    expect(harness.state.capabilityChecks).toBe(1);
+    expect(harness.state.queued).toHaveLength(0);
+    expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.holdCalls).toEqual([]);
     expect(harness.state.claims).toBe(0);
   });
 

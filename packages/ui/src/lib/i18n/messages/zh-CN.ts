@@ -3431,6 +3431,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.checkingVersion': '正在检查所连接服务器的 OpenCode 版本…',
   'chat.consult.unavailable.versionUnknown': '模型咨询需要 OpenCode {version} 或更高版本；无法验证所连接服务器的版本。',
   'chat.consult.unavailable.versionUnsupported': 'OpenCode {version} 低于受支持的版本 {minVersion}，模型咨询不可用。',
+  'chat.consult.unavailable.backendProtocol': '模型咨询需要更新的 OpenChamber 服务器：所连接的后端不支持咨询队列协议。',
 
   'chat.consult.dialog.title': '咨询模型',
   'chat.consult.dialog.description': '先向其他模型提出同样的问题。它们的回答可能会作为仅用于一轮的私密提示加入；回复仍由当前执行模型撰写。',

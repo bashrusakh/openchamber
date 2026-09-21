@@ -8,34 +8,40 @@ import { isServerOwnedMessageQueue } from '@/stores/messageQueueStore';
  * The mechanism Phase 0 verified is: a turn-scoped `system` on the advisor
  * send, a wildcard deny-all session permission, a hidden advisor fork, and a
  * request body that survives the active runtime's transport (the web proxy
- * and the VS Code bridge). The transport half was **not** verified (Phase 0
- * A7), and this module is the single place that answers what can be assumed.
+ * and the VS Code bridge).
  *
- * There is no reliable signal for the transport half:
+ * Two independent proofs are required, and the OpenCode version is not a
+ * proxy for the backend half:
  *
- * - `opencodeClient.getApp()` returns a hardcoded OpenAPI spec version
- *   (`"0.0.3"`), not a server capability surface;
- * - the OpenChamber server exposes no `experimental.capabilities` endpoint
- *   and no consult-specific capability flag;
- * - the runtime descriptor (`isServerOwnedMessageQueue`, `isVSCodeRuntime`)
- *   says which runtime this is, not what its bridge forwards.
+ * - the connected OpenCode server reports a version at or above the build the
+ *   mechanism was verified on (`CONSULT_MIN_OPENCODE_VERSION`);
+ * - the connected OpenChamber backend speaks the consult queue protocol
+ *   (`CONSULT_BACKEND_PROTOCOL_VERSION`), reported as `consultProtocol` on
+ *   `GET /api/opencode/version`. A backend that predates that field ignores
+ *   the unknown item `kind` and could deliver the message as a normal queued
+ *   item, so an absent value must refuse instead of assuming support.
  *
  * The one real runtime signal is the server-owned message queue: admission is
  * impossible without it (VS Code has none), so a runtime without it is
- * `unsupported-runtime`. A server-queue runtime with no readable OpenCode
- * version stays available but `unverified` (the accepted deviation recorded in
- * `lib/consult/DOCUMENTATION.md`); a runtime whose connected OpenCode server
- * reports a real version at or above the verified floor is `verified`.
+ * `unsupported-runtime`. `resolveConsultMechanismCapability` is the
+ * synchronous, still-unverified answer (the accepted deviation recorded in
+ * `lib/consult/DOCUMENTATION.md`); the live gate
+ * (`resolveConsultLiveCapability`) proves both requirements and refuses with
+ * `version-unknown` / `version-unsupported` / `protocol-missing` /
+ * `protocol-unsupported` when either is unreadable or missing.
  *
- * F3 fail-closed: the mechanism was proven end-to-end on OpenCode 1.18.29.
- * The composer's live gate (`resolveConsultAvailability`) requires that
- * version, and an unreadable version refuses instead of assuming support.
+ * F3 fail-closed: the mechanism was proven end-to-end on OpenCode 1.18.29 and
+ * against the backend protocol version this module requires; an unreadable
+ * version or an absent/unusable backend protocol refuses instead of assuming
+ * support.
  */
 export type ConsultMechanismCapability =
   | { available: false; reason: 'unsupported-runtime' }
   | { available: false; reason: 'checking-version' }
   | { available: false; reason: 'version-unknown'; version?: string }
   | { available: false; reason: 'version-unsupported'; version?: string }
+  | { available: false; reason: 'protocol-missing' }
+  | { available: false; reason: 'protocol-unsupported' }
   | { available: true; assurance: 'unverified' }
   | { available: true; assurance: 'verified'; version: string };
 
@@ -58,13 +64,23 @@ export const resolveConsultMechanismCapability = (
  */
 export const CONSULT_MIN_OPENCODE_VERSION = '1.18.29';
 
+/**
+ * The OpenChamber backend's consult-queue protocol version. This is
+ * independent of the OpenCode version: the server that speaks the consult
+ * queue reports it as `consultProtocol` on `GET /api/opencode/version`, and
+ * the live gate refuses when that field is absent or below this value.
+ */
+export const CONSULT_BACKEND_PROTOCOL_VERSION = 1;
+
 /** The version payload `GET /api/opencode/version` returns. */
-export type ConsultServerVersionResponse = { version: string | null; error?: string };
+export type ConsultServerVersionResponse = { version: string | null; error?: string; consultProtocol?: unknown };
 
 export type ConsultServerVersionGate =
   | { verified: true; version: string }
   | { verified: false; reason: 'version-unknown'; version?: string }
-  | { verified: false; reason: 'version-unsupported'; version?: string };
+  | { verified: false; reason: 'version-unsupported'; version?: string }
+  | { verified: false; reason: 'protocol-missing' }
+  | { verified: false; reason: 'protocol-unsupported'; protocol: number };
 
 /**
  * Numeric-only semver-ish comparison. Prerelease suffixes (and build
@@ -100,15 +116,31 @@ export const isConsultVersionSupported = (candidate: string, floor: string = CON
 };
 
 /**
- * The version half of the live gate, injectable for tests: an unreadable
- * version (`null`, empty, unparseable) or a fetch error is `version-unknown`
- * — fail closed, never assume the floor. A real version below the floor is
- * `version-unsupported`.
+ * A usable backend protocol number is a non-negative integer; an absent, null,
+ * string, float, or negative value reads as missing, never as a version.
+ */
+const consultBackendProtocolSchema = z.number().int().min(0);
+
+/** Reads the consult-queue protocol the connected backend reports, if usable. */
+const readConsultBackendProtocol = (value: ConsultServerVersionResponse['consultProtocol']): number | null => {
+  const parsed = consultBackendProtocolSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+};
+
+/**
+ * The live gate, injectable for tests: the OpenCode version **and** the
+ * backend consult-queue protocol must both be proven, version first. An
+ * unreadable version (`null`, empty, unparseable) or a fetch error is
+ * `version-unknown`, and a real version below the floor is
+ * `version-unsupported`. An absent or unusable `consultProtocol` is
+ * `protocol-missing`, and one below `CONSULT_BACKEND_PROTOCOL_VERSION` is
+ * `protocol-unsupported`; equal or higher passes (forward compatible). Every
+ * refusal fails closed.
  */
 export const verifyConsultServerVersion = async (
-  fetchVersion: () => Promise<{ version: string | null; error?: string }>,
+  fetchVersion: () => Promise<ConsultServerVersionResponse>,
 ): Promise<ConsultServerVersionGate> => {
-  let response: { version: string | null; error?: string };
+  let response: ConsultServerVersionResponse;
   try {
     response = await fetchVersion();
   } catch {
@@ -122,6 +154,9 @@ export const verifyConsultServerVersion = async (
   // reports a build string the parser cannot read is fail-closed unknown.
   if (!versionParts(version)) return { verified: false, reason: 'version-unknown', version };
   if (!isConsultVersionSupported(version)) return { verified: false, reason: 'version-unsupported', version };
+  const protocol = readConsultBackendProtocol(response.consultProtocol);
+  if (protocol === null) return { verified: false, reason: 'protocol-missing' };
+  if (protocol < CONSULT_BACKEND_PROTOCOL_VERSION) return { verified: false, reason: 'protocol-unsupported', protocol };
   return { verified: true, version };
 };
 
@@ -130,12 +165,14 @@ const CONSULT_VERSION_TIMEOUT_MS = 5_000;
 
 /**
  * The version route's payload parsed at the I/O boundary with zod: the route
- * returns `{ version: string | null, error?: string }`; anything else reads
- * as unreadable.
+ * returns `{ version: string | null, error?: string, consultProtocol }`; the
+ * protocol is kept as the raw value so the gate reads it instead of trusting
+ * the parse to have understood it.
  */
 const serverVersionPayloadSchema = z.object({
   version: z.string().nullable(),
   error: z.string().optional(),
+  consultProtocol: z.unknown().optional(),
 });
 
 type ServerVersionPayload = z.infer<typeof serverVersionPayloadSchema>;
@@ -151,7 +188,8 @@ export const fetchConsultServerVersion = async (): Promise<ServerVersionPayload>
         error: payload.success ? payload.data.error : `version request failed (${response.status})`,
       };
     }
-    return { version: payload.success ? payload.data.version : null };
+    if (!payload.success) return { version: null };
+    return { version: payload.data.version, consultProtocol: payload.data.consultProtocol };
   } catch (error) {
     return { version: null, error: error instanceof Error ? error.message : String(error) };
   }
@@ -159,17 +197,22 @@ export const fetchConsultServerVersion = async (): Promise<ServerVersionPayload>
 
 /**
  * The composed live capability gate (F3): the runtime gate first, then the
- * connected server's OpenCode version. Unknown or unreadable versions refuse
- * (`version-unknown`), versions below the verified floor refuse
- * (`version-unsupported`), and only a verified version offers the action with
- * `assurance: 'verified'`.
+ * connected server's OpenCode version and backend consult-queue protocol.
+ * Unknown or unreadable versions refuse (`version-unknown`), versions below
+ * the verified floor refuse (`version-unsupported`), an absent or unusable
+ * backend protocol refuses (`protocol-missing`), and one below
+ * `CONSULT_BACKEND_PROTOCOL_VERSION` refuses (`protocol-unsupported`). Only
+ * both proofs together offer the action with `assurance: 'verified'`.
  */
 export const resolveConsultLiveCapability = async (
-  fetchVersion: () => Promise<{ version: string | null; error?: string }> = fetchConsultServerVersion,
+  fetchVersion: () => Promise<ConsultServerVersionResponse> = fetchConsultServerVersion,
   input: ConsultMechanismCapabilityInput = { serverQueueSupported: isServerOwnedMessageQueue() },
 ): Promise<ConsultMechanismCapability> => {
   if (!input.serverQueueSupported) return { available: false, reason: 'unsupported-runtime' };
   const gate = await verifyConsultServerVersion(fetchVersion);
   if (gate.verified) return { available: true, assurance: 'verified', version: gate.version };
+  if (gate.reason === 'protocol-missing' || gate.reason === 'protocol-unsupported') {
+    return { available: false, reason: gate.reason };
+  }
   return { available: false, reason: gate.reason, version: gate.version };
 };

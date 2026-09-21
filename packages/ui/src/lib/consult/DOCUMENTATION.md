@@ -24,7 +24,11 @@ module set is:
   (default 60 min). `sweepStaleConsultAdvisorForks()` is the live-wired sweep.
 - `synthesis.ts` (WP3.2) owns the pure builders: the anonymous untrusted
   synthesis block, the degraded notice, and the bounded per-message receipt
-  with its metadata read boundary.
+  with its metadata read boundary. The synthesis block is bounded client-side
+  by `CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET` (23_000), deliberately below the
+  message-queue server's `CONSULT_SYSTEM_CHAR_LIMIT` (24_000), so advisor
+  output is truncated instead of a payload update being rejected; keep the two
+  constants in sync.
 - `submission.ts` (WP3.2) owns queue admission and the acting dispatch:
   `createConsultSubmission(deps)` is the injectable seam, and
   `submitConsultMessage(input)` is the live entry point.
@@ -417,28 +421,42 @@ cannot travel in the server batch.
 
 The runtime is shared UI code. It runs on web, Electron, VS Code, hosted mobile,
 and Capacitor wherever the OpenChamber-managed OpenCode server is the backend.
-`capability.ts#resolveConsultMechanismCapability` is the single answer to what
-can be assumed for the current runtime/server:
 
-- a runtime without the server-owned queue (VS Code) is
-  `{ available: false, reason: 'unsupported-runtime' }`;
-- every other runtime is `{ available: true, assurance: 'unverified' }`.
+The composer action is gated by `useConsultLiveCapability` /
+`resolveConsultLiveCapability`, which requires two independent proofs:
 
-Phase 0 A7 did not verify that the web proxy and the VS Code bridge carry the
-advisor request body unchanged, and **no reliable signal exists to close that
-gap**: `opencodeClient.getApp()` returns a hardcoded OpenAPI spec version, and
-the server exposes no `experimental.capabilities` endpoint or consult-specific
-capability flag. The helper therefore never claims verification. The composer
-gate (`resolveConsultAvailability`) reads the helper and disables the action
-only for `unsupported-runtime`; an `unverified` assurance keeps it enabled
-under an **accepted deviation** (plan risk 9), because no signal exists to
-justify a stricter gate. The transport half of the verified mechanism remains
-unverified for web, Electron, and mobile. Adding an `assurance: 'verified'`
-answer requires a real capability/version surface first. Nothing in the
-advisor runtime branches per runtime, and the queue admission model assumes
-the server-owned queue; see the submission contract's VS Code and hold-expiry
-notes. The independent Phase 1 verdicts and their residuals are
-recorded in `plans/consult-models/reviews/phase-1-verification.md`.
+- the connected OpenCode server reports a version at or above
+  `CONSULT_MIN_OPENCODE_VERSION`;
+- the connected OpenChamber backend reports `consultProtocol` at or above
+  `CONSULT_BACKEND_PROTOCOL_VERSION` on `GET /api/opencode/version`. This is
+  the backend half of the handshake: a backend that predates the field ignores
+  the unknown consult item `kind` and would deliver the message as a normal
+  queued item, so absence must refuse rather than assume support.
+
+The composer's `resolveConsultAvailability` consumes that live capability and
+disables the action for every refusal; there is no `unverified` availability
+path in the composer:
+
+- `unsupported-runtime`: the runtime has no server-owned queue (VS Code);
+- `checking-version`: the initial state, and every re-check while a read is in
+  flight;
+- `version-unknown`: the version read failed or returned an unparseable value;
+- `version-unsupported`: a real OpenCode version below the floor;
+- `protocol-missing`: `consultProtocol` is absent or malformed — the
+  older-backend case above;
+- `protocol-unsupported`: a protocol number below the required version.
+
+The submission re-checks the same capability independently in its
+`verifyCapability` seam before it acquires any hold or enqueues, so a caller
+that bypassed the composer still cannot queue onto an old backend.
+`resolveConsultMechanismCapability` remains only as the synchronous runtime
+descriptor used before or without a live read; it never claims verification. A
+runtime endpoint change resets `useConsultLiveCapability` to
+`checking-version` and re-resolves against the new backend. Nothing in the
+advisor runtime branches per runtime, and the queue admission model assumes the
+server-owned queue; see the submission contract's VS Code and hold-expiry
+notes. The independent Phase 1 verdicts and their residuals are recorded in
+`plans/consult-models/reviews/phase-1-verification.md`.
 
 The WP2.2/WP2.3 composer surface is wired: `components/chat/consult/*` provides
 the footer action (`ConsultActionButton`, rendered by `ComposerFooter`), the
@@ -467,11 +485,12 @@ Accepted v1 limitations:
   `lib/opencode/client.ts` attaches `textPartMetadata` only when that text is
   non-empty, so a consult with attachments and no text delivers the turn with
   no receipt.
-- VS Code has no server-owned message queue, so the capability helper
-  (`resolveConsultMechanismCapability`) reports `unsupported-runtime`, and the
-  composer gate (`resolveConsultAvailability`, which reads the helper) disables
-  the action with that reason; the tooltip explains why instead of queueing
-  where the submission cannot hold.
+- VS Code has no server-owned message queue, so the runtime gate refuses before
+  any protocol read: `resolveConsultMechanismCapability` and
+  `resolveConsultLiveCapability` both report `unsupported-runtime`, and the
+  composer disables the action with that reason. The VS Code bridge's own
+  version payload does not carry `consultProtocol`; that absence is never
+  reached as `protocol-missing` because the runtime check comes first.
 - The collapsed mobile composer pill (`MobilePillComposer`) has no footer, so
   it has no consult entry point; the action is reached by expanding the
   composer.

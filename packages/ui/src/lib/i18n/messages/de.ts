@@ -3428,6 +3428,7 @@ export const dict = {
   'chat.consult.unavailable.checkingVersion': 'Die OpenCode-Version des verbundenen Servers wird geprüft…',
   'chat.consult.unavailable.versionUnknown': 'Consult Models benötigt OpenCode {version} oder neuer; die Version des verbundenen Servers konnte nicht überprüft werden.',
   'chat.consult.unavailable.versionUnsupported': 'Consult Models ist nicht verfügbar, weil OpenCode {version} älter als die unterstützte Version {minVersion} ist.',
+  'chat.consult.unavailable.backendProtocol': 'Consult Models benötigt einen neueren OpenChamber-Server: Das verbundene Backend unterstützt das Consult-Queue-Protokoll nicht.',
 
   'chat.consult.dialog.title': 'Modelle befragen',
   'chat.consult.dialog.description': 'Stelle anderen Modellen zuerst dieselbe Frage. Ihre Antworten können für einen Zug als privater Hinweis hinzugefügt werden; die Antwort schreibt weiterhin dein aktives Modell.',

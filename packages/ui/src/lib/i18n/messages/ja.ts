@@ -3430,6 +3430,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.checkingVersion': '接続先サーバーの OpenCode バージョンを確認しています…',
   'chat.consult.unavailable.versionUnknown': 'モデルへの相談には OpenCode {version} 以降が必要です。接続先サーバーのバージョンを確認できませんでした。',
   'chat.consult.unavailable.versionUnsupported': 'OpenCode {version} がサポート対象のバージョン {minVersion} より古いため、モデルへの相談は利用できません。',
+  'chat.consult.unavailable.backendProtocol': 'モデルへの相談には新しい OpenChamber サーバーが必要です。接続先のバックエンドは相談キューのプロトコルに対応していません。',
 
   'chat.consult.dialog.title': 'モデルに相談',
   'chat.consult.dialog.description': '先に他のモデルへ同じ質問を送ります。回答は 1 ターンだけの非公開ヒントとして追加されることがあり、返信はこれまでどおり実行モデルが作成します。',

@@ -3431,6 +3431,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.checkingVersion': 'Перевірка версії OpenCode підключеного сервера…',
   'chat.consult.unavailable.versionUnknown': 'Для порад з моделями потрібен OpenCode {version} або новіший; не вдалося перевірити версію підключеного сервера.',
   'chat.consult.unavailable.versionUnsupported': 'Поради з моделями недоступні, бо OpenCode {version} старіша за підтримувану версію {minVersion}.',
+  'chat.consult.unavailable.backendProtocol': 'Для порад з моделями потрібен новіший сервер OpenChamber: підключений бекенд не підтримує протокол черги консультацій.',
 
   'chat.consult.dialog.title': 'Порадитися з моделями',
   'chat.consult.dialog.description': 'Спершу поставте те саме запитання іншим моделям. Їхні відповіді можуть бути додані як приватна підказка на один хід; відповідь і далі пише ваша активна модель.',

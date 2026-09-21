@@ -1,7 +1,7 @@
 import { resolveQueuedSessionStatusType } from '@/hooks/useQueuedMessageAutoSend';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { queuedContextToParts } from '@/components/chat/composer/submit/buildOutgoingMessage';
-import { CONSULT_MIN_OPENCODE_VERSION, resolveConsultLiveCapability } from '@/lib/consult/capability';
+import { CONSULT_BACKEND_PROTOCOL_VERSION, CONSULT_MIN_OPENCODE_VERSION, resolveConsultLiveCapability } from '@/lib/consult/capability';
 import {
   createMessageQueueTarget,
   useMessageQueueStore,
@@ -131,6 +131,22 @@ const DELIVERED_RAW_MESSAGE =
   'The queued consult message left the queue before this consultation could dispatch it.';
 const AUTO_REVIEW_ACTIVE_MESSAGE =
   'A consultation cannot start while the automatic review loop is running for this session.';
+
+/**
+ * The default refusal for an unverified live capability. The reason decides
+ * the diagnosis: a backend whose consult queue protocol is absent or too old
+ * needs an OpenChamber backend update, so naming the OpenCode version floor
+ * there would misdiagnose a passing OpenCode server.
+ */
+const capabilityRefusalMessage = (reason: string): string => {
+  if (reason === 'protocol-missing') {
+    return 'The connected OpenChamber backend does not support the consult queue protocol; update the backend to use Consult Models.';
+  }
+  if (reason === 'protocol-unsupported') {
+    return `The connected OpenChamber backend's consult protocol is older than the required version ${CONSULT_BACKEND_PROTOCOL_VERSION}; update the backend to use Consult Models.`;
+  }
+  return `Consult Models needs OpenCode ${CONSULT_MIN_OPENCODE_VERSION} or newer; the connected server could not be verified (${reason}).`;
+};
 
 const defaultScheduleHoldReassert = (callback: () => void, intervalMs: number): (() => void) => {
   const timer = setInterval(callback, intervalMs);
@@ -616,8 +632,7 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       };
     }
     if (!capability.available) {
-      const error = capability.message
-        ?? `Consult Models needs OpenCode ${CONSULT_MIN_OPENCODE_VERSION} or newer; the connected server could not be verified (${capability.reason}).`;
+      const error = capability.message ?? capabilityRefusalMessage(capability.reason);
       deps.runs.finish(parentSessionId, runId, { phase: 'failed', error });
       return {
         status: 'refused',

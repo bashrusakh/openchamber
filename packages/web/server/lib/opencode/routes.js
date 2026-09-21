@@ -8,6 +8,7 @@ import {
 import { getClaudeCliAuthStatus } from './claude-cli-auth.js';
 import { OPENCODE_CONFIG_DIR } from './shared.js';
 import { settingsSurfaceOf } from './settings-files.js';
+import { CONSULT_PROTOCOL_VERSION } from '../message-queue/runtime.js';
 
 export const registerOpenCodeRoutes = (app, dependencies) => {
   const {
@@ -413,7 +414,7 @@ ${desktopReturn ? `<a class="return" href="openchamber://focus/mcp-auth">Return 
         });
       }
       const version = typeof health?.version === 'string' ? health.version.replace(/^v/, '') : null;
-      return res.json({ version });
+      return res.json({ version, consultProtocol: CONSULT_PROTOCOL_VERSION });
     } catch (error) {
       return res.status(500).json({
         version: null,

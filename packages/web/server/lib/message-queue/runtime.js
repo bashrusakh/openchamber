@@ -121,6 +121,11 @@ const parseContextPart = (value) => {
 // own claim → payload → dispatch-consult route; the generic dispatcher skips it.
 const CONSULT_ITEM_KIND = 'consult';
 
+// Bump whenever the consult queue protocol changes. The UI capability gate
+// reads this through GET /api/opencode/version and must fail closed when the
+// value is absent or lower than the version it requires.
+export const CONSULT_PROTOCOL_VERSION = 1;
+
 // Parses the optional consult payload: { system?, textPartMetadata? }. `system`
 // is a plain string; `textPartMetadata` is carried as JSON text (it must be
 // serializable and bounded) so the stored item round-trips like every other
@@ -881,13 +886,29 @@ export function createMessageQueueRuntime({
       items = existingItems.filter((_, index) => index !== evictIndex);
       items.push(item);
     }
+    const hadSession = queues.has(sessionId);
     queues.set(sessionId, { directory, items });
     directories.set(sessionId, directory);
     if (queues.size > MAX_SESSIONS) {
+      // A session with an in-flight send, a live hold, or any consult item is
+      // never evicted: dropping it would discard authoritative queued work
+      // (a consultation waiting for its own dispatch route).
       const oldest = Array.from(queues.entries())
-        .filter(([id]) => id !== sessionId && !sending.has(id))
+        .filter(([id, queue]) =>
+          id !== sessionId
+          && !sending.has(id)
+          && !isHeld(id)
+          && !queue.items.some((entry) => entry.kind === CONSULT_ITEM_KIND))
         .sort((left, right) => (left[1].items[0]?.createdAt ?? 0) - (right[1].items[0]?.createdAt ?? 0))
         .slice(0, queues.size - MAX_SESSIONS);
+      if (oldest.length === 0 && !hadSession) {
+        // Nothing safe to evict and this call created the session: roll the
+        // just-added entry back so a refused enqueue leaves no phantom queue.
+        queues.delete(sessionId);
+        directories.delete(sessionId);
+        clearTimer(sessionId);
+        throw httpError('cannot queue message: the queue is full of active sessions', 409);
+      }
       for (const [staleId] of oldest) {
         queues.delete(staleId);
         clearTimer(staleId);

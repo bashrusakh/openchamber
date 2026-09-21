@@ -3,6 +3,8 @@ import type { ConsultAdvisorProvenance } from './runtime';
 import {
   CONSULT_RECEIPT_METADATA_KEY,
   CONSULT_RECEIPT_REASON_MAX_LENGTH,
+  CONSULT_SERVER_SYSTEM_CHAR_LIMIT,
+  CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET,
   buildConsultReceipt,
   buildConsultSynthesisSystem,
   buildDegradedConsultNotice,
@@ -58,6 +60,108 @@ describe('buildConsultSynthesisSystem', () => {
 
   test('an empty block list yields the degraded notice instead of an empty frame', () => {
     expect(buildConsultSynthesisSystem([])).toBe(buildDegradedConsultNotice());
+  });
+
+  test('keeps five short advisor outputs complete and unmarked', () => {
+    const texts = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'];
+    const system = buildConsultSynthesisSystem(texts.map((text) => ({ text })));
+
+    // The exact body the unbounded join produced before the budget existed.
+    const unboundedBody = texts.map((text, index) => `ADVISOR ${index + 1}:\n${text}`).join('\n\n');
+    expect(system).toContain(unboundedBody);
+    expect(system).not.toContain('[advisor response truncated]');
+    expect(system.length).toBeLessThanOrEqual(CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET);
+  });
+
+  test('bounds one runaway advisor output and marks the truncation', () => {
+    const system = buildConsultSynthesisSystem([{ text: 'long '.repeat(20_000) }]);
+
+    expect(system).toContain('1 anonymous advisor responses');
+    expect(system).toContain('ADVISOR 1:');
+    expect(system).toContain('[advisor response truncated]');
+    expect(system.length).toBeLessThanOrEqual(CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET);
+  });
+
+  test('keeps all five runaway advisors present with truncation markers', () => {
+    const blocks = Array.from({ length: 5 }, (_, index) => ({
+      text: `advisor ${index + 1} ${'y'.repeat(50_000)}`,
+    }));
+    const system = buildConsultSynthesisSystem(blocks);
+
+    for (let ordinal = 1; ordinal <= blocks.length; ordinal += 1) {
+      expect(system).toContain(`ADVISOR ${ordinal}:`);
+    }
+    expect(system.match(/\[advisor response truncated\]/g)).toHaveLength(blocks.length);
+    expect(system.length).toBeLessThanOrEqual(CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET);
+  });
+
+  test('stays under the server limit and the client budget for huge inputs', () => {
+    const system = buildConsultSynthesisSystem([
+      { text: 'z'.repeat(400_000) },
+      { text: 'w'.repeat(400_000) },
+    ]);
+
+    expect(system.length).toBeLessThanOrEqual(CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET);
+    expect(system.length).toBeLessThanOrEqual(CONSULT_SERVER_SYSTEM_CHAR_LIMIT);
+    expect(CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET).toBeLessThanOrEqual(
+      CONSULT_SERVER_SYSTEM_CHAR_LIMIT - 1_000,
+    );
+  });
+
+  test('numbers included advisors sequentially with intact separators', () => {
+    const blocks = Array.from({ length: 4 }, (_, index) => ({
+      text: `response ${index + 1} ${'q'.repeat(40_000)}`,
+    }));
+    const system = buildConsultSynthesisSystem(blocks);
+
+    const headers = [...system.matchAll(/ADVISOR (\d+):/g)].map((match) => Number(match[1]));
+    expect(headers).toEqual([1, 2, 3, 4]);
+    expect(system).toContain('4 anonymous advisor responses');
+    for (let ordinal = 1; ordinal < blocks.length; ordinal += 1) {
+      expect(system).toContain(`[advisor response truncated]\n\nADVISOR ${ordinal + 1}:`);
+    }
+    expect(system.startsWith('<system-reminder>')).toBe(true);
+    expect(system.endsWith('</system-reminder>')).toBe(true);
+  });
+
+  test('redistributes short-block leftover to the truncated block', () => {
+    const system = buildConsultSynthesisSystem([
+      { text: 'h'.repeat(200_000) },
+      { text: 'tiny' },
+      { text: 'tiny' },
+      { text: 'tiny' },
+      { text: 'tiny' },
+    ]);
+
+    expect(system).toContain('[advisor response truncated]');
+    const hugeSection = system.slice(system.indexOf('ADVISOR 1:'), system.indexOf('ADVISOR 2:'));
+    const tinySections = system.slice(system.indexOf('ADVISOR 2:'));
+    expect(hugeSection.length).toBeGreaterThan(tinySections.length);
+  });
+
+  test('truncates without splitting a surrogate pair', () => {
+    const system = buildConsultSynthesisSystem([{ text: '😀'.repeat(20_000) }]);
+
+    const markerIndex = system.indexOf('[advisor response truncated]');
+    expect(markerIndex).toBeGreaterThan(0);
+    // Every kept content unit is the low half of an emoji pair; a naive slice
+    // would leave the dangling high half before the marker.
+    expect(system.charCodeAt(markerIndex - 1)).toBeGreaterThanOrEqual(0xdc00);
+    expect(system.length).toBeLessThanOrEqual(CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET);
+  });
+
+  test('bounds a pathological block count and numbers only the included blocks', () => {
+    const blocks = Array.from({ length: 2_000 }, (_, index) => ({
+      text: `advisor-${index} ${'x'.repeat(97)}`,
+    }));
+    const system = buildConsultSynthesisSystem(blocks);
+
+    expect(system.length).toBeLessThanOrEqual(CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET);
+    const headers = [...system.matchAll(/ADVISOR (\d+):/g)].map((match) => Number(match[1]));
+    expect(headers.length).toBeGreaterThan(0);
+    expect(headers.length).toBeLessThan(blocks.length);
+    expect(headers).toEqual(headers.map((_, index) => index + 1));
+    expect(system).toContain(`Below are ${headers.length} anonymous advisor responses`);
   });
 });
 

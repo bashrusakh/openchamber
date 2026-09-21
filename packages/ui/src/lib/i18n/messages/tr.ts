@@ -3428,6 +3428,7 @@ export const dict = {
   'chat.consult.unavailable.checkingVersion': 'Bağlı sunucunun OpenCode sürümü denetleniyor…',
   'chat.consult.unavailable.versionUnknown': 'Modellere danışma için OpenCode {version} veya üstü gerekir; bağlı sunucunun sürümü doğrulanamadı.',
   'chat.consult.unavailable.versionUnsupported': 'OpenCode {version}, desteklenen sürüm {minVersion} sürümünden daha eski olduğu için modellere danışma kullanılamaz.',
+  'chat.consult.unavailable.backendProtocol': 'Modellere danışma için daha yeni bir OpenChamber sunucusu gerekir: bağlı arka uç, danışma kuyruğu protokolünü desteklemiyor.',
 
   'chat.consult.dialog.title': 'Modellere danış',
   'chat.consult.dialog.description': 'Önce aynı soruyu diğer modellere sor. Yanıtları bir tur boyunca özel bir ipucu olarak eklenebilir; yanıtı yine etkin model yazar.',

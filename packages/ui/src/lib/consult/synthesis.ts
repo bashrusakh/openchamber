@@ -159,21 +159,137 @@ const SYNTHESIS_FRAME = [
 ].join(' ');
 
 /**
+ * Mirrors `CONSULT_SYSTEM_CHAR_LIMIT` in
+ * `packages/web/server/lib/message-queue/runtime.js`, whose
+ * `parseConsultPayload` rejects a consult item whose `system` is longer. Keep
+ * the two constants in sync.
+ */
+export const CONSULT_SERVER_SYSTEM_CHAR_LIMIT = 24_000;
+
+/**
+ * Client-side ceiling for the synthesis `system`, always at least 1_000
+ * characters below `CONSULT_SERVER_SYSTEM_CHAR_LIMIT`: the margin covers the
+ * `<system-reminder>` wrapper and the framing the builder adds around the
+ * advisor blocks, plus the server's own accounting, so runaway advisor output
+ * is truncated here instead of failing the payload update that carries it.
+ */
+export const CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET = 23_000;
+
+/** Marks an advisor block whose text had to be cut to fit the budget. */
+const SYNTHESIS_TRUNCATION_MARKER = '[advisor response truncated]';
+
+const SYNTHESIS_BLOCK_SEPARATOR = '\n\n';
+
+/**
+ * What `wrapSystemReminder` adds around the synthesis body: the two reminder
+ * tags plus the newline before and after the body.
+ */
+const SYNTHESIS_WRAPPER_OVERHEAD = '<system-reminder>'.length + '</system-reminder>'.length + 2;
+
+/** `ADVISOR n:` header plus its newline, exactly as the blocks are framed. */
+const advisorBlockHeader = (ordinal: number): string => `ADVISOR ${ordinal}:\n`;
+
+const synthesisFrame = (count: number): string => SYNTHESIS_FRAME.replace('{count}', String(count));
+
+/**
+ * Slice `text` to at most `end` UTF-16 units without splitting a surrogate
+ * pair: the high half is dropped rather than left dangling.
+ */
+const sliceWithoutSplittingSurrogatePair = (text: string, end: number): string => {
+  if (end <= 0) return '';
+  if (end >= text.length) return text;
+  const lastKept = text.charCodeAt(end - 1);
+  const firstDropped = text.charCodeAt(end);
+  const splitsPair =
+    lastKept >= 0xd800 && lastKept <= 0xdbff && firstDropped >= 0xdc00 && firstDropped <= 0xdfff;
+  return text.slice(0, splitsPair ? end - 1 : end);
+};
+
+/**
+ * Fit one advisor text into `allowance` characters. A cut block ends with the
+ * marker, and that marker is counted inside its allowance.
+ */
+const fitAdvisorText = (text: string, allowance: number): string => {
+  if (text.length <= allowance) return text;
+  const contentEnd = Math.max(0, allowance - SYNTHESIS_TRUNCATION_MARKER.length);
+  return `${sliceWithoutSplittingSurrogatePair(text, contentEnd)}${SYNTHESIS_TRUNCATION_MARKER}`;
+};
+
+/** Text characters left for blocks once wrapper, frame, headers, and separators are reserved. */
+const synthesisTextBudget = (count: number, headerChars: number): number =>
+  CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET
+  - SYNTHESIS_WRAPPER_OVERHEAD
+  - synthesisFrame(count).length
+  - headerChars
+  - count * SYNTHESIS_BLOCK_SEPARATOR.length;
+
+const joinAdvisorBlocks = (bodies: readonly string[]): string =>
+  bodies
+    .map((body, index) => `${advisorBlockHeader(index + 1)}${body}`)
+    .join(SYNTHESIS_BLOCK_SEPARATOR);
+
+/**
  * The turn-scoped `system` guidance for a run with usable advisor output.
  *
  * Blocks are anonymous (`ADVISOR 1`, `ADVISOR 2`, …) and in collection order.
  * An empty block list yields the degraded notice instead, so a caller can
  * never dispatch an acting turn with a guidance frame and nothing under it.
+ *
+ * The result always fits `CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET` (and therefore
+ * the server's limit). Input that already fits is returned exactly as the
+ * unbounded join built it. Otherwise the wrapper, frame, headers, and
+ * separators are reserved first; the remaining text budget is split evenly,
+ * and the share a short block did not need is handed to the blocks that had to
+ * be cut, so one huge block keeps its text instead of losing it to tiny
+ * neighbours. A block is dropped only when even that split cannot hold its
+ * header plus usable content — for a block whose text has to be cut, that
+ * means its marker and at least one character of its own text. Frame count and
+ * numbering then cover the included blocks only.
  */
 export const buildConsultSynthesisSystem = (blocks: readonly ConsultAdvisorBlock[]): string => {
   if (blocks.length === 0) return buildDegradedConsultNotice();
 
-  const frame = SYNTHESIS_FRAME.replace('{count}', String(blocks.length));
-  const body = blocks
-    .map((block, index) => `ADVISOR ${index + 1}:\n${block.text.trim()}`)
-    .join('\n\n');
+  const texts = blocks.map((block) => block.text.trim());
+  const unbounded = wrapSystemReminder(
+    `${synthesisFrame(blocks.length)}${SYNTHESIS_BLOCK_SEPARATOR}${joinAdvisorBlocks(texts)}`,
+  );
+  if (unbounded.length <= CONSULT_SYNTHESIS_SYSTEM_CHAR_BUDGET) return unbounded;
 
-  return wrapSystemReminder(`${frame}\n\n${body}`);
+  let includedCount = texts.length;
+  let headerChars = 0;
+  for (let ordinal = 1; ordinal <= includedCount; ordinal += 1) {
+    headerChars += advisorBlockHeader(ordinal).length;
+  }
+  const perBlockFloor = SYNTHESIS_TRUNCATION_MARKER.length + 1;
+  while (
+    includedCount > 0
+    && synthesisTextBudget(includedCount, headerChars) < includedCount * perBlockFloor
+  ) {
+    headerChars -= advisorBlockHeader(includedCount).length;
+    includedCount -= 1;
+  }
+  if (includedCount === 0) return buildDegradedConsultNotice();
+
+  const includedTexts = texts.slice(0, includedCount);
+  const textBudget = synthesisTextBudget(includedCount, headerChars);
+  const evenShare = Math.floor(textBudget / includedCount);
+  const allowances = includedTexts.map((text) => Math.min(text.length, evenShare));
+
+  // Second pass: short blocks already handed back their unused share, so the
+  // truncated blocks split that leftover between them.
+  const truncatedCount = includedTexts.filter((text) => text.length > evenShare).length;
+  if (truncatedCount > 0) {
+    const usedChars = allowances.reduce((sum, allowance) => sum + allowance, 0);
+    const extraPerTruncated = Math.floor((textBudget - usedChars) / truncatedCount);
+    for (let index = 0; index < includedTexts.length; index += 1) {
+      if (includedTexts[index].length > evenShare) allowances[index] += extraPerTruncated;
+    }
+  }
+
+  const bodies = includedTexts.map((text, index) => fitAdvisorText(text, allowances[index]));
+  return wrapSystemReminder(
+    `${synthesisFrame(includedCount)}${SYNTHESIS_BLOCK_SEPARATOR}${joinAdvisorBlocks(bodies)}`,
+  );
 };
 
 /**

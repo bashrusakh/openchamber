@@ -3431,6 +3431,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.checkingVersion': 'Comprobando la versión de OpenCode del servidor conectado…',
   'chat.consult.unavailable.versionUnknown': 'Consultar modelos necesita OpenCode {version} o posterior; no se pudo verificar la versión del servidor conectado.',
   'chat.consult.unavailable.versionUnsupported': 'Consultar modelos no está disponible porque OpenCode {version} es anterior a la versión compatible {minVersion}.',
+  'chat.consult.unavailable.backendProtocol': 'Consultar modelos necesita un servidor OpenChamber más reciente: el backend conectado no admite el protocolo de cola de consultas.',
 
   'chat.consult.dialog.title': 'Consultar modelos',
   'chat.consult.dialog.description': 'Pregunta primero a otros modelos lo mismo. Sus respuestas pueden añadirse como pista privada durante un turno; tu modelo activo sigue escribiendo la respuesta.',

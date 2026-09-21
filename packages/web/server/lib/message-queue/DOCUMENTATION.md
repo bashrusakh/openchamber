@@ -177,6 +177,12 @@ characters and must be serializable. Violations are TypeErrors (→ 400), the
 same contract as every other item field. All three fields ride snapshots,
 broadcasts, and the JSON round-trip.
 
+`CONSULT_PROTOCOL_VERSION` (exported by `runtime.js`) is the backend half of the
+Consult Models capability handshake: the version route exposes it as
+`consultProtocol` on `GET /api/opencode/version`. Bump it whenever the consult
+queue protocol changes in a way an older UI cannot handle; the UI fails closed
+when the field is absent or below its required value.
+
 ### Dispatcher skip rule
 
 `tick` sends only normal items, and only the *deliverable head*: the first
@@ -317,7 +323,10 @@ delivered message on screen (a session's directory is remembered until the
 session is deleted or evicted).
 
 Limits: 20 items per session, 50 sessions (oldest evicted, never one with an
-item in flight), 200k characters of content; attachment payloads are bounded
+item in flight, a live hold, or any `kind: 'consult'` item; when no session is
+safely evictable, an enqueue that would create a new session is refused with a
+`409` and existing queues are left unchanged), 200k characters of content;
+attachment payloads are bounded
 by the route family's 50 MB JSON limit. When a session's queue is full, a new
 enqueue evicts the oldest **normal** item, never a consult item; if every
 slot holds a pending consultation the enqueue is refused with a `409`

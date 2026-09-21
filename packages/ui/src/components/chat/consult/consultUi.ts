@@ -12,6 +12,7 @@ import type {
 } from '@/lib/consult/routing';
 import type { ConsultSubmissionResult, SubmitConsultMessageInput } from '@/lib/consult/submission';
 import type { I18nKey, I18nParams } from '@/lib/i18n';
+import { subscribeRuntimeEndpointChanged } from '@/lib/runtime-switch';
 import type { ConsultAdvisorRunStatus, ConsultRunPhase } from '@/stores/useConsultStore';
 
 /**
@@ -55,6 +56,8 @@ export type ConsultUnavailableReason =
   | 'checking-version'
   | 'version-unknown'
   | 'version-unsupported'
+  | 'protocol-missing'
+  | 'protocol-unsupported'
   | 'consult-active'
   | 'auto-review-active'
   | 'btw-active'
@@ -86,9 +89,9 @@ type ConsultAvailability =
  * The mechanism gate comes from the caller: a synchronous
  * `resolveConsultMechanismCapability()` result (runtime gate only) or the
  * composed live gate resolved by `useConsultLiveCapability` (runtime gate +
- * the connected server's OpenCode version, F3 fail-closed). The live gate is
- * the composer entry point's source of truth; the sync resolver stays for
- * callers that render before the version read settles.
+ * the connected server's OpenCode version and consult-queue protocol, F3
+ * fail-closed). The live gate is the composer entry point's source of truth;
+ * the sync resolver stays for callers that render before the read settles.
  */
 export const resolveConsultAvailability = (
   input: ConsultAvailabilityInput & { mechanism?: ConsultMechanismCapability },
@@ -118,14 +121,26 @@ export const initialConsultCapability = (
 
 /**
  * The live server capability for the composer (F3): runtime gate + OpenCode
- * version, resolved once per mount and refetchable. The hook never surfaces
- * `assurance: 'unverified'`: a server-queue runtime starts fail-closed as
- * `checking-version` (the action stays disabled) until the version read
- * settles, and only a verified version makes it available.
+ * version + backend consult-queue protocol, refetchable and re-resolved after
+ * a runtime endpoint change. The hook never surfaces `assurance:
+ * 'unverified'`: a server-queue runtime starts fail-closed as
+ * `checking-version` (the action stays disabled) until the read settles, and
+ * only both proofs together make it available.
  */
 export const useConsultLiveCapability = () => {
   const [capability, setCapability] = React.useState<ConsultMechanismCapability>(initialConsultCapability);
   const [generation, setGeneration] = React.useState(0);
+
+  React.useEffect(() => {
+    const unsubscribe = subscribeRuntimeEndpointChanged(() => {
+      // A different backend may report a different version or protocol; drop
+      // straight back to the fail-closed state instead of showing the previous
+      // runtime's answer while the new check runs.
+      setCapability(initialConsultCapability());
+      setGeneration((value) => value + 1);
+    });
+    return unsubscribe;
+  }, []);
 
   React.useEffect(() => {
     let stale = false;
@@ -158,6 +173,9 @@ export const consultUnavailableLabelKey = (reason: ConsultUnavailableReason): I1
       return 'chat.consult.unavailable.versionUnknown';
     case 'version-unsupported':
       return 'chat.consult.unavailable.versionUnsupported';
+    case 'protocol-missing':
+    case 'protocol-unsupported':
+      return 'chat.consult.unavailable.backendProtocol';
     case 'consult-active':
       return 'chat.consult.unavailable.active';
     case 'auto-review-active':

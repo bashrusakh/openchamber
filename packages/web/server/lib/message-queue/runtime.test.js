@@ -630,6 +630,128 @@ describe('message queue runtime', () => {
     expect(items.some((entry) => entry.content === 'overflow')).toBe(false);
   });
 
+  describe('session cap eviction', () => {
+    const bulkSession = (index) => `ses_queue_bulk_${index}`;
+    const seedBulkSessions = async (runtime, count, start = 0) => {
+      for (let index = start; index < start + count; index += 1) {
+        await runtime.enqueue(bulkSession(index), DIRECTORY, item({ content: `bulk-${index}`, text: `bulk-${index}` }));
+      }
+    };
+
+    it('evicts the oldest session when the session cap is exceeded', async () => {
+      const { runtime } = createRuntime();
+      // Queue bookkeeping only: with no dispatch loop the items stay where the
+      // eviction assertions can see them.
+      runtime.stop();
+      await seedBulkSessions(runtime, 50);
+      await runtime.enqueue('ses_queue_cap_new', DIRECTORY, item({ content: 'newest', text: 'newest' }));
+
+      expect(runtime.snapshot().sessions).toHaveLength(50);
+      expect(runtime.sessionSnapshot(bulkSession(0)).items).toEqual([]);
+      expect(runtime.sessionSnapshot('ses_queue_cap_new').items).toHaveLength(1);
+      await runtime.flush();
+    });
+
+    it('never evicts a session holding an unclaimed consult item', async () => {
+      const { runtime } = createRuntime();
+      runtime.stop();
+      await runtime.enqueue(bulkSession(0), DIRECTORY, item({ kind: 'consult', consult: { system: 'be terse' } }));
+      await seedBulkSessions(runtime, 49, 1);
+      await runtime.enqueue('ses_queue_cap_new', DIRECTORY, item({ content: 'newest', text: 'newest' }));
+
+      // The queued consultation is authoritative: the session survives and the
+      // next-oldest normal session is evicted in its place.
+      expect(runtime.sessionSnapshot(bulkSession(0)).items).toHaveLength(1);
+      expect(runtime.sessionSnapshot(bulkSession(0)).items[0].kind).toBe('consult');
+      expect(runtime.sessionSnapshot(bulkSession(1)).items).toEqual([]);
+      expect(runtime.sessionSnapshot('ses_queue_cap_new').items).toHaveLength(1);
+      await runtime.flush();
+    });
+
+    it('never evicts a session whose consult item is claimed', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.stop();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(bulkSession(0), DIRECTORY, item({ kind: 'consult', consult: { system: 'be terse' } }));
+      await runtime.claim(bulkSession(0), itemId, 'consult:run-1', 60_000);
+      await seedBulkSessions(runtime, 49, 1);
+      await runtime.enqueue('ses_queue_cap_new', DIRECTORY, item({ content: 'newest', text: 'newest' }));
+
+      const items = runtime.sessionSnapshot(bulkSession(0)).items;
+      expect(items).toHaveLength(1);
+      expect(items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      expect(runtime.sessionSnapshot(bulkSession(1)).items).toEqual([]);
+      await runtime.flush();
+    });
+
+    it('never evicts a session with an active hold', async () => {
+      const { runtime } = createRuntime();
+      runtime.stop();
+      await seedBulkSessions(runtime, 50);
+      runtime.setHold(bulkSession(0), true, 60_000, 'auto-review');
+      await runtime.enqueue('ses_queue_cap_new', DIRECTORY, item({ content: 'newest', text: 'newest' }));
+
+      expect(runtime.sessionSnapshot(bulkSession(0)).items).toHaveLength(1);
+      expect(runtime.sessionSnapshot(bulkSession(1)).items).toEqual([]);
+      await runtime.flush();
+    });
+
+    it('refuses a new session and leaves every queue untouched when no session is evictable', async () => {
+      const { runtime } = createRuntime();
+      runtime.stop();
+      await seedBulkSessions(runtime, 50);
+      for (let index = 0; index < 50; index += 1) runtime.setHold(bulkSession(index), true, 60_000, 'auto-review');
+      const before = runtime.snapshot();
+
+      await expect(runtime.enqueue('ses_queue_cap_refused', DIRECTORY, item({ content: 'overflow', text: 'overflow' }))).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('full of active sessions'),
+      });
+      // Neither revision nor any queue may change, and the refused session must
+      // not be left behind as a phantom queue.
+      expect(runtime.snapshot()).toEqual(before);
+      expect(runtime.sessionSnapshot('ses_queue_cap_refused')).toEqual({
+        sessionId: 'ses_queue_cap_refused',
+        directory: '',
+        items: [],
+        sendingId: null,
+      });
+      await runtime.flush();
+    });
+
+    it('evicts that session again once its consult item is removed', async () => {
+      const { runtime } = createRuntime();
+      runtime.stop();
+      const consult = await runtime.enqueue(bulkSession(0), DIRECTORY, item({ kind: 'consult', consult: { system: 'be terse' } }));
+      await runtime.enqueue(bulkSession(0), DIRECTORY, item({ content: 'bulk-0', text: 'bulk-0' }));
+      await seedBulkSessions(runtime, 49, 1);
+      await runtime.remove(bulkSession(0), consult.itemId);
+
+      await runtime.enqueue('ses_queue_cap_new', DIRECTORY, item({ content: 'newest', text: 'newest' }));
+
+      expect(runtime.sessionSnapshot(bulkSession(0)).items).toEqual([]);
+      expect(runtime.sessionSnapshot('ses_queue_cap_new').items).toHaveLength(1);
+      expect(runtime.snapshot().sessions).toHaveLength(50);
+      await runtime.flush();
+    });
+
+    it('evicts that session again once its hold lapses', async () => {
+      let clock = 0;
+      const { runtime } = createRuntime({ now: () => clock });
+      runtime.stop();
+      await seedBulkSessions(runtime, 50);
+      runtime.setHold(bulkSession(0), true, 1_000, 'auto-review');
+
+      clock = 2_000;
+      await runtime.enqueue('ses_queue_cap_new', DIRECTORY, item({ content: 'newest', text: 'newest' }));
+
+      expect(runtime.sessionSnapshot(bulkSession(0)).items).toEqual([]);
+      expect(runtime.sessionSnapshot('ses_queue_cap_new').items).toHaveLength(1);
+      expect(runtime.snapshot().sessions).toHaveLength(50);
+      await runtime.flush();
+    });
+  });
+
   it('reorders only with a complete permutation', async () => {
     const { runtime } = createRuntime();
     runtime.start();
