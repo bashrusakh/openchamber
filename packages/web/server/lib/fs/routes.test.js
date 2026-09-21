@@ -536,6 +536,63 @@ describe('fs clone', () => {
     expect(fsPromises.rm).toHaveBeenCalledWith('/tmp/repository', { recursive: true, force: true });
   });
 
+  it('retains a cancelled Windows clone when taskkill cannot confirm root close', async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const fsPromises = createCloneFs();
+      const coordinator = createGitExecutionCoordinator({
+        globalConcurrency: 1,
+        globalNetworkConcurrency: 1,
+        canonicalizeCloneDestination: async (destination) => path.resolve(destination),
+      });
+      let gitChild;
+      let taskkill;
+      const spawn = vi.fn((command) => {
+        if (command === 'taskkill') {
+          taskkill = new EventEmitter();
+          return taskkill;
+        }
+        gitChild = new EventEmitter();
+        gitChild.pid = 1234;
+        gitChild.stdout = new EventEmitter();
+        gitChild.stderr = new EventEmitter();
+        gitChild.kill = vi.fn();
+        return gitChild;
+      });
+      const handler = registerClone({
+        fsPromises,
+        spawn,
+        platform: 'win32',
+        gitExecutionService: { coordinator },
+        resolveCloneGitIdentity: async () => null,
+      });
+      const request = beginClone(handler, cloneBody());
+      for (let attempt = 0; attempt < 20 && !gitChild; attempt += 1) {
+        await Promise.resolve();
+      }
+
+      request.req.emit('aborted');
+      expect(taskkill).toBeTruthy();
+      taskkill.emit('close', 0, null);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await request.promise;
+
+      expect(request.res.statusCode).toBe(500);
+      expect(request.res.body).toMatchObject({ error: expect.stringMatching(/descendant termination was not confirmed/) });
+      expect(fsPromises.rm).not.toHaveBeenCalled();
+      expect(coordinator.getStats()).toMatchObject({
+        active: 1,
+        activeNetwork: 1,
+        clonePending: 0,
+        cloneDestinations: 1,
+      });
+    } finally {
+      errorSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('cancels clone descendants before removing the destination', { skip: process.platform === 'win32' }, async () => {
     const parent = await mkdtemp(path.join(tmpdir(), 'openchamber-clone-tree-'));
     const marker = path.join(parent, 'descendant.pid');

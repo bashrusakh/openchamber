@@ -239,6 +239,46 @@ describe('GitExecutionCoordinator', () => {
     await expect(second).resolves.toBe('second');
   });
 
+  it('keeps a clone lease and destination reserved when process cleanup is unconfirmed', async () => {
+    const coordinator = createGitExecutionCoordinator({
+      globalConcurrency: 2,
+      globalNetworkConcurrency: 1,
+      canonicalizeCloneDestination: async (destination) => path.resolve(destination),
+    });
+    const blocked = coordinator.runClone({ destination: '/tmp/blocked-clone' }, () => ({
+      ok: false,
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+    }));
+
+    await expect(blocked).resolves.toMatchObject({
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+    });
+    expect(coordinator.getStats()).toMatchObject({
+      active: 1,
+      activeNetwork: 1,
+      clonePending: 0,
+      cloneDestinations: 1,
+    });
+
+    const controller = new AbortController();
+    const queued = coordinator.runClone({
+      destination: '/tmp/blocked-clone',
+      signal: controller.signal,
+    }, () => 'must-not-start');
+    await waitFor(() => coordinator.getStats().clonePending === 1);
+    expect(coordinator.getStats()).toMatchObject({ active: 1, activeNetwork: 1, cloneDestinations: 1 });
+    controller.abort();
+    await expect(queued).rejects.toMatchObject({ code: GIT_EXECUTION_ERROR_CODES.CANCELLED });
+    expect(coordinator.getStats()).toMatchObject({
+      active: 1,
+      activeNetwork: 1,
+      clonePending: 0,
+      cloneDestinations: 1,
+    });
+  });
+
   it('counts active clones against the global concurrency limit', async () => {
     const coordinator = createGitExecutionCoordinator({
       globalConcurrency: 1,

@@ -3,7 +3,11 @@ import { resolveByteRange } from './byte-range.js';
 import nodeFsPromises from 'node:fs/promises';
 import nodePath from 'node:path';
 import { createGitIgnoreReader } from './gitignore.js';
-import { killProcessTree, withProcessTreeOwnership } from '../git/process-tree.js';
+import {
+  isProcessTreeCleanupBlocked,
+  killProcessTree,
+  withProcessTreeOwnership,
+} from '../git/process-tree.js';
 
 const EXEC_JOB_TTL_MS = 30 * 60 * 1000;
 const OUTSIDE_FILE_GRANT_TTL_MS = 10 * 60 * 1000;
@@ -1029,10 +1033,12 @@ export const registerFsRoutes = (app, dependencies) => {
         } catch (error) {
           try {
             if (destinationOwned) {
-              await Promise.resolve(fsPromises.rm?.(resolvedDestination, { recursive: true, force: true })).catch(() => {});
+              if (!isProcessTreeCleanupBlocked(error)) {
+                await Promise.resolve(fsPromises.rm?.(resolvedDestination, { recursive: true, force: true })).catch(() => {});
+              }
             }
           } finally {
-            lease.releaseNetwork();
+            if (!isProcessTreeCleanupBlocked(error)) lease.releaseNetwork();
           }
           throw error;
         }

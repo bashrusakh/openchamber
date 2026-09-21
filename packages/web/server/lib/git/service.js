@@ -8,7 +8,11 @@ import { promisify } from 'util';
 import { createRequire } from 'module';
 
 import { getGitExecutionEnv } from './execution-scope.js';
-import { killProcessTree, withProcessTreeOwnership } from './process-tree.js';
+import {
+  isProcessTreeCleanupBlocked,
+  killProcessTree,
+  withProcessTreeOwnership,
+} from './process-tree.js';
 import { unsupportedRepositoryRootReason } from './repository-root.js';
 
 export { unsupportedRepositoryRootReason } from './repository-root.js';
@@ -2473,6 +2477,7 @@ const expandUntrackedDirectories = async (repoRoot, files) => {
     }
     const listing = await listUntrackedFilesBounded(repoRoot, file.path, UNTRACKED_DIRECTORY_EXPANSION_LIMIT)
       .catch((error) => {
+        if (isProcessTreeCleanupBlocked(error)) throw error;
         console.warn(`[GitService] Could not expand untracked directory ${file.path}:`, error?.message || error);
         return null;
       });
@@ -2833,6 +2838,9 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
       rebaseInProgress,
     };
   } catch (error) {
+    if (isProcessTreeCleanupBlocked(error)) {
+      throw error;
+    }
     if (isNotGitRepositoryError(error) || isMissingDirectoryError(error)) {
       // Re-throw a plain Error so route/session callers can match reliably and
       // continue enumerating other projects instead of treating GitError as 500.

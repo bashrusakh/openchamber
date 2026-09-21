@@ -1,4 +1,5 @@
 import { createGitIgnoreReader } from './gitignore.js';
+import { isProcessTreeCleanupBlocked } from '../git/process-tree.js';
 
 const FILE_SEARCH_MAX_CONCURRENCY = 5;
 const FILE_SEARCH_EXCLUDED_DIRS = new Set([
@@ -139,12 +140,14 @@ export const createFsSearchRuntime = ({
             let ignoredNames;
             try {
               ignoredNames = await gitIgnoreReader.getIgnoredNames(dir, pathsToCheck);
-            } catch {
+            } catch (error) {
+              if (isProcessTreeCleanupBlocked(error)) throw error;
               ignoredNames = new Set();
             }
 
             return { dir, dirents, ignoredPaths: ignoredNames };
-          } catch {
+          } catch (error) {
+            if (isProcessTreeCleanupBlocked(error)) throw error;
             return { dir, dirents: await listDirectoryEntries(dir, fsPromises), ignoredPaths: new Set() };
           }
         })

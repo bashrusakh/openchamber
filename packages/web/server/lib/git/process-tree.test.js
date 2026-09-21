@@ -8,12 +8,18 @@ import {
 } from './process-tree.js';
 
 describe('Git process-tree ownership', () => {
-  it('waits for Windows taskkill to finish enumerating descendants', async () => {
-    const child = { pid: 1234, kill: vi.fn() };
+  it('waits for Windows taskkill and the owned root to close', async () => {
+    const child = new EventEmitter();
+    child.pid = 1234;
+    child.kill = vi.fn();
     const taskkill = new EventEmitter();
     const spawn = vi.fn(() => taskkill);
 
-    const termination = killProcessTree(child, { spawn, platform: 'win32' });
+    const termination = killProcessTree(child, {
+      spawn,
+      platform: 'win32',
+      terminationTimeoutMs: 5,
+    });
     let settled = false;
     void termination.then(() => { settled = true; });
     await Promise.resolve();
@@ -27,8 +33,34 @@ describe('Git process-tree ownership', () => {
     );
 
     taskkill.emit('close', 0);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    child.emit('close', 137, null);
     await termination;
     expect(settled).toBe(true);
+  });
+
+  it('reports a bounded confirmation failure when taskkill succeeds without root close', async () => {
+    const child = new EventEmitter();
+    child.pid = 1234;
+    child.kill = vi.fn();
+    const taskkill = new EventEmitter();
+    const spawn = vi.fn(() => taskkill);
+
+    const termination = killProcessTree(child, {
+      spawn,
+      platform: 'win32',
+      terminationTimeoutMs: 5,
+    });
+    taskkill.emit('close', 0);
+
+    await expect(termination).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      descendantsTerminated: false,
+      cleanupBlocked: true,
+      rootClosed: false,
+    });
+    expect(child.kill).not.toHaveBeenCalled();
   });
 
   it('reports taskkill failure after attempting a bounded root fallback', async () => {
@@ -48,6 +80,94 @@ describe('Git process-tree ownership', () => {
       descendantsTerminated: false,
     });
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('reports a nonzero taskkill exit without claiming tree cleanup', async () => {
+    const child = new EventEmitter();
+    child.pid = 1234;
+    child.kill = vi.fn();
+    const taskkill = new EventEmitter();
+    const spawn = vi.fn(() => taskkill);
+
+    const termination = killProcessTree(child, {
+      spawn,
+      platform: 'win32',
+      terminationTimeoutMs: 5,
+    });
+    taskkill.emit('close', 1);
+
+    await expect(termination).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      descendantsTerminated: false,
+      cleanupBlocked: true,
+    });
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('reports a taskkill spawn failure without claiming tree cleanup', async () => {
+    const child = new EventEmitter();
+    child.pid = 1234;
+    child.kill = vi.fn();
+    const spawn = vi.fn(() => { throw new Error('taskkill spawn failed'); });
+
+    await expect(killProcessTree(child, {
+      spawn,
+      platform: 'win32',
+      terminationTimeoutMs: 5,
+    })).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      descendantsTerminated: false,
+      cleanupBlocked: true,
+    });
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('reports a taskkill timeout without claiming tree cleanup', async () => {
+    const child = new EventEmitter();
+    child.pid = 1234;
+    child.kill = vi.fn();
+    const spawn = vi.fn(() => new EventEmitter());
+
+    await expect(killProcessTree(child, {
+      spawn,
+      platform: 'win32',
+      terminationTimeoutMs: 5,
+    })).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      descendantsTerminated: false,
+      cleanupBlocked: true,
+    });
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('settles cancellation when taskkill succeeds but the root never closes', async () => {
+    const child = new EventEmitter();
+    child.pid = 1234;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = vi.fn();
+    const taskkill = new EventEmitter();
+    const controller = new AbortController();
+    const spawn = vi.fn((command) => (command === 'taskkill' ? taskkill : child));
+
+    const pending = execFileProcessTree({
+      command: 'git',
+      args: ['status'],
+      signal: controller.signal,
+      spawn,
+      platform: 'win32',
+      terminationTimeoutMs: 5,
+    });
+    controller.abort();
+    taskkill.emit('close', 0);
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      operationError: { code: 'ABORT_ERR' },
+      descendantsTerminated: false,
+      cleanupBlocked: true,
+    });
+    expect(child.kill).not.toHaveBeenCalled();
   });
 
   it('settles cancellation with an explicit cleanup failure when Windows taskkill fails', async () => {

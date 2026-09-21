@@ -20,31 +20,58 @@ const killRoot = (child) => {
 
 const WINDOWS_TERMINATION_TIMEOUT_MS = 5_000;
 
-const waitForChildClose = (child, timeoutMs) => {
+const observeChildClose = (child) => {
   if (!child?.pid || child.exitCode !== null && child.exitCode !== undefined
     || child.signalCode !== null && child.signalCode !== undefined) {
-    return Promise.resolve(true);
+    return {
+      promise: Promise.resolve(true),
+      cancel: () => {},
+    };
   }
   if (!child.once) {
-    return Promise.resolve(false);
+    return {
+      promise: Promise.resolve(false),
+      cancel: () => {},
+    };
   }
 
-  return new Promise((resolve) => {
-    let settled = false;
-    let timer;
-    const finish = (closed) => {
+  let settled = false;
+  let resolveClose;
+  const promise = new Promise((resolve) => {
+    resolveClose = resolve;
+  });
+  const onClose = () => {
+    if (settled) return;
+    settled = true;
+    child.removeListener?.('close', onClose);
+    resolveClose(true);
+  };
+  child.once('close', onClose);
+
+  return {
+    promise,
+    cancel: () => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
       child.removeListener?.('close', onClose);
-      resolve(closed);
-    };
-    const onClose = () => finish(true);
-    child.once('close', onClose);
-    timer = setTimeout(() => finish(false), timeoutMs);
-    timer?.unref?.();
-  });
+    },
+  };
 };
+
+const confirmChildClose = (observation, timeoutMs) => new Promise((resolve) => {
+  let settled = false;
+  let timer;
+  const finish = (closed) => {
+    if (settled) return;
+    settled = true;
+    if (timer) clearTimeout(timer);
+    observation.cancel();
+    resolve(closed);
+  };
+  void observation.promise.then((closed) => finish(closed));
+  timer = setTimeout(() => finish(false), timeoutMs);
+  timer?.unref?.();
+});
 
 const processTreeTerminationError = (pid, cause, rootError, rootClosed) => Object.assign(
   new Error(
@@ -55,16 +82,34 @@ const processTreeTerminationError = (pid, cause, rootError, rootClosed) => Objec
     code: 'ERR_PROCESS_TREE_TERMINATION',
     pid,
     descendantsTerminated: false,
+    cleanupBlocked: true,
     rootClosed,
     cause,
     rootError: rootError || undefined,
   },
 );
 
-const failWindowsTermination = async (child, pid, cause, timeoutMs) => {
+export const isProcessTreeCleanupBlocked = (value) => (
+  value?.cleanupBlocked === true
+  || value?.error?.cleanupBlocked === true
+  || (value?.code === 'ERR_PROCESS_TREE_TERMINATION' && value?.descendantsTerminated === false)
+);
+
+const failWindowsTermination = async (child, pid, cause, timeoutMs, observation = observeChildClose(child)) => {
   const rootError = killRoot(child);
-  const rootClosed = await waitForChildClose(child, timeoutMs);
+  const rootClosed = await confirmChildClose(observation, timeoutMs);
   throw processTreeTerminationError(pid, cause, rootError, rootClosed);
+};
+
+const confirmSuccessfulWindowsTermination = async (child, pid, timeoutMs, observation) => {
+  const rootClosed = await confirmChildClose(observation, timeoutMs);
+  if (rootClosed) return;
+  throw processTreeTerminationError(
+    pid,
+    new Error(`Windows process tree for PID ${pid} did not close within ${timeoutMs}ms after taskkill`),
+    null,
+    false,
+  );
 };
 
 export const killProcessTree = (
@@ -81,6 +126,7 @@ export const killProcessTree = (
   }
 
   if (platform === 'win32') {
+    const observation = observeChildClose(child);
     let taskkill;
     try {
       taskkill = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
@@ -88,7 +134,7 @@ export const killProcessTree = (
         stdio: 'ignore',
       });
     } catch (error) {
-      return failWindowsTermination(child, child.pid, error, terminationTimeoutMs);
+      return failWindowsTermination(child, child.pid, error, terminationTimeoutMs, observation);
     }
 
     if (!taskkill) {
@@ -97,6 +143,7 @@ export const killProcessTree = (
         child.pid,
         new Error('Windows taskkill did not start'),
         terminationTimeoutMs,
+        observation,
       );
     }
 
@@ -107,13 +154,14 @@ export const killProcessTree = (
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
-        resolve();
+        void confirmSuccessfulWindowsTermination(child, child.pid, terminationTimeoutMs, observation)
+          .then(resolve, reject);
       };
       const fail = (cause) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
-        void failWindowsTermination(child, child.pid, cause, terminationTimeoutMs)
+        void failWindowsTermination(child, child.pid, cause, terminationTimeoutMs, observation)
           .then(resolve, reject);
       };
       try {
