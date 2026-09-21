@@ -41,6 +41,10 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessa
     const firstLine = getQueuedMessagePreview(message);
 
     const attachmentCount = message.attachments?.length ?? 0;
+    // A consult message is only ever sent by its own claim → dispatch route:
+    // Edit (take) and Send (raw delivery) cannot work for it, so the chip
+    // offers the consult badge and keeps manual removal one click away.
+    const isConsult = message.kind === 'consult';
 
     return (
         <div
@@ -58,30 +62,40 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessa
             >
                 <Icon name="draggable" className="h-4 w-4" aria-hidden="true" />
             </button>
+            {isConsult && (
+                <span className="flex flex-shrink-0 items-center gap-0.5 typography-ui-label text-muted-foreground">
+                    <Icon name="team" className="h-3 w-3" aria-hidden="true" />
+                    {t('chat.consult.action')}
+                </span>
+            )}
             <span className="min-w-0 flex-1 truncate typography-ui-label text-foreground">
                 {firstLine || t('chat.queuedMessage.empty')}
                 {attachmentCount > 0 && (
                     <span className="ml-1 text-muted-foreground">{t('chat.queuedMessage.attachments', { count: attachmentCount })}</span>
                 )}
             </span>
-            <Button
-                type="button"
-                variant="secondary"
-                size="xs"
-                onClick={() => onEdit(message)}
-            >
-                <Icon name="edit" className="h-3 w-3" aria-hidden="true" />
-                {t('chat.queuedMessage.edit')}
-            </Button>
-            <Button
-                type="button"
-                variant="secondary"
-                size="xs"
-                onClick={() => onSend(message)}
-            >
-                <Icon name="send-plane" className="h-3 w-3" aria-hidden="true" />
-                {t('chat.queuedMessage.send')}
-            </Button>
+            {!isConsult && (
+                <>
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        size="xs"
+                        onClick={() => onEdit(message)}
+                    >
+                        <Icon name="edit" className="h-3 w-3" aria-hidden="true" />
+                        {t('chat.queuedMessage.edit')}
+                    </Button>
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        size="xs"
+                        onClick={() => onSend(message)}
+                    >
+                        <Icon name="send-plane" className="h-3 w-3" aria-hidden="true" />
+                        {t('chat.queuedMessage.send')}
+                    </Button>
+                </>
+            )}
             <button
                 type="button"
                 onClick={() => removeFromQueue(target, message.id)}
