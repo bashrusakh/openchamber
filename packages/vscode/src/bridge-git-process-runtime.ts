@@ -21,6 +21,20 @@ export type GitProcessExecutionOptions = {
   maxBuffer?: number;
 };
 
+export type GitProcessExecutionResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  code?: string;
+  cleanupBlocked?: boolean;
+  descendantsTerminated?: boolean;
+  rootClosed?: boolean;
+  pid?: number;
+  cause?: Error;
+  rootError?: Error;
+  operationError?: Error;
+};
+
 const isSocketPath = async (candidate: string): Promise<boolean> => {
   if (!candidate) {
     return false;
@@ -106,12 +120,33 @@ const getErrorCode = (error: Error): string | undefined => {
   return String(code) === code ? code : undefined;
 };
 
-const processFailure = (error: Error) => ({
-  stdout: '',
-  stderr: error.message,
-  exitCode: 1,
-  code: getErrorCode(error),
-}) satisfies { stdout: string; stderr: string; exitCode: number; code?: string };
+type OwnedProcessFailure = Error & {
+  cleanupBlocked?: boolean;
+  descendantsTerminated?: boolean;
+  rootClosed?: boolean;
+  pid?: number;
+  rootError?: Error;
+  operationError?: Error;
+};
+
+const processFailure = (error: OwnedProcessFailure): GitProcessExecutionResult => {
+  const result: GitProcessExecutionResult = {
+    stdout: '',
+    stderr: error.message,
+    exitCode: 1,
+    code: getErrorCode(error),
+  };
+  if (error.cleanupBlocked === true) result.cleanupBlocked = true;
+  if (error.descendantsTerminated === false) result.descendantsTerminated = false;
+  if ('rootClosed' in error && (error.rootClosed === true || error.rootClosed === false)) {
+    result.rootClosed = error.rootClosed;
+  }
+  if (Number.isInteger(error.pid)) result.pid = error.pid;
+  if (error.cause instanceof Error) result.cause = error.cause;
+  if (error.rootError !== undefined) result.rootError = error.rootError;
+  if (error.operationError !== undefined) result.operationError = error.operationError;
+  return result;
+};
 
 export const createGitProcessRuntime = ({
   resolveGitExecutable = getGitExecutablePath,
@@ -120,7 +155,7 @@ export const createGitProcessRuntime = ({
     args: string[],
     cwd: string,
     options: GitProcessExecutionOptions = {},
-  ): Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }> => {
+  ): Promise<GitProcessExecutionResult> => {
     let env: NodeJS.ProcessEnv;
     let configuredPath: string | undefined;
     try {

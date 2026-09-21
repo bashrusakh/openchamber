@@ -9,6 +9,7 @@ import { createRequire } from 'module';
 
 import { getGitExecutionEnv } from './execution-scope.js';
 import {
+  execFileProcessTree,
   isProcessTreeCleanupBlocked,
   killProcessTree,
   withProcessTreeOwnership,
@@ -379,6 +380,7 @@ export const createGit = async (
     allowUnsafeSshCommand = false,
     allowUnsafeCredentialHelper = false,
     stallTimeoutMs = 0,
+    ownedProcessTree = false,
     envOverrides = undefined,
     signal = undefined,
   } = {},
@@ -406,6 +408,9 @@ export const createGit = async (
   const baseDir = normalizeDirectoryPath(directory);
   if (typeof baseDir !== 'string' || !baseDir.trim()) {
     throw new Error('Git directory is required');
+  }
+  if (ownedProcessTree) {
+    return createOwnedGit(baseDir, { stallTimeoutMs, signal });
   }
   const gitOptions = {
     baseDir,
@@ -569,8 +574,9 @@ const createGitPathError = (code, filePath) => Object.assign(new Error(GIT_PATH_
 // Mode of the exact entry at `repoPath`, or null. `cat-file -e` cannot answer
 // this: a gitlink's commit lives in the submodule's object store, so git exits 1
 // without stderr, which simple-git reports as success.
-const readGitEntryMode = async (repoRoot, args, repoPath) => {
-  const result = await runGitCommand(repoRoot, args);
+const readGitEntryMode = async (repoRoot, args, repoPath, executionOptions = {}) => {
+  const result = await runGitCommand(repoRoot, args, executionOptions);
+  if (isProcessTreeCleanupBlocked(result)) throw result;
   if (!result.success) return null;
   for (const record of result.stdout.split('\0')) {
     const tab = record.indexOf('\t');
@@ -581,7 +587,13 @@ const readGitEntryMode = async (repoRoot, args, repoPath) => {
   return null;
 };
 
-const resolveGitFileContext = async (directoryPath, git, filePath, repoRootOverride = null) => {
+const resolveGitFileContext = async (
+  directoryPath,
+  git,
+  filePath,
+  repoRootOverride = null,
+  executionOptions = {},
+) => {
   const repoRoot = repoRootOverride || await resolveGitRepositoryRoot(directoryPath, git);
   const candidates = Array.from(new Set([
     path.resolve(repoRoot, filePath),
@@ -599,8 +611,18 @@ const resolveGitFileContext = async (directoryPath, git, filePath, repoRootOverr
     const worktreeEntry = await fsp.lstat(absolutePath).catch(() => null);
     const isSymbolicLink = worktreeEntry?.isSymbolicLink() ?? false;
     const existsInWorktree = worktreeEntry?.isFile() || isSymbolicLink;
-    const indexMode = await readGitEntryMode(repoRoot, ['ls-files', '--stage', '-z', '--', `:(literal)${repoPath}`], repoPath);
-    const headMode = await readGitEntryMode(repoRoot, ['ls-tree', '-z', 'HEAD', '--', repoPath], repoPath);
+    const indexMode = await readGitEntryMode(
+      repoRoot,
+      ['ls-files', '--stage', '-z', '--', `:(literal)${repoPath}`],
+      repoPath,
+      executionOptions,
+    );
+    const headMode = await readGitEntryMode(
+      repoRoot,
+      ['ls-tree', '-z', 'HEAD', '--', repoPath],
+      repoPath,
+      executionOptions,
+    );
 
     if (existsInWorktree || indexMode || headMode) {
       return {
@@ -633,9 +655,14 @@ const resolveGitFileContext = async (directoryPath, git, filePath, repoRootOverr
  * with only untracked files inside, `git status` marks it modified while
  * `git diff` prints nothing.
  */
-const readSubmoduleState = async (repoRoot, fileContext) => {
-  const status = await runGitCommand(repoRoot, ['status', '--porcelain=v2', '-z', '--', `:(literal)${fileContext.repoPath}`]);
+const readSubmoduleState = async (repoRoot, fileContext, executionOptions = {}) => {
+  const status = await runGitCommand(
+    repoRoot,
+    ['status', '--porcelain=v2', '-z', '--', `:(literal)${fileContext.repoPath}`],
+    executionOptions,
+  );
   if (!status.success) {
+    if (isProcessTreeCleanupBlocked(status)) throw status;
     throw new Error(status.message || 'Failed to read submodule status');
   }
   // Changed: "1 XY S<c><m><u> mH mI mW hH hI path" ("2" adds rename fields
@@ -644,13 +671,24 @@ const readSubmoduleState = async (repoRoot, fileContext) => {
   // record the same commit.
   const record = status.stdout.split('\0').find((entry) => /^[12u] /.test(entry))?.split(' ');
   const hasConflict = record?.[0] === 'u';
-  const readHead = async () => (await runGitCommand(repoRoot, ['rev-parse', '--verify', '--quiet', `HEAD:${fileContext.repoPath}`])).stdout.trim();
+  const readHead = async () => {
+    const result = await runGitCommand(
+      repoRoot,
+      ['rev-parse', '--verify', '--quiet', `HEAD:${fileContext.repoPath}`],
+      executionOptions,
+    );
+    if (isProcessTreeCleanupBlocked(result)) throw result;
+    return result.stdout.trim();
+  };
   const head = record && !hasConflict ? record[6] : await readHead();
   const index = hasConflict ? '' : (record ? record[7] : head);
   const flags = record ? record[2] : 'S...';
   // Without its own `.git`, rev-parse would answer for the parent repository.
   const initialized = await fsp.lstat(path.join(fileContext.absolutePath, '.git')).then(() => true, () => false);
-  const worktree = initialized ? await runGitCommand(fileContext.absolutePath, ['rev-parse', '--verify', 'HEAD']) : null;
+  const worktree = initialized
+    ? await runGitCommand(fileContext.absolutePath, ['rev-parse', '--verify', 'HEAD'], executionOptions)
+    : null;
+  if (isProcessTreeCleanupBlocked(worktree)) throw worktree;
   const commitOrNull = (value) => (value && !/^0+$/.test(value) ? value : null);
 
   return {
@@ -977,7 +1015,7 @@ const hasRemote = async (git, directory, remoteName) => {
   const exists = await git
     .raw(['remote', 'get-url', remote])
     .then((value) => String(value || '').trim().length > 0)
-    .catch(() => false);
+    .catch(ignoreOwnedGitFailure(false));
 
   remoteExistenceCache.set(key, { exists, checkedAt: Date.now() });
   return exists;
@@ -1015,7 +1053,7 @@ const getRemoteBranchComparison = async (git, remoteName, branchName) => {
   const exists = await git
     .raw(['rev-parse', '--verify', remoteRef])
     .then((value) => String(value || '').trim())
-    .catch(() => '');
+    .catch(ignoreOwnedGitFailure(''));
   if (!exists) {
     return null;
   }
@@ -1023,7 +1061,7 @@ const getRemoteBranchComparison = async (git, remoteName, branchName) => {
   const countsRaw = await git
     .raw(['rev-list', '--left-right', '--count', `HEAD...${remoteRef}`])
     .then((value) => String(value || '').trim())
-    .catch(() => '');
+    .catch(ignoreOwnedGitFailure(''));
   const counts = parseAheadBehindCounts(countsRaw);
   if (!counts) {
     return null;
@@ -1070,24 +1108,34 @@ const isMissingDirectoryError = (error) => {
   return /directory that does not exist|does not exist|no such file or directory/i.test(text);
 };
 
-const runGitCommand = async (cwd, args, { timeoutMs = 0, envOverrides = undefined, signal = undefined } = {}) => {
+const copyProcessTreeMetadata = (target, source) => {
+  if (source?.cleanupBlocked === true) target.cleanupBlocked = true;
+  if (source?.descendantsTerminated === false) target.descendantsTerminated = false;
+  if (source?.rootClosed === true || source?.rootClosed === false) target.rootClosed = source.rootClosed;
+  if (Number.isInteger(source?.pid)) target.pid = source.pid;
+  return target;
+};
+
+const runGitCommand = async (
+  cwd,
+  args,
+  { timeoutMs = 0, idleTimeoutMs = 0, envOverrides = undefined, signal = undefined } = {},
+) => {
   try {
     const execOptions = {
       cwd,
       env: await buildGitEnv(envOverrides),
       windowsHide: true,
       maxBuffer: 20 * 1024 * 1024,
-      // Only short probes pass a timeout; commands that legitimately run long
-      // (a fetch into a temporary clone) keep the default of none.
+      timeout: timeoutMs,
+      idleTimeout: idleTimeoutMs,
+      signal,
     };
-    if (timeoutMs > 0) {
-      execOptions.timeout = timeoutMs;
-      execOptions.killSignal = 'SIGKILL';
-    }
-    if (signal) {
-      execOptions.signal = signal;
-    }
-    const { stdout, stderr } = await execFileAsync(getGitBinary(), args, execOptions);
+    const { stdout, stderr } = await execFileProcessTree({
+      command: getGitBinary(),
+      args,
+      ...execOptions,
+    });
     return {
       success: true,
       exitCode: 0,
@@ -1095,7 +1143,7 @@ const runGitCommand = async (cwd, args, { timeoutMs = 0, envOverrides = undefine
       stderr: String(stderr || ''),
     };
   } catch (error) {
-    return {
+    const result = {
       success: false,
       exitCode: Number.isInteger(error?.code) ? error.code : null,
       code: error?.code == null ? undefined : String(error.code),
@@ -1103,7 +1151,79 @@ const runGitCommand = async (cwd, args, { timeoutMs = 0, envOverrides = undefine
       stderr: String(error?.stderr || ''),
       message: parseGitErrorText(error),
     };
+    return copyProcessTreeMetadata(result, error);
   }
+};
+
+const parseOwnedStatus = (text) => {
+  const status = {
+    current: null,
+    tracking: null,
+    ahead: 0,
+    behind: 0,
+    files: [],
+    isClean: () => status.files.length === 0,
+  };
+  const records = String(text || '').split('\0');
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record) continue;
+    if (record.startsWith('##')) {
+      const branch = record.slice(2).trim();
+      const emptyBranch = branch.match(/^No commits yet on (\S+)/);
+      const currentPart = emptyBranch ? emptyBranch[1] : branch.split(/\.\.\.|\s/)[0];
+      status.current = currentPart || null;
+      const trackingMatch = branch.match(/\.\.\.(\S+)/);
+      status.tracking = trackingMatch?.[1] || null;
+      const aheadMatch = branch.match(/ahead (\d+)/);
+      const behindMatch = branch.match(/behind (\d+)/);
+      status.ahead = aheadMatch ? Number(aheadMatch[1]) : 0;
+      status.behind = behindMatch ? Number(behindMatch[1]) : 0;
+      continue;
+    }
+    if (record.length < 3) continue;
+    const file = {
+      path: record.slice(3),
+      index: record[0],
+      working_dir: record[1],
+    };
+    if (record[0] === 'R' || record[0] === 'C') {
+      file.from = records[index + 1] || file.path;
+      index += 1;
+    }
+    status.files.push(file);
+  }
+  return status;
+};
+
+const createOwnedGit = (directory, { stallTimeoutMs = 0, signal = undefined } = {}) => {
+  const raw = async (args) => {
+    const result = await runGitCommand(directory, args, { idleTimeoutMs: stallTimeoutMs, signal });
+    if (result.success) return result.stdout;
+    const error = Object.assign(new Error(result.message || result.stderr || 'Git command failed'), {
+      code: result.code || result.exitCode || 1,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+    copyProcessTreeMetadata(error, result);
+    throw error;
+  };
+  return {
+    raw,
+    status: async (options = []) => parseOwnedStatus(await raw([
+      'status',
+      '--porcelain',
+      '-b',
+      '-u',
+      '--null',
+      ...options.filter((arg) => arg !== '--null' && arg !== '-z'),
+    ])),
+  };
+};
+
+const ignoreOwnedGitFailure = (fallback) => (error) => {
+  if (isProcessTreeCleanupBlocked(error)) throw error;
+  return fallback;
 };
 
 const resolveGitCommitFilePath = async (repoRoot, hash, candidates) => {
@@ -2568,6 +2688,7 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
 
     const { directoryPath, repoRoot, git } = await createRepositoryGitContext(normalizedDirectory, {
       stallTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS,
+      ownedProcessTree: true,
       signal,
     });
 
@@ -2586,8 +2707,8 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
     const [stagedStatsRaw, workingStatsRaw] = lightMode
       ? ['', '']
       : await Promise.all([
-          git.raw(['diff', '--cached', '--numstat']).catch(() => ''),
-          git.raw(['diff', '--numstat']).catch(() => ''),
+          git.raw(['diff', '--cached', '--numstat']).catch(ignoreOwnedGitFailure('')),
+          git.raw(['diff', '--numstat']).catch(ignoreOwnedGitFailure('')),
         ]);
 
     const stagedDiffStats = {};
@@ -2714,7 +2835,7 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
       const originHead = await git
         .raw(['symbolic-ref', '-q', 'refs/remotes/origin/HEAD'])
         .then((value) => String(value || '').trim())
-        .catch(() => '');
+        .catch(ignoreOwnedGitFailure(''));
 
       if (originHead) {
         // "refs/remotes/origin/main" -> "origin/main"
@@ -2727,7 +2848,7 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
         const exists = await git
           .raw(['rev-parse', '--verify', ref])
           .then((value) => String(value || '').trim())
-          .catch(() => '');
+          .catch(ignoreOwnedGitFailure(''));
         if (exists) return ref;
       }
 
@@ -2748,7 +2869,7 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
         const countRaw = await git
           .raw(['rev-list', '--count', `${baseRef}..HEAD`])
           .then((value) => String(value || '').trim())
-          .catch(() => '');
+          .catch(ignoreOwnedGitFailure(''));
         const count = parseInt(countRaw, 10);
         if (Number.isFinite(count)) {
           ahead = count;
@@ -2775,14 +2896,14 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
       const mergeHeadExists = await git
         .raw(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])
         .then(() => true)
-        .catch(() => false);
+        .catch(ignoreOwnedGitFailure(false));
       
       if (mergeHeadExists) {
-        const mergeHead = await git.raw(['rev-parse', 'MERGE_HEAD']).catch(() => '');
+        const mergeHead = await git.raw(['rev-parse', 'MERGE_HEAD']).catch(ignoreOwnedGitFailure(''));
         const headSha = mergeHead.trim().slice(0, 7);
         // Only set mergeInProgress if we actually have a valid head SHA
         if (headSha) {
-          const mergeMsgPath = await resolveGitInternalPath(repoRoot, git, 'MERGE_MSG').catch(() => '');
+          const mergeMsgPath = await resolveGitInternalPath(repoRoot, git, 'MERGE_MSG').catch(ignoreOwnedGitFailure(''));
           const mergeMsg = mergeMsgPath ? await fsp.readFile(mergeMsgPath, 'utf8').catch(() => '') : '';
           mergeInProgress = {
             head: headSha,
@@ -2796,8 +2917,8 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
 
     try {
       // Check for rebase in progress (.git/rebase-merge or .git/rebase-apply)
-      const rebaseMergePath = await resolveGitInternalPath(repoRoot, git, 'rebase-merge').catch(() => '');
-      const rebaseApplyPath = await resolveGitInternalPath(repoRoot, git, 'rebase-apply').catch(() => '');
+      const rebaseMergePath = await resolveGitInternalPath(repoRoot, git, 'rebase-merge').catch(ignoreOwnedGitFailure(''));
+      const rebaseApplyPath = await resolveGitInternalPath(repoRoot, git, 'rebase-apply').catch(ignoreOwnedGitFailure(''));
       const rebaseMergeExists = rebaseMergePath ? await fsp.stat(rebaseMergePath).then(() => true).catch(() => false) : false;
       const rebaseApplyExists = rebaseApplyPath ? await fsp.stat(rebaseApplyPath).then(() => true).catch(() => false) : false;
       
@@ -2851,13 +2972,13 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
   }
 }
 
-const getNoIndexDiff = async (repoRoot, repoPath, contextLines) => {
+const getNoIndexDiff = async (repoRoot, repoPath, contextLines, executionOptions = {}) => {
   const args = ['diff', '--no-color', '--full-index'];
   if (Number.isFinite(contextLines)) {
     args.push(`-U${Math.max(0, contextLines)}`);
   }
   args.push('--no-index', '--', '/dev/null', repoPath);
-  const result = await runGitCommand(repoRoot, args);
+  const result = await runGitCommand(repoRoot, args, executionOptions);
   // Exit 1 means differences, even when Git also writes warnings to stderr.
   // Spawn and buffer errors have no numeric exit code and must still fail.
   if (result.exitCode === 0 || result.exitCode === 1) {
@@ -2867,9 +2988,18 @@ const getNoIndexDiff = async (repoRoot, repoPath, contextLines) => {
 };
 
 export async function getDiff(directory, { path: filePath, staged = false, contextLines = 3 } = {}) {
-  const context = await createRepositoryGitContext(directory);
+  const context = await createRepositoryGitContext(directory, {
+    ownedProcessTree: true,
+    stallTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS,
+  });
   const fileContext = filePath
-    ? await resolveGitFileContext(context.directoryPath, context.directoryGit, filePath, context.repoRoot)
+    ? await resolveGitFileContext(
+      context.directoryPath,
+      context.directoryGit,
+      filePath,
+      context.repoRoot,
+      { idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS },
+    )
     : null;
   return readDiff(context, fileContext, { staged, contextLines });
 }
@@ -2880,11 +3010,27 @@ export async function getDiff(directory, { path: filePath, staged = false, conte
  * to show anything truthful.
  */
 export async function getPathDiff(directory, { path: filePath, staged = false, contextLines = 3 } = {}) {
-  const context = await createRepositoryGitContext(directory);
-  const fileContext = await resolveGitFileContext(context.directoryPath, context.directoryGit, filePath, context.repoRoot);
+  const context = await createRepositoryGitContext(directory, {
+    ownedProcessTree: true,
+    stallTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS,
+  });
+  const fileContext = await resolveGitFileContext(
+    context.directoryPath,
+    context.directoryGit,
+    filePath,
+    context.repoRoot,
+    { idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS },
+  );
   const diff = await readDiff(context, fileContext, { staged, contextLines });
   if (!fileContext.isSubmodule) return { diff, submodule: null };
-  return { diff, submodule: await readSubmoduleState(context.repoRoot, fileContext) };
+  return {
+    diff,
+    submodule: await readSubmoduleState(
+      context.repoRoot,
+      fileContext,
+      { idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS },
+    ),
+  };
 }
 
 async function readDiff({ repoRoot, git }, fileContext, { staged, contextLines }) {
@@ -2919,7 +3065,8 @@ async function readDiff({ repoRoot, git }, fileContext, { staged, contextLines }
     try {
       await git.raw(['ls-files', '--error-unmatch', '--', fileContext.repoPath]);
       return diff;
-    } catch {
+    } catch (error) {
+      if (isProcessTreeCleanupBlocked(error)) throw error;
       if (fileContext.isSymbolicLink) {
         const target = await fsp.readlink(fileContext.absolutePath);
         return [
@@ -2934,7 +3081,9 @@ async function readDiff({ repoRoot, git }, fileContext, { staged, contextLines }
         ].join('\n');
       }
 
-      return await getNoIndexDiff(repoRoot, fileContext.repoPath, contextLines);
+      return await getNoIndexDiff(repoRoot, fileContext.repoPath, contextLines, {
+        idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS,
+      });
     }
   } catch (error) {
     console.error('Failed to get Git diff:', error);

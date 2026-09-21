@@ -264,6 +264,92 @@ describe('VS Code skills catalog Git execution', () => {
     expect(gitCalls.filter((args) => args[0] === 'clone')).toHaveLength(1);
   });
 
+  it('retains the clone destination and lease when Windows tree cleanup is unconfirmed', async () => {
+    let leaseActive = false;
+    let networkReleased = false;
+    const blockedRuntime = {
+      coordinator: {
+        runClone: async (_options, task) => {
+          leaseActive = true;
+          const result = await task({
+            releaseNetwork: () => { networkReleased = true; },
+          });
+          if (!result.cleanupBlocked) {
+            leaseActive = false;
+          }
+          return result;
+        },
+      },
+    };
+    const blockedExecGit = async (args, cwd, options = {}) => {
+      const result = await testExecGit(args, cwd, options);
+      if (args[0] === 'clone' && args.includes('--filter=blob:none')) {
+        return {
+          ...result,
+          exitCode: 1,
+          stderr: 'Failed to terminate the Windows process tree',
+          cleanupBlocked: true,
+          descendantsTerminated: false,
+          rootClosed: false,
+        };
+      }
+      return result;
+    };
+
+    const result = await scanSkillsRepository({ source: 'owner/skills' }, {
+      ...dependencies,
+      execGit: blockedExecGit,
+      gitExecutionRuntime: blockedRuntime,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+      error: {
+        kind: 'networkError',
+        cleanupBlocked: true,
+        descendantsTerminated: false,
+      },
+    });
+    expect(cloneTargetsFromLog(await readGitLog())).toHaveLength(1);
+    const [target] = cloneTargetsFromLog(await readGitLog());
+    await expect(fs.stat(target)).resolves.toBeTruthy();
+    expect(leaseActive).toBe(true);
+    expect(networkReleased).toBe(false);
+    await fs.rm(target, { recursive: true, force: true });
+
+    const workingDirectory = await fs.mkdtemp(path.join(testRoot, 'blocked-install-'));
+    leaseActive = false;
+    networkReleased = false;
+    await clearGitLog();
+    const installResult = await installSkillsFromRepository({
+      source: 'owner/skills',
+      scope: 'project',
+      workingDirectory,
+      selections: [{ skillDir: 'skills/example' }],
+    }, {
+      ...dependencies,
+      execGit: blockedExecGit,
+      gitExecutionRuntime: blockedRuntime,
+    });
+    expect(installResult).toMatchObject({
+      ok: false,
+      cleanupBlocked: true,
+      error: {
+        kind: 'networkError',
+        cleanupBlocked: true,
+        descendantsTerminated: false,
+      },
+    });
+    const [installTarget] = cloneTargetsFromLog(await readGitLog());
+    await expect(fs.stat(installTarget)).resolves.toBeTruthy();
+    expect(leaseActive).toBe(true);
+    expect(networkReleased).toBe(false);
+    await fs.rm(installTarget, { recursive: true, force: true });
+    await fs.rm(workingDirectory, { recursive: true, force: true });
+  });
+
   it('rejects Git output that exceeds the bounded process buffer', async () => {
     process.env.OPENCHAMBER_VSCODE_SKILLS_GIT_MODE = 'output-limit';
 

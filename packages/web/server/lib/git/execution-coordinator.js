@@ -614,6 +614,9 @@ export class GitExecutionCoordinator {
     if (entry.context.commonId !== context.commonId || entry.context.worktreeId !== context.worktreeId) {
       return false;
     }
+    if (entry.cleanupBlocked) {
+      return true;
+    }
     if (entry.sourceAbortRequested || entry.controller.signal.aborted) {
       return false;
     }
@@ -728,7 +731,19 @@ export class GitExecutionCoordinator {
         entry.baseKey = this.statusBaseKey(options.context, this.getGeneration(options.context));
         return Promise.resolve()
           .then(() => task(mode, controller.signal))
-          .finally(() => this.finishStatusSource(key, entry));
+          .then(
+            (value) => {
+              if (hasUnconfirmedProcessCleanup(value)) entry.cleanupBlocked = true;
+              return value;
+            },
+            (error) => {
+              if (hasUnconfirmedProcessCleanup(error)) entry.cleanupBlocked = true;
+              throw error;
+            },
+          )
+          .finally(() => {
+            if (!entry.cleanupBlocked) this.finishStatusSource(key, entry);
+          });
       };
       entry.promise = this.run({
         context: options.context,
@@ -741,12 +756,12 @@ export class GitExecutionCoordinator {
       this.statusInFlight.set(key, entry);
       entry.promise.then(
         () => {
-          if (!entry.sourceStarted) {
+          if (!entry.sourceStarted && !entry.cleanupBlocked) {
             this.finishStatusSource(key, entry);
           }
         },
         () => {
-          if (!entry.sourceStarted) {
+          if (!entry.sourceStarted && !entry.cleanupBlocked) {
             this.finishStatusSource(key, entry);
           }
         },

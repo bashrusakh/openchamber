@@ -161,6 +161,30 @@ describe('GitExecutionCoordinator', () => {
     expect(coordinator.getStats()).toMatchObject({ active: 0, statusInFlight: 0 });
   });
 
+  it('retains the status lease when process cleanup is unconfirmed', async () => {
+    const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
+    const cleanupBlocked = {
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+    };
+    const blocked = coordinator.runStatus({ context: context(), mode: 'full' }, () => (
+      Promise.reject(cleanupBlocked)
+    ));
+
+    await expect(blocked).rejects.toMatchObject(cleanupBlocked);
+    expect(coordinator.getStats()).toMatchObject({ active: 1, statusInFlight: 1 });
+
+    let replacementStarted = false;
+    const replacement = coordinator.runStatus({ context: context(), mode: 'light' }, () => {
+      replacementStarted = true;
+      return 'must-not-start';
+    });
+    await expect(replacement).rejects.toMatchObject(cleanupBlocked);
+    expect(replacementStarted).toBe(false);
+    expect(coordinator.getStats()).toMatchObject({ active: 1, statusInFlight: 1 });
+  });
+
   it('does not reuse a status source that is before a queued mutation', async () => {
     const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
     const calls = [];
