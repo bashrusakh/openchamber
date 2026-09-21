@@ -6,8 +6,10 @@ import yaml from 'yaml';
 
 import { discoverSkills } from './opencodeConfig';
 import type { GitProcessExecutionOptions } from './bridge-git-process-runtime';
+import { runWithGitExecutionScope } from './git-execution-scope';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 
@@ -152,7 +154,7 @@ const loadGitProcessRuntime = async (): Promise<GitProcessRunner> => {
 
 async function runGit(
   args: string[],
-  options: { cwd?: string; timeoutMs?: number; signal?: AbortSignal } = {},
+  options: { cwd?: string; timeoutMs?: number; maxBuffer?: number; signal?: AbortSignal } = {},
   resolveGitExecutable: GitExecutableResolver,
   executeGit: GitProcessRunner,
 ) {
@@ -162,6 +164,7 @@ async function runGit(
     const result = await executeGit(args, options.cwd || process.cwd(), {
       binary: gitExecutable,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      maxBuffer: options.maxBuffer ?? DEFAULT_MAX_BUFFER,
       signal: options.signal,
     });
     if (result.exitCode === 0) {
@@ -358,9 +361,19 @@ export async function scanSkillsRepository(
   const resolveGitExecutable = dependencies.resolveGitExecutable || resolveConfiguredGitExecutable;
   const executeGit = dependencies.execGit || await loadGitProcessRuntime();
   const executionRuntime = dependencies.gitExecutionRuntime || await loadGitExecutionRuntime();
-  const runGitCommand = (args: string[], runOptions: { cwd?: string; timeoutMs?: number } = {}) => (
-    runGit(args, { ...runOptions, signal: options.signal }, resolveGitExecutable, executeGit)
-  );
+  const runGitCommand = (
+    args: string[],
+    runOptions: { cwd?: string; timeoutMs?: number; readOnly?: boolean } = {},
+  ) => {
+    const execute = () => runGit(
+      args,
+      { ...runOptions, signal: options.signal },
+      resolveGitExecutable,
+      executeGit,
+    );
+    if (!runOptions.readOnly) return execute();
+    return runWithGitExecutionScope(true, execute);
+  };
   const tempBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openchamber-vscode-skills-scan-'));
   let cleaned = false;
   const cleanup = async () => {
@@ -409,7 +422,7 @@ export async function scanSkillsRepository(
             if (sparseSet.ok) {
               const checkout = await runGitCommand(['-C', tempBase, 'checkout', '--force', 'HEAD'], { timeoutMs: 60_000 });
               if (checkout.ok) {
-                const lsFiles = await runGitCommand(['-C', tempBase, 'ls-files'], { timeoutMs: 15_000 });
+                const lsFiles = await runGitCommand(['-C', tempBase, 'ls-files'], { timeoutMs: 15_000, readOnly: true });
                 if (lsFiles.ok) {
                   skillMdPaths = lsFiles.stdout
                     .split(/\r?\n/)
@@ -427,7 +440,7 @@ export async function scanSkillsRepository(
               listArgs.push('--', effectiveSubpath);
             }
 
-            const list = await runGitCommand(listArgs, { timeoutMs: 30_000 });
+            const list = await runGitCommand(listArgs, { timeoutMs: 30_000, readOnly: true });
             if (!list.ok) {
               return { ok: false as const, error: { kind: 'networkError' as const, message: list.stderr || list.message || 'Failed to list repository files' } };
             }
@@ -457,7 +470,10 @@ export async function scanSkillsRepository(
             try {
               content = await fs.promises.readFile(toFsPath(skillMdPath), 'utf8');
             } catch {
-              const show = await runGitCommand(['-C', tempBase, 'show', `HEAD:${skillMdPath}`], { timeoutMs: 15_000 });
+              const show = await runGitCommand(
+                ['-C', tempBase, 'show', `HEAD:${skillMdPath}`],
+                { timeoutMs: 15_000, readOnly: true },
+              );
               if (!show.ok) {
                 warnings.push('Failed to read SKILL.md');
               } else {

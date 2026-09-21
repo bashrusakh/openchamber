@@ -132,7 +132,7 @@ The following functions are internal helpers used by exported functions:
 - `resolveBranchForExistingMode(...)`: Resolve branch for existing-mode worktree creation.
 - `applyUpstreamConfiguration(...)`: Set upstream tracking for new branches.
 - `runPostCheckoutHook(directory)`: Invoke the worktree's `post-checkout` hook after population, because `git worktree add --no-checkout` and the bootstrap's `git reset --hard` never run git hooks. Runs with git's standard arguments and the worktree as cwd; skips missing/non-executable hooks and never throws on hook failure.
-- `process-tree.js`: Shared ownership helpers for detached Git process groups and descendant termination on cancellation or timeout.
+- `process-tree.js`: Shared ownership helpers for detached Git process groups and descendant termination on cancellation, timeout, or output limits. Windows tree termination is awaitable; clone cleanup, Gitignore reads, and bounded listings do not settle or release their owning work until the `taskkill /T /F` lifecycle completes.
 - And various other internal helpers for Git command execution and parsing.
 
 ### Execution Coordination
@@ -155,6 +155,8 @@ mutation runs.
 and re-entrancy errors returned by the coordinator.
 Raw Git reads owned by adjacent web features use `gitExecutionService.withRawRead()`
 so they receive the same repository/worktree admission and read-only environment.
+Gitignore checks and skills-catalog Git processes use the shared process-tree
+lifecycle rather than root-only termination.
 `checkoutBranch` admits its remote-name probe as a read. A configured remote
 name keeps the potentially remote checkout in common-write and network
 admission, rather than relying on a local-branch probe that could become stale

@@ -102,6 +102,37 @@ describe('web Gitignore reader', () => {
     await expect(pending).rejects.toThrow(/timed out/i);
   });
 
+  it('waits for Windows taskkill before settling a timed-out check-ignore', async () => {
+    const child = createChild();
+    child.pid = 1234;
+    let taskkill;
+    const spawn = vi.fn((command) => {
+      if (command === 'taskkill') {
+        taskkill = new EventEmitter();
+        return taskkill;
+      }
+      return child;
+    });
+    const reader = createGitIgnoreReader({
+      spawn,
+      resolveGitBinaryForSpawn: () => 'git',
+      platform: 'win32',
+      timeoutMs: 1,
+    });
+
+    const pending = reader.getIgnoredNames('/repo', ['dist']);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    child.emit('close', null);
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(spawn).toHaveBeenLastCalledWith('taskkill', ['/pid', '1234', '/T', '/F'], expect.objectContaining({ windowsHide: true }));
+
+    taskkill.emit('close', 0, null);
+    await expect(pending).rejects.toThrow(/timed out/i);
+  });
+
   it('preserves permission failures instead of treating them as no matches', async () => {
     const child = createChild();
     const spawn = vi.fn(() => {

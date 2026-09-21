@@ -22,7 +22,7 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
 
 - `bridge-git-process-runtime.ts`
   - Git process execution and environment setup (`execGit`), including SSH agent socket resolution. Both bridge helpers and `gitService.ts` use this executor; the latter passes the Git binary selected by VS Code's Git extension.
-  - Reads both output streams and gives commands EOF on stdin. A signal exit is a failure, never exit code zero. File ignore checks pass their deadline to this executor so timeout terminates the child tree rather than abandoning a live command behind `Promise.race`. Other Git commands have no new time limit.
+  - Reads both output streams and gives commands EOF on stdin. A signal exit is a failure, never exit code zero. Callers can set independent stdout/stderr `maxBuffer` limits; output over the limit terminates the owned tree and returns the existing child-process limit error contract. File ignore checks pass their deadline to this executor so timeout terminates the child tree rather than abandoning a live command behind `Promise.race`. Other Git commands have no new time limit.
   - Tracks outstanding commands through completion and timeout cleanup. Extension deactivation awaits `stopGitProcesses`, which terminates active work and rejects later launches. Operations delegated to VS Code's built-in Git API remain owned by that extension.
 
 - `owned-process.ts`
@@ -63,6 +63,10 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
     SSH/environment setup, timeouts, cancellation, clone reservations, and
     preferred-clone fallback remain unchanged; deactivation stops active
     catalog Git children through the same process registry.
+  - Skill Git commands retain a 4 MiB stdout/stderr bound. Repository reads
+    (`ls-files`, `ls-tree`, and `show`) run inside the read-only execution scope
+    (`GIT_OPTIONAL_LOCKS=0`); clone and sparse-checkout materialization keeps
+    normal locking.
 
 - `git-context-resolver.ts`, `git-execution-coordinator.ts`,
   `git-execution-errors.ts`

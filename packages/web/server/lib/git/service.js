@@ -2409,22 +2409,25 @@ const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
     let truncated = false;
     let settled = false;
     let stallTimer = null;
+    let termination;
     const finish = (error) => {
       if (settled) return;
       settled = true;
       if (stallTimer) clearTimeout(stallTimer);
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve({ paths, truncated });
+      void Promise.resolve(termination).then(() => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve({ paths, truncated });
+      });
     };
     // A listing that goes silent is killed rather than left holding the
     // status read (and its limiter slot) open.
     const armStallTimer = () => {
       if (stallTimer) clearTimeout(stallTimer);
       stallTimer = setTimeout(() => {
-        killProcessTree(child);
+        termination = killProcessTree(child);
         finish(new Error(`git ls-files produced no output for ${GIT_UNTRACKED_LISTING_STALL_TIMEOUT_MS}ms in ${dirPath}`));
       }, GIT_UNTRACKED_LISTING_STALL_TIMEOUT_MS);
     };
@@ -2440,7 +2443,7 @@ const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
         paths.push(record);
         if (paths.length > limit) {
           truncated = true;
-          killProcessTree(child);
+          termination = killProcessTree(child);
           finish();
           return;
         }
