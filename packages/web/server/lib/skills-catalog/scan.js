@@ -12,6 +12,7 @@ import {
 import { parseSkillRepoSource } from './source.js';
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
+const isStringValue = (value) => Object.prototype.toString.call(value) === '[object String]';
 
 function validateSkillName(skillName) {
   if (typeof skillName !== 'string') return false;
@@ -214,8 +215,8 @@ export async function scanSkillsRepository({
           const parsedMd = parseSkillMd(skillMdContent);
           warnings.push(...(parsedMd.warnings || []));
 
-          const description = typeof parsedMd.frontmatter?.description === 'string' ? parsedMd.frontmatter.description : undefined;
-          const frontmatterName = typeof parsedMd.frontmatter?.name === 'string' ? parsedMd.frontmatter.name : undefined;
+          const description = isStringValue(parsedMd.frontmatter?.description) ? parsedMd.frontmatter.description : undefined;
+          const frontmatterName = isStringValue(parsedMd.frontmatter?.name) ? parsedMd.frontmatter.name : undefined;
 
           const installable = validateSkillName(skillName);
           if (!installable) {

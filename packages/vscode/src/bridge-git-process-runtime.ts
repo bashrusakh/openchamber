@@ -99,20 +99,18 @@ export const stopGitProcesses = (): Promise<void> => {
   return shutdown;
 };
 
-const getErrorCode = (error: unknown): string | undefined => {
-  if (!error || typeof error !== 'object' || !('code' in error)) {
-    return undefined;
-  }
-  const code = error.code;
-  return typeof code === 'string' ? code : undefined;
+const getErrorCode = (error: Error): string | undefined => {
+  // SAFETY: child-process failures use Node's optional errno code field.
+  const code = (error as NodeJS.ErrnoException).code;
+  return String(code) === code ? code : undefined;
 };
 
-const processFailure = (error: unknown): { stdout: string; stderr: string; exitCode: number; code?: string } => ({
+const processFailure = (error: Error) => ({
   stdout: '',
-  stderr: error instanceof Error ? error.message : String(error),
+  stderr: error.message,
   exitCode: 1,
   code: getErrorCode(error),
-});
+}) satisfies { stdout: string; stderr: string; exitCode: number; code?: string };
 
 export const createGitProcessRuntime = ({
   resolveGitExecutable = getGitExecutablePath,
@@ -130,7 +128,7 @@ export const createGitProcessRuntime = ({
         resolveGitExecutable(),
       ]);
     } catch (error) {
-      return processFailure(error);
+      return processFailure(error instanceof Error ? error : new Error(String(error)));
     }
     if (shutdown) return { stdout: '', stderr: 'Git runtime is shutting down', exitCode: 1 };
     if (options.signal?.aborted) {
@@ -190,7 +188,7 @@ export const createGitProcessRuntime = ({
         exitCode: exit.code ?? 1,
       };
     } catch (error) {
-      return processFailure(error);
+      return processFailure(error instanceof Error ? error : new Error(String(error)));
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', onAbort);

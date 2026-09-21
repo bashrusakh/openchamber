@@ -12,7 +12,12 @@ export type GitExecutionError = Error & {
   readonly details?: GitExecutionErrorDetails;
 };
 
-export function isGitExecutionError(error: unknown): error is GitExecutionError;
+export type GitExecutionErrorInput = Error | {
+  readonly code?: GitExecutionErrorCode;
+  readonly details?: GitExecutionErrorDetails;
+} | null | undefined;
+
+export function isGitExecutionError(error: GitExecutionErrorInput): error is GitExecutionError;
 
 export class GitExecutionOverloadedError extends Error {
   readonly code: typeof GIT_EXECUTION_ERROR_CODES.OVERLOADED;

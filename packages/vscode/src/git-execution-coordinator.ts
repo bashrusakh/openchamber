@@ -16,5 +16,5 @@ export type {
   GitExecutionRunOptions,
   GitOperationKind,
   GitStatusRunOptions,
-  GitStatusShape,
+  GitStatusMode,
 } from '../../web/server/lib/git/execution-coordinator.js';

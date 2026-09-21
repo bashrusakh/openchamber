@@ -11,7 +11,7 @@ import type {
   GitExecutionCoordinator,
   GitExecutionLease,
   GitOperationKind,
-  GitStatusShape,
+  GitStatusMode,
 } from './git-execution-coordinator';
 import {
   getGitOperationClassification,
@@ -65,15 +65,16 @@ const fallbackLease = (context: GitExecutionContext, kind: GitOperationKind): Gi
   active: true,
 });
 
-const isGitDiscoveryExecutableUnavailable = (error: unknown): boolean => {
-  if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') {
-    return false;
-  }
-  if (!('details' in error) || !error.details || typeof error.details !== 'object') {
-    return false;
-  }
-  return 'operation' in error.details && error.details.operation === 'git-context-discovery';
+type GitDiscoveryFailure = {
+  name?: string;
+  message?: string;
+  code?: string;
+  details?: { operation?: string };
 };
+
+const isGitDiscoveryExecutableUnavailable = (error: GitDiscoveryFailure): boolean => (
+  error.code === 'ENOENT' && error.details?.operation === 'git-context-discovery'
+);
 
 const fallbackContext = (directory: string): GitExecutionContext => ({
   isRepository: true,
@@ -114,7 +115,14 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
     try {
       context = await discover(directory, { signal: operationOptions.signal });
     } catch (error) {
-      if (!isGitDiscoveryExecutableUnavailable(error)) {
+      const failure = error instanceof Error
+        ? error
+        : (() => {
+          // SAFETY: GitContextResolver rejects with an Error or a structured
+          // discovery failure carrying the optional code/details fields.
+          return Object(error) as GitDiscoveryFailure;
+        })();
+      if (!isGitDiscoveryExecutableUnavailable(failure)) {
         throw error;
       }
       return runWithGitExecutionScope(kind === GIT_OPERATION_KIND.READ, () => task(
@@ -144,41 +152,54 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
 
   const runStatus = async <T, R = T>(
     directory: string,
-    task: (shape: GitStatusShape, signal?: AbortSignal) => Promise<T> | T,
+    task: (mode: GitStatusMode, signal?: AbortSignal) => Promise<T> | T,
     options: {
-      shape?: GitStatusShape;
+      mode?: GitStatusMode;
       signal?: AbortSignal;
       queueTimeoutMs?: number;
-      projectResult?: (value: T, requestedShape: GitStatusShape, sourceShape: GitStatusShape) => R;
+      projectResult?: (value: T, requestedMode: GitStatusMode, sourceMode: GitStatusMode) => R;
     } = {},
   ): Promise<R> => {
-    const requestedShape = options.shape === 'light' ? 'light' : 'full';
+    const requestedMode = options.mode === 'light' ? 'light' : 'full';
     let context: GitResolvedContext;
     try {
       context = await discover(directory, { signal: options.signal });
     } catch (error) {
-      if (!isGitDiscoveryExecutableUnavailable(error)) {
+      const failure = error instanceof Error
+        ? error
+        : (() => {
+          // SAFETY: GitContextResolver rejects with an Error or a structured
+          // discovery failure carrying the optional code/details fields.
+          return Object(error) as GitDiscoveryFailure;
+        })();
+      if (!isGitDiscoveryExecutableUnavailable(failure)) {
         throw error;
       }
-      const value = await runWithGitExecutionScope(true, () => task(requestedShape, options.signal));
-      return typeof options.projectResult === 'function'
-        ? options.projectResult(value, requestedShape, requestedShape)
-        : value as R;
+      const value = await runWithGitExecutionScope(true, () => task(requestedMode, options.signal));
+      if (options.projectResult) {
+        return options.projectResult(value, requestedMode, requestedMode);
+      }
+      // SAFETY: without projectResult, the default generic result type is T,
+      // so the task value is the public result for this branch.
+      return value as R;
     }
     if (!context.isRepository) {
-      const value = await runWithGitExecutionScope(true, () => task(requestedShape, options.signal));
-      return typeof options.projectResult === 'function'
-        ? options.projectResult(value, requestedShape, requestedShape)
-        : value as R;
+      const value = await runWithGitExecutionScope(true, () => task(requestedMode, options.signal));
+      if (options.projectResult) {
+        return options.projectResult(value, requestedMode, requestedMode);
+      }
+      // SAFETY: without projectResult, the default generic result type is T,
+      // so the task value is the public result for this branch.
+      return value as R;
     }
     return coordinator.runStatus({
       context,
-      shape: requestedShape,
+      mode: requestedMode,
       signal: options.signal,
       queueTimeoutMs: options.queueTimeoutMs,
       projectResult: options.projectResult,
-      label: `status:${requestedShape}`,
-    }, (sourceShape, sourceSignal) => runWithGitExecutionScope(true, () => task(sourceShape, sourceSignal)));
+      label: `status:${requestedMode}`,
+    }, (sourceMode, sourceSignal) => runWithGitExecutionScope(true, () => task(sourceMode, sourceSignal)));
   };
 
   const runDirectoryFallbackRead = <T>(directory: string, task: () => Promise<T> | T): Promise<T> => (

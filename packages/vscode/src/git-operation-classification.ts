@@ -91,6 +91,8 @@ export const GIT_INTERNAL_OPERATION_CLASSIFICATION = Object.freeze({
 export const getGitServiceOperationClassification = (
   operationName: string,
 ): GitOperationClassification => {
+  // SAFETY: the lookup is checked immediately below; an unknown operation is
+  // rejected before the returned classification is used.
   const classification = GIT_SERVICE_OPERATION_CLASSIFICATION[operationName as GitServiceOperationName];
   if (!classification) {
     throw new TypeError(`Unclassified Git service operation: ${operationName}`);
@@ -101,6 +103,8 @@ export const getGitServiceOperationClassification = (
 export const getGitOperationClassification = (
   operationName: string,
 ): GitOperationClassification => {
+  // SAFETY: both maps are keyed by their corresponding operation-name unions;
+  // the missing-key check below rejects an unclassified string.
   const classification = GIT_SERVICE_OPERATION_CLASSIFICATION[operationName as GitServiceOperationName]
     || GIT_INTERNAL_OPERATION_CLASSIFICATION[operationName as keyof typeof GIT_INTERNAL_OPERATION_CLASSIFICATION];
   if (!classification) {

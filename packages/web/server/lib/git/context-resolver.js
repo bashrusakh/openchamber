@@ -14,8 +14,16 @@ const DEFAULTS = Object.freeze({
   discoveryTimeoutMs: 30_000,
 });
 
+const isStringValue = (value) => String(value) === value;
+
+const isObjectRecord = (value) => (
+  value !== null
+  && !Array.isArray(value)
+  && Object.prototype.toString.call(value) === '[object Object]'
+);
+
 const normalizeDirectory = (directory) => {
-  if (typeof directory !== 'string' || !directory.trim()) {
+  if (!isStringValue(directory) || !directory.trim()) {
     throw new TypeError('Git directory is required');
   }
   return path.resolve(directory.trim());
@@ -81,13 +89,13 @@ const normalizeCommandResult = (result) => {
   if (Buffer.isBuffer(result)) {
     return { success: true, stdout: result.toString(), stderr: '' };
   }
-  if (typeof result === 'string') {
+  if (isStringValue(result)) {
     return { success: true, stdout: result, stderr: '' };
   }
   if (result instanceof Error) {
     throw result;
   }
-  if (!result || typeof result !== 'object') {
+  if (!isObjectRecord(result)) {
     return { success: false, stdout: '', stderr: 'Git discovery failed' };
   }
   const success = result.success === undefined
@@ -180,7 +188,7 @@ const isPathWithin = (candidate, parent) => (
 );
 
 const isPathIdentity = (value) => (
-  typeof value === 'string'
+  isStringValue(value)
   && value.length > 0
   && !/[\u0000\r\n]/.test(value)
   && path.isAbsolute(value)
@@ -309,7 +317,7 @@ const createQueue = (concurrency, maxPending) => {
 
 export class GitContextResolver {
   constructor(options) {
-    if (!options || typeof options.runGit !== 'function') {
+    if (!(options?.runGit instanceof Function)) {
       throw new TypeError('runGit is required');
     }
 

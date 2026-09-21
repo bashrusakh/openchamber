@@ -101,13 +101,13 @@ describe('GitExecutionCoordinator', () => {
     const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
     let release;
     let calls = 0;
-    const full = coordinator.runStatus({ context: context(), shape: 'full' }, () => {
+    const full = coordinator.runStatus({ context: context(), mode: 'full' }, () => {
       calls += 1;
       return new Promise((resolve) => { release = resolve; });
     });
-    const light = coordinator.runStatus({ context: context(), shape: 'light' }, (shape) => {
+    const light = coordinator.runStatus({ context: context(), mode: 'light' }, (mode) => {
       calls += 1;
-      return shape;
+      return mode;
     });
     await tick();
     expect(calls).toBe(1);
@@ -125,7 +125,7 @@ describe('GitExecutionCoordinator', () => {
     let sourceAbortCount = 0;
     const source = coordinator.runStatus({
       context: context(),
-      'shape': 'full',
+      mode: 'full',
       signal: firstController.signal,
     }, (_statusMode, signal) => {
       sourceSignal = signal;
@@ -134,7 +134,7 @@ describe('GitExecutionCoordinator', () => {
     });
     const shared = coordinator.runStatus({
       context: context(),
-      'shape': 'light',
+      mode: 'light',
       signal: secondController.signal,
     }, () => 'never');
 
@@ -165,7 +165,7 @@ describe('GitExecutionCoordinator', () => {
     const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
     const calls = [];
     let releaseStatus;
-    const first = coordinator.runStatus({ context: context(), 'shape': 'full' }, () => {
+    const first = coordinator.runStatus({ context: context(), mode: 'full' }, () => {
       calls.push('status-before');
       return new Promise((resolve) => { releaseStatus = resolve; });
     });
@@ -178,7 +178,7 @@ describe('GitExecutionCoordinator', () => {
         return 'mutated';
       },
     );
-    const later = coordinator.runStatus({ context: context(), 'shape': 'light' }, () => {
+    const later = coordinator.runStatus({ context: context(), mode: 'light' }, () => {
       calls.push('status-after');
       return { version: 'after' };
     });
@@ -203,13 +203,13 @@ describe('GitExecutionCoordinator', () => {
     const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
     const calls = [];
     let releaseFirst;
-    const first = coordinator.runStatus({ context: context('first'), 'shape': 'full' }, () => {
+    const first = coordinator.runStatus({ context: context('first'), mode: 'full' }, () => {
       calls.push('first');
       return new Promise((resolve) => { releaseFirst = resolve; });
     });
     await waitFor(() => coordinator.getStats().active === 1);
 
-    const second = coordinator.runStatus({ context: context('second'), 'shape': 'full' }, () => {
+    const second = coordinator.runStatus({ context: context('second'), mode: 'full' }, () => {
       calls.push('second');
       return 'second';
     });

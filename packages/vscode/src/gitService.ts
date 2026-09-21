@@ -239,7 +239,7 @@ async function getGitApi(): Promise<GitAPI | null> {
 export async function getGitExecutablePath(): Promise<string | undefined> {
   const api = await getGitApi();
   const configuredPath = api?.git.path;
-  return typeof configuredPath === 'string' && configuredPath.trim() ? configuredPath : undefined;
+  return configuredPath?.trim() ? configuredPath : undefined;
 }
 
 /**
@@ -1508,8 +1508,7 @@ const loadProjectStartCommand = async (projectID: string): Promise<string> => {
   try {
     const raw = await fs.promises.readFile(storagePath, 'utf8');
     const parsed = JSON.parse(raw) as { commands?: { start?: string } };
-    const start = typeof parsed?.commands?.start === 'string' ? parsed.commands.start.trim() : '';
-    return start || '';
+    return parsed?.commands?.start?.trim() || '';
   } catch {
     return '';
   }

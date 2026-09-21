@@ -41,8 +41,6 @@ export const GitExecutionReentrancyError = defineError(
 );
 
 export const isGitExecutionError = (error) => Boolean(
-  error
-  && typeof error === 'object'
-  && typeof error.code === 'string'
-  && Object.values(GIT_EXECUTION_ERROR_CODES).includes(error.code),
+  error != null
+  && Object.values(GIT_EXECUTION_ERROR_CODES).includes(Object(error).code),
 );

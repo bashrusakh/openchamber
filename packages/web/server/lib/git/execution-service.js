@@ -307,7 +307,7 @@ export const createGitExecutionService = (dependencies = {}) => {
     const statusMode = options?.mode === 'light' ? 'light' : 'full';
     return coordinator.runStatus({
       context,
-      'shape': statusMode,
+      mode: statusMode,
       signal: options?.signal,
       queueTimeoutMs: options?.queueTimeoutMs,
       label: `status:${statusMode}`,

@@ -34,6 +34,10 @@ type SkillFrontmatter = {
   [key: string]: unknown;
 };
 
+const isStringValue = (value: SkillFrontmatter['description']): value is string => (
+  Object.prototype.toString.call(value) === '[object String]'
+);
+
 type SkillsCatalogItem = {
   repoSource: string;
   repoSubpath?: string;
@@ -410,10 +414,10 @@ export async function scanSkillsRepository(
             const parsedMd = parseSkillMd(content);
             warnings.push(...parsedMd.warnings);
 
-            const description = typeof parsedMd.frontmatter.description === 'string'
+            const description = isStringValue(parsedMd.frontmatter.description)
               ? parsedMd.frontmatter.description
               : undefined;
-            const frontmatterName = typeof parsedMd.frontmatter.name === 'string'
+            const frontmatterName = isStringValue(parsedMd.frontmatter.name)
               ? parsedMd.frontmatter.name
               : undefined;
 

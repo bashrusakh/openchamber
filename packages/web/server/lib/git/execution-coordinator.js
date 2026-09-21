@@ -20,6 +20,9 @@ export const GIT_READ_ONLY_ENV = Object.freeze({ GIT_OPTIONAL_LOCKS: '0' });
 const kinds = new Set(Object.values(GIT_OPERATION_KIND));
 const cloneLeaseEntries = new WeakMap();
 
+const isStringValue = (value) => String(value) === value;
+const isFunction = (value) => value instanceof Function;
+
 const DEFAULT_LIMITS = Object.freeze({
   globalConcurrency: 32,
   readsPerCommonContext: 8,
@@ -74,10 +77,10 @@ const ensureContext = (context) => {
   if (!context || context.isRepository !== true) {
     throw new TypeError('A repository execution context is required');
   }
-  if (typeof context.commonId !== 'string' || !context.commonId.trim()) {
+  if (!isStringValue(context.commonId) || !context.commonId.trim()) {
     throw new TypeError('commonId is required');
   }
-  if (typeof context.worktreeId !== 'string' || !context.worktreeId.trim()) {
+  if (!isStringValue(context.worktreeId) || !context.worktreeId.trim()) {
     throw new TypeError('worktreeId is required');
   }
 };
@@ -273,7 +276,7 @@ export class GitExecutionCoordinator {
   }
 
   invalidateWorktrees(commonId, worktreeIds) {
-    if (typeof commonId !== 'string' || !commonId.trim() || !Array.isArray(worktreeIds)) {
+    if (!isStringValue(commonId) || !commonId.trim() || !Array.isArray(worktreeIds)) {
       return 0;
     }
     const contextState = this.contexts.get(commonId);
@@ -533,7 +536,7 @@ export class GitExecutionCoordinator {
   }
 
   run(options, task) {
-    if (!options || typeof task !== 'function') {
+    if (!options || !isFunction(task)) {
       return Promise.reject(new TypeError('Git execution options and task are required'));
     }
     try {
@@ -660,14 +663,15 @@ export class GitExecutionCoordinator {
     });
   }
 
-  projectStatus(value, requestedShape, sourceShape, projectResult) {
-    return typeof projectResult === 'function'
-      ? projectResult(value, requestedShape, sourceShape)
-      : value;
+  projectStatus(value, requestedMode, sourceMode, projectResult) {
+    if (projectResult) {
+      return projectResult(value, requestedMode, sourceMode);
+    }
+    return value;
   }
 
   runStatus(options, task) {
-    if (!options || typeof task !== 'function') {
+    if (!options || !isFunction(task)) {
       return Promise.reject(new TypeError('Git status options and task are required'));
     }
     let generation;
@@ -680,10 +684,10 @@ export class GitExecutionCoordinator {
     if (options.signal?.aborted) {
       return Promise.reject(cancellationError(options.signal, 'Git status was cancelled before admission'));
     }
-    const requestedShape = options.shape === 'light' ? 'light' : 'full';
+    const requestedMode = options.mode === 'light' ? 'light' : 'full';
     const baseKey = this.statusBaseKey(options.context, generation);
     const sourceEntry = Array.from(this.statusInFlight.values()).find((entry) => (
-      (entry.shape === 'full' || entry.shape === requestedShape)
+      (entry.mode === 'full' || entry.mode === requestedMode)
       && this.canReuseStatusSource(entry, baseKey, options.context)
     ));
 
@@ -691,14 +695,14 @@ export class GitExecutionCoordinator {
       if (this.statusInFlight.size >= this.limits.maxStatusInFlight) {
         return null;
       }
-      const shape = requestedShape;
+      const mode = requestedMode;
       const operationId = this.nextEntryId;
-      const key = `${baseKey}\0${shape}\0${operationId}`;
+      const key = `${baseKey}\0${mode}\0${operationId}`;
       const controller = new AbortController();
       const entry = {
         context: options.context,
         baseKey,
-        shape,
+        mode,
         operationId,
         controller,
         waiters: 0,
@@ -711,14 +715,14 @@ export class GitExecutionCoordinator {
         entry.sourceStarted = true;
         entry.baseKey = this.statusBaseKey(options.context, this.getGeneration(options.context));
         return Promise.resolve()
-          .then(() => task(shape, controller.signal))
+          .then(() => task(mode, controller.signal))
           .finally(() => this.finishStatusSource(key, entry));
       };
       entry.promise = this.run({
         context: options.context,
         kind: GIT_OPERATION_KIND.READ,
         targetWorktree: true,
-        label: options.label || `status:${shape}`,
+        label: options.label || `status:${mode}`,
         queueTimeoutMs: options.queueTimeoutMs,
         signal: controller.signal,
       }, sourceTask);
@@ -746,15 +750,15 @@ export class GitExecutionCoordinator {
     }
     const projected = waitFor.promise.then((value) => this.projectStatus(
       value,
-      requestedShape,
-      waitFor.shape,
+      requestedMode,
+      waitFor.mode,
       options.projectResult,
     ));
     return this.waitForStatus(waitFor, projected, options.signal);
   }
 
   canonicalCloneKey(destination) {
-    if (typeof destination !== 'string' || !destination.trim()) {
+    if (!isStringValue(destination) || !destination.trim()) {
       throw new TypeError('Clone destination is required');
     }
     return this.canonicalizeCloneDestination(destination.trim());
@@ -901,14 +905,14 @@ export class GitExecutionCoordinator {
   }
 
   runClone(options, task) {
-    if (!options || typeof task !== 'function') {
+    if (!options || !isFunction(task)) {
       return Promise.reject(new TypeError('Clone options and task are required'));
     }
     if (options.signal?.aborted) {
       return Promise.reject(cancellationError(options.signal, 'Git clone was cancelled before admission'));
     }
     return Promise.resolve(this.canonicalCloneKey(options.destination)).then((destinationId) => {
-      if (typeof destinationId !== 'string' || !destinationId.trim()) {
+      if (!isStringValue(destinationId) || !destinationId.trim()) {
         throw new TypeError('Canonical clone destination is required');
       }
       return this.enqueueClone(destinationId, options, task);

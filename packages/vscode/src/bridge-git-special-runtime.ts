@@ -227,7 +227,7 @@ export async function handleSpecialGitBridgeMessage(
       let diffSummaries = '';
       for (const file of files) {
         const diff = await readGitRangeDiff(directory, base, head, file);
-        if (!diff || typeof diff.diff !== 'string') {
+        if (!diff || !diff.diff || !diff.diff.trim) {
           throw new Error(`Git range diff returned an invalid result for ${file}`);
         }
         const raw = diff.diff;
