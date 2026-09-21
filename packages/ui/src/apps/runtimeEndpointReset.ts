@@ -30,6 +30,8 @@ import { replaceGlobalSessionStatusById } from '@/sync/global-session-status';
 import { resetGlobalBlockingRequests } from '@/sync/global-blocking-requests';
 import { useAgentGroupsStore } from '@/stores/useAgentGroupsStore';
 import { useMultiRunStore } from '@/stores/useMultiRunStore';
+import { useConsultPendingHideStore } from '@/stores/useConsultPendingHideStore';
+import { useConsultStore } from '@/stores/useConsultStore';
 import { resetSessionOrdering } from '@/sync/session-ordering';
 import { resetSessionActivityTiming } from '@/sync/session-activity-timing';
 import { syncDesktopSettings } from '@/lib/persistence';
@@ -74,6 +76,12 @@ export const resetAppForRuntimeEndpointChange = (detail: RuntimeEndpointChangedD
   useGlobalSessionsStore.getState().resetForRuntimeSwitch();
   useAgentGroupsStore.getState().resetForRuntimeSwitch();
   useMultiRunStore.getState().resetForRuntimeSwitch();
+  // Pending-hide entries name advisor forks of the previous instance; the new
+  // runtime's sessions must not inherit a stale hide window.
+  useConsultPendingHideStore.getState().resetForRuntimeSwitch();
+  // Consult run progress is per-instance presentation state; the previous
+  // runtime's phases and advisor rows must not survive the switch.
+  useConsultStore.getState().resetForRuntimeSwitch();
   useSessionMultiSelectStore.getState().disable();
   useCommandsStore.getState().resetForRuntimeSwitch();
   replaceGlobalSessionStatusById(new Map());

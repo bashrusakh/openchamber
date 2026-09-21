@@ -46,7 +46,8 @@ This module provides notification message preparation utilities for the web serv
   - `maybeSendPushForTrigger(payload)`
 - Owns:
   - completion/error/question/permission trigger routing; permission suppression consults the authoritative permission-auto-accept runtime
-  - session parent cache for subtask suppression
+  - hidden Consult Models advisor forks (`metadata.openchamber.kind === 'consult-advisor'` plus a non-empty `consultRunID`) never raise a notification, regardless of the subtask/completion settings; the kind alone is not the marker, so a partial marker missing the run id stays on the normal path exactly like the client's hidden-session predicate treats it
+  - session info cache for subtask suppression and advisor-fork push suppression
   - template resolution and fallback behavior
   - native notification fanout and web push payload fanout
   - push suppression while any fresh UI visibility heartbeat reports a focused client

@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, mock } from "bun:test"
+import { describe, expect, test, beforeEach, afterEach, mock, spyOn } from "bun:test"
 import type { PermissionRequest } from "@/types/permission"
 import type { QuestionRequest } from "@/types/question"
 import type { InputState } from "./input-store"
@@ -7,18 +7,23 @@ import type { InputState } from "./input-store"
 const replyCalls: Array<{ method: string; params: Record<string, unknown> }> = []
 const scopedClientDirectories: string[] = []
 const registeredSessionDirectories: Array<{ sessionID: string; directory: string }> = []
+type MockSdkResult = { data?: unknown; error?: unknown; response?: { status?: number } }
+
 let sessionRevertResult: { data?: unknown; error?: unknown; response?: { status?: number } } = {}
 let questionReplyError: unknown | null = null
 let questionRejectError: unknown | null = null
 let permissionReplyError: unknown | null = null
 let sessionShareResult: { data?: unknown; error?: unknown; response?: { status?: number } } = {}
-let sessionUpdateResult: { data?: unknown; error?: unknown; response?: { status?: number } } = {}
+let sessionUpdateResult: MockSdkResult = {}
 let sessionMessagesResult: { data?: unknown; error?: unknown; response?: { status?: number } } = { data: [] }
 const sessionMessageRecords = new Map<string, Array<{ info: Message; parts: Part[] }>>()
 const failingRevertSessionIds = new Set<string>()
 const failingUnrevertSessionIds = new Set<string>()
 let afterUnrevertCall: ((sessionId: string) => void) | null = null
 let sessionDeleteError: unknown | null = null
+const sessionDeleteErrorsById = new Map<string, unknown>()
+// Sessions `getSession` can return; anything else rejects like a real 404.
+const sessionRecordsById = new Map<string, Session>()
 let sessionForkResult: Session | null = null
 let sessionForkError: Error | null = null
 let beforeSessionForkResolve: (() => void) | null = null
@@ -37,7 +42,9 @@ const globalRemovedSessionIds: string[] = []
 // sessions can be archived by the server in one batch.
 let globalActiveSessions: Session[] = []
 const archiveBatchRequests: Array<{ directory: string; ids: string[] }> = []
-let archiveBatchResponse: { status: number; body: unknown } = {
+type ArchiveBatchResponseBody = { status: number; body: unknown }
+
+let archiveBatchResponse: ArchiveBatchResponseBody = {
   status: 404,
   body: { error: 'not found' },
 }
@@ -174,6 +181,11 @@ mock.module("@/lib/opencode/client", () => ({
       return mockScopedClient
     },
     getDirectory: () => "/test/project",
+    getSession: mock(async (sessionId: string) => {
+      const session = sessionRecordsById.get(sessionId)
+      if (!session) throw Object.assign(new Error(`Session not found: ${sessionId}`), { status: 404 })
+      return session
+    }),
     getDirectoryAvailability: mock(async (directory: string) => {
       beforeDirectoryAvailabilityResolve?.()
       return directoryAvailability.get(directory) ?? "available"
@@ -222,7 +234,8 @@ mock.module("@/lib/opencode/client", () => ({
       // Lets a test switch runtime while the delete is in flight, so the action
       // observes the change only after awaiting (or catching) the response.
       beforeSessionDeleteResolve?.(sessionId)
-      if (sessionDeleteError) throw sessionDeleteError
+      const error = sessionDeleteErrorsById.get(sessionId) ?? sessionDeleteError
+      if (error) throw error
       return Promise.resolve(true)
     }),
   },
@@ -581,6 +594,8 @@ describe("confirmed session removal", () => {
     globalRemovedSessionIds.length = 0
     deletedCleanupIdentities.length = 0
     sessionDeleteError = null
+    sessionDeleteErrorsById.clear()
+    sessionRecordsById.clear()
     sessionUpdateResult = {}
     runtimeKey = "default-runtime"
     beforeSessionUpdateResolve = null
@@ -1038,6 +1053,128 @@ describe("archiving a batch through the server", () => {
     expect(result).toEqual({ archivedIds: [], failedIds: ["session-a"] })
     expect(source.getState().session.map((item) => item.id)).toEqual(["session-a"])
     expect(globalUpsertedSessionBatches).toEqual([])
+  })
+})
+
+describe("advisor fork cleanup on parent delete/archive", () => {
+  const sessionFixture = (id: string): Session => ({
+    id,
+    slug: id,
+    projectID: "project-1",
+    directory: "/test/project",
+    title: id,
+    version: "1.18.31",
+    time: { created: 1, updated: 1 },
+  })
+
+  const parentSession = (id = "session-parent"): Session => sessionFixture(id)
+
+  const advisorFork = (id: string, parentSessionId = "session-parent"): Session => ({
+    ...sessionFixture(id),
+    metadata: {
+      openchamber: {
+        kind: "consult-advisor",
+        originalSessionID: parentSessionId,
+        consultRunID: "run-1",
+        advisorIndex: 0,
+      },
+    },
+  })
+
+  const deletedSessionIds = () => replyCalls
+    .filter((call) => call.method === "session.delete")
+    .map((call) => call.params.sessionID)
+
+  beforeEach(() => {
+    replyCalls.length = 0
+    globalUpsertedSessions.length = 0
+    globalUpsertedSessionBatches.length = 0
+    globalRemovedSessionIds.length = 0
+    deletedCleanupIdentities.length = 0
+    globalActiveSessions = []
+    archiveBatchRequests.length = 0
+    archiveBatchResponse = { status: 404, body: { error: "not found" } }
+    sessionUpdateResult = {}
+    sessionDeleteErrorsById.clear()
+    sessionRecordsById.clear()
+    beforeSessionUpdateResolve = null
+    spyOn(console, "error").mockImplementation(() => {})
+    spyOn(console, "warn").mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    mock.restore()
+  })
+
+  test("deleting a parent deletes its advisor forks before the parent", async () => {
+    const parent = parentSession()
+    const fork1 = advisorFork("session-fork-1")
+    const fork2 = advisorFork("session-fork-2")
+    globalActiveSessions = [parent, fork1, fork2]
+    sessionRecordsById.set("session-parent", parent)
+    const source = createStore({}, { session: [parent, fork1, fork2] })
+    const { deleteSession, setActionRefs } = await import("./session-actions")
+    setActionRefs(actionSdk, createChildStores([["/test/project", source]]), () => "/test/project")
+
+    expect(await deleteSession("session-parent")).toBe(true)
+    expect(deletedSessionIds()).toEqual(["session-fork-1", "session-fork-2", "session-parent"])
+  })
+
+  test("a failed advisor fork delete does not block deleting the parent", async () => {
+    const parent = parentSession()
+    const fork1 = advisorFork("session-fork-1")
+    const fork2 = advisorFork("session-fork-2")
+    globalActiveSessions = [parent, fork1, fork2]
+    sessionRecordsById.set("session-parent", parent)
+    sessionDeleteErrorsById.set("session-fork-1", new Error("fork delete failed"))
+    const source = createStore({}, { session: [parent, fork1, fork2] })
+    const { deleteSession, setActionRefs } = await import("./session-actions")
+    setActionRefs(actionSdk, createChildStores([["/test/project", source]]), () => "/test/project")
+
+    // Best-effort: the parent's own delete still runs and is confirmed.
+    expect(await deleteSession("session-parent")).toBe(true)
+    expect(deletedSessionIds()).toEqual(["session-fork-1", "session-fork-2", "session-parent"])
+    expect(globalRemovedSessionIds).toContain("session-parent")
+  })
+
+  test("a parent with advisor forks stays on the per-session archive path", async () => {
+    const parent = parentSession()
+    const fork = advisorFork("session-fork-1")
+    const plain = sessionFixture("session-plain")
+    globalActiveSessions = [plain, parent, fork]
+    archiveBatchResponse = {
+      status: 200,
+      body: { archived: [{ ...plain, time: { created: 1, archived: 2 } }], failedIds: [] },
+    }
+    sessionUpdateResult = { data: { ...parent, time: { created: 1, archived: 2 } } }
+    sessionRecordsById.set("session-parent", parent)
+    const source = createStore({}, { session: [plain, parent, fork] })
+    const { archiveSessions, setActionRefs } = await import("./session-actions")
+    setActionRefs(actionSdk, createChildStores([["/test/project", source]]), () => "/test/project")
+
+    const result = await archiveSessions(["session-plain", "session-parent"])
+
+    expect(result).toEqual({ archivedIds: ["session-plain", "session-parent"], failedIds: [] })
+    // The parent must not travel in the server batch: its advisor fork has to
+    // be deleted with it, which is UI-owned work on a second session.
+    expect(archiveBatchRequests).toEqual([{ directory: "/test/project", ids: ["session-plain"] }])
+    expect(deletedSessionIds()).toEqual(["session-fork-1"])
+    expect(replyCalls.filter((call) => call.method === "session.update").map((call) => call.params.sessionID))
+      .toEqual(["session-parent"])
+  })
+
+  test("deleting one advisor fork never deletes its siblings", async () => {
+    const parent = parentSession()
+    const fork1 = advisorFork("session-fork-1")
+    const fork2 = advisorFork("session-fork-2")
+    globalActiveSessions = [parent, fork1, fork2]
+    sessionRecordsById.set("session-fork-1", fork1)
+    const source = createStore({}, { session: [parent, fork1, fork2] })
+    const { deleteSession, setActionRefs } = await import("./session-actions")
+    setActionRefs(actionSdk, createChildStores([["/test/project", source]]), () => "/test/project")
+
+    expect(await deleteSession("session-fork-1")).toBe(true)
+    expect(deletedSessionIds()).toEqual(["session-fork-1"])
   })
 })
 

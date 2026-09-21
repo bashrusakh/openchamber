@@ -20,6 +20,22 @@ const promptAsyncMock = mock(async (...args: unknown[]) => {
   return next ?? { response: new Response(null, { status: 200 }) };
 });
 
+const promptAsyncBody = (index: number): Record<string, unknown> => {
+  const body = promptAsyncCalls[index]?.[0] as Record<string, unknown> | undefined;
+  if (!body) throw new Error(`promptAsync call ${index} has no body`);
+  return body;
+};
+
+const sessionUpdateCalls: unknown[][] = [];
+const sessionUpdateResults: Array<unknown> = [];
+
+const sessionUpdateMock = mock(async (...args: unknown[]) => {
+  sessionUpdateCalls.push(args);
+  const next = sessionUpdateResults.shift();
+  if (next instanceof Error) throw next;
+  return next ?? { data: { id: 'ses_1' } };
+});
+
 let pathGetCalls = 0;
 const pathGetMock = mock(async () => {
   pathGetCalls += 1;
@@ -41,6 +57,7 @@ mock.module('@opencode-ai/sdk/v2', () => ({
     },
     session: {
       promptAsync: promptAsyncMock,
+      update: sessionUpdateMock,
     },
     path: {
       get: pathGetMock,
@@ -94,6 +111,8 @@ beforeEach(() => {
   runtimeKey = 'test-runtime';
   promptAsyncCalls.length = 0;
   promptAsyncResults.length = 0;
+  sessionUpdateCalls.length = 0;
+  sessionUpdateResults.length = 0;
   pathGetResults.length = 0;
   pathGetCalls = 0;
   runtimeFetchCalls.length = 0;
@@ -348,5 +367,212 @@ describe('opencodeClient prompt retry behavior', () => {
     expect(error).toBeInstanceOf(Error);
     expect(error instanceof Error ? error.message : String(error)).toContain('runtime changed');
     expect(promptAsyncCalls).toHaveLength(0);
+  });
+});
+
+describe('opencodeClient sendMessage system pass-through', () => {
+  const send = (system?: string) => opencodeClient.sendMessage({
+    id: 'ses_1',
+    providerID: 'anthropic',
+    modelID: 'claude-sonnet',
+    text: 'hello',
+    messageId: 'msg_fixed',
+    ...(system !== undefined ? { system } : {}),
+  });
+
+  test('a normal send carries no system field and is unchanged by the extension', async () => {
+    await send();
+    const body = promptAsyncBody(0);
+    expect(Object.prototype.hasOwnProperty.call(body, 'system')).toBe(false);
+    expect(Object.keys(body).sort()).toEqual([
+      'agent',
+      'messageID',
+      'model',
+      'parts',
+      'sessionID',
+      'variant',
+    ]);
+  });
+
+  test('a provided system is forwarded and only the system field differs', async () => {
+    await send();
+    await send('advisor hint for exactly this turn');
+    const plainBody = promptAsyncBody(0);
+    const hintedBody = promptAsyncBody(1);
+    expect(hintedBody.system).toBe('advisor hint for exactly this turn');
+    const rest = { ...hintedBody };
+    delete rest.system;
+    expect(rest).toEqual(plainBody);
+    expect(Object.keys(hintedBody).sort()).toEqual([...Object.keys(plainBody), 'system'].sort());
+  });
+});
+
+describe('opencodeClient sendMessage part-metadata pass-through', () => {
+  type TextPartMetadataFixture = {
+    openchamberConsultReceipt: { runID: string; degraded: boolean };
+  };
+
+  type PartMetadataSendParams = {
+    id: string;
+    providerID: string;
+    modelID: string;
+    text: string;
+    messageId: string;
+    files: Array<{ type: 'file'; mime: string; filename: string; url: string }>;
+    additionalParts: Array<{ text: string; synthetic: boolean }>;
+    agentMentions: Array<{ name: string }>;
+    textPartMetadata?: TextPartMetadataFixture;
+  };
+
+  const send = (textPartMetadata?: TextPartMetadataFixture) => {
+    const params: PartMetadataSendParams = {
+      id: 'ses_1',
+      providerID: 'anthropic',
+      modelID: 'claude-sonnet',
+      text: 'hello',
+      messageId: 'msg_fixed',
+      files: [{ type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'data:text/plain,hello' }],
+      additionalParts: [{ text: 'attached context', synthetic: true }],
+      agentMentions: [{ name: 'build' }],
+    };
+    if (textPartMetadata !== undefined) params.textPartMetadata = textPartMetadata;
+    return opencodeClient.sendMessage(params);
+  };
+
+  test('a normal send attaches no metadata to any part', async () => {
+    await send();
+
+    const body = promptAsyncBody(0);
+    expect(body.parts).toEqual([
+      { type: 'text', text: 'hello' },
+      { type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'data:text/plain,hello' },
+      { type: 'text', text: 'attached context', synthetic: true },
+      { type: 'agent', name: 'build' },
+    ]);
+  });
+
+  test('a provided metadata rides the primary text part and nothing else changes', async () => {
+    const metadata: TextPartMetadataFixture = {
+      openchamberConsultReceipt: { runID: 'run-1', degraded: false },
+    };
+    await send();
+    await send(metadata);
+
+    const plainBody = promptAsyncBody(0);
+    const hintedBody = promptAsyncBody(1);
+    expect(hintedBody.parts).toEqual([
+      { type: 'text', text: 'hello', metadata },
+      { type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'data:text/plain,hello' },
+      { type: 'text', text: 'attached context', synthetic: true },
+      { type: 'agent', name: 'build' },
+    ]);
+
+    const plainRest = { ...plainBody };
+    delete plainRest.parts;
+    const hintedRest = { ...hintedBody };
+    delete hintedRest.parts;
+    expect(hintedRest).toEqual(plainRest);
+  });
+});
+
+describe('opencodeClient updateSession permission forwarding', () => {
+  test('does not send a permission field when the patch has none', async () => {
+    await opencodeClient.updateSession('ses_1', { title: 'renamed' });
+    const call = sessionUpdateCalls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(call?.title).toBe('renamed');
+    expect(call && Object.prototype.hasOwnProperty.call(call, 'permission')).toBe(false);
+  });
+
+  test('forwards a permission ruleset to session.update when provided', async () => {
+    const permission = [{ permission: '*', pattern: '*', action: 'deny' as const }];
+    await opencodeClient.updateSession('ses_1', { permission });
+    const call = sessionUpdateCalls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(call?.sessionID).toBe('ses_1');
+    expect(call?.permission).toEqual(permission);
+  });
+
+  test('an empty ruleset is forwarded as provided rather than dropped', async () => {
+    await opencodeClient.updateSession('ses_1', { permission: [] });
+    const call = sessionUpdateCalls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(call?.permission).toEqual([]);
+  });
+});
+
+describe('opencodeClient provider circuit opt-out', () => {
+  const advisorSend = (providerID: string) => opencodeClient.sendMessage({
+    id: 'ses_advisor',
+    providerID,
+    modelID: 'advisor-model',
+    text: 'advise',
+    trackProviderErrors: false,
+  });
+
+  const ordinarySend = (providerID: string) => opencodeClient.sendMessage({
+    id: 'ses_1',
+    providerID,
+    modelID: 'claude-sonnet',
+    text: 'hello',
+  });
+
+  test('consecutive advisor failures do not open or feed the circuit for ordinary sends', async () => {
+    const providerID = 'advisor-exempt-provider';
+
+    promptAsyncResults.push(new TypeError('Failed to fetch'));
+    await expect(advisorSend(providerID)).rejects.toThrow('Failed to fetch');
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      promptAsyncResults.push({ response: new Response('overloaded', { status: 503 }) });
+      await expect(advisorSend(providerID)).rejects.toThrow('Failed to send message (503)');
+    }
+
+    // Ordinary accounting starts clean: two errors stay below the threshold of
+    // three, so the acting send is dispatched instead of hitting an open circuit.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      promptAsyncResults.push({ response: new Response('overloaded', { status: 503 }) });
+      await expect(ordinarySend(providerID)).rejects.toThrow('Failed to send message (503)');
+    }
+    const dispatchesBefore = promptAsyncCalls.length;
+    promptAsyncResults.push({ response: new Response(null, { status: 200 }) });
+    await ordinarySend(providerID);
+    expect(promptAsyncCalls.length).toBe(dispatchesBefore + 1);
+  });
+
+  test('advisor sends are dispatched while the circuit is open and do not close it', async () => {
+    const providerID = 'advisor-open-circuit-provider';
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      promptAsyncResults.push({ response: new Response('overloaded', { status: 503 }) });
+      await expect(ordinarySend(providerID)).rejects.toThrow('Failed to send message (503)');
+    }
+    await expect(ordinarySend(providerID)).rejects.toThrow('temporarily unavailable');
+
+    const dispatchesBefore = promptAsyncCalls.length;
+    promptAsyncResults.push({ response: new Response(null, { status: 200 }) });
+    await advisorSend(providerID);
+    expect(promptAsyncCalls.length).toBe(dispatchesBefore + 1);
+
+    // The advisor outcome is not recorded, so the circuit stays open for ordinary sends.
+    await expect(ordinarySend(providerID)).rejects.toThrow('temporarily unavailable');
+  });
+
+  test('an ordinary success clears accumulated errors when the option is absent', async () => {
+    const providerID = 'default-circuit-provider';
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      promptAsyncResults.push({ response: new Response('overloaded', { status: 503 }) });
+      await expect(ordinarySend(providerID)).rejects.toThrow('Failed to send message (503)');
+    }
+    promptAsyncResults.push({ response: new Response(null, { status: 200 }) });
+    await ordinarySend(providerID);
+
+    // The success reset the counter: two more failures still do not open the circuit.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      promptAsyncResults.push({ response: new Response('overloaded', { status: 503 }) });
+      await expect(ordinarySend(providerID)).rejects.toThrow('Failed to send message (503)');
+    }
+    const dispatchesBefore = promptAsyncCalls.length;
+    promptAsyncResults.push({ response: new Response(null, { status: 200 }) });
+    await ordinarySend(providerID);
+    expect(promptAsyncCalls.length).toBe(dispatchesBefore + 1);
   });
 });

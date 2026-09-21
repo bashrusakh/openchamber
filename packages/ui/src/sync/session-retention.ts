@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Session } from '@opencode-ai/sdk/v2';
 import { getRuntimeKey, subscribeRuntimeEndpointWillChange } from '@/lib/runtime-switch';
 import { getBtwSessionID } from '@/lib/sessionBtwMetadata';
+import { isConsultAdvisorSession } from '@/lib/consult/metadata';
 import { resolveGlobalSessionDirectory, useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
 import { useUIStore, type SessionRetentionAction } from '@/stores/useUIStore';
 import { useSessionUIStore } from './session-ui-store';
@@ -37,11 +38,16 @@ export function buildSessionRetentionCandidates({
 }: CandidateOptions): string[] {
   if (!Number.isFinite(cutoffDays) || cutoffDays < 1) return [];
   const cutoff = now - cutoffDays * DAY_MS;
-  const byId = new Map(sessions.map((session) => [session.id, session]));
-  const sorted = sessions.filter((session) => Boolean(session.time.archived) === onlyArchived)
+  // Advisor forks are not ordinary sessions. Excluding them keeps them out of
+  // the keep-recent protection slots (their constant recency would otherwise
+  // displace real sessions into candidacy) and leaves their lifecycle to the
+  // consult GC (WP1.4). `/btw` retention behavior is unchanged.
+  const retentionSessions = sessions.filter((session) => !isConsultAdvisorSession(session));
+  const byId = new Map(retentionSessions.map((session) => [session.id, session]));
+  const sorted = retentionSessions.filter((session) => Boolean(session.time.archived) === onlyArchived)
     .sort((a, b) => retentionTimestamp(b, onlyArchived) - retentionTimestamp(a, onlyArchived));
   const protectedIds = new Set(sorted.slice(0, RETENTION_KEEP_RECENT).map((session) => session.id));
-  for (const session of sessions) {
+  for (const session of retentionSessions) {
     if (Boolean(session.time.archived) !== onlyArchived || session.share || getBtwSessionID(session) || session.id === currentSessionId
       || activeSessionIds.has(session.id) || !isOlderThanCutoff(session, cutoff, onlyArchived)) {
       protectedIds.add(session.id);
@@ -135,7 +141,7 @@ export async function runSessionRetentionCleanup({ force = false } = {}): Promis
       const state = useGlobalSessionsStore.getState();
       const session = state.entityById.get(id);
       if (!session) continue;
-      if (Boolean(session.time.archived) !== onlyArchived || session.share || getBtwSessionID(session) || session.id === useSessionUIStore.getState().currentSessionId
+      if (Boolean(session.time.archived) !== onlyArchived || session.share || getBtwSessionID(session) || isConsultAdvisorSession(session) || session.id === useSessionUIStore.getState().currentSessionId
         || useGlobalSessionStatusStore.getState().activeSessionIds.has(id)
         || !isOlderThanCutoff(session, now - settings.autoDeleteAfterDays * DAY_MS, onlyArchived)) continue;
       if (action === 'delete') {

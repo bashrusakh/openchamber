@@ -96,9 +96,9 @@ persisted "sending" flag would strand a message forever.
    drops the session's queue. An assistant `MessageAbortedError` records an
    abort.
 3. `tick(sessionId)` bails when the queue is empty, an item is in flight, or
-   the session is held. It re-arms after a 2 s post-abort hold (the UI's
-   old behavior: a stop is not immediately followed by the next prompt) or
-   while the head item is in retry backoff.
+   the session is held (by any owner). It re-arms after a 2 s post-abort hold
+   (the UI's old behavior: a stop is not immediately followed by the next
+   prompt) or while the head item is in retry backoff.
 4. Idleness is re-verified against OpenCode before sending, because
    `prompt_async` into a running turn steers into it instead of starting the
    next one: `GET /session/status` must not list the session as busy/retry,
@@ -136,7 +136,28 @@ idle between iterations; the UI tells the server to hold that session's queue
 (`PUT .../hold { held: true, ttlMs? }`) while a run is going and releases it
 when the run ends. A hold expires on its own (default 5 min, cap 10 min)
 because the UI that asserted it may be gone; the UI re-asserts it every two
-minutes while the run continues. Releasing arms a dispatch.
+minutes while the run continues. Releasing arms a dispatch, which the tick
+re-checks.
+
+Holds are owner-scoped: an optional `owner` string names the independent UI
+process asserting the hold, and the server keeps one TTL per
+`(sessionId, owner)`. The session is held while **any** owner has a live TTL,
+so two features (auto-review, a Consult Models run) holding the same session
+cannot clear each other's protection: each release removes only the caller's
+own owner. A request without an `owner` uses the legacy owner-less slot and
+behaves exactly as before for that slot. A present-but-malformed owner
+(blank, non-string, over 128 characters) is refused with a `400`, so it
+cannot silently clear or extend another owner's hold. Expired owners are
+pruned lazily on every hold read and, across every session, on every hold
+mutation, so owners on sessions that are never read again do not accumulate.
+One session holds at most `MAX_HOLD_OWNERS_PER_SESSION` (8) owners; a
+genuinely new owner beyond the cap is refused with a `429` rather than
+silently dropping or clearing a hold someone still relies on, and a re-assert
+of an existing owner always fits. Deleting a session drops its holds.
+
+The hold is authoritative at send time, not just when the dispatch timer is
+armed: `tick` re-checks it after the idleness round-trips, so a hold that
+lands while a tick is in flight stops that send.
 
 ## Routes (`/api/message-queue`)
 
@@ -152,7 +173,7 @@ allowlists.
 | `POST .../sessions/:id/take` | Remove and return every item not in flight, in order |
 | `PUT .../sessions/:id/order` | `{ itemIds }` must be a complete permutation |
 | `DELETE .../sessions/:id` | Clear; the in-flight item stays |
-| `PUT .../sessions/:id/hold` | `{ held, ttlMs? }` |
+| `PUT .../sessions/:id/hold` | `{ held, ttlMs?, owner? }`; per-owner TTL, held while any owner is live |
 
 Every mutation broadcasts `openchamber:message-queue.updated` with
 `{ revision, session }` to all connected clients (SSE and WS), so several

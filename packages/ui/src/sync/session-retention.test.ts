@@ -79,6 +79,19 @@ describe('retention eligibility', () => {
     expect(candidates([parent], 'archive')).toEqual([]);
   });
 
+  test('advisor forks neither occupy keep-recent slots nor become candidates', () => {
+    const advisor = session('advisor', {
+      time: { created: now - day / 2, updated: now - day / 2 },
+      metadata: { openchamber: { kind: 'consult-advisor', originalSessionID: 'parent', consultRunID: 'run-1', advisorIndex: 0 } },
+    });
+
+    // The fork is the most recent session in the list: without the exclusion it
+    // would take a keep-recent slot, push a real recent into candidacy, and be
+    // eligible for retention cleanup itself.
+    expect(candidates([advisor, session('old')])).toEqual(['old']);
+    expect(candidates([advisor])).toEqual([]);
+  });
+
   test('orders descendants before ancestors regardless of timestamps or list order', () => {
     expect(candidates([session('root'), session('child', { parentID: 'root' }), session('leaf', { parentID: 'child' })]))
       .toEqual(['leaf', 'child', 'root']);
@@ -174,6 +187,37 @@ describe('retention execution', () => {
     expect((await runSessionRetentionCleanup({ force: true })).completedIds).toEqual(['first']);
     expect(remove.mock.calls).toHaveLength(1);
     expect(useGlobalSessionsStore.getState().entityById.has('parent')).toBe(true);
+  });
+
+  test('never deletes advisor forks as ordinary retention candidates', async () => {
+    const advisor = session('advisor', {
+      time: { created: now - 60 * day, updated: now - 40 * day },
+      metadata: { openchamber: { kind: 'consult-advisor', originalSessionID: 'parent', consultRunID: 'run-1', advisorIndex: 0 } },
+    });
+    seed([advisor, session('old')]);
+    const remove = spyOn(opencodeClient, 'deleteSession').mockResolvedValue(true);
+    const result = await runSessionRetentionCleanup({ force: true });
+    expect(result.completedIds).toEqual(['old']);
+    expect(remove.mock.calls.map(([id]) => id)).toEqual(['old']);
+    expect(useGlobalSessionsStore.getState().entityById.has('advisor')).toBe(true);
+  });
+
+  test('rechecks the advisor marker before each request', async () => {
+    seed([session('first'), session('second')]);
+    const remove = spyOn(opencodeClient, 'deleteSession').mockImplementation(async () => {
+      useGlobalSessionsStore.getState().upsertSessions([
+        session('second', {
+          time: { created: now - 60 * day, updated: now - 40 * day },
+          metadata: { openchamber: { kind: 'consult-advisor', originalSessionID: 'parent', consultRunID: 'run-1', advisorIndex: 0 } },
+        }),
+      ]);
+      return true;
+    });
+    const result = await runSessionRetentionCleanup({ force: true });
+    expect(result.completedIds).toEqual(['first']);
+    expect(result.failedIds).toEqual([]);
+    expect(remove.mock.calls.map(([id]) => id)).toEqual(['first']);
+    expect(useGlobalSessionsStore.getState().entityById.has('second')).toBe(true);
   });
 
   test('stops at a runtime switch without reconciling the destination or its cooldown', async () => {

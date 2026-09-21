@@ -4,14 +4,18 @@ import { switchRuntimeEndpoint } from './runtime-switch';
 
 import {
   assertAutoReviewRuntimeStillCurrent,
+  assertNoConsultRunActiveForAutoReview,
   claimAutoReviewForward,
   releaseAutoReviewForward,
   hasFinalReviewMarker,
   isAutoReviewRuntimeCurrent,
+  isConsultActiveForSession,
   isExpectedAutoReviewAssistantParent,
+  startReviewFlow,
   stripFinalReviewMarker,
 } from './reviewFlow';
 import type { AutoReviewRun } from '@/stores/useAutoReviewStore';
+import { useConsultStore } from '@/stores/useConsultStore';
 
 describe('reviewFlow auto-review helpers', () => {
   beforeEach(() => {
@@ -77,5 +81,44 @@ describe('reviewFlow auto-review helpers', () => {
     const nextKey = claimAutoReviewForward(run, 'msg_assistant_review');
     expect(nextKey).toBe(key);
     releaseAutoReviewForward(nextKey!);
+  });
+
+  test('auto-review refuses to start while a consult run is active for the parent', async () => {
+    useConsultStore.getState().startRun({
+      parentSessionId: 'original-1',
+      runId: 'consult-run-1',
+      mode: 'parallel',
+      timeoutMs: 120_000,
+      advisors: [{ providerID: 'openai', modelID: 'gpt-5', agent: 'build' }],
+    });
+    expect(isConsultActiveForSession('original-1')).toBe(true);
+
+    // The refusal happens before the connection wait and before any message,
+    // and reaches the caller's existing toast channel as an Error.
+    await expect(startReviewFlow({
+      originalSessionID: 'original-1',
+      directory: '/workspace',
+      providerID: 'anthropic',
+      modelID: 'claude',
+      autoReview: true,
+    })).rejects.toThrow(/consultation is running/i);
+
+    useConsultStore.getState().finish('original-1', 'consult-run-1', { phase: 'cancelled' });
+  });
+
+  test('the consult guard releases once the run reaches a terminal phase', () => {
+    useConsultStore.getState().startRun({
+      parentSessionId: 'original-1',
+      runId: 'consult-run-1',
+      mode: 'sequential',
+      timeoutMs: 120_000,
+      advisors: [{ providerID: 'openai', modelID: 'gpt-5', agent: 'build' }],
+    });
+    expect(isConsultActiveForSession('original-1')).toBe(true);
+
+    useConsultStore.getState().finish('original-1', 'consult-run-1', { phase: 'done' });
+    expect(isConsultActiveForSession('original-1')).toBe(false);
+    // Does not throw once the run is terminal.
+    assertNoConsultRunActiveForAutoReview('original-1');
   });
 });

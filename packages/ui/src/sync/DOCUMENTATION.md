@@ -187,6 +187,15 @@ Both modes preserve the five most recent sessions in the selected scope, ranked
 by that scope's retention timestamp, plus the selected session, shared sessions,
 and sessions with observed live activity. Parents with an attached `/btw` conversation also stay,
 because the canonical archive/delete actions remove that temporary fork.
+Consult Models advisor forks (`openchamber.kind = 'consult-advisor'`) are
+excluded from eligibility entirely: their constant recency would otherwise
+occupy the five preserved slots and push real sessions into candidacy, and
+their lifecycle belongs to the consult GC, not to retention. The eligibility
+recheck before each request applies the same exclusion. Deleting or archiving a
+parent also deletes its advisor forks, discovered through the marker's
+`originalSessionID`; that best-effort cleanup is what the archive batching
+treats as a linked-session cleanup. `/btw` forks keep their current retention
+behavior.
 Sessions outside the selected scope remain protected. Because
 OpenCode cascades deletion, every ancestor of a retained session is protected
 too. Eligible deletions run children first and recheck current selection,

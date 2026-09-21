@@ -282,7 +282,7 @@ type ServerQueueItemInput = {
 type ServerQueueRequestBody =
     | { directory: string; item: ServerQueueItemInput }
     | { itemIds: string[] }
-    | { held: boolean };
+    | { held: boolean; owner?: string };
 
 const toServerAttachment = (attachment: AttachedFile): ServerQueueAttachmentInput => {
     const input: ServerQueueAttachmentInput = {
@@ -395,7 +395,7 @@ interface MessageQueueActions {
     /** Server-owned queue: apply one session's authoritative state (broadcast or response). */
     applyServerSession: (session: ServerQueueSession, revision: number, expectedRuntimeKey: string) => void;
     /** Server-owned queue: tell the server to hold or release a session's delivery. */
-    setServerHold: (sessionId: string, held: boolean) => Promise<void>;
+    setServerHold: (sessionId: string, held: boolean, owner?: string) => Promise<void>;
     resetForRuntimeSwitch: (previousRuntimeKey: string | null | undefined) => void;
 }
 
@@ -828,9 +828,14 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
 
                     applyServerSession,
 
-                    setServerHold: async (sessionId, held) => {
+                    setServerHold: async (sessionId, held, owner) => {
                         if (!isServerOwnedMessageQueue()) return;
-                        const response = await runtimeFetch(`${sessionPath(sessionId)}/hold`, jsonInit('PUT', { held }));
+                        const body: Extract<ServerQueueRequestBody, { held: boolean }> = { held };
+                        // Owner-scoped holds: independent UI processes each own
+                        // a slot, so one release cannot clear another's hold.
+                        // An omitted owner keeps the legacy owner-less slot.
+                        if (owner) body.owner = owner;
+                        const response = await runtimeFetch(`${sessionPath(sessionId)}/hold`, jsonInit('PUT', body));
                         if (!response.ok) throw new Error(`Message queue hold request failed (${response.status})`);
                     },
 

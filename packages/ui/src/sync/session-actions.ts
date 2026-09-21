@@ -30,6 +30,7 @@ import {
 } from "@/lib/sessionReviewMetadata"
 import { withContextObligatoryMessage, type ContextObligatoryMessage } from "@/lib/contextObligatoryMessages"
 import { getBtwOriginalSessionID, getBtwSessionID, isBtwSession, withoutBtwSessionLink } from "@/lib/sessionBtwMetadata"
+import { getConsultOriginalSessionID } from "@/lib/consult/metadata"
 import { withLinkedIssue, type LinkedIssue } from "@/lib/linkedIssues"
 import { getImperativeSessionMessageLoader } from "./session-message-loader"
 import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
@@ -1007,6 +1008,52 @@ export async function setContextObligatoryMessage(
     withContextObligatoryMessage(metadata, message, pinned))
 }
 
+/**
+ * Every session record this client currently holds, keyed by id: the global
+ * active/archived cache plus the live per-directory stores. A child store entry
+ * wins because it is the live record for an open directory.
+ */
+function collectKnownSessions(): Map<string, Session> {
+  const known = new Map<string, Session>()
+  const global = useGlobalSessionsStore.getState()
+  for (const session of [...global.activeSessions, ...global.archivedSessions]) known.set(session.id, session)
+  for (const store of _childStores?.children.values() ?? []) {
+    for (const session of store.getState().session) known.set(session.id, session)
+  }
+  return known
+}
+
+/** Parent session ids that currently own at least one advisor fork. */
+function collectAdvisorForkParentIds(sessions: Iterable<Session>): Set<string> {
+  const parents = new Set<string>()
+  for (const session of sessions) {
+    // Cheap scan prefilter: only metadata carrying an `openchamber` object can
+    // hold an advisor marker, and most sessions have none. The marker schema
+    // still validates every candidate.
+    if (!Object.hasOwn(getSessionMetadata(session), "openchamber")) continue
+    const parentId = getConsultOriginalSessionID(session)
+    if (parentId) parents.add(parentId)
+  }
+  return parents
+}
+
+/**
+ * The advisor forks of a parent, discovered through the marker's
+ * `originalSessionID`. Advisor forks carry no `parentID`, so the server cascade
+ * cannot reach them; the client finds them in the sessions it holds.
+ */
+function findAdvisorForksOfParent(parentSessionId: string): Array<{ id: string; directory: string }> {
+  const forks: Array<{ id: string; directory: string }> = []
+  for (const session of collectKnownSessions().values()) {
+    if (session.id === parentSessionId) continue
+    if (!Object.hasOwn(getSessionMetadata(session), "openchamber")) continue
+    if (getConsultOriginalSessionID(session) !== parentSessionId) continue
+    const directory = resolveGlobalSessionDirectory(session)
+    if (directory) forks.push({ id: session.id, directory })
+  }
+  return forks
+}
+
 async function cleanupReviewMetadataBeforeDelete(
   sessionId: string,
   directory?: string | null,
@@ -1054,6 +1101,24 @@ async function cleanupReviewMetadataBeforeDelete(
       await deleteSession(btwSessionID, { expectedRuntimeKey })
     } catch (error) {
       console.warn("[session-actions] failed to delete btw fork before parent delete", error)
+    }
+  }
+
+  // Deleting or archiving a parent session also removes the advisor forks it
+  // owns: they are temporary sessions that only exist for the consultation.
+  // Advisor forks carry no `parentID`, so the server cascade cannot reach them;
+  // they are discovered through the marker's `originalSessionID`. Best-effort —
+  // a failed fork delete must not block the parent's operation; the leftover
+  // stays hidden by its marker and the consult GC (WP1.4) collects it.
+  for (const fork of findAdvisorForksOfParent(sessionId)) {
+    if (isStaleRuntime(expectedRuntimeKey)) return
+    try {
+      const deleted = await deleteSessionInDirectory(fork.id, fork.directory, expectedRuntimeKey)
+      if (!deleted) {
+        console.warn("[session-actions] failed to delete advisor fork before parent delete", fork.id)
+      }
+    } catch (error) {
+      console.warn("[session-actions] failed to delete advisor fork before parent delete", error)
     }
   }
 }
@@ -1469,15 +1534,17 @@ export async function archiveSessions(
 }
 
 /**
- * A session whose archive also has to rewrite another session's metadata.
+ * A session whose archive also has to rewrite or delete another session.
  *
- * Review sessions and btw forks point at a parent that must be unlinked, and a
- * parent with an active btw fork has to delete that fork. Those are
- * read-modify-write pairs on a second session, so they stay on the per-session
- * path instead of the server batch.
+ * Review sessions and btw forks point at a parent that must be unlinked, a
+ * parent with an active btw fork has to delete that fork, and a parent with
+ * advisor forks has to delete those forks. Those are read-modify-write or
+ * delete pairs on a second session, so they stay on the per-session path
+ * instead of the server batch.
  */
-function hasLinkedSessionCleanup(session: Session): boolean {
+function hasLinkedSessionCleanup(session: Session, advisorForkParentIds: ReadonlySet<string>): boolean {
   return isReviewSession(session) || isBtwSession(session) || Boolean(getBtwSessionID(session))
+    || advisorForkParentIds.has(session.id)
 }
 
 /**
@@ -1493,14 +1560,8 @@ function hasLinkedSessionCleanup(session: Session): boolean {
  * nothing to say.
  */
 function planArchiveBatches(ids: string[]) {
-  const global = useGlobalSessionsStore.getState()
-  const knownSessions = new Map<string, Session>()
-  for (const session of [...global.activeSessions, ...global.archivedSessions]) {
-    knownSessions.set(session.id, session)
-  }
-  for (const store of _childStores?.children.values() ?? []) {
-    for (const session of store.getState().session) knownSessions.set(session.id, session)
-  }
+  const knownSessions = collectKnownSessions()
+  const advisorForkParentIds = collectAdvisorForkParentIds(knownSessions.values())
 
   const batchesByDirectory = new Map<string, string[]>()
   const individualIds: string[] = []
@@ -1510,7 +1571,7 @@ function planArchiveBatches(ids: string[]) {
     const directory = session
       ? resolveGlobalSessionDirectory(session) ?? getSessionDirectory(id)
       : undefined
-    if (!session || !directory || hasLinkedSessionCleanup(session)) {
+    if (!session || !directory || hasLinkedSessionCleanup(session, advisorForkParentIds)) {
       individualIds.push(id)
       continue
     }

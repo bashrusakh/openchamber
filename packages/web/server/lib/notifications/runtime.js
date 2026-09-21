@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 export const createNotificationTriggerRuntime = (deps) => {
   const {
     readSettingsFromDisk,
@@ -112,8 +114,24 @@ export const createNotificationTriggerRuntime = (deps) => {
   const lastReadyNotificationAt = new Map();
   const lastErrorNotificationAt = new Map();
 
-  const sessionParentIdCache = new Map();
-  const SESSION_PARENT_CACHE_TTL_MS = 60 * 1000;
+  // Session facts the push decisions need: the parent chain for subtask
+  // suppression and the Consult Models advisor marker, which keeps hidden
+  // advisor forks push-silent.
+  const sessionInfoCache = new Map();
+  const SESSION_INFO_CACHE_TTL_MS = 60 * 1000;
+  const CONSULT_ADVISOR_KIND = 'consult-advisor';
+
+  // The advisor marker is persisted, externally writable session metadata:
+  // decode it at the read site. `kind` + `consultRunID` are the marker
+  // contract shared with the client's hidden-session predicate and GC; a
+  // partial marker that carries both is suppressed here even when the parent
+  // id or index is missing, and one missing either field is not an advisor.
+  const consultAdvisorMarkerSchema = z.object({
+    kind: z.literal(CONSULT_ADVISOR_KIND),
+    consultRunID: z.string().trim().min(1),
+  });
+  const hasConsultAdvisorMarker = (session) =>
+    consultAdvisorMarkerSchema.safeParse(session?.metadata?.openchamber).success;
 
   // Sessions where the client has enabled Permission Auto-Accept. Mirrored
   // from the client-side permissionStore via POST /api/notifications/auto-accept
@@ -137,21 +155,28 @@ export const createNotificationTriggerRuntime = (deps) => {
     return `/?session=${encodeURIComponent(sessionId)}`;
   };
 
-  const getSessionParentCacheKey = (sessionId, directory) => `${directory || ''}\0${sessionId}`;
+  const getSessionInfoCacheKey = (sessionId, directory) => `${directory || ''}\0${sessionId}`;
 
-  const getCachedSessionParentId = (sessionId, directory) => {
-    const cacheKey = getSessionParentCacheKey(sessionId, directory);
-    const entry = sessionParentIdCache.get(cacheKey);
+  const getCachedSessionInfo = (sessionId, directory) => {
+    const cacheKey = getSessionInfoCacheKey(sessionId, directory);
+    const entry = sessionInfoCache.get(cacheKey);
     if (!entry) return undefined;
-    if (Date.now() - entry.at > SESSION_PARENT_CACHE_TTL_MS) {
-      sessionParentIdCache.delete(cacheKey);
+    if (Date.now() - entry.at > SESSION_INFO_CACHE_TTL_MS) {
+      sessionInfoCache.delete(cacheKey);
       return undefined;
     }
-    return entry.parentID;
+    return entry;
   };
 
-  const setCachedSessionParentId = (sessionId, directory, parentID) => {
-    sessionParentIdCache.set(getSessionParentCacheKey(sessionId, directory), { parentID: parentID ?? null, at: Date.now() });
+  // Patch merge; `undefined` means "nothing to say about this field", so an
+  // event payload cannot erase a fact learned from a full session fetch.
+  const setCachedSessionInfo = (sessionId, directory, { parentID, isConsultAdvisor }) => {
+    const existing = getCachedSessionInfo(sessionId, directory);
+    sessionInfoCache.set(getSessionInfoCacheKey(sessionId, directory), {
+      parentID: parentID === undefined ? existing?.parentID ?? null : parentID,
+      isConsultAdvisor: isConsultAdvisor === undefined ? existing?.isConsultAdvisor : isConsultAdvisor,
+      at: Date.now(),
+    });
   };
 
   const getParentIdFromPayload = (payload) => {
@@ -161,20 +186,26 @@ export const createNotificationTriggerRuntime = (deps) => {
     return typeof parentID === 'string' && parentID.length > 0 ? parentID : null;
   };
 
-  const maybeCacheSessionParentFromPayload = (payload) => {
+  // session.created/session.updated carry the session object itself, so the
+  // marker is often known without another fetch. Only a positive marker is
+  // cached: a payload without metadata must not record "not an advisor".
+  const getConsultAdvisorFromPayload = (payload) => {
+    if (payload?.type !== 'session.created' && payload?.type !== 'session.updated') return undefined;
+    return hasConsultAdvisorMarker(payload.properties?.info) ? true : undefined;
+  };
+
+  const maybeCacheSessionInfoFromPayload = (payload) => {
     const sessionId = extractSessionIdFromPayload(payload);
     if (typeof sessionId !== 'string' || sessionId.length === 0) return;
     const directory = extractDirectoryFromPayload(payload);
     const parentID = getParentIdFromPayload(payload);
-    if (parentID === undefined) return;
-    setCachedSessionParentId(sessionId, directory, parentID);
+    const isConsultAdvisor = getConsultAdvisorFromPayload(payload);
+    if (parentID === undefined && isConsultAdvisor === undefined) return;
+    setCachedSessionInfo(sessionId, directory, { parentID, isConsultAdvisor });
   };
 
-  const fetchSessionParentId = async (sessionId, directory) => {
+  const fetchAndCacheSessionInfo = async (sessionId, directory) => {
     if (!sessionId) return undefined;
-
-    const cached = getCachedSessionParentId(sessionId, directory);
-    if (cached !== undefined) return cached;
 
     try {
       const base = buildOpenCodeUrl(`/session/${encodeURIComponent(sessionId)}`, '');
@@ -198,11 +229,34 @@ export const createNotificationTriggerRuntime = (deps) => {
       const parentID = typeof session.parentID === 'string' && session.parentID.length > 0
         ? session.parentID
         : null;
-      setCachedSessionParentId(sessionId, directory, parentID);
-      return parentID;
+      // A full session fetch knows both fields, so any cached "unknown"
+      // advisor state is resolved here.
+      const isConsultAdvisor = hasConsultAdvisorMarker(session);
+      setCachedSessionInfo(sessionId, directory, { parentID, isConsultAdvisor });
+      return { parentID, isConsultAdvisor };
     } catch {
       return undefined;
     }
+  };
+
+  const fetchSessionParentId = async (sessionId, directory) => {
+    if (!sessionId) return undefined;
+
+    const cached = getCachedSessionInfo(sessionId, directory);
+    const info = cached !== undefined ? cached : await fetchAndCacheSessionInfo(sessionId, directory);
+    return info?.parentID;
+  };
+
+  // Hidden Consult Models advisor forks are temporary and never surfaced;
+  // they must stay push-silent whatever the notification settings say. A
+  // fetch failure reads as "not an advisor" and falls through to the normal
+  // notification path, like the goal check.
+  const isConsultAdvisorSession = async (sessionId, directory) => {
+    if (!sessionId) return false;
+
+    const cached = getCachedSessionInfo(sessionId, directory);
+    const info = cached?.isConsultAdvisor !== undefined ? cached : await fetchAndCacheSessionInfo(sessionId, directory);
+    return info?.isConsultAdvisor === true;
   };
 
   // Mirrors client-side autoRespondsPermission: a session auto-accepts if it
@@ -305,7 +359,7 @@ export const createNotificationTriggerRuntime = (deps) => {
       return;
     }
 
-    maybeCacheSessionParentFromPayload(payload);
+    maybeCacheSessionInfoFromPayload(payload);
 
     const sessionId = extractSessionIdFromPayload(payload);
     const notificationDirectory = extractDirectoryFromPayload(payload);
@@ -334,6 +388,11 @@ export const createNotificationTriggerRuntime = (deps) => {
       const info = payload.properties?.info;
       if (info?.role === 'assistant' && info?.finish === 'stop' && sessionId) {
         const settings = await readSettingsFromDisk();
+
+        // Hidden advisor forks never notify, independent of notifyOnSubtasks.
+        if (await isConsultAdvisorSession(sessionId, notificationDirectory)) {
+          return;
+        }
 
         if (settings.notifyOnSubtasks === false) {
           const parentIDFromPayload = getParentIdFromPayload(payload);
@@ -434,6 +493,7 @@ export const createNotificationTriggerRuntime = (deps) => {
       if (info?.role === 'assistant' && info?.finish === 'error' && sessionId) {
         const settings = await readSettingsFromDisk();
         if (settings.notifyOnError === false) return;
+        if (await isConsultAdvisorSession(sessionId, notificationDirectory)) return;
 
         const now = Date.now();
         const lastAt = lastErrorNotificationAt.get(sessionId) ?? 0;
@@ -515,6 +575,10 @@ export const createNotificationTriggerRuntime = (deps) => {
 
         const settings = await readSettingsFromDisk();
         if (settings.notifyOnQuestion === false) {
+          return;
+        }
+
+        if (await isConsultAdvisorSession(sessionId, notificationDirectory)) {
           return;
         }
 
@@ -636,6 +700,10 @@ export const createNotificationTriggerRuntime = (deps) => {
         const settings = await readSettingsFromDisk();
 
         if (settings.notifyOnQuestion === false) {
+          return;
+        }
+
+        if (await isConsultAdvisorSession(sessionId, notificationDirectory)) {
           return;
         }
 

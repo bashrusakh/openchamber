@@ -103,6 +103,30 @@ projects those identities for selection and group deletion, retaining failed
 directory scopes and resetting on runtime changes. Membership, fork handling,
 fusion and legacy compatibility are owned by `lib/multirun/DOCUMENTATION.md`.
 
+`useConsultPendingHideStore` is the client-side pending-hide registry for
+Consult Models advisor forks. `session.fork` cannot bind the hidden marker
+atomically, so the advisor runtime registers the returned fork id immediately
+and releases it once the marker is readable; `lib/sessionVisibility.ts` is the
+canonical predicate that honors the registry together with the btw and
+consult-advisor metadata markers. It is memory-only and runtime-scoped
+(`resetForRuntimeSwitch` from `apps/runtimeEndpointReset.ts`). Session data
+stores keep the session; only list/counter/widget projections hide it.
+
+`useConsultStore` is the transient progress state for a Consult Models run, one
+record per parent session, memory-only. It is presentation state, not authority:
+the advisor forks are named by session metadata, the run is executed by
+`lib/consult/runtime.ts`, and the receipt is carried on the acting user message.
+A run starts at `waiting-admission` (the consult item waits at the queue head
+for an authoritatively idle session), then moves through `consulting`,
+`settling`, and `dispatching` to `done`; `failed` is the run failing and
+`cancelled` is a user cancel before dispatch. Every mutation is bound to the
+record's `runId`, so a superseded run's late completion cannot touch the new run;
+`setPhase(..., 'idle')` dismisses a finished run. `selectConsultRun` returns
+`undefined` when the session has no run, and `isConsultRunActive` is the shared
+in-flight check. Runtime switching clears the store through
+`resetForRuntimeSwitch` from `apps/runtimeEndpointReset.ts`; cancelling the
+underlying run stays with the runtime.
+
 `useProjectsStore.hasServerSnapshot` distinguishes a server-confirmed project list from persisted startup hints; `serverSnapshotFailed` records a failed settings sync without clearing the last confirmed list. Successful settings adoption clears that failure even for an unchanged list. Runtime switching clears both flags. Extension project subscriptions consume these flags and project records without changing active selection.
 
 Project parsing, project selection, directory navigation, mobile session paths, and the SDK adapter share `lib/pathNormalization.ts` for request paths. Tilde expansion happens before normalization. Windows drive roots retain their slash, and parent navigation stops at drive and UNC share roots. Selecting a spelling variant of the current directory preserves history and its forward entries. Bare drive-relative paths such as `C:` stay distinct from `C:/`; normalization does not guess their filesystem target.
@@ -155,7 +179,7 @@ context-only messages without carrying full quotes or diffs. VS Code derives
 the same preview from its local full item. Preview text is display-only;
 editing and delivery always use the original content and captured context.
 
-A queued message is captured whole, so whoever delivers it sends exactly what the composer would have: `text` (the content with its agent mention stripped and `@file` mentions already resolved into `attachments`), `agentMention`, and `context` — every chip the composer had attached (inline comments, terminal selections, browser annotations, PR comments/checks, quotes, linked issue/PR/Linear references, pending synthetic parts) plus the skill instruction derived from the text. `QueuedContextPart` distinguishes attached items (restored to the chips when the message is edited) from derived instructions (re-derived on send, never restored) and from synthetic parts other surfaces handed the composer (restored as pending). Context is captured by `buildComposerContext` and delivered by `queuedContextToParts` (`components/chat/composer/submit/buildOutgoingMessage.ts`), the same functions the composer uses for its own send. Nothing is re-resolved at delivery: the server has no agent list, no confirmed mentions, and no draft store. Messages a previous build left in this browser are uploaded once on the first hydration of a runtime and then dropped from persistence for that runtime (`partialize` skips server-owned runtime keys). VS Code has no server and keeps the local queue with the foreground auto-send hook (`useQueuedMessageAutoSend`, enabled only there); `useMessageQueueHoldSync` tells the server to hold a session's queue while a UI-driven auto-review run is going.
+A queued message is captured whole, so whoever delivers it sends exactly what the composer would have: `text` (the content with its agent mention stripped and `@file` mentions already resolved into `attachments`), `agentMention`, and `context` — every chip the composer had attached (inline comments, terminal selections, browser annotations, PR comments/checks, quotes, linked issue/PR/Linear references, pending synthetic parts) plus the skill instruction derived from the text. `QueuedContextPart` distinguishes attached items (restored to the chips when the message is edited) from derived instructions (re-derived on send, never restored) and from synthetic parts other surfaces handed the composer (restored as pending). Context is captured by `buildComposerContext` and delivered by `queuedContextToParts` (`components/chat/composer/submit/buildOutgoingMessage.ts`), the same functions the composer uses for its own send. Nothing is re-resolved at delivery: the server has no agent list, no confirmed mentions, and no draft store. Messages a previous build left in this browser are uploaded once on the first hydration of a runtime and then dropped from persistence for that runtime (`partialize` skips server-owned runtime keys). VS Code has no server and keeps the local queue with the foreground auto-send hook (`useQueuedMessageAutoSend`, enabled only there); `useMessageQueueHoldSync` tells the server to hold a session's queue while a UI-driven auto-review run is going. `setServerHold(sessionId, held, owner?)` passes an optional owner: the server keeps one TTL per owner, the session is held while any owner is live, and a release removes only the caller's own owner, so independent holders (auto-review's owner-less calls, a Consult Models run's `consult:<runId>`) never clear each other's protection.
 
 In the local (VS Code) mode the store keeps a queued message until its own send resolves, so between dispatch and resolution the entry is still visible to every reader. Dispatchers must therefore mark the send (`markSending`/`clearSending`) and read `getSendableQueue()` — or filter `sendingIds` themselves — instead of dispatching straight from `queuedMessages`; otherwise a composer submit merges a message the auto-send hook is already delivering and it is sent twice (the window is seconds over a relay). `clearQueue()` retains in-flight entries for the same reason. `sendingIds` is deliberately not persisted: a restart has no in-flight sends, and a stale flag would strand a queued message; in the server-owned mode it mirrors the server's in-flight item. Desktop queues use the configured host id as runtime identity, not the current API URL, because an SSH reconnect allocates a new local forwarding port while the remote host remains the same.
 

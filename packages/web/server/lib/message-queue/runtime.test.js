@@ -293,6 +293,116 @@ describe('message queue runtime', () => {
     expect(openCode.state.sent).toHaveLength(1);
   });
 
+  it('keeps the session held while any owner holds it', async () => {
+    const { runtime, openCode, emit } = createRuntime();
+    runtime.start();
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+    expect(runtime.setHold(SESSION, true, 60_000, 'consult:run-1')).toMatchObject({ held: true });
+    expect(runtime.setHold(SESSION, true, 60_000, 'auto-review')).toMatchObject({ held: true });
+
+    // Releasing one owner (or an owner that never held) leaves the others.
+    expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: true });
+    expect(runtime.setHold(SESSION, false, undefined, 'never-held')).toMatchObject({ held: true });
+    expect(runtime.setHold(SESSION, false)).toMatchObject({ held: true });
+    emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+    await settle();
+    expect(openCode.state.sent).toHaveLength(0);
+
+    // The last owner releases: the session is dispatchable again.
+    expect(runtime.setHold(SESSION, false, undefined, 'auto-review')).toMatchObject({ held: false });
+    await settle();
+    expect(openCode.state.sent).toHaveLength(1);
+  });
+
+  it('lets an owner lapse on its own TTL without touching the others', async () => {
+    let clock = 0;
+    const { runtime, openCode, emit } = createRuntime({ now: () => clock });
+    runtime.start();
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+    runtime.setHold(SESSION, true, 1_000, 'short');
+    runtime.setHold(SESSION, true, 10_000, 'long');
+
+    clock = 1_500;
+    // Releasing the long owner must not resurrect the expired short one.
+    expect(runtime.setHold(SESSION, false, undefined, 'long')).toMatchObject({ held: false });
+    emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+    await settle();
+    expect(openCode.state.sent).toHaveLength(1);
+  });
+
+  it('refuses a malformed hold owner instead of folding it into the owner-less slot', () => {
+    const { runtime } = createRuntime();
+    expect(() => runtime.setHold(SESSION, true, 60_000, '   ')).toThrow(TypeError);
+    expect(() => runtime.setHold(SESSION, true, 60_000, 42)).toThrow(TypeError);
+    expect(() => runtime.setHold(SESSION, true, 60_000, 'x'.repeat(129))).toThrow(TypeError);
+  });
+
+  it('caps the owners of one session and refuses a new owner beyond it', () => {
+    const { runtime } = createRuntime();
+    for (let index = 0; index < 8; index += 1) {
+      expect(runtime.setHold(SESSION, true, 60_000, `owner-${index}`)).toMatchObject({ held: true });
+    }
+
+    let refusal = null;
+    try {
+      runtime.setHold(SESSION, true, 60_000, 'owner-8');
+    } catch (error) {
+      refusal = error;
+    }
+    // A new owner is refused instead of silently dropping or clearing an
+    // existing hold that its owner still relies on.
+    expect(refusal?.status).toBe(429);
+    expect(refusal?.message).toContain('hold owners');
+    expect(runtime.setHold(SESSION, false, undefined, 'owner-8')).toMatchObject({ held: true });
+
+    // A re-assert of an existing owner is not a new slot...
+    expect(runtime.setHold(SESSION, true, 60_000, 'owner-3')).toMatchObject({ held: true });
+    // ...and releasing one owner frees its slot for a genuinely new owner.
+    expect(runtime.setHold(SESSION, false, undefined, 'owner-3')).toMatchObject({ held: true });
+    expect(runtime.setHold(SESSION, true, 60_000, 'owner-8')).toMatchObject({ held: true });
+  });
+
+  it('lets lapsed owners free their slots without touching the live ones', async () => {
+    let clock = 0;
+    const { runtime, openCode, emit } = createRuntime({ now: () => clock });
+    runtime.start();
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+    for (let index = 0; index < 8; index += 1) runtime.setHold(SESSION, true, 1_000, `owner-${index}`);
+
+    // Every owner lapses; a later hold mutation prunes them, so the slots are
+    // reusable instead of the cap staying permanently full.
+    clock = 2_000;
+    runtime.setHold('ses_other_hold_owner', true, 60_000, 'other');
+    expect(runtime.setHold(SESSION, true, 60_000, 'fresh')).toMatchObject({ held: true });
+
+    // The fresh owner is authoritative: the queue stays held, and once it is
+    // released the item goes out (the lapsed owners did not leave it stuck).
+    emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+    await settle();
+    expect(openCode.state.sent).toHaveLength(0);
+    runtime.setHold(SESSION, false, undefined, 'fresh');
+    await settle();
+    expect(openCode.state.sent).toHaveLength(1);
+  });
+
+  it('stops an in-flight dispatch tick when a hold lands while it awaits idleness', async () => {
+    const { runtime, openCode, emit } = createRuntime();
+    runtime.start();
+    await runtime.enqueue(SESSION, DIRECTORY, item());
+    // Hold the status read open, so the tick is between its first isHeld check
+    // and the send. A hold asserted in that window must still stop the send.
+    let releaseStatus;
+    openCode.fetchImpl.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseStatus = () => resolve(Response.json({}));
+    }));
+    emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+    await settle(5);
+    runtime.setHold(SESSION, true, 60_000, 'consult:run-1');
+    releaseStatus();
+    await settle();
+    expect(openCode.state.sent).toHaveLength(0);
+  });
+
   it('survives a restart and delivers once OpenCode reconnects', async () => {
     const dataDir = makeDataDir();
     const first = createRuntime({ dataDir });

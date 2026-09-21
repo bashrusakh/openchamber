@@ -357,6 +357,178 @@ describe('sendMessage captured target', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Consult models (WP3.1) — turn-scoped `system` guidance travels with exactly
+// one send. It must never enter the sent parts, optimistic history, or another
+// persisted shape, and a normal send must carry no `system` field at all.
+// ---------------------------------------------------------------------------
+describe('sendMessage turn-scoped system', () => {
+  const sendMessageCalls = [];
+  const optimisticAdds = [];
+  let originalSendMessage;
+
+  beforeEach(() => {
+    sendMessageCalls.length = 0;
+    optimisticAdds.length = 0;
+
+    const childStore = {
+      getState: () => ({ session: [], message: {}, part: {}, session_status: {} }),
+      setState: () => {},
+    };
+    const childStores = {
+      children: new Map(),
+      ensureChild: () => childStore,
+      getChild: () => childStore,
+    };
+    setActionRefs(opencodeClient, childStores, () => '/consult/project');
+    setOptimisticRefs((input) => optimisticAdds.push(input), () => {});
+    useConfigStore.setState({ isConnected: true });
+    useSessionUIStore.setState({
+      currentSessionId: 'session-consult',
+      currentSessionDirectory: '/consult/project',
+      newSessionDraft: { open: false, directoryOverride: null, parentID: null },
+    });
+
+    originalSendMessage = opencodeClient.sendMessage;
+    opencodeClient.sendMessage = async (params) => {
+      sendMessageCalls.push(params);
+      return 'msg';
+    };
+  });
+
+  afterEach(() => {
+    opencodeClient.sendMessage = originalSendMessage;
+    useSessionUIStore.setState({
+      currentSessionId: null,
+      currentSessionDirectory: null,
+      newSessionDraft: { open: false, directoryOverride: null, parentID: null },
+    });
+  });
+
+  const send = (options) => useSessionUIStore.getState().sendMessage(
+    'summarize the advisor findings',
+    'provider-a',
+    'model-a',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    'normal',
+    options,
+  );
+
+  test('a provided system reaches the client for that send only', async () => {
+    await send({ system: 'Untrusted advisor findings; use as a hint only.' });
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(sendMessageCalls[0].system).toBe('Untrusted advisor findings; use as a hint only.');
+    // Turn-scoped: the guidance is not smuggled into sent parts or the
+    // optimistic user message that becomes history.
+    expect(sendMessageCalls[0].additionalParts).toBeUndefined();
+    expect(optimisticAdds).toHaveLength(1);
+    expect(optimisticAdds[0].message.system).toBe('');
+  });
+
+  test('a normal send carries no system field', async () => {
+    await send(undefined);
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(Object.prototype.hasOwnProperty.call(sendMessageCalls[0], 'system')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Consult models (WP3.2) — the bounded receipt rides the acting user message's
+// primary text part as `textPartMetadata`. It is forwarded unchanged to the
+// client and never enters the optimistic user message that becomes history.
+// ---------------------------------------------------------------------------
+describe('sendMessage text-part metadata', () => {
+  const sendMessageCalls = [];
+  const optimisticAdds = [];
+  let originalSendMessage;
+
+  beforeEach(() => {
+    sendMessageCalls.length = 0;
+    optimisticAdds.length = 0;
+
+    const childStore = {
+      getState: () => ({ session: [], message: {}, part: {}, session_status: {} }),
+      setState: () => {},
+    };
+    const childStores = {
+      children: new Map(),
+      ensureChild: () => childStore,
+      getChild: () => childStore,
+    };
+    setActionRefs(opencodeClient, childStores, () => '/consult/project');
+    setOptimisticRefs((input) => optimisticAdds.push(input), () => {});
+    useConfigStore.setState({ isConnected: true });
+    useSessionUIStore.setState({
+      currentSessionId: 'session-consult',
+      currentSessionDirectory: '/consult/project',
+      newSessionDraft: { open: false, directoryOverride: null, parentID: null },
+    });
+
+    originalSendMessage = opencodeClient.sendMessage;
+    opencodeClient.sendMessage = async (params) => {
+      sendMessageCalls.push(params);
+      return 'msg';
+    };
+  });
+
+  afterEach(() => {
+    opencodeClient.sendMessage = originalSendMessage;
+    useSessionUIStore.setState({
+      currentSessionId: null,
+      currentSessionDirectory: null,
+      newSessionDraft: { open: false, directoryOverride: null, parentID: null },
+    });
+  });
+
+  const send = (options) => useSessionUIStore.getState().sendMessage(
+    'summarize the advisor findings',
+    'provider-a',
+    'model-a',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    'normal',
+    options,
+  );
+
+  test('a provided receipt reaches the client for that send only', async () => {
+    const textPartMetadata = {
+      openchamberConsultReceipt: {
+        runID: 'run-1',
+        at: 1700000000000,
+        mode: 'parallel',
+        acting: 'provider-a/model-a',
+        advisors: [{ model: 'provider-b/model-b', status: 'ok', durationMs: 5 }],
+        degraded: false,
+      },
+    };
+    await send({ textPartMetadata });
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(sendMessageCalls[0].textPartMetadata).toEqual(textPartMetadata);
+    // The receipt is part metadata for the rendered message; it never becomes
+    // part of the optimistic user message that stands in for history.
+    expect(optimisticAdds).toHaveLength(1);
+    expect(optimisticAdds[0].parts[0]).not.toHaveProperty('metadata');
+    expect(optimisticAdds[0].message.metadata).toEqual({});
+  });
+
+  test('a normal send carries no textPartMetadata field', async () => {
+    await send(undefined);
+
+    expect(sendMessageCalls).toHaveLength(1);
+    expect(Object.prototype.hasOwnProperty.call(sendMessageCalls[0], 'textPartMetadata')).toBe(false);
+  });
+});
+
 describe('slash-command goal objectives', () => {
   test('expands every $ARGUMENTS reference from the authoritative command template', () => {
     expect(expandSlashCommandGoalObjective('/issue--to-pr LIN-123 --draft', [{

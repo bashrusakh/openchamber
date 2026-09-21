@@ -14,6 +14,7 @@ import type {
   Agent,
   TextPartInput,
   FilePartInput,
+  PermissionRuleset,
 } from "@opencode-ai/sdk/v2";
 import { isAmbiguousTransportFailure, markAmbiguousTransportFailure } from "@/lib/relay/transport-error";
 import { FilesystemError, parseFilesystemErrorReason } from "@/lib/api/files-errors";
@@ -631,9 +632,10 @@ class OpencodeService {
   }
 
   // Session Management
-  async listSessions(): Promise<Session[]> {
+  async listSessions(directory?: string | null): Promise<Session[]> {
+    const requestDirectory = this.normalizeCandidatePath(directory) ?? this.currentDirectory;
     const response = await this.client.session.list(
-      this.currentDirectory ? { directory: this.currentDirectory } : undefined
+      requestDirectory ? { directory: requestDirectory } : undefined
     );
     return Array.isArray(response.data) ? response.data : [];
   }
@@ -669,13 +671,14 @@ class OpencodeService {
 
   async updateSession(
     id: string,
-    patch: { title?: string; metadata?: Record<string, unknown>; time?: { archived?: number | null } },
+    patch: { title?: string; metadata?: Record<string, unknown>; permission?: PermissionRuleset; time?: { archived?: number | null } },
     directory?: string | null,
   ): Promise<Session> {
     const requestDirectory = this.normalizeCandidatePath(directory) ?? this.currentDirectory;
     const sdkPatch = {
       ...(patch.title !== undefined ? { title: patch.title } : {}),
       ...(patch.metadata !== undefined ? { metadata: patch.metadata } : {}),
+      ...(patch.permission !== undefined ? { permission: patch.permission } : {}),
       ...(patch.time?.archived !== undefined && patch.time.archived !== null ? { time: { archived: patch.time.archived } } : {}),
     };
     const response = await this.client.session.update({
@@ -888,6 +891,25 @@ class OpencodeService {
       retryCount?: number;
     };
     directory?: string | null;
+    /** Turn-scoped system guidance for this prompt. Omitted from the request body when not provided. */
+    system?: string;
+    /**
+     * Structured metadata for the primary text part (for example the Consult
+     * Models receipt). Part metadata persists with the message and is not sent
+     * to the model. Omitted from the part when not provided, so a normal send
+     * keeps the exact request shape.
+     */
+    textPartMetadata?: TextPartInput['metadata'];
+    /**
+     * Whether this send participates in the shared provider circuit breaker
+     * (`provider-tracker.ts`). Defaults to `true`.
+     *
+     * Advisor/consult sends pass `false`: they neither record provider
+     * success/error nor check the open circuit, so failing advisors cannot open
+     * the circuit for the acting turn and an open circuit cannot block them.
+     * Ordinary sends leave this unset.
+     */
+    trackProviderErrors?: boolean;
   }): Promise<string> {
     this.assertRuntimeUnchanged(params.runtimeKey);
 
@@ -912,6 +934,9 @@ class OpencodeService {
         type: 'text',
         text: params.text
       };
+      // Attach only when the caller provided metadata; an absent option leaves
+      // the primary part exactly as it was before the extension.
+      if (params.textPartMetadata !== undefined) textPart.metadata = params.textPartMetadata;
       parts.push(textPart);
     }
 
@@ -972,7 +997,13 @@ class OpencodeService {
       });
     }
 
-    assertProviderCircuitClosed(params.providerID);
+    // Advisor/consult sends opt out of the shared provider circuit: they must
+    // not open it, and an open circuit must not block them. Ordinary sends keep
+    // today's accounting (absent option = tracked).
+    const trackProviderErrors = params.trackProviderErrors !== false;
+    if (trackProviderErrors) {
+      assertProviderCircuitClosed(params.providerID);
+    }
     this.assertRuntimeUnchanged(params.runtimeKey);
 
     let response: Response;
@@ -990,6 +1021,7 @@ class OpencodeService {
         messageID: messageId,
         ...(params.delivery ? { delivery: params.delivery } : {}),
         ...(params.format ? { format: params.format } : {}),
+        ...(params.system !== undefined ? { system: params.system } : {}),
         parts,
       });
       if (result.response instanceof Response) {
@@ -1017,12 +1049,16 @@ class OpencodeService {
       // Do not retry prompt_async after a transport failure: through a remote
       // tunnel the POST may already be running server-side even though the
       // client lost the response.
-      recordProviderError(params.providerID);
+      if (trackProviderErrors) {
+        recordProviderError(params.providerID);
+      }
       throw error;
     }
 
     if (response.ok) {
-      recordProviderSuccess(params.providerID);
+      if (trackProviderErrors) {
+        recordProviderSuccess(params.providerID);
+      }
       return messageId;
     }
 
@@ -1035,7 +1071,9 @@ class OpencodeService {
     const suffix = detail && detail.trim().length > 0 ? `: ${detail.trim()}` : '';
     const error = new Error(`Failed to send message (${response.status})${suffix}`) as Error & { status?: number };
     error.status = response.status;
-    recordProviderError(params.providerID, response.status);
+    if (trackProviderErrors) {
+      recordProviderError(params.providerID, response.status);
+    }
     throw error;
   }
 

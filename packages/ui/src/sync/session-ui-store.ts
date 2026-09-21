@@ -14,7 +14,7 @@
 
 import type { ContextPartMetadata } from "@/lib/messages/contextParts"
 import { create } from "zustand"
-import type { Session, Part, TextPart } from "@opencode-ai/sdk/v2/client"
+import type { Session, Part, TextPart, TextPartInput } from "@opencode-ai/sdk/v2/client"
 import type { AttachedFile, SessionContextUsage, SessionWorktreeAttachment } from "@/stores/types/sessionTypes"
 import type { WorktreeMetadata } from "@/types/worktree"
 import { opencodeClient } from "@/lib/opencode/client"
@@ -146,6 +146,10 @@ export async function routeMessage(params: {
   additionalParts?: Array<{ text: string; synthetic?: boolean; metadata?: ContextPartMetadata; files?: Array<{ type: "file"; mime: string; url: string; filename: string }>; systemContext?: 'session-knowledge' }>
   appendSubmissions?: () => void
   delivery?: 'steer'
+  /** Turn-scoped system guidance for this prompt. Omitted from the request when not provided. */
+  system?: string
+  /** Structured metadata for the primary text part; omitted from the part when not provided. */
+  textPartMetadata?: TextPartInput['metadata']
 }): Promise<'command' | 'prompt' | 'shell'> {
   const requestDirectory = params.directory ?? undefined
   let promptContent = params.content
@@ -254,26 +258,33 @@ export async function routeMessage(params: {
     directory: requestDirectory,
     files: params.files,
     appendSubmissions: params.appendSubmissions,
-    send: (messageID) => opencodeClient.sendMessage({
-      runtimeKey: params.runtimeKey,
-      id: params.sessionId,
-      providerID: params.providerID,
-      modelID: params.modelID,
-      text: promptContent,
-      agent: params.agent,
-      agentMentions: params.agentMentionName ? [{ name: params.agentMentionName }] : undefined,
-      variant: params.variant,
-      files: params.files,
-      additionalParts: promptAdditionalParts?.map((part) => ({
-        text: part.text,
-        synthetic: part.synthetic,
-        metadata: part.metadata,
-        files: part.files,
-      })),
-      delivery: params.delivery,
-      messageId: messageID,
-      directory: requestDirectory,
-    }).then(() => {}),
+    send: (messageID) => {
+      const request: Parameters<typeof opencodeClient.sendMessage>[0] = {
+        runtimeKey: params.runtimeKey,
+        id: params.sessionId,
+        providerID: params.providerID,
+        modelID: params.modelID,
+        text: promptContent,
+        agent: params.agent,
+        agentMentions: params.agentMentionName ? [{ name: params.agentMentionName }] : undefined,
+        variant: params.variant,
+        files: params.files,
+        additionalParts: promptAdditionalParts?.map((part) => ({
+          text: part.text,
+          synthetic: part.synthetic,
+          metadata: part.metadata,
+          files: part.files,
+        })),
+        delivery: params.delivery,
+        messageId: messageID,
+        directory: requestDirectory,
+      }
+      // Attach turn-scoped guidance only when the caller provided it; an absent
+      // value leaves the request object exactly as it was before the extension.
+      if (params.system !== undefined) request.system = params.system
+      if (params.textPartMetadata !== undefined) request.textPartMetadata = params.textPartMetadata
+      return opencodeClient.sendMessage(request).then(() => {})
+    },
   })
   return 'prompt'
 }
@@ -292,6 +303,10 @@ type SendMessageOptions = {
   /** Immutable copy of the new-session draft at submit time; used instead of the live draft. */
   draftSnapshot?: NewSessionDraftState
   delivery?: 'steer'
+  /** Turn-scoped system guidance forwarded to this one send; never persisted into message history or the queue. */
+  system?: string
+  /** Structured metadata for the primary text part (for example the Consult Models receipt); absent leaves the part unchanged. */
+  textPartMetadata?: TextPartInput['metadata']
 }
 
 type AssistantMessageSessionExecution = {
@@ -1783,6 +1798,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
         files,
         appendSubmissions,
         delivery: options?.delivery,
+        system: options?.system,
+        textPartMetadata: options?.textPartMetadata,
         additionalParts: mergedAdditionalParts?.map((p) => ({
           text: p.text,
           synthetic: p.synthetic,
@@ -1903,6 +1920,8 @@ export const useSessionUIStore = create<SessionUIState>()((set, get) => ({
       files,
       appendSubmissions,
       delivery: options?.delivery,
+      system: options?.system,
+      textPartMetadata: options?.textPartMetadata,
       additionalParts: partsWithPinnedContext?.map((p) => ({
         text: p.text,
         synthetic: p.synthetic,

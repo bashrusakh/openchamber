@@ -473,4 +473,22 @@ describe("server-owned message queue", () => {
     await Promise.resolve()
     expect(calls[0]).toEqual({ method: "PUT", path: "/api/message-queue/sessions/session-1/order", body: { itemIds: ["q2", "q1"] } })
   })
+
+  test("setServerHold names the owner when given and keeps the legacy body without one", async () => {
+    respond = () => json({ revision: 20, session: session([]) })
+    await useMessageQueueStore.getState().setServerHold("session-1", true, "consult:run-1")
+    await useMessageQueueStore.getState().setServerHold("session-1", false, "consult:run-1")
+    await useMessageQueueStore.getState().setServerHold("session-1", false)
+
+    expect(calls).toEqual([
+      { method: "PUT", path: "/api/message-queue/sessions/session-1/hold", body: { held: true, owner: "consult:run-1" } },
+      { method: "PUT", path: "/api/message-queue/sessions/session-1/hold", body: { held: false, owner: "consult:run-1" } },
+      { method: "PUT", path: "/api/message-queue/sessions/session-1/hold", body: { held: false } },
+    ])
+  })
+
+  test("a failed hold request rejects so the caller can release locally", async () => {
+    respond = () => new Response("nope", { status: 500 })
+    await expect(useMessageQueueStore.getState().setServerHold("session-1", true, "consult:run-1")).rejects.toThrow()
+  })
 })

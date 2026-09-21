@@ -33,6 +33,10 @@ const RETRY_MAX_DELAY_MS = 60_000;
 // UI; it expires unless the UI keeps re-asserting it.
 const HOLD_DEFAULT_TTL_MS = 5 * 60 * 1000;
 const HOLD_MAX_TTL_MS = 10 * 60 * 1000;
+// Independent holders (UI processes, one per feature or run) each own a slot.
+// The cap bounds a session's owner map when holds are asserted on sessions
+// that never dispatch, which would otherwise only leave on expiry.
+const MAX_HOLD_OWNERS_PER_SESSION = 8;
 const FETCH_TIMEOUT_MS = 15_000;
 const MESSAGE_TAIL_LIMIT = 2;
 
@@ -242,7 +246,14 @@ export function createMessageQueueRuntime({
   const timers = new Map(); // sessionId → timeout
   const failures = new Map(); // sessionId → { itemId, failures, nextAttemptAt }
   const abortedAt = new Map(); // sessionId → timestamp
-  const holds = new Map(); // sessionId → expiresAt
+  // sessionId → Map<owner, expiresAt>. Several independent UI processes (and
+  // several consult runs) can hold one session at once; a release removes only
+  // the caller's own owner, and the session stays held while any owner has a
+  // live TTL. The empty-string owner is the legacy owner-less slot, so callers
+  // that never send an owner keep today's behavior for their own slot. Owners
+  // lapse on their own TTL and are pruned on every hold mutation; one session
+  // holds at most MAX_HOLD_OWNERS_PER_SESSION owners.
+  const holds = new Map();
   // sessionId → directory, kept after the queue empties: the UI keys its
   // projection by directory, so the broadcast that removes the last item must
   // still name it or the client cannot tell which queue just finished.
@@ -553,13 +564,43 @@ export function createMessageQueueRuntime({
     timers.set(sessionId, timer);
   };
 
-  const isHeld = (sessionId) => {
-    const expiresAt = holds.get(sessionId);
-    if (expiresAt === undefined) return false;
-    if (expiresAt > now()) return true;
-    holds.delete(sessionId);
-    return false;
+  /**
+   * Drop every lapsed owner across every session. A read prunes only the
+   * session it touches, so without this sweep an owner on a session that never
+   * dispatches (no queue, no further hold traffic) would sit in the map until
+   * the process ends. Every hold mutation runs it, which bounds the map to
+   * live owners (plus at most one mutation's worth of lapsed ones).
+   */
+  const pruneExpiredHolds = () => {
+    const nowMs = now();
+    for (const [sessionId, owners] of holds) {
+      for (const [owner, expiresAt] of owners) {
+        if (expiresAt <= nowMs) owners.delete(owner);
+      }
+      if (owners.size === 0) holds.delete(sessionId);
+    }
   };
+
+  /**
+   * Prune expired owners and return the session's live owner map, or null when
+   * nothing holds it. Expiry is lazy: every read drops what has lapsed, so the
+   * map cannot grow past the owners that are actually holding.
+   */
+  const liveHoldOwners = (sessionId) => {
+    const owners = holds.get(sessionId);
+    if (!owners) return null;
+    const nowMs = now();
+    for (const [owner, expiresAt] of owners) {
+      if (expiresAt <= nowMs) owners.delete(owner);
+    }
+    if (owners.size === 0) {
+      holds.delete(sessionId);
+      return null;
+    }
+    return owners;
+  };
+
+  const isHeld = (sessionId) => liveHoldOwners(sessionId) !== null;
 
   async function tick(sessionId) {
     if (stopped) return;
@@ -588,10 +629,14 @@ export function createMessageQueueRuntime({
     // Busy: the next idle status event re-arms the loop.
     if (!idle) return;
 
-    // Re-read after the awaits — the user may have edited the queue meanwhile.
+    // Re-read after the awaits — the user may have edited the queue meanwhile,
+    // and a hold may have landed while this tick was between its first check
+    // and the idleness round-trips. The hold is authoritative at the moment of
+    // sending: without this check a hold asserted mid-tick would not stop the
+    // send it was asserted to prevent.
     const current = queues.get(sessionId);
     const item = current?.items[0];
-    if (!item || item.id !== head.id || sending.has(sessionId)) return;
+    if (!item || item.id !== head.id || sending.has(sessionId) || isHeld(sessionId)) return;
 
     sending.set(sessionId, item.id);
     broadcast(sessionId);
@@ -732,18 +777,53 @@ export function createMessageQueueRuntime({
     return commit(sessionId);
   };
 
-  const setHold = (sessionIdInput, held, ttlMs = HOLD_DEFAULT_TTL_MS) => {
+  /**
+   * The hold owner a request names. Owner-less requests use the empty-string
+   * slot, which is the whole map for a client that never sends an owner (the
+   * legacy semantics). A present-but-invalid owner is refused instead of being
+   * silently folded into that slot, so a malformed owner cannot clear or
+   * extend another owner's hold.
+   */
+  const parseHoldOwner = (value) => {
+    if (value === undefined || value === null) return '';
+    const owner = asNonEmptyString(value);
+    if (!owner || owner.length > 128) throw new TypeError('owner must be a non-empty string');
+    return owner;
+  };
+
+  const setHold = (sessionIdInput, held, ttlMs = HOLD_DEFAULT_TTL_MS, ownerInput = undefined) => {
     const sessionId = requireSessionId(sessionIdInput);
     if (held !== true && held !== false) throw new TypeError('held must be a boolean');
+    const owner = parseHoldOwner(ownerInput);
+    // Every hold mutation sweeps lapsed owners, including sessions that are
+    // never read again, so the owner map cannot accumulate indefinitely.
+    pruneExpiredHolds();
     if (held) {
       const ttl = Math.min(asCount(ttlMs) || HOLD_DEFAULT_TTL_MS, HOLD_MAX_TTL_MS);
-      holds.set(sessionId, now() + ttl);
+      let owners = liveHoldOwners(sessionId);
+      if (!owners) {
+        owners = new Map();
+        holds.set(sessionId, owners);
+      }
+      // A re-assert of an existing owner extends its own TTL and never counts
+      // as a new slot; a genuinely new owner beyond the cap is refused rather
+      // than silently dropping or clearing a hold someone still relies on.
+      if (!owners.has(owner) && owners.size >= MAX_HOLD_OWNERS_PER_SESSION) {
+        throw httpError(`session already has ${MAX_HOLD_OWNERS_PER_SESSION} hold owners`, 429);
+      }
+      owners.set(owner, now() + ttl);
       clearTimer(sessionId);
-      return { held: true, expiresAt: holds.get(sessionId) };
+      return { held: true, expiresAt: owners.get(owner) };
     }
-    holds.delete(sessionId);
+    const owners = liveHoldOwners(sessionId);
+    if (owners) {
+      owners.delete(owner);
+      if (owners.size === 0) holds.delete(sessionId);
+    }
+    // Releasing one owner never clears the others; the dispatch is armed only
+    // as a re-check, and the tick bails while any owner still holds.
     armDispatch(sessionId);
-    return { held: false, expiresAt: null };
+    return { held: isHeld(sessionId), expiresAt: null };
   };
 
   // --- events --------------------------------------------------------------
@@ -758,6 +838,7 @@ export function createMessageQueueRuntime({
       queues.delete(deletedSessionId);
       clearTimer(deletedSessionId);
       failures.delete(deletedSessionId);
+      holds.delete(deletedSessionId);
       commit(deletedSessionId);
       directories.delete(deletedSessionId);
       return;
@@ -871,7 +952,7 @@ export function registerMessageQueueRoutes(app, runtime) {
   app.put('/api/message-queue/sessions/:sessionId/hold', async (req, res) => {
     try {
       await runtime.load();
-      res.json(runtime.setHold(req.params.sessionId, req.body?.held, req.body?.ttlMs));
+      res.json(runtime.setHold(req.params.sessionId, req.body?.held, req.body?.ttlMs, req.body?.owner));
     } catch (error) {
       respondError(res, error, 'Failed to update queue hold');
     }

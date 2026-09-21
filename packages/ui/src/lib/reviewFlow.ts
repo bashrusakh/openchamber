@@ -12,6 +12,7 @@ import {
 } from '@/lib/sessionReviewMetadata';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useAutoReviewStore, type AutoReviewRun } from '@/stores/useAutoReviewStore';
+import { isConsultRunActive, selectConsultRun, useConsultStore } from '@/stores/useConsultStore';
 import { useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { usePermissionStore } from '@/stores/permissionStore';
@@ -136,6 +137,24 @@ export const assertAutoReviewRuntimeStillCurrent = (expectedRuntimeKey?: string)
   if (expectedRuntimeKey && !isAutoReviewRuntimeCurrent(expectedRuntimeKey)) {
     throw new Error('Auto-review stopped because the runtime changed.');
   }
+};
+
+/**
+ * True while a consultation owns the parent session. The consult submission
+ * refuses to start while auto-review runs for the session; this is the
+ * symmetric guard, so an auto-review loop cannot start into a live
+ * consultation either. The run store is the consult side's own owner of that
+ * state (`runId` + phase), and it is memory-only, so this is exact.
+ */
+export const isConsultActiveForSession = (sessionId: string): boolean =>
+  isConsultRunActive(selectConsultRun(useConsultStore.getState(), sessionId));
+
+const CONSULT_ACTIVE_MESSAGE =
+  'A consultation is running for this session; the automatic review loop cannot start until it finishes.';
+
+/** Refuses an auto-review start while a consult run is active for the parent. */
+export const assertNoConsultRunActiveForAutoReview = (sessionId: string): void => {
+  if (isConsultActiveForSession(sessionId)) throw new Error(CONSULT_ACTIVE_MESSAGE);
 };
 
 const isRuntimeChangeError = (error: unknown): boolean => {
@@ -491,6 +510,10 @@ const createOrReuseReviewSession = async (originalSessionID: string, directory: 
 };
 
 export const startReviewFlow = async (input: StartReviewFlowInput): Promise<void> => {
+  // Symmetric exclusion: a consult run owns the parent from its submission
+  // until it settles, so auto-review may not start into one. Refuse before any
+  // message is sent; the caller surfaces the error through its toast channel.
+  if (input.autoReview) assertNoConsultRunActiveForAutoReview(input.originalSessionID);
   await waitForConnectionOrThrow();
   const expectedAutoReviewRuntimeKey = input.autoReview ? getRuntimeKey() : undefined;
   let reviewPrompt: string;
