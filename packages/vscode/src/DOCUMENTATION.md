@@ -26,7 +26,7 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
   - Tracks outstanding commands through completion and timeout cleanup. Extension deactivation awaits `stopGitProcesses`, which terminates active work and rejects later launches. Operations delegated to VS Code's built-in Git API remain owned by that extension.
 
 - `owned-process.ts`
-  - Owns background child termination shared by Git and managed OpenCode. POSIX children have a separate process group, which receives SIGKILL after the grace period or root exit so a SIGTERM-resistant descendant cannot survive. Windows enumerates and terminates the tree before losing its root, using an asynchronous hidden `taskkill` invocation. Completion waits for stdio closure; failed termination remains an error.
+  - Owns background child termination shared by Git and managed OpenCode. POSIX children have a separate process group, which receives SIGKILL after the grace period or root exit so a SIGTERM-resistant descendant cannot survive. Windows enumerates and terminates the tree before losing its root, using an asynchronous hidden `taskkill` invocation. Completion waits for stdio closure; a failed `taskkill` attempts a bounded root fallback, reports `ERR_PROCESS_TREE_TERMINATION` with descendant termination unconfirmed, and never resolves as if the tree was killed.
 
 - `managed-opencode-process.ts` and `opencode.ts`
   - The process handle and shared registry entry exist from spawn, before readiness. Startup timeout, malformed output, and cancellation terminate the child before the attempt settles. Registry removal follows confirmed termination. Startup diagnostics retain a bounded output tail; ready processes keep draining both streams.

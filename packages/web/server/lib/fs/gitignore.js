@@ -71,7 +71,10 @@ const runCheckIgnore = ({ spawn, resolveGitBinaryForSpawn, cwd, names, signal, p
     if (settled) return;
     settled = true;
     signal?.removeEventListener('abort', onAbort);
-    void Promise.resolve(termination).then(() => resolve(result));
+    void Promise.resolve(termination).then(
+      () => resolve(result),
+      (terminationFailure) => reject(terminationFailure),
+    );
   };
 
   const onAbort = () => {
@@ -79,8 +82,19 @@ const runCheckIgnore = ({ spawn, resolveGitBinaryForSpawn, cwd, names, signal, p
     terminationRequested = true;
     try {
       termination = killProcessTree(child, { spawn, platform });
+      void termination.catch(() => finish({
+        stdout,
+        stderr,
+        exitCode: undefined,
+        aborted: true,
+      }));
     } catch {
-      // The process may already have exited.
+      finish({
+        stdout,
+        stderr,
+        exitCode: undefined,
+        aborted: true,
+      });
     }
   };
 

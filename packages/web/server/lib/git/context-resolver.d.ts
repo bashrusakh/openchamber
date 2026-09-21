@@ -25,6 +25,11 @@ export type GitNonRepositoryContext = {
   isRepository: false;
   requestedDirectory: string;
   reason: 'not-a-repository';
+} | {
+  isRepository: false;
+  requestedDirectory: string;
+  reason: 'unsupported-repository-root';
+  unsupportedRoot: 'home' | 'filesystem-root';
 };
 
 export type GitResolvedContext = GitRepositoryContext | GitNonRepositoryContext;

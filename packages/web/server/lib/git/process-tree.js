@@ -11,14 +11,69 @@ export const withProcessTreeOwnership = (options, platform = process.platform) =
 const killRoot = (child) => {
   try {
     child?.kill?.('SIGKILL');
-  } catch {
+    return null;
+  } catch (error) {
     // The process may already have exited.
+    return error;
   }
+};
+
+const WINDOWS_TERMINATION_TIMEOUT_MS = 5_000;
+
+const waitForChildClose = (child, timeoutMs) => {
+  if (!child?.pid || child.exitCode !== null && child.exitCode !== undefined
+    || child.signalCode !== null && child.signalCode !== undefined) {
+    return Promise.resolve(true);
+  }
+  if (!child.once) {
+    return Promise.resolve(false);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    const finish = (closed) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      child.removeListener?.('close', onClose);
+      resolve(closed);
+    };
+    const onClose = () => finish(true);
+    child.once('close', onClose);
+    timer = setTimeout(() => finish(false), timeoutMs);
+    timer?.unref?.();
+  });
+};
+
+const processTreeTerminationError = (pid, cause, rootError, rootClosed) => Object.assign(
+  new Error(
+    `Failed to terminate the Windows process tree for PID ${pid}; `
+    + 'descendant termination was not confirmed',
+  ),
+  {
+    code: 'ERR_PROCESS_TREE_TERMINATION',
+    pid,
+    descendantsTerminated: false,
+    rootClosed,
+    cause,
+    rootError: rootError || undefined,
+  },
+);
+
+const failWindowsTermination = async (child, pid, cause, timeoutMs) => {
+  const rootError = killRoot(child);
+  const rootClosed = await waitForChildClose(child, timeoutMs);
+  throw processTreeTerminationError(pid, cause, rootError, rootClosed);
 };
 
 export const killProcessTree = (
   child,
-  { spawn = nodeSpawn, platform = process.platform } = {},
+  {
+    spawn = nodeSpawn,
+    platform = process.platform,
+    terminationTimeoutMs = WINDOWS_TERMINATION_TIMEOUT_MS,
+  } = {},
 ) => {
   if (!child?.pid) {
     killRoot(child);
@@ -32,27 +87,51 @@ export const killProcessTree = (
         windowsHide: true,
         stdio: 'ignore',
       });
-    } catch {
-      killRoot(child);
-      return Promise.resolve();
+    } catch (error) {
+      return failWindowsTermination(child, child.pid, error, terminationTimeoutMs);
     }
 
     if (!taskkill) {
-      return Promise.resolve();
+      return failWindowsTermination(
+        child,
+        child.pid,
+        new Error('Windows taskkill did not start'),
+        terminationTimeoutMs,
+      );
     }
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let settled = false;
+      let timer;
       const finish = () => {
         if (settled) return;
         settled = true;
+        if (timer) clearTimeout(timer);
         resolve();
       };
-      taskkill.on('error', () => {
-        killRoot(child);
-        finish();
-      });
-      taskkill.on('close', finish);
+      const fail = (cause) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        void failWindowsTermination(child, child.pid, cause, terminationTimeoutMs)
+          .then(resolve, reject);
+      };
+      try {
+        taskkill.on('error', (error) => fail(error));
+        taskkill.on('close', (code) => {
+          if (code === 0) {
+            finish();
+            return;
+          }
+          fail(new Error(`taskkill exited with code ${code}`));
+        });
+        timer = setTimeout(() => fail(new Error(
+          `taskkill did not finish within ${terminationTimeoutMs}ms`,
+        )), terminationTimeoutMs);
+        timer?.unref?.();
+      } catch (error) {
+        fail(error);
+      }
     });
   }
 
@@ -85,6 +164,7 @@ export const execFileProcessTree = ({
   signal,
   spawn = nodeSpawn,
   platform = process.platform,
+  terminationTimeoutMs = WINDOWS_TERMINATION_TIMEOUT_MS,
 }) => new Promise((resolve, reject) => {
   let child;
   try {
@@ -112,16 +192,29 @@ export const execFileProcessTree = ({
     if (timer) clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
   };
-  const requestTermination = (error) => {
-    if (termination) return;
-    terminationError = error;
-    termination = killProcessTree(child, { spawn, platform });
+  const withTerminationFailure = (error, failure) => {
+    if (failure) {
+      failure.operationError = error || undefined;
+      failure.descendantsTerminated = false;
+      return failure;
+    }
+    return error;
   };
   const finish = async (error, result) => {
     if (settled) return;
     settled = true;
     cleanup();
-    await termination;
+    try {
+      await termination;
+    } catch (failure) {
+      const result = withTerminationFailure(error, failure);
+      if (error) {
+        result.stdout = stdout;
+        result.stderr = error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? error.message : stderr;
+      }
+      reject(result);
+      return;
+    }
     if (error) {
       error.stdout = stdout;
       error.stderr = error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? error.message : stderr;
@@ -129,6 +222,16 @@ export const execFileProcessTree = ({
       return;
     }
     resolve(result);
+  };
+  const requestTermination = (error) => {
+    if (termination) return;
+    terminationError = error;
+    try {
+      termination = killProcessTree(child, { spawn, platform, terminationTimeoutMs });
+    } catch (failure) {
+      termination = Promise.reject(failure);
+    }
+    void termination.catch(() => finish(error));
   };
   const append = (stream, chunk) => {
     const text = chunk.toString();

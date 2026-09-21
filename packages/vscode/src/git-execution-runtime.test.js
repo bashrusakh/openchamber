@@ -59,6 +59,41 @@ describe('VS Code Git execution runtime discovery', () => {
     }));
   });
 
+  it('does not run Git service operations for an unsupported repository root', async () => {
+    const resolver = {
+      resolve: mock(async () => ({
+        isRepository: false,
+        requestedDirectory: '/home/user/project',
+        reason: 'unsupported-repository-root',
+        unsupportedRoot: 'home',
+      })),
+    };
+    const runtime = createGitExecutionRuntime({ resolver });
+    const task = mock(async () => 'must not run');
+
+    await expect(runtime.runServiceOperation('getGitBranches', '/home/user/project', task))
+      .rejects.toMatchObject({ code: 'GIT_NOT_A_REPOSITORY' });
+    expect(task).not.toHaveBeenCalled();
+  });
+
+  it('returns the soft status fallback without asking VS Code to scan an unsupported root', async () => {
+    const resolver = {
+      resolve: mock(async () => ({
+        isRepository: false,
+        requestedDirectory: '/home/user/project',
+        reason: 'unsupported-repository-root',
+        unsupportedRoot: 'home',
+      })),
+    };
+    const runtime = createGitExecutionRuntime({ resolver });
+    const task = mock(async () => 'must not run');
+
+    await expect(runtime.runStatus('/home/user/project', async () => task(), {
+      unsupportedRepositoryResult: () => ({ current: '', files: [] }),
+    })).resolves.toEqual({ current: '', files: [] });
+    expect(task).not.toHaveBeenCalled();
+  });
+
   it('passes Gitignore waiter cancellation and queue deadlines to coordinated reads', async () => {
     const resolver = {
       resolve: mock(async () => ({

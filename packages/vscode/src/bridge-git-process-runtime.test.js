@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 
 const spawnCalls = [];
 const getGitExecutablePath = mock();
+const execFile = mock();
 const spawn = mock((command, args, options) => {
   const childProcess = new EventEmitter();
   childProcess.stdout = new EventEmitter();
@@ -13,7 +14,7 @@ const spawn = mock((command, args, options) => {
 });
 
 mock.module('child_process', () => ({
-  execFile: mock(),
+  execFile,
   spawn,
 }));
 
@@ -21,7 +22,7 @@ mock.module('./gitService', () => ({
   getGitExecutablePath,
 }));
 
-const { createGitProcessRuntime } = await import('./bridge-git-process-runtime');
+const { createGitProcessRuntime, stopGitProcesses } = await import('./bridge-git-process-runtime');
 
 describe('VS Code Git process runtime executable selection', () => {
   const originalSshAuthSock = process.env.SSH_AUTH_SOCK;
@@ -42,6 +43,7 @@ describe('VS Code Git process runtime executable selection', () => {
     getGitExecutablePath.mockReset();
     getGitExecutablePath.mockResolvedValue(undefined);
     spawn.mockClear();
+    execFile.mockReset();
     spawnCalls.length = 0;
   });
 
@@ -125,5 +127,105 @@ describe('VS Code Git process runtime executable selection', () => {
       stderr: expect.stringMatching(/maxBuffer/),
     });
     expect(childProcess.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('settles cancellation when Windows taskkill fails and does not claim tree cleanup', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      const childProcess = new EventEmitter();
+      childProcess.stdout = new EventEmitter();
+      childProcess.stderr = new EventEmitter();
+      childProcess.pid = 1234;
+      childProcess.exitCode = null;
+      childProcess.signalCode = null;
+      childProcess.kill = mock();
+      spawn.mockImplementationOnce(() => childProcess);
+      execFile.mockImplementationOnce((_command, _args, _options, callback) => {
+        callback(new Error('taskkill failed'));
+      });
+
+      const controller = new AbortController();
+      const pending = createGitProcessRuntime().execGit(['status'], '/repo', {
+        signal: controller.signal,
+      });
+      for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      controller.abort();
+
+      await expect(pending).resolves.toMatchObject({
+        exitCode: 1,
+        stderr: expect.stringMatching(/Failed to terminate.*descendant termination was not confirmed/),
+      });
+      expect(childProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+    }
+  });
+
+  it('settles max-buffer cleanup with an explicit Windows termination failure', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      const childProcess = new EventEmitter();
+      childProcess.stdout = new EventEmitter();
+      childProcess.stderr = new EventEmitter();
+      childProcess.pid = 1235;
+      childProcess.exitCode = null;
+      childProcess.signalCode = null;
+      childProcess.kill = mock();
+      spawn.mockImplementationOnce(() => childProcess);
+      execFile.mockImplementationOnce((_command, _args, _options, callback) => {
+        callback(new Error('taskkill failed during max-buffer cleanup'));
+      });
+
+      const pending = createGitProcessRuntime().execGit(['status'], '/repo', { maxBuffer: 1 });
+      for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      childProcess.stdout.emit('data', Buffer.from('12'));
+
+      await expect(pending).resolves.toMatchObject({
+        exitCode: 1,
+        stderr: expect.stringMatching(/Failed to terminate.*descendant termination was not confirmed/),
+      });
+      expect(childProcess.kill).toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+    }
+  });
+
+  it('settles deactivation after a failed Windows tree kill without releasing twice', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      const childProcess = new EventEmitter();
+      childProcess.stdout = new EventEmitter();
+      childProcess.stderr = new EventEmitter();
+      childProcess.pid = 1236;
+      childProcess.exitCode = null;
+      childProcess.signalCode = null;
+      childProcess.kill = mock();
+      spawn.mockImplementationOnce(() => childProcess);
+      execFile.mockImplementationOnce((_command, _args, _options, callback) => {
+        callback(new Error('taskkill failed during deactivation'));
+      });
+
+      const pending = createGitProcessRuntime().execGit(['status'], '/repo');
+      for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      await stopGitProcesses();
+      const result = await pending;
+
+      expect(result).toMatchObject({
+        exitCode: 1,
+        stderr: expect.stringMatching(/Failed to terminate.*descendant termination was not confirmed/),
+      });
+      expect(childProcess.kill).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+    }
   });
 });

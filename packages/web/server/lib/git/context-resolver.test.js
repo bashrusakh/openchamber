@@ -57,6 +57,37 @@ describe('GitContextResolver', () => {
     });
   });
 
+  it('rejects filesystem-root repositories as unsupported before caching or admitting work', async () => {
+    const fingerprint = vi.fn();
+    const resolver = createGitContextResolver({
+      pathExists: async () => true,
+      getPathFingerprint: fingerprint,
+      runGit: async () => ({ success: true, stdout: '/\n/.git\n/.git\n' }),
+    });
+
+    await expect(resolver.resolve('/workspace')).resolves.toEqual({
+      isRepository: false,
+      requestedDirectory: '/workspace',
+      reason: 'unsupported-repository-root',
+      unsupportedRoot: 'filesystem-root',
+    });
+    expect(fingerprint).not.toHaveBeenCalled();
+  });
+
+  it('rejects home-root repositories with the same shared context contract', async () => {
+    const home = os.homedir();
+    const resolver = createGitContextResolver({
+      pathExists: async () => true,
+      runGit: async () => ({ success: true, stdout: `${home}\n${home}/.git\n${home}/.git\n` }),
+    });
+
+    await expect(resolver.resolve(path.join(home, 'project'))).resolves.toMatchObject({
+      isRepository: false,
+      reason: 'unsupported-repository-root',
+      unsupportedRoot: 'home',
+    });
+  });
+
   it('returns a missing requested directory as non-repository without invoking Git', async () => {
     const runGit = vi.fn();
     const resolver = createGitContextResolver({

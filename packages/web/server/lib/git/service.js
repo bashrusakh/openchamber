@@ -9,6 +9,9 @@ import { createRequire } from 'module';
 
 import { getGitExecutionEnv } from './execution-scope.js';
 import { killProcessTree, withProcessTreeOwnership } from './process-tree.js';
+import { unsupportedRepositoryRootReason } from './repository-root.js';
+
+export { unsupportedRepositoryRootReason } from './repository-root.js';
 
 const fsp = fs.promises;
 const require = createRequire(import.meta.url);
@@ -2214,22 +2217,6 @@ const applyUpstreamConfiguration = async (args) => {
   );
 };
 
-/**
- * A repository whose root is the user's home directory or a filesystem root
- * (`C:\`, `/`) covers the whole disk. Every status read walks Program Files
- * or the entire home tree, which is minutes of Git work per refresh and, on
- * Windows, the process pile-ups users report. Such a repository is nearly
- * always an accidental `git init` in the wrong place, so OpenChamber treats
- * it as no repository at all. Returns the reason or null for a normal root.
- */
-export const unsupportedRepositoryRootReason = (repoRoot, home = os.homedir()) => {
-  if (typeof repoRoot !== 'string' || !repoRoot.trim()) return null;
-  const resolved = path.resolve(repoRoot.trim());
-  if (path.resolve(path.parse(resolved).root) === resolved) return 'filesystem-root';
-  if (typeof home === 'string' && home.trim() && path.resolve(home.trim()) === resolved) return 'home';
-  return null;
-};
-
 const warnedUnsupportedRoots = new Set();
 
 export async function isGitRepository(directory, { signal = undefined } = {}) {
@@ -2414,13 +2401,16 @@ const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
       if (settled) return;
       settled = true;
       if (stallTimer) clearTimeout(stallTimer);
-      void Promise.resolve(termination).then(() => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve({ paths, truncated });
-      });
+      void Promise.resolve(termination).then(
+        () => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve({ paths, truncated });
+        },
+        (terminationFailure) => reject(terminationFailure),
+      );
     };
     // A listing that goes silent is killed rather than left holding the
     // status read (and its limiter slot) open.
