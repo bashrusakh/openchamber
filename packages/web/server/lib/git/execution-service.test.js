@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { createGitExecutionService } from './execution-service.js';
 import {
@@ -64,7 +65,10 @@ describe('Git execution service', () => {
   it('applies optional-lock suppression only inside coordinated read execution', async () => {
     const observations = [];
     const directory = process.cwd();
-    const repositoryRoot = path.resolve(directory, '../..');
+    const repositoryRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../../../../..',
+    );
     let service;
     const raw = {
       createGit: async (cwd, options) => {
@@ -104,11 +108,6 @@ describe('Git execution service', () => {
         type: 'read',
         env: { GIT_OPTIONAL_LOCKS: '0' },
         active: 1,
-      },
-      {
-        type: 'discovery',
-        cwd: directory,
-        env: { GIT_OPTIONAL_LOCKS: '0' },
       },
       {
         type: 'write',

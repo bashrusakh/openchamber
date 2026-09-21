@@ -12,7 +12,7 @@ const noisyGit = `
   const fs = require('node:fs');
   const chunk = Buffer.alloc(65536, 'x');
   for (let i = 0; i < 32; i++) fs.writeSync(2, chunk);
-  fs.writeSync(1, 'ignored.txt\\n');
+  fs.writeSync(1, 'ignored.txt\\0');
 `;
 
 describe('filesystem Git process ownership', () => {
