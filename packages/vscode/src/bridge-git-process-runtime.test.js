@@ -157,6 +157,8 @@ describe('VS Code Git process runtime executable selection', () => {
       await expect(pending).resolves.toMatchObject({
         exitCode: 1,
         stderr: expect.stringMatching(/Failed to terminate.*descendant termination was not confirmed/),
+        cleanupBlocked: true,
+        descendantsTerminated: false,
       });
       expect(childProcess.kill).toHaveBeenCalledWith('SIGKILL');
     } finally {
@@ -189,6 +191,8 @@ describe('VS Code Git process runtime executable selection', () => {
       await expect(pending).resolves.toMatchObject({
         exitCode: 1,
         stderr: expect.stringMatching(/Failed to terminate.*descendant termination was not confirmed/),
+        cleanupBlocked: true,
+        descendantsTerminated: false,
       });
       expect(childProcess.kill).toHaveBeenCalledWith('SIGKILL');
     } finally {
@@ -222,10 +226,13 @@ describe('VS Code Git process runtime executable selection', () => {
       expect(result).toMatchObject({
         exitCode: 1,
         stderr: expect.stringMatching(/Failed to terminate.*descendant termination was not confirmed/),
+        cleanupBlocked: true,
+        descendantsTerminated: false,
       });
       expect(childProcess.kill).toHaveBeenCalledTimes(1);
     } finally {
       Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
     }
   });
+
 });

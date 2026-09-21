@@ -4,15 +4,21 @@ type ProcessExit = { code: number | null; signal: NodeJS.Signals | null; error: 
 const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000;
 const WINDOWS_TERMINATION_TIMEOUT_MS = 1_000;
 
-const terminationFailure = (pid: number, cause: unknown, rootError: Error | null, rootClosed: boolean) => Object.assign(
+const terminationFailure = (
+  pid: number,
+  cause: unknown,
+  rootError: Error | null,
+  rootClosed: boolean,
+  message = `Failed to terminate the Windows process tree for PID ${pid}; descendant termination was not confirmed`,
+) => Object.assign(
   new Error(
-    `Failed to terminate the Windows process tree for PID ${pid}; `
-    + 'descendant termination was not confirmed',
+    message,
   ),
   {
     code: 'ERR_PROCESS_TREE_TERMINATION',
     pid,
     descendantsTerminated: false,
+    cleanupBlocked: true,
     rootClosed,
     cause,
     rootError: rootError || undefined,
@@ -111,7 +117,15 @@ export function spawnOwnedProcess(binary: string, args: string[], options: Pick<
         // A parent can exit while a tool ignores SIGTERM or holds its pipes.
         signalGroup('SIGKILL');
       }
-      if (!await waitForClose(WINDOWS_TERMINATION_TIMEOUT_MS)) throw new Error('Owned process did not close after termination');
+      if (!await waitForClose(WINDOWS_TERMINATION_TIMEOUT_MS)) {
+        throw terminationFailure(
+          child.pid,
+          new Error('Owned process did not close after termination'),
+          null,
+          false,
+          `Failed to terminate owned process PID ${child.pid}; process close was not confirmed`,
+        );
+      }
     })();
     void termination.catch((error) => {
       reportTerminationFailure(error instanceof Error ? error : new Error(String(error)));

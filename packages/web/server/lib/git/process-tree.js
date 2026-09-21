@@ -209,6 +209,7 @@ export const execFileProcessTree = ({
   windowsHide = true,
   timeout = 0,
   maxBuffer = Infinity,
+  idleTimeout = 0,
   signal,
   spawn = nodeSpawn,
   platform = process.platform,
@@ -235,9 +236,11 @@ export const execFileProcessTree = ({
   let termination;
   let terminationError;
   let timer;
+  let idleTimer;
 
   const cleanup = () => {
     if (timer) clearTimeout(timer);
+    if (idleTimer) clearTimeout(idleTimer);
     signal?.removeEventListener('abort', onAbort);
   };
   const withTerminationFailure = (error, failure) => {
@@ -283,6 +286,12 @@ export const execFileProcessTree = ({
   };
   const append = (stream, chunk) => {
     const text = chunk.toString();
+    if (idleTimeout > 0) {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => requestTermination(
+        Object.assign(new Error(`Command produced no output for ${idleTimeout}ms`), { code: 'ETIMEDOUT' }),
+      ), idleTimeout);
+    }
     if (stream === 'stdout') {
       stdoutBytes += Buffer.byteLength(text);
       if (stdoutBytes > maxBuffer) {
@@ -331,4 +340,9 @@ export const execFileProcessTree = ({
     return;
   }
   signal?.addEventListener('abort', onAbort, { once: true });
+  if (idleTimeout > 0) {
+    idleTimer = setTimeout(() => requestTermination(
+      Object.assign(new Error(`Command produced no output for ${idleTimeout}ms`), { code: 'ETIMEDOUT' }),
+    ), idleTimeout);
+  }
 });

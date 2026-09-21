@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -8,6 +9,46 @@ import {
 } from './process-tree.js';
 
 describe('Git process-tree ownership', () => {
+  it.each(['status', 'diff'])('terminates a hanging %s read and its descendant on idle timeout', async (operation) => {
+    if (process.platform === 'win32') return;
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+      'process.stdout.write(String(child.pid));',
+      'setInterval(() => {}, 1000);',
+    ].join('');
+    let failure;
+    try {
+      await execFileProcessTree({
+        command: process.execPath,
+        args: ['-e', script, operation],
+        idleTimeout: 20,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ code: 'ETIMEDOUT' });
+    const descendantPid = Number(String(failure?.stdout || '').trim());
+    expect(Number.isInteger(descendantPid)).toBe(true);
+    const descendantIsAlive = () => {
+      try {
+        process.kill(descendantPid, 0);
+        if (process.platform === 'linux') {
+          const stat = readFileSync(`/proc/${descendantPid}/stat`, 'utf8');
+          const state = stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
+          return state !== 'Z';
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    for (let attempt = 0; attempt < 200 && descendantIsAlive(); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(descendantIsAlive()).toBe(false);
+  });
+
   it('waits for Windows taskkill and the owned root to close', async () => {
     const child = new EventEmitter();
     child.pid = 1234;

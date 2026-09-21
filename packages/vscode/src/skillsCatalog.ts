@@ -5,7 +5,10 @@ import path from 'path';
 import yaml from 'yaml';
 
 import { discoverSkills } from './opencodeConfig';
-import type { GitProcessExecutionOptions } from './bridge-git-process-runtime';
+import type {
+  GitProcessExecutionOptions,
+  GitProcessExecutionResult,
+} from './bridge-git-process-runtime';
 import { runWithGitExecutionScope } from './git-execution-scope';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -55,17 +58,26 @@ type SkillsRepoError =
   | { kind: 'authRequired'; message: string; sshOnly: boolean }
   | { kind: 'invalidSource'; message: string }
   | { kind: 'gitUnavailable'; message: string }
-  | { kind: 'networkError'; message: string }
+  | ({ kind: 'networkError'; message: string } & ProcessTerminationMetadata)
   | { kind: 'unknown'; message: string }
   | { kind: 'conflicts'; message: string; conflicts: Array<{ skillName: string; scope: SkillScope; source?: SkillInstallSource }> };
 
 type SkillsRepoScanResult =
   | { ok: true; items: SkillsCatalogItem[] }
-  | { ok: false; error: SkillsRepoError };
+  | ({ ok: false; error: SkillsRepoError } & ProcessTerminationMetadata);
 
 type SkillsInstallResult =
   | { ok: true; installed: Array<{ skillName: string; scope: SkillScope; source?: SkillInstallSource }>; skipped: Array<{ skillName: string; reason: string }> }
-  | { ok: false; error: SkillsRepoError };
+  | ({ ok: false; error: SkillsRepoError } & ProcessTerminationMetadata);
+
+type ProcessTerminationMetadata = {
+  cleanupBlocked?: boolean;
+  descendantsTerminated?: boolean;
+  rootClosed?: boolean;
+  pid?: number;
+};
+
+type GitProcessResult = GitProcessExecutionResult;
 
 const CURATED_SOURCES: CuratedSource[] = [
   {
@@ -116,7 +128,7 @@ type GitProcessRunner = (
   args: string[],
   cwd: string,
   options?: GitProcessExecutionOptions,
-) => Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }>;
+) => Promise<GitProcessResult>;
 
 type GitCloneLease = {
   releaseNetwork: () => void;
@@ -175,17 +187,66 @@ async function runGit(
       stdout: result.stdout || '',
       stderr: result.stderr || '',
       message: result.stderr || result.code || 'Git command failed',
+      ...terminationMetadata(result),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return {
+    const result = {
       ok: false as const,
       stdout: '',
       stderr: message,
       message: message || 'Git command failed',
     };
+    if (error instanceof Error) Object.assign(result, terminationMetadata(error));
+    return result;
   }
 }
+
+function terminationMetadata(value: Error | ProcessTerminationMetadata): ProcessTerminationMetadata {
+  const metadata: ProcessTerminationMetadata = {};
+  if ('cleanupBlocked' in value && value.cleanupBlocked === true) metadata.cleanupBlocked = true;
+  if ('descendantsTerminated' in value && value.descendantsTerminated === false) {
+    metadata.descendantsTerminated = false;
+  }
+  if ('rootClosed' in value && (value.rootClosed === true || value.rootClosed === false)) {
+    metadata.rootClosed = value.rootClosed;
+  }
+  if ('pid' in value && Number.isInteger(value.pid)) metadata.pid = value.pid;
+  return metadata;
+}
+
+type ProcessCleanupCandidate = {
+  ok?: boolean;
+  message?: string;
+  cleanupBlocked?: boolean;
+  descendantsTerminated?: boolean;
+  rootClosed?: boolean;
+  pid?: number;
+  error?: { kind?: string; message?: string; cleanupBlocked?: boolean; descendantsTerminated?: boolean };
+};
+
+function isProcessCleanupBlocked(value: ProcessCleanupCandidate | undefined): boolean {
+  const topLevel = value && 'cleanupBlocked' in value && value.cleanupBlocked === true;
+  const nested = value && 'error' in value && value.error?.cleanupBlocked === true;
+  return Boolean(topLevel || nested);
+}
+
+function processCleanupBlockedResult(result: ProcessCleanupCandidate): ({ ok: false; error: SkillsRepoError } & ProcessTerminationMetadata) {
+  const metadata = { cleanupBlocked: true as const, ...terminationMetadata(result) };
+  return {
+    ok: false as const,
+    error: {
+      kind: 'networkError' as const,
+      message: result.message || 'Git process cleanup was not confirmed; temporary clone retained',
+      ...metadata,
+    },
+    ...metadata,
+  };
+}
+
+type CloneRepoResult =
+  | { ok: true }
+  | ({ ok: false; error: SkillsRepoError } & ProcessTerminationMetadata);
 
 async function assertGitAvailable(
   resolveGitExecutable: GitExecutableResolver,
@@ -301,7 +362,7 @@ async function cloneRepo(
   resolveGitExecutable: GitExecutableResolver,
   executeGit: GitProcessRunner,
   signal?: AbortSignal,
-) {
+): Promise<CloneRepoResult> {
   const preferred = ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', cloneUrl, targetDir];
   const fallback = ['clone', '--depth', '1', '--no-checkout', cloneUrl, targetDir];
 
@@ -313,6 +374,10 @@ async function cloneRepo(
   );
   if (result.ok) {
     return { ok: true as const };
+  }
+
+  if (isProcessCleanupBlocked(result)) {
+    return processCleanupBlockedResult(result);
   }
 
   // A cancelled operation must not start the compatibility clone after its
@@ -332,6 +397,9 @@ async function cloneRepo(
     executeGit,
   );
   if (fallbackResult.ok) return { ok: true as const };
+  if (isProcessCleanupBlocked(fallbackResult)) {
+    return processCleanupBlockedResult(fallbackResult);
+  }
 
   const combined = `${fallbackResult.stderr}\n${fallbackResult.message}`.trim();
   if (looksLikeAuthError(combined)) {
@@ -376,7 +444,9 @@ export async function scanSkillsRepository(
   };
   const tempBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openchamber-vscode-skills-scan-'));
   let cleaned = false;
+  let cleanupBlocked = false;
   const cleanup = async () => {
+    if (cleanupBlocked) return;
     if (cleaned) return;
     cleaned = true;
     await safeRm(tempBase);
@@ -394,6 +464,10 @@ export async function scanSkillsRepository(
         try {
           const gitCheck = await assertGitAvailable(resolveGitExecutable, executeGit, options.signal);
           if (!gitCheck.ok) {
+            if (isProcessCleanupBlocked(gitCheck)) {
+              cleanupBlocked = true;
+              return processCleanupBlockedResult(gitCheck);
+            }
             return { ok: false as const, error: gitCheck.error };
           }
 
@@ -405,6 +479,10 @@ export async function scanSkillsRepository(
             options.signal,
           );
           if (!cloned.ok) {
+            if (cloned.cleanupBlocked) {
+              cleanupBlocked = true;
+              return processCleanupBlockedResult(cloned.error);
+            }
             return { ok: false as const, error: cloned.error };
           }
 
@@ -417,12 +495,28 @@ export async function scanSkillsRepository(
           let skillMdPaths: string[] | null = null;
 
           const sparseInit = await runGitCommand(['-C', tempBase, 'sparse-checkout', 'init', '--no-cone'], { timeoutMs: 15_000 });
+          if (isProcessCleanupBlocked(sparseInit)) {
+            cleanupBlocked = true;
+            return processCleanupBlockedResult(sparseInit);
+          }
           if (sparseInit.ok) {
             const sparseSet = await runGitCommand(['-C', tempBase, 'sparse-checkout', 'set', ...patterns], { timeoutMs: 30_000 });
+            if (isProcessCleanupBlocked(sparseSet)) {
+              cleanupBlocked = true;
+              return processCleanupBlockedResult(sparseSet);
+            }
             if (sparseSet.ok) {
               const checkout = await runGitCommand(['-C', tempBase, 'checkout', '--force', 'HEAD'], { timeoutMs: 60_000 });
+              if (isProcessCleanupBlocked(checkout)) {
+                cleanupBlocked = true;
+                return processCleanupBlockedResult(checkout);
+              }
               if (checkout.ok) {
                 const lsFiles = await runGitCommand(['-C', tempBase, 'ls-files'], { timeoutMs: 15_000, readOnly: true });
+                if (isProcessCleanupBlocked(lsFiles)) {
+                  cleanupBlocked = true;
+                  return processCleanupBlockedResult(lsFiles);
+                }
                 if (lsFiles.ok) {
                   skillMdPaths = lsFiles.stdout
                     .split(/\r?\n/)
@@ -442,6 +536,10 @@ export async function scanSkillsRepository(
 
             const list = await runGitCommand(listArgs, { timeoutMs: 30_000, readOnly: true });
             if (!list.ok) {
+              if (isProcessCleanupBlocked(list)) {
+                cleanupBlocked = true;
+                return processCleanupBlockedResult(list);
+              }
               return { ok: false as const, error: { kind: 'networkError' as const, message: list.stderr || list.message || 'Failed to list repository files' } };
             }
 
@@ -474,6 +572,10 @@ export async function scanSkillsRepository(
                 ['-C', tempBase, 'show', `HEAD:${skillMdPath}`],
                 { timeoutMs: 15_000, readOnly: true },
               );
+              if (isProcessCleanupBlocked(show)) {
+                cleanupBlocked = true;
+                return processCleanupBlockedResult(show);
+              }
               if (!show.ok) {
                 warnings.push('Failed to read SKILL.md');
               } else {
@@ -646,7 +748,9 @@ export async function installSkillsFromRepository(options: {
 
   const tempBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openchamber-vscode-skills-install-'));
   let cleaned = false;
+  let cleanupBlocked = false;
   const cleanup = async () => {
+    if (cleanupBlocked) return;
     if (cleaned) return;
     cleaned = true;
     await safeRm(tempBase);
@@ -664,6 +768,10 @@ export async function installSkillsFromRepository(options: {
         try {
           const gitCheck = await assertGitAvailable(resolveGitExecutable, executeGit, options.signal);
           if (!gitCheck.ok) {
+            if (isProcessCleanupBlocked(gitCheck)) {
+              cleanupBlocked = true;
+              return processCleanupBlockedResult(gitCheck);
+            }
             return { ok: false as const, error: gitCheck.error };
           }
 
@@ -675,16 +783,32 @@ export async function installSkillsFromRepository(options: {
             options.signal,
           );
           if (!cloned.ok) {
+            if (cloned.cleanupBlocked) {
+              cleanupBlocked = true;
+              return processCleanupBlockedResult(cloned.error);
+            }
             return { ok: false as const, error: cloned.error };
           }
 
-          await runGitCommand(['-C', tempBase, 'sparse-checkout', 'init', '--cone'], { timeoutMs: 15_000 });
+          const sparseInit = await runGitCommand(['-C', tempBase, 'sparse-checkout', 'init', '--cone'], { timeoutMs: 15_000 });
+          if (isProcessCleanupBlocked(sparseInit)) {
+            cleanupBlocked = true;
+            return processCleanupBlockedResult(sparseInit);
+          }
           const setResult = await runGitCommand(['-C', tempBase, 'sparse-checkout', 'set', ...requestedDirs], { timeoutMs: 30_000 });
+          if (isProcessCleanupBlocked(setResult)) {
+            cleanupBlocked = true;
+            return processCleanupBlockedResult(setResult);
+          }
           if (!setResult.ok) {
             return { ok: false as const, error: { kind: 'unknown' as const, message: setResult.stderr || setResult.message || 'Failed to configure sparse checkout' } };
           }
 
           const checkoutResult = await runGitCommand(['-C', tempBase, 'checkout', '--force', 'HEAD'], { timeoutMs: 60_000 });
+          if (isProcessCleanupBlocked(checkoutResult)) {
+            cleanupBlocked = true;
+            return processCleanupBlockedResult(checkoutResult);
+          }
           if (!checkoutResult.ok) {
             return { ok: false as const, error: { kind: 'unknown' as const, message: checkoutResult.stderr || checkoutResult.message || 'Failed to checkout repository' } };
           }
