@@ -7,6 +7,7 @@ import { expect } from 'vitest';
 
 import { LABEL_MARKER, LABEL_OWNER, ROLE_SPACE, spaceResourceName } from '../labels.js';
 import { runCommand } from '../run-command.js';
+import { createRegistryToolsSource, readHostToolVersions } from '../tools.js';
 import { SPACE_BASE_IMAGE, createDockerPlace } from './docker.js';
 
 export const LIVE_DOCKER_ENABLED = process.env.OPENCHAMBER_TEST_DOCKER === '1';
@@ -24,10 +25,15 @@ const addresses = [...new Set(local)].filter((address) => !address.startsWith('1
 require('node:net').createServer((socket) => { socket.on('error', () => {}); socket.end('host'); }).listen(${port}, '0.0.0.0', () => console.log(JSON.stringify(addresses)));
 `;
 
-/** A Docker place with an owner id of its own, so parallel runs and real spaces stay apart. */
-export function createLiveDockerPlace() {
+/**
+ * A Docker place with an owner id of its own, so parallel runs and real spaces stay apart.
+ * The owner also gets a tools volume of its own, so the first create of every live file pays for one fill.
+ * `placeWith(toolsSource)` makes another place for the same owner, as a host with other tools would be.
+ */
+export function createLiveDockerPlace({ toolsSource = createRegistryToolsSource(readHostToolVersions()) } = {}) {
   const owner = `test-${crypto.randomBytes(6).toString('hex')}`;
-  const place = createDockerPlace({ runCommand, dockerPath: 'docker', owner });
+  const placeWith = (source) => createDockerPlace({ runCommand, dockerPath: 'docker', owner, toolsSource: source });
+  const place = placeWith(toolsSource);
   const ownerFilter = ['--filter', `label=${LABEL_MARKER}`, '--filter', `label=${LABEL_OWNER}=${owner}`];
   // Helper containers carry the marker and the owner, so the leftover check sees them. They have no space id.
   const helperLabels = ['--label', `${LABEL_MARKER}=true`, '--label', `${LABEL_OWNER}=${owner}`];
@@ -79,13 +85,19 @@ export function createLiveDockerPlace() {
       };
     },
 
+    // Everything the place's own records show about the space container. A secret must not be in here.
+    spaceMetadata: async (spaceId) => (await docker(['inspect', spaceResourceName(spaceId, ROLE_SPACE)])).stdout,
+
+    /** The names of this owner's volumes. */
+    volumes: async () => (await docker([...LISTINGS[2], ...ownerFilter])).stdout.split('\n').filter(Boolean),
+
     logBytes: async (spaceId) => {
       const result = await docker(['logs', spaceResourceName(spaceId, ROLE_SPACE)], { maxOutputBytes: 128 * 1024 * 1024, timeoutMs: 120_000 });
       return Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr);
     },
   };
 
-  /** Removes every space and helper of this run, then asserts that Docker holds nothing with this owner label. */
+  /** Removes every space, helper and tools volume of this run, then asserts that Docker holds nothing with this owner label. */
   const dispose = async () => {
     for (const space of await place.list()) {
       await place.remove(space.id);
@@ -96,8 +108,12 @@ export function createLiveDockerPlace() {
     for (const network of (await docker([...LISTINGS[1], ...ownerFilter])).stdout.split('\n').filter(Boolean)) {
       await docker(['network', 'rm', network]);
     }
+    // What is left now are the tools volumes. No space mounts them any more.
+    for (const volume of await host.volumes()) {
+      await docker(['volume', 'rm', volume]);
+    }
     expect(await leftovers()).toEqual([]);
   };
 
-  return { place, dispose, host };
+  return { place, placeWith, dispose, host, owner };
 }

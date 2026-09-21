@@ -1,13 +1,20 @@
 import { SpaceError } from './errors.js';
-import { ROLE_NETWORK, parseSpaceLabels, requireSpaceId, spaceResourceName, spaceResourcePrefix } from './labels.js';
+import { ROLE_NETWORK, ROLE_TOOLS, parseSpaceLabels, parseToolsLabels, spaceResourceName, spaceResourcePrefix, toolsKeyFromVolumeName } from './labels.js';
+import { IMAGE_CAT, IMAGE_CHOWN, IMAGE_NODE, IMAGE_SH, SPACE_ENVIRONMENT, SPACE_HOME, SPACE_SERVER_COMMAND, SPACE_USER, TOOLS_MARKER_PATH, TOOLS_MOUNT_PATH, spaceWorkPath } from './layout.js';
+import { FILLER_PROGRAM } from './tools-filler.js';
+import { TOOLS_STAGING_PATH } from './tools.js';
 
-export const SPACE_USER = '1000:1000';
-const SPACE_HOME = '/home/space';
 const SPACE_PIDS_LIMIT = 512;
 const SPACE_SHM_BYTES = 64 * 1024 * 1024;
 const TMPFS_OPTIONS = 'rw,exec,nosuid,size=256m';
 const MIN_MEMORY_BYTES = 64 * 1024 * 1024;
 const SETUP_MEMORY_BYTES = 128 * 1024 * 1024;
+// The filler keeps the npm cache and the tarballs in its tmpfs, and a tmpfs counts as memory.
+// Measured: the cache of one fill is 444 MB.
+const FILLER_MEMORY_BYTES = 2 * 1024 * 1024 * 1024;
+const FILLER_TMPFS_OPTIONS = 'rw,exec,nosuid,size=1g';
+// Variables that would put a secret where `docker inspect` shows it.
+const FORBIDDEN_ENVIRONMENT = ['OPENCHAMBER_UI_PASSWORD', 'OPENCODE_AUTH_CONTENT'];
 
 // Container output lands in a file on the Docker host. One 10 MB file, no rotation copies.
 // The `local` driver refuses max-file=1 unless compression is off.
@@ -26,9 +33,8 @@ const NO_NEW_PRIVILEGES = ['no-new-privileges', 'no-new-privileges:true'];
 const PRIVATE_NAMESPACE_MODES = ['', 'private'];
 const NAMESPACE_FIELDS = ['PidMode', 'IpcMode', 'UTSMode', 'UsernsMode', 'CgroupnsMode'];
 
-const spaceWorkPath = (spaceId) => `/spaces/${requireSpaceId(spaceId)}`;
-
 const volumeMount = (volume, destination) => ['--mount', `type=volume,src=${volume},dst=${destination}`];
+const readOnlyVolumeMount = (volume, destination) => ['--mount', `type=volume,src=${volume},dst=${destination},readonly`];
 
 // Equal values mean swap adds nothing on top of the limit.
 const memoryArgs = (bytes) => ['--memory', String(bytes), '--memory-swap', String(bytes)];
@@ -57,7 +63,7 @@ export function buildSpaceNetworkArgs({ network, labelArguments }) {
  * The full `docker create` argv for a space container. Every restriction here has
  * a matching check in findHardeningViolations.
  */
-export function buildSpaceCreateArgs({ spaceId, containerName, labelArguments, network, workVolume, homeVolume, memoryBytes, image, command }) {
+export function buildSpaceCreateArgs({ spaceId, containerName, labelArguments, network, workVolume, homeVolume, toolsVolume, memoryBytes, image }) {
   return [
     'create',
     '--name', containerName,
@@ -78,9 +84,10 @@ export function buildSpaceCreateArgs({ spaceId, containerName, labelArguments, n
     '--network', network,
     ...volumeMount(workVolume, spaceWorkPath(spaceId)),
     ...volumeMount(homeVolume, SPACE_HOME),
-    '--env', `HOME=${SPACE_HOME}`,
+    ...readOnlyVolumeMount(toolsVolume, TOOLS_MOUNT_PATH),
+    ...Object.entries(SPACE_ENVIRONMENT).flatMap(([name, value]) => ['--env', `${name}=${value}`]),
     image,
-    ...command,
+    ...SPACE_SERVER_COMMAND,
   ];
 }
 
@@ -106,7 +113,69 @@ export function buildVolumeOwnershipRunArgs({ spaceId, containerName, labelArgum
     ...volumeMount(workVolume, spaceWorkPath(spaceId)),
     ...volumeMount(homeVolume, SPACE_HOME),
     image,
-    'chown', SPACE_USER, spaceWorkPath(spaceId), SPACE_HOME,
+    IMAGE_CHOWN, SPACE_USER, spaceWorkPath(spaceId), SPACE_HOME,
+  ];
+}
+
+/**
+ * The argv for the one-shot container that fills a fresh tools volume. It is the one container
+ * here with a way out: the default bridge, to reach the npm registry. Otherwise it is
+ * hardened like a space. It runs as root with every capability dropped: root owns the
+ * fresh volume, so npm needs none, and what it writes is readable by the space user.
+ * The program is fixed, and its input arrives on stdin.
+ */
+export function buildToolsFillRunArgs({ containerName, labelArguments, toolsVolume, image }) {
+  return [
+    'run', '--rm', '--interactive',
+    '--name', containerName,
+    ...labelArguments,
+    '--init',
+    '--user', '0:0',
+    '--network', 'bridge',
+    '--cap-drop', 'ALL',
+    '--security-opt', 'no-new-privileges',
+    '--read-only',
+    '--tmpfs', `/tmp:${FILLER_TMPFS_OPTIONS}`,
+    '--pids-limit', String(SPACE_PIDS_LIMIT),
+    '--ipc', 'private',
+    '--cgroupns', 'private',
+    ...memoryArgs(FILLER_MEMORY_BYTES),
+    ...LOG_ARGS,
+    ...volumeMount(toolsVolume, TOOLS_MOUNT_PATH),
+    // npm keeps its logs under HOME, and the root filesystem is read-only.
+    '--env', 'HOME=/tmp',
+    image,
+    IMAGE_NODE, '-e', FILLER_PROGRAM, TOOLS_MOUNT_PATH, TOOLS_STAGING_PATH,
+  ];
+}
+
+// Exit code of the marker check for "there is no marker". It is a code of its own, because
+// the docker CLI exits with 1 when it cannot reach the daemon, and `cat` exits with 1 for a missing file.
+// Mixing the two up would remove a filled volume.
+export const TOOLS_MARKER_MISSING_EXIT_CODE = 42;
+const MARKER_CHECK_SCRIPT = `[ -f "$1" ] || exit ${TOOLS_MARKER_MISSING_EXIT_CODE}; ${IMAGE_CAT} "$1"`;
+
+/**
+ * The argv for the one-shot container that prints the fill marker of a tools volume.
+ * It runs as the space user, so a marker it can read is a volume a space can read.
+ */
+export function buildToolsCheckRunArgs({ containerName, labelArguments, toolsVolume, image }) {
+  return [
+    'run', '--rm',
+    '--name', containerName,
+    ...labelArguments,
+    '--user', SPACE_USER,
+    '--network', 'none',
+    '--cap-drop', 'ALL',
+    '--security-opt', 'no-new-privileges',
+    '--read-only',
+    '--ipc', 'private',
+    '--cgroupns', 'private',
+    ...memoryArgs(SETUP_MEMORY_BYTES),
+    ...LOG_ARGS,
+    ...readOnlyVolumeMount(toolsVolume, TOOLS_MOUNT_PATH),
+    image,
+    IMAGE_SH, '-c', MARKER_CHECK_SCRIPT, 'sh', TOOLS_MARKER_PATH,
   ];
 }
 
@@ -117,10 +186,12 @@ const mentionsRuntimeSocket = (text) => String(text ?? '').includes('docker.sock
  * network with the requested hardening. Returns one `{ check, message }` per
  * difference. An empty list means the space is verified.
  *
+ * `toolsVolume` is the inspect entry of the volume mounted at the tools path, or null.
+ *
  * Docker fills every field read here at `docker create`, so this runs before the
  * container starts.
  */
-export function findHardeningViolations({ spaceId, owner, container, network }) {
+export function findHardeningViolations({ spaceId, owner, container, network, toolsVolume }) {
   const violations = [];
   const violate = (check, message) => violations.push({ check, message });
 
@@ -130,6 +201,8 @@ export function findHardeningViolations({ spaceId, owner, container, network }) 
   const prefix = spaceResourcePrefix(spaceId);
   const networkName = spaceResourceName(spaceId, ROLE_NETWORK);
 
+  const secretVariables = (config.Env ?? []).map((entry) => String(entry).split('=')[0]).filter((name) => FORBIDDEN_ENVIRONMENT.includes(name));
+  if (secretVariables.length > 0) violate('environment', `The container environment holds a secret: ${secretVariables.join(', ')}`);
   if (config.User !== SPACE_USER) violate('user', `Runs as '${config.User ?? ''}', expected ${SPACE_USER}`);
   if (host.ReadonlyRootfs !== true) violate('read_only', 'The root filesystem is writable');
   if (host.Privileged !== false) violate('privileged', 'The container is privileged');
@@ -162,9 +235,27 @@ export function findHardeningViolations({ spaceId, owner, container, network }) 
 
   if ((host.Binds ?? []).length > 0) violate('binds', `Host paths are mounted: ${host.Binds.join(', ')}`);
   if ((host.VolumesFrom ?? []).length > 0) violate('volumes_from', 'Volumes of another container are attached');
-  for (const mount of mounts) {
+  // The one exception to "only volumes of this space" is the mount at the tools path, and it has rules of its own.
+  // A tools volume mounted anywhere else gets no exception.
+  for (const mount of mounts.filter((candidate) => candidate.Destination !== TOOLS_MOUNT_PATH)) {
     if (mount.Type !== 'volume' || !String(mount.Name ?? '').startsWith(prefix)) {
       violate('mounts', `Mount at ${mount.Destination} is not a volume of this space`);
+    }
+  }
+  const toolsMounts = mounts.filter((candidate) => candidate.Destination === TOOLS_MOUNT_PATH);
+  if (toolsMounts.length !== 1) {
+    violate('tools_mount', `Expected one tools volume at ${TOOLS_MOUNT_PATH}, found ${toolsMounts.length}`);
+  } else {
+    const [mount] = toolsMounts;
+    const key = toolsKeyFromVolumeName(mount.Name, owner);
+    if (mount.Type !== 'volume' || key === null) {
+      violate('tools_mount', `Mount at ${TOOLS_MOUNT_PATH} is not a tools volume of this installation`);
+    }
+    // The agent must never change the programs that the next space will run.
+    if (mount.RW !== false) violate('tools_read_only', 'The tools volume is writable from inside the space');
+    const toolsLabels = parseToolsLabels(toolsVolume?.Labels);
+    if (toolsVolume?.Name !== mount.Name || toolsLabels?.role !== ROLE_TOOLS || toolsLabels?.owner !== owner || toolsLabels?.key !== key) {
+      violate('tools_labels', 'The tools volume does not carry the tools labels of this installation');
     }
   }
   const socketMounted = mounts.some((mount) => mentionsRuntimeSocket(mount.Source) || mentionsRuntimeSocket(mount.Destination))

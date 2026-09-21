@@ -30,6 +30,9 @@ From inside a space, each attempt must fail:
 - Find the bait secret from the repository's ignored `.env`.
 - Reach the container runtime socket or gain privileges.
 - Write outside the permitted paths on the read-only filesystem.
+- Change, replace, or remount the tools volume that holds the programs the space runs.
+- Find the token of the server inside the space in container metadata.
+- Reach the server inside the space from the space's network.
 - Reach the gatekeeper's control channel or another space's gatekeeper.
 - Issue itself a grant, or forge a grant request through the server inside the space.
 - Make the host run something through apply: git hooks, tags, refs outside the quarantine namespace.

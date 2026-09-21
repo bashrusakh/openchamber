@@ -2614,6 +2614,16 @@ const resolveInitialUrl = async () => {
     ? hmrUiUrl
     : localUrl;
 
+  if (localUiUrl === hmrUiUrl) {
+    // The HMR dev script wipes Vite's dependency cache on every start, so the
+    // regenerated dependency chunks get new names under the same `?v=` hash.
+    // Vite serves those chunks as immutable and Chromium's disk cache survives
+    // app restarts, so a stale chunk set keeps answering 504 "Outdated
+    // Optimize Dep" and the splash never clears. Drop the cache before the
+    // first navigation so the renderer fetches the current chunk set.
+    await session.defaultSession.clearCache();
+  }
+
   state.sidecarUrl = localUrl;
   state.localUiUrl = localUiUrl;
   const localAvailable = Boolean(localUrl);

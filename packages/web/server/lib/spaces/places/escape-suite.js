@@ -7,6 +7,7 @@
 //                            and `candidates`: every IPv4 address of that host plus the names that may lead to it
 //   createPlainInternalNetwork()  resolves { run(script), remove } for an internal network WITHOUT the space's isolation
 //   logBytes(spaceId)        resolves how many bytes of space output the host keeps
+//   spaceMetadata(spaceId)   resolves, as text, everything the place's own records show about the space container
 
 import net from 'node:net';
 import os from 'node:os';
@@ -14,9 +15,13 @@ import os from 'node:os';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createSpaceId, hashProjectDirectory } from '../labels.js';
+import { SPACE_SERVER_PORT, TOOLS_BIN_PATH, TOOLS_MARKER_PATH, TOOLS_MOUNT_PATH } from '../layout.js';
+import { createSpaceServerChannel } from '../space-server.js';
 
 const CREATE_TIMEOUT_MS = 25 * 60_000;
-const MEMORY_BYTES = 256 * 1024 * 1024;
+// The server and OpenCode inside take about 370 MiB at rest. With 1 GiB the process that
+// allocates without end is by far the largest when the limit is hit, so it is the one that gets killed.
+const MEMORY_BYTES = 1024 * 1024 * 1024;
 const LOG_CAP_BYTES = 11 * 1024 * 1024;
 
 // Every probe prints one line, `connected:<ip>` or `failed:<reason>`, and exits 0 within ten seconds.
@@ -59,6 +64,11 @@ require('node:dns').promises.lookup('example.com', { family: 4 }).then(({ addres
   socket.on('error', (error) => done('failed:' + error.code));
 }, (error) => done('failed:' + error.code));
 `;
+
+// Prints one line per listening TCP socket, IPv4 and IPv6: `<local address in hex>:<port in hex>`.
+const LISTENERS = "cat /proc/net/tcp /proc/net/tcp6 | awk '$4 == \"0A\" { print $2 }'";
+// 127.0.0.0/8 in the kernel's byte order, or ::1. Docker's own DNS stub listens on 127.0.0.11.
+const LOOPBACK_LISTENER = /^([0-9A-F]{6}7F|00000000000000000000000001000000):[0-9A-F]{4}$/;
 
 const ALLOCATE_WITHOUT_END = 'const kept = []; for (;;) kept.push(Buffer.alloc(16 * 1024 * 1024, 1));';
 
@@ -233,6 +243,112 @@ export function runEscapeSuite(title, { enabled = true, setup }) {
       }
     });
 
+    describe('tools volume', () => {
+      const launcher = `${TOOLS_BIN_PATH}/openchamber`;
+      const fingerprint = async () => (await shell(`sha256sum ${TOOLS_MARKER_PATH} "$(readlink -f ${launcher})" && ls -la ${TOOLS_MOUNT_PATH} ${TOOLS_BIN_PATH}`)).stdout;
+
+      it('positive control: the tools are there, and the programs the space runs come from them', async () => {
+        const version = await inside(['openchamber', '--version']);
+        expect(version.code).toBe(0);
+        expect(version.stdout).toMatch(/^\d+\.\d+\.\d+/);
+        expect((await shell('command -v openchamber && command -v opencode')).stdout).toBe(`${launcher}\n${TOOLS_BIN_PATH}/opencode\n`);
+
+        // The server that runs right now was started from the mount, and so was its OpenCode.
+        const running = (await shell("for pid in /proc/[0-9]*; do tr '\\0' ' ' < $pid/cmdline; echo; done")).stdout;
+        expect(running).toMatch(new RegExp(`node ${launcher} serve --foreground`));
+        expect(running).toMatch(new RegExp(`${TOOLS_MOUNT_PATH}/node_modules/\\S*opencode\\S* serve`));
+      });
+
+      it('is mounted read-only', async () => {
+        const mounts = (await inside(['cat', '/proc/mounts'])).stdout.split('\n').filter((line) => line.split(' ')[1] === TOOLS_MOUNT_PATH);
+        expect(mounts).toHaveLength(1);
+        expect(mounts[0].split(' ')[3].split(',')).toContain('ro');
+      });
+
+      it.each([
+        ['write a new file', `touch ${TOOLS_MOUNT_PATH}/openchamber-escape-probe`],
+        ['write into node_modules', `touch ${TOOLS_BIN_PATH}/openchamber-escape-probe`],
+        ['overwrite the launcher', `echo 'echo escaped' > "$(readlink -f ${launcher})"`],
+        ['replace the launcher', `cp /bin/true /tmp/replacement && mv /tmp/replacement ${launcher}`],
+        ['replace the launcher with a link', `ln -sfn /bin/true ${launcher}`],
+        ['delete the launcher', `rm -f ${launcher}`],
+        ['delete the fill marker', `rm -f ${TOOLS_MARKER_PATH}`],
+        ['rename a directory', `mv ${TOOLS_MOUNT_PATH}/node_modules ${TOOLS_MOUNT_PATH}/node_modules-moved`],
+        ['change permissions', `chmod 777 ${TOOLS_MOUNT_PATH}`],
+        ['change permissions of the launcher', `chmod 777 "$(readlink -f ${launcher})"`],
+      ])('cannot %s', async (title, script) => {
+        const before = await fingerprint();
+        // Positive control: the fingerprint is real, so "unchanged" below means something.
+        expect(before).toMatch(/^[0-9a-f]{64}  /);
+
+        const result = await shell(script);
+        expect(result.code).not.toBe(0);
+        // Root owns these files, so "Permission denied" would also stop this user on a WRITABLE mount
+        // and would prove nothing about the mount. Only the kernel's answer for a read-only mount counts.
+        expect(result.stderr).toMatch(/Read-only file system/);
+        expect(result.stderr).not.toMatch(/Permission denied|Operation not permitted/);
+        expect(await fingerprint()).toBe(before);
+      });
+
+      // The one attempt that the read-only mount does not get to answer. To open an existing file
+      // without truncating it, the kernel checks the file's permissions first, and root owns the file.
+      // So this proves the ownership, not the mount. The attempts above prove the mount.
+      it('cannot append to the launcher', async () => {
+        const before = await fingerprint();
+        const result = await shell(`echo 'echo escaped' >> "$(readlink -f ${launcher})"`);
+        expect(result.code).not.toBe(0);
+        expect(result.stderr).toMatch(/Permission denied|Read-only file system/);
+        expect(await fingerprint()).toBe(before);
+      });
+
+      it('cannot remount it writable', async () => {
+        expect((await shell('command -v mount')).code).toBe(0);
+        const result = await inside(['mount', '-o', 'remount,rw', TOOLS_MOUNT_PATH]);
+        expect(result.code).not.toBe(0);
+        expect((await shell(`touch ${TOOLS_MOUNT_PATH}/openchamber-escape-probe`)).code).not.toBe(0);
+      });
+    });
+
+    it('keeps the server token out of everything the place records about the container', async () => {
+      const server = createSpaceServerChannel({ exec: place.exec });
+      const token = await server.readToken(spec.id);
+      // Positive control: this is the real token. The server inside accepts it and refuses another one.
+      expect(token.length).toBeGreaterThanOrEqual(32);
+      const login = (password) => server.request(spec.id, { method: 'POST', path: '/auth/session', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });
+      expect((await login(token)).status).toBe(200);
+      expect((await login(`${token}x`)).status).toBe(401);
+
+      const metadata = await host.spaceMetadata(spec.id);
+      // Positive control: the metadata is real and complete enough to show the environment.
+      expect(metadata).toContain('OPENCODE_DISABLE_AUTOUPDATE=1');
+      expect(metadata).not.toContain(token);
+      expect(metadata).not.toContain('OPENCODE_AUTH_CONTENT');
+    });
+
+    it('cannot steer the requests of the host through its own ~/.curlrc', async () => {
+      const server = createSpaceServerChannel({ exec: place.exec });
+      try {
+        await shell(`printf 'write-out = "INJECTED-BY-THE-AGENT"\\n' > "$HOME/.curlrc"`);
+        // Positive control: this curl does read the file, so an unprotected request would carry the text.
+        const unprotected = await shell(`curl --silent http://127.0.0.1:${SPACE_SERVER_PORT}/health`);
+        expect(unprotected.stdout).toContain('INJECTED-BY-THE-AGENT');
+
+        const answer = await server.request(spec.id, { path: '/health' });
+        expect(answer.status).toBe(200);
+        expect(answer.body).not.toContain('INJECTED-BY-THE-AGENT');
+        expect(JSON.parse(answer.body)).toMatchObject({ isOpenCodeReady: true });
+      } finally {
+        await shell('rm -f "$HOME/.curlrc"');
+      }
+    });
+
+    it('has no listener that faces the space network', async () => {
+      const listeners = (await shell(LISTENERS)).stdout.split('\n').filter(Boolean);
+      // Positive control: the server inside is among them, so the listing is real.
+      expect(listeners).toContain(`0100007F:${SPACE_SERVER_PORT.toString(16).toUpperCase().padStart(4, '0')}`);
+      expect(listeners.filter((listener) => !LOOPBACK_LISTENER.test(listener))).toEqual([]);
+    });
+
     it('cannot fill the disk of the host through its own output', async () => {
       // 50 MB to the stdout of PID 1, which is what the place keeps as the container log.
       const flood = await shell('head -c 52428800 /dev/zero | tr "\\0" x | fold -w 1000 > /proc/1/fd/1');
@@ -249,6 +365,9 @@ export function runEscapeSuite(title, { enabled = true, setup }) {
 
       expect(await inside(['echo', 'alive'])).toMatchObject({ code: 0, stdout: 'alive\n' });
       expect((await place.list()).find((space) => space.id === spec.id)).toMatchObject({ state: 'running' });
+      // "Nothing else" includes the server inside and its OpenCode.
+      const health = await createSpaceServerChannel({ exec: place.exec }).request(spec.id, { path: '/health' });
+      expect(JSON.parse(health.body)).toMatchObject({ isOpenCodeReady: true });
       expect(await place.check()).toMatchObject({ available: true });
     }, 120_000);
   });
