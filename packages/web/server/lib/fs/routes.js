@@ -1843,13 +1843,15 @@ export const registerFsRoutes = (app, dependencies) => {
               ignoredNames.forEach((name) => {
                 ignoredPaths.add(path.join(resolvedPath, name));
               });
-            } catch {
+            } catch (error) {
+              if (isProcessTreeCleanupBlocked(error)) throw error;
               // Gitignore is an optional filter; retain all entries on failure.
             } finally {
               requestAbort.cleanup();
             }
           }
-        } catch {
+        } catch (error) {
+          if (isProcessTreeCleanupBlocked(error)) throw error;
         }
       }
 

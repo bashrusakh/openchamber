@@ -1,4 +1,9 @@
 import { getGitExecutionEnv, runWithGitExecutionScope } from '../git/execution-scope.js';
+import {
+  copyGitProcessMetadata,
+  createGitProcessError,
+  isGitProcessCleanupBlocked,
+} from '../git/execution-errors.js';
 import { killProcessTree, withProcessTreeOwnership } from '../git/process-tree.js';
 
 const DEFAULT_TIMEOUT_MS = 2500;
@@ -19,6 +24,10 @@ const isExecutionFailure = (result) => {
 };
 
 const parseResult = (result, cwd) => {
+  if (isGitProcessCleanupBlocked(result)) {
+    throw createGitProcessError(result, `Gitignore cleanup was not confirmed for ${cwd}`);
+  }
+
   if (result?.aborted) {
     throw new Error(`Gitignore discovery timed out for ${cwd}`);
   }
@@ -73,7 +82,7 @@ const runCheckIgnore = ({ spawn, resolveGitBinaryForSpawn, cwd, names, signal, p
     signal?.removeEventListener('abort', onAbort);
     void Promise.resolve(termination).then(
       () => resolve(result),
-      (terminationFailure) => reject(terminationFailure),
+      (terminationFailure) => resolve(copyGitProcessMetadata({ ...result }, terminationFailure)),
     );
   };
 
@@ -88,13 +97,14 @@ const runCheckIgnore = ({ spawn, resolveGitBinaryForSpawn, cwd, names, signal, p
         exitCode: undefined,
         aborted: true,
       }));
-    } catch {
-      finish({
+    } catch (error) {
+      termination = Promise.reject(error);
+      void termination.catch(() => finish({
         stdout,
         stderr,
         exitCode: undefined,
         aborted: true,
-      });
+      }));
     }
   };
 

@@ -1,5 +1,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 
+export { isGitProcessCleanupBlocked as isProcessTreeCleanupBlocked } from './execution-errors.js';
+
 // A Git launcher can create descendants (Git for Windows is one example). Give
 // every long-lived Git child its own group so cancellation never signals the
 // server's unrelated work, then terminate that group/tree as one unit.
@@ -87,12 +89,6 @@ const processTreeTerminationError = (pid, cause, rootError, rootClosed) => Objec
     cause,
     rootError: rootError || undefined,
   },
-);
-
-export const isProcessTreeCleanupBlocked = (value) => (
-  value?.cleanupBlocked === true
-  || value?.error?.cleanupBlocked === true
-  || (value?.code === 'ERR_PROCESS_TREE_TERMINATION' && value?.descendantsTerminated === false)
 );
 
 const failWindowsTermination = async (child, pid, cause, timeoutMs, observation = observeChildClose(child)) => {

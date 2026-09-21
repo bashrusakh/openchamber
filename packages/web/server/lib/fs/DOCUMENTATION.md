@@ -35,7 +35,7 @@ Own filesystem API behavior for the web server runtime, including workspace-boun
 - `createFsSearchRuntime({ fsPromises, path, spawn, resolveGitBinaryForSpawn, gitExecutionService })` from `search.js`
   - Returns `{ searchFilesystemFiles(rootPath, options) }`.
   - Supports fuzzy matching, hidden-file handling, and optional `git check-ignore` filtering.
-  - Gitignore checks use the coordinated raw-read path when the execution service is provided; timeout and cancellation await shared process-tree termination before settling, while non-repository and Git failures retain the existing unfiltered search/list behavior.
+  - Gitignore checks use the coordinated raw-read path when the execution service is provided; timeout and cancellation await shared process-tree termination before settling. Non-repository and ordinary Git failures retain the existing unfiltered search/list behavior, but an unconfirmed process-tree cleanup rejects so the coordinator keeps the read lease.
 
 Both search and directory listing discard `git check-ignore` stderr at spawn.
 They consume stdout for ignore matches. Never create an unread stderr pipe:

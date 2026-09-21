@@ -10,9 +10,15 @@ import * as os from 'os';
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { execGit as executeGit } from './bridge-git-process-runtime';
+import { execGit as executeGit, type GitProcessExecutionResult } from './bridge-git-process-runtime';
 import { readSubmoduleState, resolveGitPathTarget, type GitPathUnavailable, type GitSubmoduleState } from './gitPathDiff';
 import type { API as GitAPI, Repository, GitExtension, Status } from './git.d';
+import {
+  copyGitProcessMetadata,
+  createGitProcessError,
+  isGitProcessCleanupBlocked,
+} from './git-execution-errors';
+import type { GitProcessTerminationMetadata } from './git-execution-errors';
 
 let gitApi: GitAPI | null = null;
 let gitExtensionEnabled = false;
@@ -328,7 +334,7 @@ async function execGit(
   args: string[],
   cwd: string,
   options: GitProcessExecutionOptions = {},
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+): Promise<GitProcessExecutionResult> {
   return executeGit(args, normalizePath(cwd), {
     signal: options.signal,
   });
@@ -598,6 +604,9 @@ async function getGitStatusRaw(directory: string, options: GitStatusOptions = {}
   });
   
   if (statusResult.exitCode !== 0) {
+    if (isGitProcessCleanupBlocked(statusResult)) {
+      throw createGitProcessError(statusResult, 'Git status cleanup was not confirmed');
+    }
     return {
       current: '',
       tracking: null,
@@ -1100,24 +1109,24 @@ type GitCommandResult = {
   stdout: string;
   stderr: string;
   message?: string;
-};
+} & GitProcessTerminationMetadata;
 
 const runGitCommand = async (cwd: string, args: string[]): Promise<GitCommandResult> => {
   const result = await execGit(args, cwd);
   const message = [result.stderr, result.stdout].map((value) => String(value || '').trim()).filter(Boolean).join('\n').trim();
-  return {
+  return copyGitProcessMetadata({
     success: result.exitCode === 0,
     exitCode: result.exitCode,
     stdout: String(result.stdout || ''),
     stderr: String(result.stderr || ''),
     message,
-  };
+  }, result);
 };
 
 const runGitCommandOrThrow = async (cwd: string, args: string[], fallbackMessage: string) => {
   const result = await runGitCommand(cwd, args);
   if (!result.success) {
-    throw new Error(result.message || fallbackMessage || 'Git command failed');
+    throw createGitProcessError(result, fallbackMessage);
   }
   return result;
 };
@@ -1767,6 +1776,7 @@ export async function listGitWorktrees(directory: string): Promise<GitWorktreeIn
       path: entry.worktree,
     }));
   } catch (error) {
+    if (isGitProcessCleanupBlocked(error)) throw error;
     console.warn('[GitService] Failed to list worktrees, returning empty list:', error instanceof Error ? error.message : String(error));
     return [];
   }

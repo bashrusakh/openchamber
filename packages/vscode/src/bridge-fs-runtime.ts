@@ -3,9 +3,10 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { BridgeResponse } from './bridge';
-import type { GitProcessExecutionOptions } from './bridge-git-process-runtime';
+import type { GitProcessExecutionOptions, GitProcessExecutionResult } from './bridge-git-process-runtime';
 import { runWithGitExecutionScope } from './git-execution-scope';
 import { parseGitCheckIgnoreResult } from './bridge-fs-helpers-runtime';
+import { isGitProcessCleanupBlocked } from './git-execution-errors';
 
 type BridgeMessageInput = {
   id: string;
@@ -124,7 +125,7 @@ type FsDeps = {
     args: string[],
     cwd: string,
     options?: GitProcessExecutionOptions,
-  ) => Promise<{ stdout: string; stderr: string; exitCode: number; code?: string }>;
+  ) => Promise<GitProcessExecutionResult>;
   searchDirectory: (
     directory: string,
     query: string,
@@ -147,7 +148,7 @@ const runGitCheckIgnore = async (
   args: string[],
   cwd: string,
   runGitRead?: FsDeps['runGitRead'],
-): Promise<{ stdout: string; stderr: string; exitCode: number; code?: string } | null> => {
+): Promise<GitProcessExecutionResult | null> => {
   const controller = GIT_CHECK_IGNORE_TIMEOUT_MS > 0 ? new AbortController() : undefined;
   const readOptions = controller
     ? { signal: controller.signal, queueTimeoutMs: GIT_CHECK_IGNORE_TIMEOUT_MS }
@@ -255,6 +256,7 @@ export async function handleFsBridgeMessage(
           normalized,
         );
       } catch (error) {
+        if (isGitProcessCleanupBlocked(error)) throw error;
         reportGitignoreFailure(normalized, error instanceof Error ? error : new Error(String(error)));
       }
 

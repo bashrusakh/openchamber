@@ -94,10 +94,12 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
      - models metadata fetch helper
     - Directory-search Gitignore checks accept the same shared Git read adapter
       so filesystem search does not bypass Git execution coordination.
-    - Gitignore exit code `1` (no matches) and a confirmed non-repository are
-      empty results. Timeouts, permission failures, and other Git execution
-      failures remain visible to the parser and diagnostics, while list/search
-      return their existing unfiltered entries.
+  - Gitignore exit code `1` (no matches) and a confirmed non-repository are
+    empty results. Timeouts, permission failures, and other ordinary Git
+    execution failures remain visible to the parser and diagnostics, while
+    list/search return their existing unfiltered entries. An unconfirmed
+    process-tree cleanup keeps its termination metadata and propagates through
+    list/search instead of releasing the coordinated read as a fallback.
   - Read paths are authorized in the requested workspace path space before symlink resolution, matching the web runtime; directly requested outside-workspace paths remain denied.
 
 The webview CSP permits `blob:` only for `worker-src` so shared UI parsers can run bounded local decompression off the main thread. Blob scripts remain disallowed by `script-src`.

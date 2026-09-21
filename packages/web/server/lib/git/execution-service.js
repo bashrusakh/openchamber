@@ -10,6 +10,7 @@ import {
 import {
   runWithGitExecutionScope,
 } from './execution-scope.js';
+import { copyGitProcessMetadata } from './execution-errors.js';
 import { isUnsupportedRepositoryContext } from './repository-root.js';
 
 const operation = Object.freeze({
@@ -158,13 +159,13 @@ const createDiscoveryRunner = (gitModule = rawGit) => async (cwd, args, options 
     return { success: true, stdout: await git.raw(args), stderr: '' };
   } catch (error) {
     const code = normalizeDiscoveryCode(error?.code);
-    return {
+    return copyGitProcessMetadata({
       success: false,
       ...code,
       stdout: String(error?.stdout || ''),
       stderr: String(error?.stderr || ''),
       message: errorText(error),
-    };
+    }, error);
   }
 };
 

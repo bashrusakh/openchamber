@@ -17,6 +17,39 @@ export type GitExecutionErrorInput = Error | {
   readonly details?: GitExecutionErrorDetails;
 } | null | undefined;
 
+export type GitProcessTerminationMetadata = {
+  cleanupBlocked?: boolean;
+  descendantsTerminated?: boolean;
+  rootClosed?: boolean;
+  pid?: number;
+  code?: string | number;
+  cause?: unknown;
+  rootError?: Error;
+  operationError?: Error;
+};
+
+export type GitProcessMetadataInput = (Error & GitProcessTerminationMetadata & {
+  error?: GitProcessMetadataInput;
+}) | (GitProcessTerminationMetadata & {
+  error?: GitProcessMetadataInput;
+}) | null | undefined;
+
+export type GitProcessResultInput = GitProcessMetadataInput & {
+  message?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+};
+
+export function copyGitProcessMetadata<T>(target: T, source: GitProcessMetadataInput): T;
+export function isGitProcessCleanupBlocked(value: GitProcessMetadataInput): boolean;
+export function isGitProcessCleanupBlocked<T>(value: T): boolean;
+export function createGitProcessError(result: GitProcessResultInput, fallbackMessage?: string): Error & Omit<GitProcessTerminationMetadata, 'cause'> & {
+  code: string | number;
+  stdout: string;
+  stderr: string;
+};
+
 export function isGitExecutionError(error: GitExecutionErrorInput): error is GitExecutionError;
 
 export class GitExecutionOverloadedError extends Error {

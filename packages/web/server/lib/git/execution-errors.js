@@ -16,6 +16,55 @@ export const GIT_EXECUTION_ERROR_CODES = Object.freeze({
   REENTRANCY: 'GIT_EXECUTION_REENTRANCY',
 });
 
+const processTreeMetadataSources = (value) => {
+  if (!value || Object(value) !== value) return [];
+  const nested = value.error;
+  return nested && Object(nested) === nested ? [value, nested] : [value];
+};
+
+/**
+ * Keep process-tree termination facts when a raw Git result crosses an
+ * adapter boundary. A cleanup failure is not an ordinary Git exit, because
+ * the caller still owns a process and the read or lease cannot be released.
+ */
+export const copyGitProcessMetadata = (target, source) => {
+  for (const metadata of processTreeMetadataSources(source)) {
+    if (metadata.cleanupBlocked === true) target.cleanupBlocked = true;
+    if (metadata.descendantsTerminated === false) target.descendantsTerminated = false;
+    if (metadata.rootClosed === true || metadata.rootClosed === false) target.rootClosed = metadata.rootClosed;
+    if (Number.isInteger(metadata.pid)) target.pid = metadata.pid;
+    if (metadata.code !== undefined && metadata.code !== null) target.code = metadata.code;
+    if (metadata.cause !== undefined) target.cause = metadata.cause;
+    if (metadata.rootError !== undefined) target.rootError = metadata.rootError;
+    if (metadata.operationError !== undefined) target.operationError = metadata.operationError;
+  }
+  return target;
+};
+
+export const isGitProcessCleanupBlocked = (value) => {
+  return processTreeMetadataSources(value).some((metadata) => (
+    metadata.cleanupBlocked === true
+    || (metadata.descendantsTerminated === false && metadata.code === 'ERR_PROCESS_TREE_TERMINATION')
+  ));
+};
+
+export const createGitProcessError = (result, fallbackMessage = 'Git command failed') => {
+  const error = Object.assign(
+    new Error(
+      result?.message
+        || result?.stderr
+        || result?.stdout
+        || fallbackMessage,
+    ),
+    {
+      code: result?.code ?? result?.exitCode ?? 'GIT_COMMAND_FAILED',
+      stdout: String(result?.stdout || ''),
+      stderr: String(result?.stderr || ''),
+    },
+  );
+  return copyGitProcessMetadata(error, result);
+};
+
 export const GitExecutionOverloadedError = defineError(
   'GitExecutionOverloadedError',
   GIT_EXECUTION_ERROR_CODES.OVERLOADED,

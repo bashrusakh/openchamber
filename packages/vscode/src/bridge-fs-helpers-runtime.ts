@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { execGit } from './bridge-git-process-runtime';
 import { runWithGitExecutionScope } from './git-execution-scope';
+import { createGitProcessError, isGitProcessCleanupBlocked } from './git-execution-errors';
 
 const MAX_FILE_ATTACH_SIZE_BYTES = 20 * 1024 * 1024;
 
@@ -139,6 +140,10 @@ export type GitCheckIgnoreResult = {
   stderr: string;
   exitCode: number;
   code?: string;
+  cleanupBlocked?: boolean;
+  descendantsTerminated?: boolean;
+  rootClosed?: boolean;
+  pid?: number;
 };
 
 const isGitExecutionFailure = (result: GitCheckIgnoreResult): boolean => {
@@ -170,6 +175,10 @@ export const parseGitCheckIgnoreResult = (
 ): Set<string> => {
   if (!result) {
     throw new Error(`Gitignore discovery timed out for ${cwd}`);
+  }
+
+  if (isGitProcessCleanupBlocked(result)) {
+    throw createGitProcessError(result, `Gitignore cleanup was not confirmed for ${cwd}`);
   }
 
   if (result.exitCode === 0) {
@@ -257,6 +266,7 @@ const safeGitCheckIgnoreNames = async (
   try {
     return await gitCheckIgnoreNames(cwd, names, runGitRead);
   } catch (error) {
+    if (isGitProcessCleanupBlocked(error)) throw error;
     reportGitignoreFailure(cwd, error instanceof Error ? error : new Error(String(error)));
     return new Set();
   }
@@ -270,6 +280,7 @@ const safeGitCheckIgnorePaths = async (
   try {
     return await gitCheckIgnorePaths(cwd, paths, runGitRead);
   } catch (error) {
+    if (isGitProcessCleanupBlocked(error)) throw error;
     reportGitignoreFailure(cwd, error instanceof Error ? error : new Error(String(error)));
     return new Set();
   }

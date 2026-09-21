@@ -6,6 +6,7 @@ import { promisify } from 'util';
 import { spawnOwnedProcess } from './owned-process';
 import { getGitExecutablePath } from './gitService';
 import { getGitExecutionEnv } from './git-execution-scope';
+import { copyGitProcessMetadata } from './git-execution-errors';
 
 const execFileAsync = promisify(execFile);
 const gpgconfCandidates = ['gpgconf', '/opt/homebrew/bin/gpgconf', '/usr/local/bin/gpgconf'];
@@ -30,7 +31,7 @@ export type GitProcessExecutionResult = {
   descendantsTerminated?: boolean;
   rootClosed?: boolean;
   pid?: number;
-  cause?: Error;
+  cause?: Error | string | null;
   rootError?: Error;
   operationError?: Error;
 };
@@ -136,16 +137,7 @@ const processFailure = (error: OwnedProcessFailure): GitProcessExecutionResult =
     exitCode: 1,
     code: getErrorCode(error),
   };
-  if (error.cleanupBlocked === true) result.cleanupBlocked = true;
-  if (error.descendantsTerminated === false) result.descendantsTerminated = false;
-  if ('rootClosed' in error && (error.rootClosed === true || error.rootClosed === false)) {
-    result.rootClosed = error.rootClosed;
-  }
-  if (Number.isInteger(error.pid)) result.pid = error.pid;
-  if (error.cause instanceof Error) result.cause = error.cause;
-  if (error.rootError !== undefined) result.rootError = error.rootError;
-  if (error.operationError !== undefined) result.operationError = error.operationError;
-  return result;
+  return copyGitProcessMetadata(result, error);
 };
 
 export const createGitProcessRuntime = ({
