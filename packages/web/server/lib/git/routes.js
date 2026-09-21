@@ -41,7 +41,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
   };
 
   const isNonRepoGitError = (error) => {
-    if (!error || typeof error !== 'object') {
+    if (error == null) {
       return false;
     }
 
@@ -50,7 +50,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
     }
 
     const details = error.details;
-    if (details && typeof details === 'object' && details.reason === 'not-a-repository') {
+    if (details && details.reason === 'not-a-repository') {
       return true;
     }
 

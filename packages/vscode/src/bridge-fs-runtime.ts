@@ -177,7 +177,7 @@ const runGitCheckIgnore = async (
   }
 };
 
-const reportGitignoreFailure = (cwd: string, error: unknown): void => {
+const reportGitignoreFailure = (cwd: string, error: Error): void => {
   const detail = error instanceof Error ? error.message : String(error);
   console.warn(`Gitignore filtering skipped for ${cwd}: ${detail}`);
 };
@@ -255,7 +255,7 @@ export async function handleFsBridgeMessage(
           normalized,
         );
       } catch (error) {
-        reportGitignoreFailure(normalized, error);
+        reportGitignoreFailure(normalized, error instanceof Error ? error : new Error(String(error)));
       }
 
       const filteredEntries = entries.filter((entry) => !ignoredNames.has(entry.name));

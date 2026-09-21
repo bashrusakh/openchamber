@@ -587,7 +587,7 @@ describe('Git execution service', () => {
       coordinator: {
         runStatus: async (options, task) => {
           calls.push(options);
-          return task(options['shape']);
+          return task(options.mode);
         },
         run: async (options, task) => {
           calls.push(options);
@@ -605,7 +605,7 @@ describe('Git execution service', () => {
     await expect(service.getBranches('/repo')).resolves.toEqual(['main']);
 
     expect(calls[0]).toMatchObject({
-      'shape': 'light',
+      mode: 'light',
       signal,
       queueTimeoutMs: 25,
     });
@@ -626,7 +626,7 @@ describe('Git execution service', () => {
         },
       },
       coordinator: {
-        runStatus: async (options, task) => task(options['shape'], sourceController.signal),
+        runStatus: async (options, task) => task(options.mode, sourceController.signal),
       },
       resolver: { resolve: async (directory) => contextFor(directory) },
     });

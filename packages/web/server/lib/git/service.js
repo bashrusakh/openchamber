@@ -1030,7 +1030,7 @@ const getRemoteBranchComparison = async (git, remoteName, branchName) => {
 };
 
 const isNotGitRepositoryError = (error) => {
-  if (error && typeof error === 'object') {
+  if (error != null) {
     if (error.code === GIT_NOT_A_REPOSITORY_ERROR_CODE || error.reason === 'not-a-repository') {
       return true;
     }
@@ -1064,16 +1064,22 @@ const isMissingDirectoryError = (error) => {
 
 const runGitCommand = async (cwd, args, { timeoutMs = 0, envOverrides = undefined, signal = undefined } = {}) => {
   try {
-    const { stdout, stderr } = await execFileAsync(getGitBinary(), args, {
+    const execOptions = {
       cwd,
       env: await buildGitEnv(envOverrides),
       windowsHide: true,
       maxBuffer: 20 * 1024 * 1024,
       // Only short probes pass a timeout; commands that legitimately run long
       // (a fetch into a temporary clone) keep the default of none.
-      ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: 'SIGKILL' } : {}),
-      ...(signal ? { signal } : {}),
-    });
+    };
+    if (timeoutMs > 0) {
+      execOptions.timeout = timeoutMs;
+      execOptions.killSignal = 'SIGKILL';
+    }
+    if (signal) {
+      execOptions.signal = signal;
+    }
+    const { stdout, stderr } = await execFileAsync(getGitBinary(), args, execOptions);
     return {
       success: true,
       exitCode: 0,
@@ -1083,8 +1089,8 @@ const runGitCommand = async (cwd, args, { timeoutMs = 0, envOverrides = undefine
   } catch (error) {
     return {
       success: false,
-      exitCode: typeof error?.code === 'number' ? error.code : 1,
-      code: typeof error?.code === 'string' ? error.code : undefined,
+      exitCode: Number.isInteger(error?.code) ? error.code : null,
+      code: error?.code == null ? undefined : String(error.code),
       stdout: String(error?.stdout || ''),
       stderr: String(error?.stderr || ''),
       message: parseGitErrorText(error),

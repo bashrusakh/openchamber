@@ -10,7 +10,8 @@ export const GIT_READ_ONLY_ENV: Readonly<{
 }>;
 
 export type GitOperationKind = typeof GIT_OPERATION_KIND[keyof typeof GIT_OPERATION_KIND];
-export type GitStatusShape = 'full' | 'light';
+export type GitStatusMode = 'full' | 'light';
+type GitTimerHandle = ReturnType<typeof setTimeout>;
 
 export type GitExecutionContext = {
   isRepository: true;
@@ -55,8 +56,8 @@ export type GitExecutionLimits = {
 export type GitExecutionCoordinatorOptions = Partial<GitExecutionLimits> & {
   now?: () => number;
   canonicalizeCloneDestination?: (destination: string) => Promise<string> | string;
-  setTimer?: (callback: () => void, delayMs: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
+  setTimer?: (callback: () => void, delayMs: number) => GitTimerHandle;
+  clearTimer?: (handle: GitTimerHandle) => void;
 };
 
 export type GitExecutionRunOptions = {
@@ -72,10 +73,10 @@ export type GitExecutionRunOptions = {
 
 export type GitStatusRunOptions<T, R> = {
   context: GitExecutionContext;
-  shape?: GitStatusShape;
+  mode?: GitStatusMode;
   signal?: AbortSignal;
   queueTimeoutMs?: number;
-  projectResult?: (value: T, requestedShape: GitStatusShape, sourceShape: GitStatusShape) => R;
+  projectResult?: (value: T, requestedMode: GitStatusMode, sourceMode: GitStatusMode) => R;
   label?: string;
 };
 
@@ -112,7 +113,7 @@ export class GitExecutionCoordinator {
   invalidateWorktrees(commonId: string, worktreeIds: string[]): number;
   run<T>(options: GitExecutionRunOptions, task: (lease: GitExecutionLease) => Promise<T> | T): Promise<T>;
   runClone<T>(options: GitCloneRunOptions, task: (lease: GitCloneLease) => Promise<T> | T): Promise<T>;
-  runStatus<T, R = T>(options: GitStatusRunOptions<T, R>, task: (shape: GitStatusShape, signal: AbortSignal) => Promise<T> | T): Promise<R>;
+  runStatus<T, R = T>(options: GitStatusRunOptions<T, R>, task: (mode: GitStatusMode, signal: AbortSignal) => Promise<T> | T): Promise<R>;
   getStats(): GitExecutionCoordinatorStats;
 }
 

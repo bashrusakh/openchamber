@@ -31,37 +31,24 @@ type GitExecutionServiceDependencies = {
 const GIT_NOT_A_REPOSITORY_ERROR_CODE = 'GIT_NOT_A_REPOSITORY';
 
 type NonRepositoryDiscoveryError = {
-  code?: unknown;
-  reason?: unknown;
-  details?: unknown;
+  name?: string;
+  message?: string;
+  code?: string;
+  reason?: string;
+  details?: { reason?: string; operation?: string };
 };
 
-const isConfirmedNonRepositoryError = (error: unknown): error is NonRepositoryDiscoveryError => {
-  if (!error || typeof error !== 'object') {
-    return false;
-  }
-
-  const candidate = error as NonRepositoryDiscoveryError;
-  if (candidate.code === GIT_NOT_A_REPOSITORY_ERROR_CODE || candidate.reason === 'not-a-repository') {
+const isConfirmedNonRepositoryError = (error: NonRepositoryDiscoveryError): boolean => {
+  if (error.code === GIT_NOT_A_REPOSITORY_ERROR_CODE || error.reason === 'not-a-repository') {
     return true;
   }
 
-  if (!candidate.details || typeof candidate.details !== 'object') {
-    return false;
-  }
-
-  return (candidate.details as { reason?: unknown }).reason === 'not-a-repository';
+  return error.details?.reason === 'not-a-repository';
 };
 
-const isGitDiscoveryExecutableUnavailable = (error: unknown): boolean => {
-  if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') {
-    return false;
-  }
-  if (!('details' in error) || !error.details || typeof error.details !== 'object') {
-    return false;
-  }
-  return 'operation' in error.details && error.details.operation === 'git-context-discovery';
-};
+const isGitDiscoveryExecutableUnavailable = (error: NonRepositoryDiscoveryError): boolean => (
+  error.code === 'ENOENT' && error.details?.operation === 'git-context-discovery'
+);
 
 const remoteLikeRef = (value: string | undefined): boolean => {
   const normalized = String(value || '').trim();
@@ -132,7 +119,14 @@ export const createGitExecutionService = ({
     try {
       return (await runtime.discover(directory)).isRepository;
     } catch (error) {
-      if (!isConfirmedNonRepositoryError(error) && !isGitDiscoveryExecutableUnavailable(error)) {
+      const failure = error instanceof Error
+        ? error
+        : (() => {
+          // SAFETY: GitContextResolver rejects with an Error or a structured
+          // discovery failure carrying the optional code/details fields.
+          return Object(error) as NonRepositoryDiscoveryError;
+        })();
+      if (!isConfirmedNonRepositoryError(failure) && !isGitDiscoveryExecutableUnavailable(failure)) {
         throw error;
       }
       return runtime.runDirectoryFallbackRead(directory, () => coreImpl.checkIsGitRepository(directory));
@@ -144,18 +138,18 @@ export const createGitExecutionService = ({
   );
 
   const getGitStatus: typeof core.getGitStatus = async (directory, options) => {
-    const shape = options?.mode === 'light' ? 'light' : 'full';
+    const mode = options?.mode === 'light' ? 'light' : 'full';
     return runtime.runStatus(
       directory,
-      (sourceShape, sourceSignal) => coreImpl.getGitStatus(
+      (sourceMode, sourceSignal) => coreImpl.getGitStatus(
         directory,
         {
-          mode: sourceShape === 'light' ? 'light' : undefined,
+          mode: sourceMode === 'light' ? 'light' : undefined,
           signal: sourceSignal,
         },
       ),
       {
-        shape,
+        mode,
         signal: options?.signal,
         queueTimeoutMs: options?.queueTimeoutMs,
       },

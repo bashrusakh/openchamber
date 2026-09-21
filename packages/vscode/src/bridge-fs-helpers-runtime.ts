@@ -159,7 +159,7 @@ const isConfirmedNonRepository = (result: GitCheckIgnoreResult): boolean => (
   )
 );
 
-const reportGitignoreFailure = (cwd: string, error: unknown): void => {
+const reportGitignoreFailure = (cwd: string, error: Error): void => {
   const detail = error instanceof Error ? error.message : String(error);
   console.warn(`Gitignore filtering skipped for ${cwd}: ${detail}`);
 };
@@ -257,7 +257,7 @@ const safeGitCheckIgnoreNames = async (
   try {
     return await gitCheckIgnoreNames(cwd, names, runGitRead);
   } catch (error) {
-    reportGitignoreFailure(cwd, error);
+    reportGitignoreFailure(cwd, error instanceof Error ? error : new Error(String(error)));
     return new Set();
   }
 };
@@ -270,7 +270,7 @@ const safeGitCheckIgnorePaths = async (
   try {
     return await gitCheckIgnorePaths(cwd, paths, runGitRead);
   } catch (error) {
-    reportGitignoreFailure(cwd, error);
+    reportGitignoreFailure(cwd, error instanceof Error ? error : new Error(String(error)));
     return new Set();
   }
 };
