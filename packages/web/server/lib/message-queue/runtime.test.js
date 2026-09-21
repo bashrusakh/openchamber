@@ -517,6 +517,33 @@ describe('message queue runtime', () => {
     expect(broadcasts.at(-1).properties.session).toEqual({ sessionId: SESSION, directory: DIRECTORY, items: [], sendingId: null });
   });
 
+  it('a consult item is never dispatched by the tick even when idle and at the head', async () => {
+    const { runtime, openCode, emit } = createRuntime();
+    runtime.start();
+    await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult', consult: { system: 'be terse' } }));
+    openCode.state.statuses = {};
+    emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+    await settle();
+    expect(openCode.state.sent).toHaveLength(0);
+    expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+  });
+
+  it('a normal item behind a claimed consult item is not delivered', async () => {
+    const { runtime, openCode, emit } = createRuntime();
+    runtime.start();
+    await runtime.enqueue(SESSION, DIRECTORY, item({ kind: 'consult', consult: { system: 'be terse' } }));
+    await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+    // A claim both marks the item and holds the session for its owner; until
+    // claim() lands the hold is asserted directly — the tick reads the same
+    // owner hold the claim would set.
+    runtime.setHold(SESSION, true, 60_000, 'consult:run-1');
+    openCode.state.statuses = {};
+    emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+    await settle();
+    expect(openCode.state.sent).toHaveLength(0);
+    expect(runtime.sessionSnapshot(SESSION).items.map((entry) => entry.content)).toEqual(['follow up', 'plain']);
+  });
+
   it('reorders only with a complete permutation', async () => {
     const { runtime } = createRuntime();
     runtime.start();
@@ -525,6 +552,242 @@ describe('message queue runtime', () => {
     await expect(runtime.reorder(SESSION, [b.itemId])).rejects.toThrow(TypeError);
     await runtime.reorder(SESSION, [b.itemId, a.itemId]);
     expect(runtime.sessionSnapshot(SESSION).items.map((entry) => entry.content)).toEqual(['b', 'a']);
+  });
+
+  describe('claim', () => {
+    const consultItem = (overrides = {}) => item({ kind: 'consult', consult: { system: 'be terse' }, ...overrides });
+
+    it('marks the item claimed only after its owner hold exists, so the sweep cannot revert a fresh claim', async () => {
+      let clock = 0;
+      const { runtime, openCode } = createRuntime({ now: () => clock });
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+
+      // The owner's previous reservation lapses just before the claim: the
+      // claim's setHold runs the expiry sweep, and a claim marked before its
+      // own hold exists would be reverted right here while still reporting
+      // success.
+      clock = 2_000;
+      const result = await runtime.claim(SESSION, itemId, 'consult:run-2', 1_000);
+      expect(result.claimed).toBe(true);
+      clock = 2_100;
+      // A sweep pass (any hold mutation) must keep the fresh claim alive.
+      runtime.setHold('ses_other_regress', true, 60_000, 'other');
+      const snapshot = runtime.sessionSnapshot(SESSION).items[0];
+      expect(snapshot.claimed).toMatchObject({ owner: 'consult:run-2' });
+      expect(snapshot.kind).toBe('consult');
+      // The payload route still accepts the claim's owner immediately after.
+      await runtime.setConsultPayload(SESSION, itemId, 'consult:run-2', { system: 'updated' });
+      expect(runtime.sessionSnapshot(SESSION).items[0].consult).toEqual({ system: 'updated' });
+    });
+
+    it('marks the head consult item claimed and holds the session for its owner', async () => {
+      const { runtime, openCode, emit, broadcasts } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = { [SESSION]: { type: 'busy' } };
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      // Clearing the fake busy status makes isSessionIdle read idle.
+      openCode.state.statuses = {};
+      const result = await runtime.claim(SESSION, itemId, 'consult:run-1', 60_000);
+      expect(result.claimed).toBe(true);
+      expect(result.item.claimed).toMatchObject({ owner: 'consult:run-1' });
+      // The claim's hold keeps the generic dispatcher away.
+      emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+      await settle();
+      expect(openCode.state.sent).toHaveLength(0);
+      expect(runtime.sessionSnapshot(SESSION).items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      expect(broadcasts.at(-1).properties.session.items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+    });
+
+    it('refuses with not-idle while the fake status is busy', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = { [SESSION]: { type: 'busy' } };
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await expect(runtime.claim(SESSION, itemId, 'consult:run-1')).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('not-idle'),
+      });
+      expect(runtime.sessionSnapshot(SESSION).items[0]).not.toHaveProperty('claimed');
+    });
+
+    it('refuses a different owner once claimed and lets the same owner re-claim', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      await expect(runtime.claim(SESSION, itemId, 'consult:run-2')).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('already-claimed'),
+      });
+      // Same owner re-claims: still claimed, and the hold extends.
+      const again = await runtime.claim(SESSION, itemId, 'consult:run-1', 90_000);
+      expect(again.claimed).toBe(true);
+      expect(again.item.claimed.owner).toBe('consult:run-1');
+    });
+
+    it('refuses a normal item with not-consult and a non-head consult with not-head', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+      await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      const queue = runtime.sessionSnapshot(SESSION).items;
+      await expect(runtime.claim(SESSION, queue[0].id, 'consult:run-1')).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('not-consult'),
+      });
+      await expect(runtime.claim(SESSION, queue[1].id, 'consult:run-1')).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('not-head'),
+      });
+    });
+  });
+
+  describe('setConsultPayload', () => {
+    const consultItem = (overrides = {}) => item({ kind: 'consult', consult: { system: 'be terse' }, ...overrides });
+
+    it('merges the consult payload for the claiming owner', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      const result = await runtime.setConsultPayload(SESSION, itemId, 'consult:run-1', { system: 'updated system' });
+      expect(result.ok).toBe(true);
+      expect(result.item.consult).toEqual({ system: 'updated system' });
+      expect(runtime.sessionSnapshot(SESSION).items[0].consult).toEqual({ system: 'updated system' });
+    });
+
+    it('refuses a foreign owner and an oversized payload', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      await expect(runtime.setConsultPayload(SESSION, itemId, 'consult:other', { system: 'x' })).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('not-claiming'),
+      });
+      await expect(runtime.setConsultPayload(SESSION, itemId, 'consult:run-1', { system: 'y'.repeat(24_001) })).rejects.toThrow(TypeError);
+      await expect(runtime.setConsultPayload(SESSION, itemId, 'consult:run-1', { textPartMetadata: { big: 'z'.repeat(8_000) } })).rejects.toThrow(TypeError);
+    });
+  });
+
+  describe('dispatchConsult', () => {
+    const consultItem = (overrides = {}) => item({
+      kind: 'consult',
+      consult: { system: 'be terse', textPartMetadata: { openchamberConsult: { model: 'glm-4.7' } } },
+      ...overrides,
+    });
+
+    it('waits for idle, sends with system + primary text part metadata, then cleans up', async () => {
+      const { runtime, openCode, emit, broadcasts } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = { [SESSION]: { type: 'busy' } };
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      openCode.state.statuses = {};
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.statuses = {};
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result.dispatched).toBe(true);
+      expect(openCode.state.sent).toHaveLength(1);
+      const body = openCode.state.sent[0].body;
+      expect(body.system).toBe('be terse');
+      expect(body.parts[0]).toEqual({
+        type: 'text',
+        text: 'follow up',
+        metadata: { openchamberConsult: { model: 'glm-4.7' } },
+      });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      expect(broadcasts.at(-1).properties.session.items).toEqual([]);
+      // The owner hold was released: a later normal dispatch is possible.
+      expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
+    });
+
+    it('refuses a foreign owner', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      await expect(runtime.dispatchConsult(SESSION, itemId, 'consult:other')).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('not-claiming'),
+      });
+      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+
+    it('records a prompt failure, keeps the item, and re-arms', async () => {
+      const { runtime, openCode } = createRuntime({ retryDelayMs: () => 15 });
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.failNext = /prompt_async$/;
+      await expect(runtime.dispatchConsult(SESSION, itemId, 'consult:run-1')).rejects.toMatchObject({ status: 502 });
+      await settle(5);
+      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+      // The dispatch route maps this to 502 via respondError's status pass-through.
+      expect(openCode.state.sent).toHaveLength(0);
+      // The retry re-arm fires; the tick re-verifies and still refuses to send
+      // a consult item, so the item stays queued for the owner to retry.
+      await settle(40);
+      expect(openCode.state.sent).toHaveLength(0);
+      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+  });
+
+  describe('expiry sweep and restart revert', () => {
+    const consultItem = (overrides = {}) => item({ kind: 'consult', consult: { system: 'be terse' }, ...overrides });
+
+    it('the sweep reverts a consult item whose reservation lapsed and the next tick delivers it raw', async () => {
+      let clock = 0;
+      const { runtime, openCode, emit, broadcasts } = createRuntime({ now: () => clock });
+      runtime.start();
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+      openCode.state.statuses = {};
+      await runtime.claim(SESSION, itemId, 'consult:run-1', 1_000);
+      expect(runtime.sessionSnapshot(SESSION).items[0].kind).toBe('consult');
+
+      // The reservation lapses; a hold mutation sweeps it and reverts the item.
+      clock = 2_000;
+      runtime.setHold('ses_other_sweep', true, 60_000, 'other');
+      expect(runtime.sessionSnapshot(SESSION).items[0]).toMatchObject({ content: 'follow up' });
+      const reverted = runtime.sessionSnapshot(SESSION).items[0];
+      expect(reverted).not.toHaveProperty('kind');
+      expect(reverted).not.toHaveProperty('consult');
+      expect(reverted).not.toHaveProperty('claimed');
+
+      // Reverted to a normal item, the generic dispatcher delivers it raw.
+      emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+      await settle();
+      expect(openCode.state.sent).toHaveLength(1);
+      expect(openCode.state.sent[0].body.parts).toEqual([{ type: 'text', text: 'follow up' }]);
+      // The stale-claim broadcast (revert commit) went out before the delivery.
+      expect(broadcasts.some((event) => event.properties.revision > 0 && event.properties.session.items[0]?.kind === undefined)).toBe(true);
+    });
+
+    it('a restart loads a persisted consult item as a normal item', async () => {
+      const dataDir = makeDataDir();
+      const first = createRuntime({ dataDir });
+      first.runtime.start();
+      await first.runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await first.runtime.flush();
+      first.runtime.stop();
+
+      const second = createRuntime({ dataDir });
+      second.runtime.start();
+      await second.runtime.load();
+      const loaded = second.runtime.sessionSnapshot(SESSION).items[0];
+      expect(loaded.content).toBe('follow up');
+      expect(loaded).not.toHaveProperty('kind');
+      expect(loaded).not.toHaveProperty('consult');
+      expect(loaded).not.toHaveProperty('claimed');
+    });
   });
 
   it('drops the queue of a deleted session', async () => {

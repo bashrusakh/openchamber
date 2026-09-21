@@ -3428,6 +3428,9 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.autoReview': 'Consultar modelos não está disponível enquanto o ciclo de revisão de código está em andamento nesta sessão',
   'chat.consult.unavailable.btw': 'Consultar modelos não está disponível enquanto uma sessão btw estiver ativa',
   'chat.consult.unavailable.runtime': 'Consultar modelos precisa da fila de mensagens do servidor OpenChamber e não está disponível aqui',
+  'chat.consult.unavailable.versionUnknown': 'Consultar modelos precisa do OpenCode {version} ou mais recente; não foi possível verificar a versão do servidor conectado.',
+  'chat.consult.unavailable.versionUnsupported': 'Consultar modelos não está disponível porque o OpenCode {version} é mais antigo que a versão suportada {minVersion}.',
+
   'chat.consult.dialog.title': 'Consultar modelos',
   'chat.consult.dialog.description': 'Pergunte primeiro a outros modelos a mesma coisa. As respostas podem ser adicionadas como dica privada por um turno; o modelo ativo continua escrevendo a resposta.',
   'chat.consult.dialog.actingLabel': 'Modelo ativo',

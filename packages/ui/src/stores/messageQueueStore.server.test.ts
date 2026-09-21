@@ -35,11 +35,13 @@ type ServerItem = MessageQueueUpdatedEvent["properties"]["session"]["items"][num
 type ServerSession = MessageQueueUpdatedEvent["properties"]["session"]
 
 type ServerReply = {
-  revision: number
+  revision?: number
   session?: ServerSession
   sessions?: ServerSession[]
   item?: ServerItem
   items?: ServerItem[]
+  claimed?: boolean
+  dispatched?: boolean
 }
 
 const json = (value: ServerReply, status = 200) => new Response(JSON.stringify(value), { status })
@@ -490,5 +492,42 @@ describe("server-owned message queue", () => {
   test("a failed hold request rejects so the caller can release locally", async () => {
     respond = () => new Response("nope", { status: 500 })
     await expect(useMessageQueueStore.getState().setServerHold("session-1", true, "consult:run-1")).rejects.toThrow()
+  })
+
+  test("claimConsultItem posts the owner and resolves the claimed item projection", async () => {
+    respond = () => json({ claimed: true, item: serverItem("q1", "the consult", { claimed: { owner: "consult:run-1", claimedAt: 5 } }) })
+    const claimed = await useMessageQueueStore.getState().claimConsultItem(target, "q1", "consult:run-1", 60_000)
+    expect(calls[0]).toEqual({ method: "POST", path: "/api/message-queue/sessions/session-1/items/q1/claim", body: { owner: "consult:run-1", ttlMs: 60_000 } })
+    expect(claimed).toMatchObject({ id: "q1", claimed: { owner: "consult:run-1" } })
+    // No second fetch: the response body is parsed from the same call.
+    expect(calls).toHaveLength(1)
+  })
+
+  test("claimConsultItem throws the server reason on refusal", async () => {
+    respond = () => new Response(JSON.stringify({ error: "cannot claim queued message: not-idle" }), { status: 409 })
+    await expect(useMessageQueueStore.getState().claimConsultItem(target, "q1", "consult:run-1")).rejects.toThrow("not-idle")
+  })
+
+  test("setConsultItemPayload posts the consult body with the owner", async () => {
+    respond = () => new Response("{}", { status: 200 })
+    await useMessageQueueStore.getState().setConsultItemPayload(target, "q1", "consult:run-1", { system: "be terse" })
+    expect(calls[0]).toEqual({ method: "POST", path: "/api/message-queue/sessions/session-1/items/q1/payload", body: { owner: "consult:run-1", consult: { system: "be terse" } } })
+  })
+
+  test("dispatchConsultItem resolves the removed item on success", async () => {
+    respond = () => json({ dispatched: true, item: serverItem("q1", "the consult", { kind: "consult" }) })
+    const dispatched = await useMessageQueueStore.getState().dispatchConsultItem(target, "q1", "consult:run-1")
+    expect(calls[0]).toEqual({ method: "POST", path: "/api/message-queue/sessions/session-1/items/q1/dispatch-consult", body: { owner: "consult:run-1" } })
+    expect(dispatched).toMatchObject({ id: "q1", kind: "consult" })
+    // No second fetch: the response body is parsed from the same response.
+    expect(calls).toHaveLength(1)
+  })
+
+  test("dispatchConsultItem resolves null on the busy refusal and throws on other failures", async () => {
+    respond = () => new Response(JSON.stringify({ error: "cannot dispatch consult: busy" }), { status: 409 })
+    expect(await useMessageQueueStore.getState().dispatchConsultItem(target, "q1", "consult:run-1")).toBeNull()
+
+    respond = () => new Response(JSON.stringify({ error: "consult dispatch failed: boom" }), { status: 502 })
+    await expect(useMessageQueueStore.getState().dispatchConsultItem(target, "q1", "consult:run-1")).rejects.toThrow("boom")
   })
 })

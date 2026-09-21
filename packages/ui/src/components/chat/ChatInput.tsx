@@ -49,6 +49,7 @@ import {
     formatConsultRejections,
     isDeliveredRawSubmission,
     resolveConsultAvailability,
+    useConsultLiveCapability,
     type ConsultSubmissionCapture,
 } from './consult/consultUi';
 import { resolveBtwSelection, useBtwStore } from '@/stores/useBtwStore';
@@ -1466,6 +1467,10 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         restore: () => void;
     } | null>(null);
 
+    // F3 fail-closed: the live gate reads the connected server's OpenCode
+    // version once per mount (and on refetch) instead of trusting the runtime
+    // descriptor alone.
+    const consultLiveCapability = useConsultLiveCapability();
     const consultAvailability = resolveConsultAvailability({
         hasSession: Boolean(currentSessionId && (currentSessionDirectoryForSync ?? currentDirectory)),
         input: message,
@@ -1473,6 +1478,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         btwActive: isBtwActive,
         consultActive: isConsultRunActive(consultRun),
         autoReviewActive: autoReviewRunning,
+        mechanism: consultLiveCapability.capability,
     });
     const consultUnavailableReason = consultAvailability.available ? null : consultAvailability.reason;
     const isConsultPanelVisible = consultRun !== undefined;

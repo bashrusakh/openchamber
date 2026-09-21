@@ -153,6 +153,9 @@ type HarnessState = {
   agents: Agent[];
   runtimeKey: string;
   replies: Map<string, ReplyScript>;
+  /** Per-fork permission read-back control for the F3 verification tests. */
+  permissionReadbacks: Map<string, 'echo' | 'echo-absent' | 'refetch-present' | 'wrong-rule' | 'throw'>;
+  readbacks: number;
   now: number;
   runCounter: number;
 };
@@ -206,6 +209,8 @@ const createHarness = (): Harness => {
     agents: [agent('build', 'primary')],
     runtimeKey: 'runtime-1',
     replies: new Map(),
+    permissionReadbacks: new Map(),
+    readbacks: 0,
     now: 0,
     runCounter: 0,
   };
@@ -233,7 +238,27 @@ const createHarness = (): Harness => {
       updateSession: async (id, patch, directory) => {
         state.calls.push(`update:${id}`);
         state.updated.push({ id, patch, directory });
+        // Echo the written patch back, like the real server does, unless the
+        // test forces an absent echo to exercise the getSession read-back.
+        if (state.permissionReadbacks.get(id) !== 'echo-absent' && state.permissionReadbacks.get(id) !== 'refetch-present' && state.permissionReadbacks.get(id) !== 'wrong-rule' && state.permissionReadbacks.get(id) !== 'throw') {
+          return { ...sessionFixture(id, directory), permission: patch.permission };
+        }
         return sessionFixture(id, directory);
+      },
+      getSession: async (sessionId, directory) => {
+        state.calls.push(`get:${sessionId}`);
+        state.readbacks += 1;
+        const forced = state.permissionReadbacks.get(sessionId);
+        if (forced === 'refetch-present') {
+          return { ...sessionFixture(sessionId, directory), permission: CONSULT_ADVISOR_PERMISSION };
+        }
+        if (forced === 'wrong-rule') {
+          return { ...sessionFixture(sessionId, directory), permission: [{ permission: 'bash', pattern: '*', action: 'allow' }] };
+        }
+        if (forced === 'throw') throw new Error('session read failed');
+        // Default refetch echoes absent, like a server that never persists the
+        // ruleset on the Session payload.
+        return sessionFixture(sessionId, directory);
       },
       getProvidersForConfig: async (directory) => {
         state.calls.push(`providers:${directory}`);
@@ -796,6 +821,96 @@ describe('cancellation, supersession, and cleanup (WP1.4)', () => {
   });
 });
 
+describe('live advisor events (F5)', () => {
+  test('sequential runs emit started/settled per advisor in order', async () => {
+    const harness = createHarness();
+    const events: Array<{ index: number; phase: string; status?: string }> = [];
+    const handle = harness.runtime.startConsultation(baseInput({
+      mode: 'sequential',
+      advisors: [selection(), selection({ providerID: 'anthropic', modelID: 'claude' })],
+      onAdvisor: (event) => events.push(event),
+    }));
+    const result = await handle.result;
+
+    expect(result.status).toBe('ok');
+    expect(events.map((event) => `${event.index}:${event.phase}${event.status ? `:${event.status}` : ''}`)).toEqual([
+      '0:started',
+      '0:settled:ok',
+      '1:started',
+      '1:settled:ok',
+    ]);
+    expect(harness.state.forkCalls).toHaveLength(2);
+  });
+
+  test('parallel runs emit started for every advisor and settled with terminal statuses', async () => {
+    const harness = createHarness();
+    const events: Array<{ index: number; phase: string; status?: string; reason?: string; durationMs?: number }> = [];
+    const handle = harness.runtime.startConsultation(baseInput({
+      advisors: [selection(), selection(), selection()],
+      onAdvisor: (event) => events.push(event),
+    }));
+    const result = await handle.result;
+
+    expect(result.status).toBe('ok');
+    const started = events.filter((event) => event.phase === 'started').map((event) => event.index).sort();
+    const settled = events.filter((event) => event.phase === 'settled');
+    expect(started).toEqual([0, 1, 2]);
+    expect(settled.map((event) => event.status)).toEqual(['ok', 'ok', 'ok']);
+    expect(settled.every((event) => typeof event.durationMs === 'number')).toBe(true);
+  });
+
+  test('a failing advisor settles with failed and its reason', async () => {
+    const harness = createHarness();
+    harness.state.replies.set('fork-1', { kind: 'error', message: 'provider exploded' });
+    const events: Array<{ index: number; phase: string; status?: string; reason?: string }> = [];
+    const handle = harness.runtime.startConsultation(baseInput({
+      onAdvisor: (event) => events.push(event),
+    }));
+    await handle.result;
+
+    const settled = events.find((event) => event.phase === 'settled');
+    expect(settled?.status).toBe('failed');
+    expect(settled?.reason).toContain('provider exploded');
+  });
+
+  test('a cancelled run emits no events after the cancellation', async () => {
+    const harness = createHarness();
+    harness.state.holdForks = true;
+    const events: Array<{ index: number; phase: string; status?: string }> = [];
+    const handle = harness.runtime.startConsultation(baseInput({
+      onAdvisor: (event) => events.push(event),
+    }));
+    await harness.flush();
+    // Advisor 0 has started (the fork is pending) but nothing settled yet.
+    expect(events.filter((event) => event.phase === 'started')).toHaveLength(1);
+
+    await harness.runtime.cancel('run-1');
+    harness.releaseForks();
+    await harness.flush();
+    const countAfterCancel = events.length;
+    await harness.flush();
+    await harness.flush();
+
+    // The cancellation settles advisor 0 as cancelled; nothing fires after.
+    expect(events.filter((event) => event.phase === 'settled').map((event) => event.status)).toEqual(['cancelled']);
+    expect(events).toHaveLength(countAfterCancel);
+    // The cancelled run never reuses the fork: no send, no completion.
+    expect(harness.state.sent).toEqual([]);
+  });
+
+  test('a throwing onAdvisor never breaks the advisor path', async () => {
+    const harness = createHarness();
+    const handle = harness.runtime.startConsultation(baseInput({
+      onAdvisor: () => {
+        throw new Error('panel exploded');
+      },
+    }));
+    const result = await handle.result;
+    expect(result.status).toBe('ok');
+    expect(harness.state.sent).toHaveLength(1);
+  });
+});
+
 describe('start refusals', () => {
   test('an unavailable advisor refuses the start before any fork', async () => {
     const harness = createHarness();
@@ -868,6 +983,141 @@ describe('start refusals', () => {
     expect(admitted).toBe(true);
     expect(outcome?.message).toBe('not at the queue head');
     expect(harness.state.forkCalls).toEqual([]);
+  });
+});
+
+describe('prevalidateConsultation (F2)', () => {
+  test('throws invalid-advisor for an unknown model without creating a fork', async () => {
+    const harness = createHarness();
+    const refusal = await harness.runtime.prevalidateConsultation(
+      baseInput({ advisors: [selection({ modelID: 'missing' })] }),
+    ).then(
+      () => null,
+      (error: Error) => error,
+    );
+
+    expect(refusal).toBeInstanceOf(ConsultationRefusedError);
+    if (!(refusal instanceof ConsultationRefusedError)) throw new Error('expected a refusal');
+    expect(refusal.code).toBe('invalid-advisor');
+    expect(refusal.rejections).toEqual([
+      { index: 0, code: 'model-unknown', message: 'Model "anthropic/missing" is not available' },
+    ]);
+    // Prevalidation reads the surface only: the advisor check fails before
+    // the parent transcript is read.
+    expect(harness.state.forkCalls).toEqual([]);
+    expect(harness.state.sent).toEqual([]);
+    expect(harness.state.calls).toEqual([
+      'providers:/work',
+      'agents:/work',
+    ]);
+  });
+
+  test('throws no-settled-context for an unfinished parent without creating a fork', async () => {
+    const harness = createHarness();
+    harness.state.parentMessages = [userMessage('p1'), assistantMessage('p2', undefined)];
+    const refusal = await harness.runtime.prevalidateConsultation(baseInput()).then(
+      () => null,
+      (error: Error) => error,
+    );
+
+    expect(refusal).toBeInstanceOf(ConsultationRefusedError);
+    if (!(refusal instanceof ConsultationRefusedError)) throw new Error('expected a refusal');
+    expect(refusal.code).toBe('no-settled-context');
+    expect(harness.state.forkCalls).toEqual([]);
+    expect(harness.state.sent).toEqual([]);
+  });
+
+  test('resolves for a valid selection without creating a fork', async () => {
+    const harness = createHarness();
+    const outcome = await harness.runtime.prevalidateConsultation(baseInput()).then(
+      () => 'ok',
+      (error: Error) => error,
+    );
+    expect(outcome).toBe('ok');
+    expect(harness.state.forkCalls).toEqual([]);
+    expect(harness.state.sent).toEqual([]);
+  });
+});
+
+describe('permission read-back verification (F3)', () => {
+  test('an echoed deny-all ruleset lets the advisor run normally', async () => {
+    const harness = createHarness();
+    harness.state.permissionReadbacks.set('fork-1', 'echo');
+    const handle = harness.runtime.startConsultation(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('ok');
+    expect(harness.state.sent).toHaveLength(1);
+    // No refetch needed when the write echo already carries the rule.
+    expect(harness.state.readbacks).toBe(0);
+  });
+
+  test('an absent ruleset that the refetch also lacks fails the advisor closed', async () => {
+    const harness = createHarness();
+    harness.state.permissionReadbacks.set('fork-1', 'echo-absent');
+    const handle = harness.runtime.startConsultation(baseInput());
+    const result = await handle.result;
+
+    // The only advisor failing leaves the run degraded, never a send.
+    expect(result.status).toBe('degraded');
+    expect(result.advisors[0]?.status).toBe('failed');
+    expect(result.advisors[0]?.reason).toBe('permission-verification-failed');
+    expect(harness.state.sent).toEqual([]);
+    // The failed fork was deleted like other failed setups.
+    expect(harness.state.deleted.map((entry) => entry.id)).toEqual(['fork-1']);
+    expect(harness.state.readbacks).toBe(1);
+  });
+
+  test('an absent echo with a present refetch lets the advisor proceed', async () => {
+    const harness = createHarness();
+    harness.state.permissionReadbacks.set('fork-1', 'refetch-present');
+    const handle = harness.runtime.startConsultation(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('ok');
+    expect(harness.state.sent).toHaveLength(1);
+    expect(harness.state.readbacks).toBe(1);
+  });
+
+  test('a ruleset without the exact deny-all wildcard fails the advisor', async () => {
+    const harness = createHarness();
+    // A permissive-looking but non-matching ruleset is not the verified lock:
+    // the write echo is absent and the refetch only carries a bash allow rule.
+    harness.state.permissionReadbacks.set('fork-1', 'wrong-rule');
+    const handle = harness.runtime.startConsultation(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('degraded');
+    expect(result.advisors[0]?.status).toBe('failed');
+    expect(result.advisors[0]?.reason).toBe('permission-verification-failed');
+    expect(harness.state.sent).toEqual([]);
+    expect(harness.state.deleted.map((entry) => entry.id)).toEqual(['fork-1']);
+  });
+
+  test('a failed read-back request fails closed instead of sending unverified', async () => {
+    const harness = createHarness();
+    harness.state.permissionReadbacks.set('fork-1', 'throw');
+    const handle = harness.runtime.startConsultation(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('degraded');
+    expect(result.advisors[0]?.status).toBe('failed');
+    expect(result.advisors[0]?.reason).toBe('permission-verification-failed');
+    expect(harness.state.sent).toEqual([]);
+    expect(harness.state.deleted.map((entry) => entry.id)).toEqual(['fork-1']);
+  });
+
+  test('one unverified advisor fails alone and the run continues with the others', async () => {
+    const harness = createHarness();
+    harness.state.permissionReadbacks.set('fork-1', 'echo-absent');
+    const handle = harness.runtime.startConsultation(baseInput({ advisors: [selection(), selection()] }));
+    const result = await handle.result;
+
+    expect(result.status).toBe('partial');
+    expect(result.advisors[0]?.status).toBe('failed');
+    expect(result.advisors[0]?.reason).toBe('permission-verification-failed');
+    expect(result.advisors[1]?.status).toBe('ok');
+    expect(harness.state.sent).toHaveLength(1);
   });
 });
 

@@ -138,8 +138,19 @@ type HarnessState = {
   holdFailure: boolean;
   addFailure: Error | null;
   addFailureOnce: boolean;
-  takeFailure: Error | null;
-  takes: number;
+  claimFailure: Error | null;
+  /** A queued refusal (e.g. not-idle) the fake claim keeps throwing until cleared. */
+  claimRefusal: Error | null;
+  claims: number;
+  payloadCalls: Array<{ system?: string; textPartMetadata?: unknown }>;
+  payloadFailure: Error | null;
+  dispatchConsultCalls: number;
+  dispatchConsultBusy: boolean;
+  dispatchConsultFailure: Error | null;
+  prevalidations: Array<{ parentSessionId: string; directory: string }>;
+  prevalidationRefusal: Error | null;
+  /** Every `runs.updateAdvisor` call in order (F5 live advisor rows). */
+  advisorUpdates: Array<{ runId: string; index: number; status?: string; durationMs?: number; reason?: string }>;
   status: 'idle' | 'busy' | 'retry';
   statusFailure: Error | null;
   autoReviewRunning: boolean;
@@ -183,8 +194,17 @@ const createHarness = (): Harness => {
     holdFailure: false,
     addFailure: null,
     addFailureOnce: false,
-    takeFailure: null,
-    takes: 0,
+    claimFailure: null,
+    claimRefusal: null,
+    claims: 0,
+    payloadCalls: [],
+    payloadFailure: null,
+    dispatchConsultCalls: 0,
+    dispatchConsultBusy: false,
+    dispatchConsultFailure: null,
+    prevalidations: [],
+    prevalidationRefusal: null,
+    advisorUpdates: [],
     status: 'idle',
     statusFailure: null,
     autoReviewRunning: false,
@@ -229,14 +249,33 @@ const createHarness = (): Harness => {
         state.events.push(`queue:remove:${messageId}`);
         state.queueItems = state.queueItems.filter((item) => item.id !== messageId);
       },
-      takeForSend: async (target, messageId) => {
-        state.events.push(`queue:take:${messageId}`);
-        state.takes += 1;
-        if (state.takeFailure) throw state.takeFailure;
-        if (state.takeEmpty) return [];
-        const taken = state.queueItems.filter((item) => item.id === messageId);
-        state.queueItems = state.queueItems.filter((item) => item.id !== messageId);
-        return taken;
+      claimConsultItem: async (target, messageId, owner) => {
+        state.events.push(`queue:claim:${messageId}:${owner ?? 'default'}`);
+        state.claims += 1;
+        if (state.claimFailure) throw state.claimFailure;
+        if (state.claimRefusal) throw state.claimRefusal;
+        const item = state.queueItems.find((entry) => entry.id === messageId);
+        if (!item) throw new Error('cannot claim queued message: not found');
+        item.claimed = { owner: owner ?? 'default', claimedAt: state.now };
+        return item;
+      },
+      setConsultItemPayload: async (target, messageId, owner, consult) => {
+        state.events.push(`queue:payload:${messageId}`);
+        state.payloadCalls.push(consult);
+        if (state.payloadFailure) throw state.payloadFailure;
+        const item = state.queueItems.find((entry) => entry.id === messageId);
+        if (!item) throw new Error('cannot update consult payload: not found');
+        item.consult = { ...item.consult, ...consult };
+      },
+      dispatchConsultItem: async (target, messageId, owner) => {
+        state.events.push(`queue:dispatch-consult:${messageId}`);
+        state.dispatchConsultCalls += 1;
+        if (state.dispatchConsultBusy) return null;
+        if (state.dispatchConsultFailure) throw state.dispatchConsultFailure;
+        const item = state.queueItems.find((entry) => entry.id === messageId);
+        if (!item) throw new Error('cannot dispatch consult: not found');
+        state.queueItems = state.queueItems.filter((entry) => entry.id !== messageId);
+        return item;
       },
       getQueueForTarget: (target) => {
         state.events.push(`queue:read:${target.sessionId}`);
@@ -286,6 +325,11 @@ const createHarness = (): Harness => {
         const current = state.runs.get(parentSessionId);
         return current && current.runId === runId ? current.phase : null;
       },
+      updateAdvisor: (parentSessionId, runId, index, update) => {
+        const current = state.runs.get(parentSessionId);
+        if (!current || current.runId !== runId) return;
+        state.advisorUpdates.push({ runId, index, ...update });
+      },
     },
     runtime: {
       startConsultation: (input): ConsultationHandle => {
@@ -298,6 +342,14 @@ const createHarness = (): Harness => {
       cancel: async (runId) => {
         state.events.push(`runtime:cancel:${runId}`);
         state.runtimeCancels.push(runId);
+      },
+      // The fake prevalidation succeeds unless the advisor list is invalid:
+      // it mirrors the real one's surface/context checks closely enough for
+      // the harness, and the refusal contract is asserted via a refusal flag.
+      prevalidateConsultation: async (input) => {
+        state.events.push('runtime:prevalidate');
+        state.prevalidations.push(input);
+        if (state.prevalidationRefusal) throw state.prevalidationRefusal;
       },
     },
     sendActingTurn: async (turn) => {
@@ -392,12 +444,13 @@ describe('queue admission', () => {
     expect(harness.state.queueItems.map((item) => item.id)).toEqual(['foreign-1', 'q-1']);
     expect(harness.state.holds).toEqual([true]);
     expect(harness.state.holdOwners).toEqual(['consult:run-1']);
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
     expect(harness.state.phaseLog).toEqual(['run-1:waiting-admission']);
 
     // The composer's queue capture shape, exactly: raw content, delivery
-    // text, agent mention, attachments, context, and send config.
+    // text, agent mention, attachments, context, and send config — marked
+    // consult so the generic dispatcher never delivers it.
     expect(harness.state.queued[0].message).toEqual({
       content: 'What should we do next? @build',
       text: 'What should we do next?',
@@ -405,6 +458,7 @@ describe('queue admission', () => {
       attachments: [attachment()],
       context: [contextPart()],
       sendConfig: { providerID: 'anthropic', modelID: 'claude-sonnet', agent: 'build', variant: 'high' },
+      kind: 'consult',
     });
 
     // The head clears; admission follows on the next poll.
@@ -412,7 +466,7 @@ describe('queue admission', () => {
     harness.state.status = 'idle';
     await harness.flush();
 
-    expect(harness.state.takes).toBe(1);
+    expect(harness.state.claims).toBe(1);
     expect(harness.state.startInputs).toHaveLength(1);
     expect(harness.state.startInputs[0]).toMatchObject({
       parentSessionId: 'parent',
@@ -454,12 +508,14 @@ describe('queue admission', () => {
     harness.lastConsultation().resolve(consultationResult());
     const result = await handle.result;
     expect(result.status).toBe('dispatched');
-    expect(harness.state.holds).toEqual([true, true, true, true, false]);
+    // The server released this owner's hold on the successful dispatch, so
+    // the submission never issues its own release after it.
+    expect(harness.state.holds).toEqual([true, true, true, true]);
     expect(harness.state.heartbeatActive).toBe(false);
 
     // A stopped heartbeat never re-asserts after the terminal release.
     await harness.tickHeartbeat();
-    expect(harness.state.holds).toHaveLength(5);
+    expect(harness.state.holds).toHaveLength(4);
   });
 
   test('an in-flight re-assert is awaited before the terminal release lands', async () => {
@@ -545,12 +601,12 @@ describe('queue admission', () => {
 
     const handle = harness.submit(baseInput());
     await harness.flush();
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
 
     harness.state.status = 'idle';
     await harness.flush();
-    expect(harness.state.takes).toBe(1);
+    expect(harness.state.claims).toBe(1);
     expect(harness.state.phaseLog).toContain('run-1:consulting');
 
     harness.lastConsultation().resolve(consultationResult());
@@ -572,7 +628,7 @@ describe('queue admission', () => {
     const result = await handle.result;
 
     expect(result).toEqual({ status: 'delivered-raw', runId: 'run-1', queueItemRestored: false });
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.dispatches).toHaveLength(0);
     // Never re-sent and never restored.
     expect(harness.state.queued).toHaveLength(enqueuedCount);
@@ -582,10 +638,15 @@ describe('queue admission', () => {
     expect(harness.state.phaseLog).toContain('run-1:finish:failed');
   });
 
-  test('a take that resolves with nothing is delivered-raw too', async () => {
+  test('a claim that resolves with nothing is delivered-raw too', async () => {
     const harness = createHarness();
-    harness.state.takeEmpty = true;
+    // The item vanishes from the projection right after admission: the claim
+    // then cannot find it, mirroring the take-empty edge of the old flow.
+    harness.state.status = 'busy';
     const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.status = 'idle';
+    harness.state.queueItems = [];
     await harness.flush();
 
     const result = await handle.result;
@@ -616,7 +677,7 @@ describe('queue admission', () => {
     expect(result.status).toBe('failed');
     if (result.status !== 'failed') throw new Error('expected a failure');
     expect(result.queueItemRestored).toBe(true);
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.holds).toEqual([true, false]);
   });
@@ -643,7 +704,7 @@ describe('queue admission', () => {
     const result = await handle.result;
     expect(result.status).toBe('cancelled');
     expect(harness.state.queueItems).toEqual([]);
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     // Owner scoping makes the release safe: it clears run-1's slot only, and
     // run-2 (a real submission) asserts `consult:run-2` separately.
     expect(harness.state.holdOwners).toEqual(['consult:run-1', 'consult:run-1']);
@@ -676,9 +737,39 @@ describe('auto-review exclusion', () => {
     expect(harness.state.queueItems).toEqual([]);
     expect(harness.state.holds).toEqual([]);
     expect(harness.state.heartbeatActive).toBe(false);
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
     expect(harness.state.dispatches).toHaveLength(0);
+  });
+
+  test('a prevalidation refusal happens before the hold and the enqueue', async () => {
+    const harness = createHarness();
+    harness.state.prevalidationRefusal = new ConsultationRefusedError(
+      'invalid-advisor',
+      'The advisor selection is not available on this runtime',
+      [{ index: 0, code: 'model-unknown', message: 'Model "openai/gpt-5" is not available' }],
+    );
+
+    const handle = harness.submit(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('refused');
+    if (result.status !== 'refused') throw new Error('expected a refusal');
+    expect(result.code).toBe('invalid-advisor');
+    expect(result.rejections).toEqual([
+      { index: 0, code: 'model-unknown', message: 'Model "openai/gpt-5" is not available' },
+    ]);
+    expect(result.queueItemRestored).toBe(false);
+
+    // F2: the refusal lands while nothing is queued and nothing is held — the
+    // message returns to the composer untouched, never a normal queued send.
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.queued).toEqual([]);
+    expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.startInputs).toHaveLength(0);
+    expect(harness.state.dispatches).toHaveLength(0);
+    expect(harness.state.phaseLog).toContain('run-1:finish:failed');
   });
 
   test('aborts a waiting admission when auto-review starts: one hold release, never a dispatch', async () => {
@@ -701,7 +792,7 @@ describe('auto-review exclusion', () => {
     expect(result.status).toBe('cancelled');
     expect(harness.state.queueItems).toEqual([]);
     expect(harness.state.events).toContain('queue:remove:q-1');
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
     expect(harness.state.dispatches).toHaveLength(0);
     // Exactly one release, with the heartbeat stopped by it.
@@ -733,7 +824,7 @@ describe('auto-review exclusion', () => {
 
     const result = await handle.result;
     expect(result.status).toBe('cancelled');
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
     expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.queueItems).toEqual([]);
@@ -741,12 +832,12 @@ describe('auto-review exclusion', () => {
 });
 
 describe('dispatch', () => {
-  test('takes, starts the exact consultation, and dispatches with the original config', async () => {
+  test('claims, starts the exact consultation, merges the payload, and dispatches via the consult route', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
     await harness.flush();
 
-    expect(harness.state.takes).toBe(1);
+    expect(harness.state.claims).toBe(1);
     expect(harness.state.startInputs[0]).toMatchObject({
       parentSessionId: 'parent',
       directory: '/work',
@@ -763,34 +854,21 @@ describe('dispatch', () => {
     const result = await handle.result;
 
     expect(result.status).toBe('dispatched');
-    expect(harness.state.dispatches).toHaveLength(1);
-    const turn = harness.state.dispatches[0];
-
-    // The acting turn keeps the original message and configuration; the
-    // guidance is turn-scoped `system`, never part of the message text.
-    expect(turn.sendConfig).toEqual({
-      providerID: 'anthropic',
-      modelID: 'claude-sonnet',
-      agent: 'build',
-      variant: 'high',
-    });
-    expect(turn.message.text).toBe('What should we do next?');
-    expect(turn.message.agentMentionName).toBe('build');
-    expect(turn.message.attachments).toEqual([attachment()]);
-    expect(turn.message.context).toEqual([contextPart()]);
-    expect(turn.target).toEqual({ runtimeKey: 'runtime-1', directory: '/work', sessionId: 'parent' });
-
-    // Anonymous untrusted blocks in the reminder frame.
-    expect(turn.system.startsWith('<system-reminder>')).toBe(true);
-    expect(turn.system).toContain('ADVISOR 1:');
-    expect(turn.system).toContain('the advisor reply');
-    expect(turn.system).toContain('untrusted data');
-    expect(turn.system).toContain('newer evidence wins');
-    expect(turn.system).not.toContain('openai');
-    expect(turn.system).not.toContain('gpt-5');
+    // The settled consultation went to the claimed item through the payload
+    // route, then the item was dispatched on its own route.
+    expect(harness.state.payloadCalls).toHaveLength(1);
+    const payload = harness.state.payloadCalls[0];
+    expect(payload.system?.startsWith('<system-reminder>')).toBe(true);
+    expect(payload.system).toContain('ADVISOR 1:');
+    expect(payload.system).toContain('the advisor reply');
+    expect(payload.system).toContain('untrusted data');
+    expect(payload.system).toContain('newer evidence wins');
+    expect(payload.system).not.toContain('openai');
+    expect(payload.system).not.toContain('gpt-5');
 
     // The bounded receipt rides the primary text part and carries provenance.
-    expect(receiptCarrier(turn)).toMatchObject({
+    const metadata = payload.textPartMetadata as { openchamberConsultReceipt?: Record<string, unknown> };
+    expect(metadata.openchamberConsultReceipt).toMatchObject({
       runID: 'run-1',
       mode: 'parallel',
       acting: 'anthropic/claude-sonnet',
@@ -798,9 +876,16 @@ describe('dispatch', () => {
       advisors: [{ model: 'openai/gpt-5', variant: 'high', status: 'ok', durationMs: 12 }],
     });
 
+    // The consult item was dispatched (and removed) through its own route,
+    // not through a raw sendActingTurn send.
+    expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.events).toContain(`queue:payload:q-1`);
+    expect(harness.state.events).toContain(`queue:dispatch-consult:q-1`);
+    expect(harness.state.dispatches).toHaveLength(0);
+
     // Hold lifecycle: asserted at enqueue, re-asserted for the fan-out, and
-    // released once after the dispatch.
-    expect(harness.state.holds).toEqual([true, true, false]);
+    // released by the server on the successful dispatch (no extra release).
+    expect(harness.state.holds).toEqual([true, true]);
     expect(harness.state.phaseLog).toEqual([
       'run-1:waiting-admission',
       'run-1:consulting',
@@ -826,10 +911,11 @@ describe('dispatch', () => {
     const result = await handle.result;
 
     expect(result.status).toBe('dispatched');
-    const turn = harness.state.dispatches[0];
-    expect(turn.system).toContain('the usable advice');
-    expect(turn.system).not.toContain('provider exploded');
-    expect(receiptCarrier(turn)).toMatchObject({
+    const payload = harness.state.payloadCalls[0];
+    expect(payload.system).toContain('the usable advice');
+    expect(payload.system).not.toContain('provider exploded');
+    const metadata = payload.textPartMetadata as { openchamberConsultReceipt?: Record<string, unknown> };
+    expect(metadata.openchamberConsultReceipt).toMatchObject({
       degraded: false,
       advisors: [
         { model: 'openai/gpt-5', status: 'ok' },
@@ -851,16 +937,17 @@ describe('dispatch', () => {
     const result = await handle.result;
 
     expect(result.status).toBe('dispatched');
-    const turn = harness.state.dispatches[0];
-    expect(turn.system).toContain('no usable advisor output');
-    expect(turn.system).toContain('Proceed normally');
-    expect(receiptCarrier(turn)).toMatchObject({ degraded: true });
+    const payload = harness.state.payloadCalls[0];
+    expect(payload.system).toContain('no usable advisor output');
+    expect(payload.system).toContain('Proceed normally');
+    const metadata = payload.textPartMetadata as { openchamberConsultReceipt?: Record<string, unknown> };
+    expect(metadata.openchamberConsultReceipt).toMatchObject({ degraded: true });
     expect(harness.state.phaseLog).toContain('run-1:finish:done');
   });
 
-  test('a failed acting send marks the run failed and releases the hold', async () => {
+  test('a failed dispatch marks the run failed and releases the hold', async () => {
     const harness = createHarness();
-    harness.state.dispatchFailure = new Error('prompt rejected');
+    harness.state.dispatchConsultFailure = new Error('prompt rejected');
     const handle = harness.submit(baseInput());
     await harness.flush();
 
@@ -870,6 +957,8 @@ describe('dispatch', () => {
     expect(result.status).toBe('failed');
     expect(errorOf(result)).toContain('prompt rejected');
     expect(harness.state.dispatches).toHaveLength(0);
+    // The dispatch route failed, so the submission releases its own hold; the
+    // item stays queued (claimed) until the sweep reverts it.
     expect(harness.state.holds).toEqual([true, true, false]);
     expect(harness.state.phaseLog).toContain('run-1:finish:failed');
   });
@@ -882,7 +971,7 @@ describe('cancellation and failures', () => {
 
     const handle = harness.submit(baseInput());
     await harness.flush();
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
 
     handle.cancel();
     handle.cancel();
@@ -895,17 +984,18 @@ describe('cancellation and failures', () => {
     expect(harness.state.queueItems).toEqual([]);
     expect(harness.state.events).toContain('queue:remove:q-1');
     expect(harness.state.holds).toEqual([true, false]);
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
     expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.phaseLog).toContain('run-1:finish:cancelled');
   });
 
-  test('cancel after the item was taken cancels the runtime and never dispatches', async () => {
+  test('cancel after the claim removes the consult item and never dispatches', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
     await harness.flush();
     expect(harness.state.startInputs).toHaveLength(1);
+    expect(harness.state.claims).toBe(1);
 
     handle.cancel();
     handle.cancel();
@@ -918,7 +1008,61 @@ describe('cancellation and failures', () => {
 
     expect(result.status).toBe('cancelled');
     expect(harness.state.dispatches).toHaveLength(0);
+    // The claimed item is removed so it can never be dispatched or revert to
+    // a normal send; the hold is released (the caller restores the composer).
+    expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.events).toContain('queue:remove:q-1');
     expect(harness.state.holds).toEqual([true, true, false]);
+  });
+
+  test('a degraded consultation after a real start still dispatches alone', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    expect(harness.state.claims).toBe(1);
+
+    // Degraded = all advisors failed after a real start; the consult message
+    // still dispatches, carrying only the explicit degraded notice.
+    harness.lastConsultation().resolve(consultationResult({
+      status: 'degraded',
+      blocks: [],
+      advisors: [provenance({ status: 'failed', reason: 'boom' })],
+    }));
+    const result = await handle.result;
+
+    expect(result.status).toBe('dispatched');
+    expect(harness.state.dispatchConsultCalls).toBe(1);
+    expect(harness.state.payloadCalls).toHaveLength(1);
+    const metadata = harness.state.payloadCalls[0].textPartMetadata as { openchamberConsultReceipt?: { degraded?: boolean } };
+    expect(metadata.openchamberConsultReceipt?.degraded).toBe(true);
+    expect(harness.state.queueItems).toEqual([]);
+  });
+
+  test('onAdvisor events update the run store rows (F5)', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    expect(harness.state.claims).toBe(1);
+
+    // The fake runtime's startConsultation does not emit onAdvisor itself;
+    // the wiring under test is the mapping, so drive it directly.
+    const consultation = harness.lastConsultation();
+    const onAdvisor = harness.state.startInputs[0].onAdvisor;
+    expect(onAdvisor).toBeDefined();
+    onAdvisor?.({ index: 0, phase: 'started' });
+    onAdvisor?.({ index: 0, phase: 'settled', status: 'ok', durationMs: 12 });
+    onAdvisor?.({ index: 1, phase: 'started' });
+    onAdvisor?.({ index: 1, phase: 'settled', status: 'failed', reason: 'boom' });
+
+    consultation.resolve(consultationResult());
+    const result = await handle.result;
+    expect(result.status).toBe('dispatched');
+    expect(harness.state.advisorUpdates).toEqual([
+      { runId: 'run-1', index: 0, status: 'running' },
+      { runId: 'run-1', index: 0, status: 'ok', durationMs: 12 },
+      { runId: 'run-1', index: 1, status: 'running' },
+      { runId: 'run-1', index: 1, status: 'failed', reason: 'boom' },
+    ]);
   });
 
   test('a runtime change while waiting stops without touching the queue or the hold', async () => {
@@ -934,7 +1078,7 @@ describe('cancellation and failures', () => {
 
     expect(result.status).toBe('failed');
     expect(errorOf(result)).toContain('runtime changed');
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.dispatches).toHaveLength(0);
     // The item and the hold belong to the runtime that created them; the
     // heartbeat stops so nothing beats against the new runtime.
@@ -948,7 +1092,7 @@ describe('cancellation and failures', () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
     await harness.flush();
-    expect(harness.state.takes).toBe(1);
+    expect(harness.state.claims).toBe(1);
 
     harness.state.runtimeKey = 'runtime-2';
     harness.lastConsultation().resolve(consultationResult());
@@ -960,11 +1104,35 @@ describe('cancellation and failures', () => {
     expect(harness.state.holds).toEqual([true, true]);
   });
 
-  test('a start refusal restores the taken item and releases the hold', async () => {
+  test('a non-degraded consultation failure after the claim removes the item and releases the hold', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
     await harness.flush();
+    expect(harness.state.claims).toBe(1);
+
+    // A consultation error that is neither a refusal nor a cancel: the run
+    // failed, the consult item is removed (never delivered as a normal send),
+    // and the hold is released.
+    harness.lastConsultation().reject(new Error('advisor transport collapsed'));
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    expect(errorOf(result)).toContain('advisor transport collapsed');
+    expect(result).toMatchObject({ queueItemRestored: false });
+    expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.events).toContain('queue:remove:q-1');
+    expect(harness.state.holds).toEqual([true, true, false]);
+    expect(harness.state.phaseLog).toContain('run-1:finish:failed');
+  });
+
+  test('a start refusal removes the claimed consult item and releases the hold', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    // The item was claimed, not taken: it stays in the projection, marked.
+    expect(harness.state.queueItems).toHaveLength(1);
+    expect(harness.state.queueItems[0].claimed).toMatchObject({ owner: 'consult:run-1' });
 
     const rejections = [
       { index: 0, code: 'model-unknown' as const, message: 'Model "openai/gpt-5" is not available' },
@@ -980,19 +1148,13 @@ describe('cancellation and failures', () => {
     if (result.status !== 'refused') throw new Error('expected a refusal');
     expect(result.code).toBe('invalid-advisor');
     expect(result.rejections).toEqual(rejections);
-    expect(result.queueItemRestored).toBe(true);
+    // The consult item was claimed, so refusal removes it instead of
+    // re-queueing it; the caller restores the composer.
+    expect(result.queueItemRestored).toBe(false);
     expect(harness.state.dispatches).toHaveLength(0);
 
-    // The message is back in the queue with its payload intact.
-    expect(harness.state.queueItems).toHaveLength(1);
-    expect(harness.state.queueItems[0]).toMatchObject({
-      content: 'What should we do next? @build',
-      text: 'What should we do next?',
-      agentMention: 'build',
-      sendConfig: { providerID: 'anthropic', modelID: 'claude-sonnet', agent: 'build', variant: 'high' },
-    });
-    expect(harness.state.queueItems[0].attachments).toEqual([attachment()]);
-    expect(harness.state.queueItems[0].context).toEqual([contextPart()]);
+    expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.events).toContain('queue:remove:q-1');
     expect(harness.state.holds).toEqual([true, true, false]);
     expect(harness.state.phaseLog).toContain('run-1:finish:failed');
   });
@@ -1010,7 +1172,7 @@ describe('cancellation and failures', () => {
     const result = await handle.result;
 
     expect(result.status).toBe('cancelled');
-    // The cancelled message is not restored for normal delivery.
+    // The claimed message is removed, never restored for normal delivery.
     expect(harness.state.queueItems).toEqual([]);
     expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.holds).toEqual([true, true, false]);
@@ -1018,13 +1180,13 @@ describe('cancellation and failures', () => {
 
   test('a failed take leaves the item queued and releases the hold', async () => {
     const harness = createHarness();
-    harness.state.takeFailure = new Error('take request failed');
+    harness.state.claimFailure = new Error('claim request failed');
     const handle = harness.submit(baseInput());
     await harness.flush();
     const result = await handle.result;
 
     expect(result.status).toBe('failed');
-    expect(errorOf(result)).toContain('take request failed');
+    expect(errorOf(result)).toContain('claim request failed');
     expect(harness.state.dispatches).toHaveLength(0);
     expect(harness.state.holds).toEqual([true, false]);
   });
@@ -1054,7 +1216,7 @@ describe('cancellation and failures', () => {
 
     expect(result.status).toBe('failed');
     expect(errorOf(result)).toContain('hold request failed');
-    expect(harness.state.takes).toBe(0);
+    expect(harness.state.claims).toBe(0);
     expect(harness.state.startInputs).toHaveLength(0);
     // B2: the hold is acquired before the item exists, so a failed hold means
     // the message was never queued and can never be delivered raw.

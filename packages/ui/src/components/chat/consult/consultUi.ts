@@ -1,5 +1,11 @@
+import React from 'react';
+
 import type { IconName } from '@/components/icon/icons';
-import { resolveConsultMechanismCapability } from '@/lib/consult/capability';
+import {
+  resolveConsultLiveCapability,
+  resolveConsultMechanismCapability,
+  type ConsultMechanismCapability,
+} from '@/lib/consult/capability';
 import type {
   ConsultAdvisorRejection,
   ConsultAdvisorSelection,
@@ -46,6 +52,8 @@ export type ConsultSubmissionCapture = Omit<SubmitConsultMessageInput, 'advisors
 export type ConsultUnavailableReason =
   | 'no-session'
   | 'unsupported-runtime'
+  | 'version-unknown'
+  | 'version-unsupported'
   | 'consult-active'
   | 'auto-review-active'
   | 'btw-active'
@@ -74,15 +82,18 @@ type ConsultAvailability =
  * explains the state the user cannot change from the composer before a
  * transient one they can.
  *
- * The runtime gate is `resolveConsultMechanismCapability()`, the single place
- * that answers what the current runtime/server can be assumed to do. An
- * `unsupported-runtime` capability disables the action with the existing
- * reason; an `unverified` assurance deliberately keeps it enabled instead of
- * inventing a stricter gate (accepted deviation, plan risk 9).
+ * The mechanism gate comes from the caller: a synchronous
+ * `resolveConsultMechanismCapability()` result (runtime gate only) or the
+ * composed live gate resolved by `useConsultLiveCapability` (runtime gate +
+ * the connected server's OpenCode version, F3 fail-closed). The live gate is
+ * the composer entry point's source of truth; the sync resolver stays for
+ * callers that render before the version read settles.
  */
-export const resolveConsultAvailability = (input: ConsultAvailabilityInput): ConsultAvailability => {
+export const resolveConsultAvailability = (
+  input: ConsultAvailabilityInput & { mechanism?: ConsultMechanismCapability },
+): ConsultAvailability => {
   if (!input.hasSession) return { available: false, reason: 'no-session' };
-  const mechanism = resolveConsultMechanismCapability();
+  const mechanism = input.mechanism ?? resolveConsultMechanismCapability();
   if (!mechanism.available) return { available: false, reason: mechanism.reason };
   if (input.consultActive) return { available: false, reason: 'consult-active' };
   if (input.autoReviewActive) return { available: false, reason: 'auto-review-active' };
@@ -92,12 +103,48 @@ export const resolveConsultAvailability = (input: ConsultAvailabilityInput): Con
   return { available: true };
 };
 
+/**
+ * The live server capability for the composer (F3): runtime gate + OpenCode
+ * version, resolved once per mount and refetchable. Until it settles the
+ * action keeps the synchronous runtime gate's answer, so a VS Code runtime is
+ * disabled immediately while a server-queue runtime briefly shows the
+ * conservative unverified state before the version lands.
+ */
+export const useConsultLiveCapability = () => {
+  const [capability, setCapability] = React.useState<ConsultMechanismCapability>(
+    () => resolveConsultMechanismCapability(),
+  );
+  const [generation, setGeneration] = React.useState(0);
+
+  React.useEffect(() => {
+    let stale = false;
+    setCapability(resolveConsultMechanismCapability());
+    resolveConsultLiveCapability()
+      .then((resolved) => {
+        if (!stale) setCapability(resolved);
+      })
+      .catch(() => {
+        if (!stale) setCapability({ available: false, reason: 'version-unknown' });
+      });
+    return () => {
+      stale = true;
+    };
+  }, [generation]);
+
+  const refetch = React.useCallback(() => setGeneration((value) => value + 1), []);
+  return { capability, refetch };
+};
+
 export const consultUnavailableLabelKey = (reason: ConsultUnavailableReason): I18nKey => {
   switch (reason) {
     case 'no-session':
       return 'chat.consult.unavailable.noSession';
     case 'unsupported-runtime':
       return 'chat.consult.unavailable.runtime';
+    case 'version-unknown':
+      return 'chat.consult.unavailable.versionUnknown';
+    case 'version-unsupported':
+      return 'chat.consult.unavailable.versionUnsupported';
     case 'consult-active':
       return 'chat.consult.unavailable.active';
     case 'auto-review-active':

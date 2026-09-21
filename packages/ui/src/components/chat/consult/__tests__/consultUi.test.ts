@@ -27,6 +27,10 @@ let mechanismCapability: ConsultMechanismCapability = { available: true, assuran
 
 mock.module('@/lib/consult/capability', () => ({
   resolveConsultMechanismCapability: (): ConsultMechanismCapability => mechanismCapability,
+  // The hook under test resolves the live gate through this seam; the
+  // presentation tests only need it to settle to the current mock answer.
+  resolveConsultLiveCapability: async (): Promise<ConsultMechanismCapability> => mechanismCapability,
+  CONSULT_MIN_OPENCODE_VERSION: '1.18.29',
 }));
 
 const {
@@ -92,6 +96,34 @@ describe('resolveConsultAvailability', () => {
     expect(resolveConsultAvailability(availableInput)).toEqual({ available: true });
   });
 
+  test('consumes the live capability when the caller provides it (F3)', () => {
+    // The composed live gate (runtime + OpenCode version) replaces the sync
+    // runtime gate when the caller resolved it.
+    expect(resolveConsultAvailability({
+      ...availableInput,
+      mechanism: { available: true, assurance: 'verified', version: '1.18.31' },
+    })).toEqual({ available: true });
+    expect(resolveConsultAvailability({
+      ...availableInput,
+      mechanism: { available: false, reason: 'version-unknown' },
+    })).toEqual({ available: false, reason: 'version-unknown' });
+    expect(resolveConsultAvailability({
+      ...availableInput,
+      mechanism: { available: false, reason: 'version-unsupported', version: '1.18.28' },
+    })).toEqual({ available: false, reason: 'version-unsupported' });
+    // The runtime gate still wins over a live answer when it is unsupported.
+    expect(resolveConsultAvailability({
+      ...availableInput,
+      mechanism: { available: false, reason: 'unsupported-runtime' },
+    })).toEqual({ available: false, reason: 'unsupported-runtime' });
+    // Fundamental composer reasons come after the capability gates.
+    expect(resolveConsultAvailability({
+      ...availableInput,
+      hasSession: false,
+      mechanism: { available: false, reason: 'version-unknown' },
+    })).toEqual({ available: false, reason: 'no-session' });
+  });
+
   test('a busy session is not an unavailability state', () => {
     // There is deliberately no session-activity field: the consult is admitted
     // through the server-authoritative queue, so a busy parent is covered by
@@ -143,6 +175,8 @@ describe('consult UI labels', () => {
   const reasons: readonly ConsultUnavailableReason[] = [
     'no-session',
     'unsupported-runtime',
+    'version-unknown',
+    'version-unsupported',
     'consult-active',
     'auto-review-active',
     'btw-active',
@@ -192,6 +226,20 @@ describe('consult unavailable reason localization', () => {
       // No English placeholder may ship in a non-English dictionary.
       if (locale !== 'en') expect(label).not.toBe(enDict[AUTO_REVIEW_LABEL_KEY]);
     }
+  });
+
+  test('the version reasons are translated in every locale (F3)', () => {
+    for (const key of ['chat.consult.unavailable.versionUnknown', 'chat.consult.unavailable.versionUnsupported'] as const) {
+      for (const [locale, dictionary] of Object.entries(localeDictionaries)) {
+        const label = dictionary[key as keyof typeof dictionary] as string | undefined;
+        expect(label?.length ?? 0).toBeGreaterThan(0);
+        if (locale !== 'en') expect(label).not.toBe(enDict[key as keyof typeof enDict]);
+      }
+    }
+    // Both strings name the version placeholder, which the action button
+    // fills with the verified floor.
+    expect(enDict['chat.consult.unavailable.versionUnknown']).toContain('{version}');
+    expect(enDict['chat.consult.unavailable.versionUnsupported']).toContain('{minVersion}');
   });
 });
 

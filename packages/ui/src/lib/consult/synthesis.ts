@@ -15,7 +15,9 @@ import type {
  * Three artifacts leave this module:
  *
  * 1. the turn-scoped `system` guidance that carries the advisor outputs into
- *    the acting turn (`buildConsultSynthesisSystem`);
+ *    the acting turn (`buildConsultSynthesisSystem`). OpenCode stores this
+ *    field on the acting user message (`UserMessage.system`), where it stays
+ *    visible in the session API/export but is active for that turn only;
  * 2. the explicit notice used when no advisor produced usable output
  *    (`buildDegradedConsultNotice`);
  * 3. the compact receipt that rides the acting user message's text-part

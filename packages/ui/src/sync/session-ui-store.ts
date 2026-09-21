@@ -303,7 +303,12 @@ type SendMessageOptions = {
   /** Immutable copy of the new-session draft at submit time; used instead of the live draft. */
   draftSnapshot?: NewSessionDraftState
   delivery?: 'steer'
-  /** Turn-scoped system guidance forwarded to this one send; never persisted into message history or the queue. */
+  /**
+   * Turn-scoped system guidance forwarded to this one send. OpenCode persists
+   * it on the acting user message (`UserMessage.system`), where it stays
+   * visible in the session API/export but is active for this turn only — the
+   * next ordinary turn does not re-apply it (Phase 0 verified).
+   */
   system?: string
   /** Structured metadata for the primary text part (for example the Consult Models receipt); absent leaves the part unchanged. */
   textPartMetadata?: TextPartInput['metadata']

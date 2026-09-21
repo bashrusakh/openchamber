@@ -136,6 +136,8 @@ export type ConsultRuntimeClient = {
   forkSession: (sessionId: string, messageId: string | undefined, directory: string) => Promise<Session>;
   sendMessage: (params: ConsultAdvisorSendParams) => Promise<string>;
   updateSession: (id: string, patch: { permission: PermissionRuleset }, directory: string) => Promise<Session>;
+  /** Read-back path for the effective permission ruleset. */
+  getSession: (sessionId: string, directory: string) => Promise<Session>;
   getProvidersForConfig: (
     directory: string,
   ) => Promise<{ providers: readonly Provider[]; default: { [key: string]: string } }>;
@@ -282,6 +284,20 @@ export type ConsultationHandle = {
   result: Promise<ConsultationResult>;
 };
 
+/**
+ * Live per-advisor progress emitted during the fan-out: `started` when the
+ * advisor's send begins, `settled` when it reaches a terminal status. The
+ * panel drives its rows from these; the run store guards updates by runId.
+ */
+export type ConsultAdvisorEvent = {
+  index: number;
+  phase: 'started' | 'settled';
+  /** Terminal status on `settled`; absent on `started`. */
+  status?: ConsultAdvisorStatus;
+  durationMs?: number;
+  reason?: string;
+};
+
 export type StartConsultationInput = {
   parentSessionId: string;
   directory: string;
@@ -298,12 +314,24 @@ export type StartConsultationInput = {
   assertAdmissible?: () => void | Promise<void>;
   /** Overrides the generated run id (tests). */
   runId?: string;
+  /**
+   * Live per-advisor progress for the panel. Called only while this run is
+   * still live (the loop's own token check guards every emission); never
+   * throws into the advisor path.
+   */
+  onAdvisor?: (event: ConsultAdvisorEvent) => void;
 };
 
 export type ConsultRuntime = {
   startConsultation: (input: StartConsultationInput) => ConsultationHandle;
   /** Idempotent; returns once cancellation is recorded and forks are cleaned best-effort. */
   cancel: (runId: string) => Promise<void>;
+  /**
+   * Start-time prevalidation: the same refusals `startConsultation` raises
+   * before its first fork, without creating a run or a fork. Exported through
+   * the runtime so the submission can prevalidate before queue admission.
+   */
+  prevalidateConsultation: (input: StartConsultationInput) => Promise<ConsultForkPoint>;
 };
 
 type AdvisorState = {
@@ -484,6 +512,45 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
     }
   };
 
+  const emitAdvisor = (
+    input: StartConsultationInput,
+    event: ConsultAdvisorEvent,
+  ): void => {
+    if (!input.onAdvisor) return;
+    try {
+      input.onAdvisor(event);
+    } catch {
+      // Progress reporting never throws into the advisor path.
+    }
+  };
+
+  /**
+   * F3 fail-closed: the deny-all ruleset is what removes the advisor's tool
+   * schema, so the write is verified by read-back before anything is sent.
+   * The effective ruleset must carry the exact wildcard deny rule; an absent
+   * ruleset is refetched once, and any failure to prove the rule fails the
+   * advisor instead of sending unverified.
+   */
+  const hasDenyAllPermission = (permission: PermissionRuleset | undefined): boolean =>
+    Array.isArray(permission) && permission.some((rule) => (
+      rule.permission === '*' && rule.pattern === '*' && rule.action === 'deny'
+    ));
+
+  const verifyAdvisorPermission = async (
+    forkId: string,
+    directory: string,
+    written: Session,
+  ): Promise<boolean> => {
+    if (hasDenyAllPermission(written.permission)) return true;
+    try {
+      const refetched = await deps.client.getSession(forkId, directory);
+      return hasDenyAllPermission(refetched.permission);
+    } catch {
+      // A failed read-back cannot prove the lock: fail closed.
+      return false;
+    }
+  };
+
   const runAdvisor = async (
     run: ActiveRun,
     input: StartConsultationInput,
@@ -495,6 +562,7 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
       finishAdvisor(advisor, 'cancelled', null, null, startedAt);
       return;
     }
+    emitAdvisor(input, { index: advisor.index, phase: 'started' });
 
     let fork: Session;
     try {
@@ -516,7 +584,9 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
       // and hiding, marking, or deleting the wrong session is worse than
       // leaving the clone. Accepted bound: a possible clone stays exactly as
       // it is (visible until the user deletes it); the advisor is failed.
-      finishAdvisor(advisor, 'failed', null, error instanceof Error ? error.message : String(error), startedAt);
+      const reason = error instanceof Error ? error.message : String(error);
+      finishAdvisor(advisor, 'failed', null, reason, startedAt);
+      emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'failed', durationMs: advisor.durationMs, reason });
       return;
     }
 
@@ -528,6 +598,7 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
     if (isAbandoned(run)) {
       await discardFork(run, fork.id);
       finishAdvisor(advisor, 'cancelled', null, null, startedAt);
+      emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'cancelled', durationMs: advisor.durationMs });
       return;
     }
 
@@ -546,22 +617,40 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
       // registry no longer needs to hide this fork.
       releaseForkPendingHide(run, fork.id);
       deps.session.registerSessionDirectory(fork.id, directory);
-      await deps.client.updateSession(fork.id, { permission: CONSULT_ADVISOR_PERMISSION }, directory);
+      const written = await deps.client.updateSession(fork.id, { permission: CONSULT_ADVISOR_PERMISSION }, directory);
+      // F3 fail-closed: verify the deny-all lock by read-back before any send.
+      const permissionVerified = await verifyAdvisorPermission(fork.id, directory, written);
+      if (!permissionVerified) {
+        releaseForkPendingHide(run, fork.id);
+        await discardFork(run, fork.id);
+        if (isAbandoned(run)) {
+          finishAdvisor(advisor, 'cancelled', null, null, startedAt);
+          emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'cancelled', durationMs: advisor.durationMs });
+          return;
+        }
+        const reason = 'permission-verification-failed';
+        finishAdvisor(advisor, 'failed', null, reason, startedAt);
+        emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'failed', durationMs: advisor.durationMs, reason });
+        return;
+      }
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = `Advisor setup failed: ${error instanceof Error ? error.message : String(error)}`;
       releaseForkPendingHide(run, fork.id);
       await discardFork(run, fork.id);
       if (isAbandoned(run)) {
         finishAdvisor(advisor, 'cancelled', null, null, startedAt);
+        emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'cancelled', durationMs: advisor.durationMs });
         return;
       }
-      finishAdvisor(advisor, 'failed', null, `Advisor setup failed: ${reason}`, startedAt);
+      finishAdvisor(advisor, 'failed', null, reason, startedAt);
+      emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'failed', durationMs: advisor.durationMs, reason });
       return;
     }
 
     if (isAbandoned(run)) {
       await discardFork(run, fork.id);
       finishAdvisor(advisor, 'cancelled', null, null, startedAt);
+      emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'cancelled', durationMs: advisor.durationMs });
       return;
     }
 
@@ -591,15 +680,26 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
       });
       if (isAbandoned(run)) {
         finishAdvisor(advisor, 'cancelled', null, null, startedAt);
+        emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'cancelled', durationMs: advisor.durationMs });
         return;
       }
       applyCompletionOutcome(advisor, outcome, startedAt);
+      emitAdvisor(input, {
+        index: advisor.index,
+        phase: 'settled',
+        status: advisor.status === 'pending' ? 'cancelled' : advisor.status,
+        durationMs: advisor.durationMs,
+        reason: advisor.reason ?? undefined,
+      });
     } catch (error) {
       if (isAbandoned(run)) {
         finishAdvisor(advisor, 'cancelled', null, null, startedAt);
+        emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'cancelled', durationMs: advisor.durationMs });
         return;
       }
-      finishAdvisor(advisor, 'failed', null, error instanceof Error ? error.message : String(error), startedAt);
+      const reason = error instanceof Error ? error.message : String(error);
+      finishAdvisor(advisor, 'failed', null, reason, startedAt);
+      emitAdvisor(input, { index: advisor.index, phase: 'settled', status: 'failed', durationMs: advisor.durationMs, reason });
     }
   };
 
@@ -667,6 +767,58 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
     };
   };
 
+  /**
+   * Start-time prevalidation without creating anything: the runtime-key check,
+   * the advisor-list check, the model/agent surface load with
+   * `validateConsultAdvisors`, and the settled-context fork-point resolution —
+   * the same checks `executeRun` performs before its first fork, in the same
+   * order, throwing the same `ConsultationRefusedError` codes. The resolved
+   * fork point is returned so `startConsultation` reuses it instead of
+   * resolving twice. Runs ahead of queue admission so an ordinary start
+   * refusal returns the message to the composer while it is still queued.
+   */
+  const prevalidateConsultation = async (input: StartConsultationInput): Promise<ConsultForkPoint> => {
+    const expectedRuntimeKey = input.expectedRuntimeKey;
+    if (expectedRuntimeKey !== undefined && deps.runtimeKey() !== expectedRuntimeKey) {
+      throw new ConsultationRefusedError('runtime-changed', 'The runtime changed before the consultation started');
+    }
+    if (input.advisors.length === 0) {
+      throw new ConsultationRefusedError('no-advisors', 'Select at least one advisor model');
+    }
+
+    let surface: ConsultModelSurface;
+    try {
+      const [catalog, agents] = await Promise.all([
+        deps.client.getProvidersForConfig(input.directory),
+        deps.client.listAgents(input.directory),
+      ]);
+      surface = { providers: catalog.providers, agents };
+    } catch (error) {
+      throw new ConsultationRefusedError(
+        'surface-unavailable',
+        `Could not load the model surface: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const validation = validateConsultAdvisors(input.advisors, surface);
+    if (!validation.ok) {
+      throw new ConsultationRefusedError(
+        'invalid-advisor',
+        'The advisor selection is not available on this runtime',
+        validation.rejections,
+      );
+    }
+
+    try {
+      return resolveConsultForkPoint(deps.readParentMessages(input.parentSessionId, input.directory));
+    } catch (error) {
+      if (error instanceof ConsultForkPointError) {
+        throw new ConsultationRefusedError('no-settled-context', error.message);
+      }
+      throw error;
+    }
+  };
+
   const executeRun = async (run: ActiveRun, input: StartConsultationInput): Promise<ConsultationResult> => {
     const mode = input.mode ?? 'parallel';
     try {
@@ -674,48 +826,8 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
       // cancellation is already recorded, and its forks are cleaned before
       // this run creates anything.
       if (run.supersededCleanup) await run.supersededCleanup;
-      if (deps.runtimeKey() !== run.runtimeKey) {
-        throw new ConsultationRefusedError('runtime-changed', 'The runtime changed before the consultation started');
-      }
-      if (input.advisors.length === 0) {
-        throw new ConsultationRefusedError('no-advisors', 'Select at least one advisor model');
-      }
+      const forkPoint = await prevalidateConsultation(input);
       if (input.assertAdmissible) await input.assertAdmissible();
-      if (isAbandoned(run)) return buildResult(run, input, mode);
-
-      let surface: ConsultModelSurface;
-      try {
-        const [catalog, agents] = await Promise.all([
-          deps.client.getProvidersForConfig(input.directory),
-          deps.client.listAgents(input.directory),
-        ]);
-        surface = { providers: catalog.providers, agents };
-      } catch (error) {
-        throw new ConsultationRefusedError(
-          'surface-unavailable',
-          `Could not load the model surface: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      if (isAbandoned(run)) return buildResult(run, input, mode);
-
-      const validation = validateConsultAdvisors(input.advisors, surface);
-      if (!validation.ok) {
-        throw new ConsultationRefusedError(
-          'invalid-advisor',
-          'The advisor selection is not available on this runtime',
-          validation.rejections,
-        );
-      }
-
-      let forkPoint: ConsultForkPoint;
-      try {
-        forkPoint = resolveConsultForkPoint(deps.readParentMessages(input.parentSessionId, input.directory));
-      } catch (error) {
-        if (error instanceof ConsultForkPointError) {
-          throw new ConsultationRefusedError('no-settled-context', error.message);
-        }
-        throw error;
-      }
       if (isAbandoned(run)) return buildResult(run, input, mode);
 
       await runAdvisors(run, input, forkPoint);
@@ -784,7 +896,7 @@ export const createConsultRuntime = (deps: ConsultRuntimeDeps): ConsultRuntime =
     await beginCancellation(run);
   };
 
-  return { startConsultation, cancel };
+  return { startConsultation, cancel, prevalidateConsultation };
 };
 
 const defaultDeps = (): ConsultRuntimeDeps => ({
@@ -792,6 +904,7 @@ const defaultDeps = (): ConsultRuntimeDeps => ({
     forkSession: (sessionId, messageId, directory) => opencodeClient.forkSession(sessionId, messageId, directory),
     sendMessage: (params) => opencodeClient.sendMessage(params),
     updateSession: (id, patch, directory) => opencodeClient.updateSession(id, patch, directory),
+    getSession: (sessionId, directory) => opencodeClient.getSession(sessionId, directory),
     getProvidersForConfig: (directory) => opencodeClient.getProvidersForConfig(directory),
     listAgents: (directory) => opencodeClient.listAgents(directory),
   },

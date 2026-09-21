@@ -3425,6 +3425,9 @@ export const dict = {
   'chat.consult.unavailable.autoReview': 'Bu oturumda kod inceleme döngüsü çalışırken modellere danışılamaz',
   'chat.consult.unavailable.btw': 'btw oturumu etkinken modellere danışılamaz',
   'chat.consult.unavailable.runtime': 'Modellere danışma, OpenChamber sunucu ileti kuyruğunu gerektirir ve burada kullanılamaz',
+  'chat.consult.unavailable.versionUnknown': 'Modellere danışma için OpenCode {version} veya üstü gerekir; bağlı sunucunun sürümü doğrulanamadı.',
+  'chat.consult.unavailable.versionUnsupported': 'OpenCode {version}, desteklenen sürüm {minVersion} sürümünden daha eski olduğu için modellere danışma kullanılamaz.',
+
   'chat.consult.dialog.title': 'Modellere danış',
   'chat.consult.dialog.description': 'Önce aynı soruyu diğer modellere sor. Yanıtları bir tur boyunca özel bir ipucu olarak eklenebilir; yanıtı yine etkin model yazar.',
   'chat.consult.dialog.actingLabel': 'Etkin model',

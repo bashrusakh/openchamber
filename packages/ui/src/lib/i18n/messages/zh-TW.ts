@@ -3427,6 +3427,9 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.unavailable.autoReview': '此工作階段中程式碼審查循環執行時無法使用模型諮詢',
   'chat.consult.unavailable.btw': 'btw 工作階段啟用時無法使用模型諮詢',
   'chat.consult.unavailable.runtime': '模型諮詢需要 OpenChamber 伺服器訊息佇列，此處無法使用',
+  'chat.consult.unavailable.versionUnknown': '模型諮詢需要 OpenCode {version} 或更新版本；無法驗證所連線伺服器的版本。',
+  'chat.consult.unavailable.versionUnsupported': 'OpenCode {version} 低於支援的版本 {minVersion}，模型諮詢無法使用。',
+
   'chat.consult.dialog.title': '諮詢模型',
   'chat.consult.dialog.description': '先向其他模型提出相同的問題。它們的回答可能會作為僅用於一輪的私密提示加入；回覆仍由目前的執行模型撰寫。',
   'chat.consult.dialog.actingLabel': '執行模型',

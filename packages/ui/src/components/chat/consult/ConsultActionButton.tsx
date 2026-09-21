@@ -3,6 +3,7 @@ import React from 'react';
 import { Icon } from '@/components/icon/Icon';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useI18n } from '@/lib/i18n';
+import { CONSULT_MIN_OPENCODE_VERSION } from '@/lib/consult/capability';
 import { cn } from '@/lib/utils';
 import { consultUnavailableLabelKey, type ConsultUnavailableReason } from './consultUi';
 
@@ -30,8 +31,10 @@ export const ConsultActionButton = React.memo(function ConsultActionButton({
   unavailableReason,
 }: ConsultActionButtonProps) {
   const { t } = useI18n();
+  // Both version reasons name the floor; the tooltip reads the same floor the
+  // live gate verified against.
   const unavailableLabel = unavailableReason
-    ? t(consultUnavailableLabelKey(unavailableReason))
+    ? t(consultUnavailableLabelKey(unavailableReason), { version: CONSULT_MIN_OPENCODE_VERSION, minVersion: CONSULT_MIN_OPENCODE_VERSION })
     : null;
   const actionLabel = t('chat.consult.action');
 

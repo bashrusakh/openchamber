@@ -3427,6 +3427,9 @@ export const dict = {
   'chat.consult.unavailable.autoReview': 'Consult models is unavailable while the code review loop is running in this session',
   'chat.consult.unavailable.btw': 'Consult models is unavailable while a btw session is active',
   'chat.consult.unavailable.runtime': 'Consult models needs the OpenChamber server message queue and is unavailable here',
+  'chat.consult.unavailable.versionUnknown': 'Consult Models needs OpenCode {version} or newer; the connected server\u2019s version could not be verified.',
+  'chat.consult.unavailable.versionUnsupported': 'Consult Models is unavailable because OpenCode {version} is older than the supported version {minVersion}.',
+
   'chat.consult.dialog.title': 'Consult models',
   'chat.consult.dialog.description': 'Ask other models the same question first. Their answers may be added as a private hint for one turn; your acting model still writes the reply.',
   'chat.consult.dialog.actingLabel': 'Acting model',

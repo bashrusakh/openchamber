@@ -59,6 +59,22 @@ per-advisor `rejections`, which the composer renders as one localized toast
 line per rejected advisor (`formatConsultRejections`); the dialog is already
 closed when a refusal settles.
 
+## What is stored where (retention contract, F4)
+
+- Advisor fork transcripts exist for the fan-out and are deleted after
+  collection (run cleanup, stale-fork GC, parent delete/archive); they are not
+  retained.
+- Successful advisor texts are copied into the acting turn's synthesis
+  `system`, which OpenCode stores on the acting user message
+  (`UserMessage.system`). That field is active for the acting turn only — the
+  next ordinary turn does not re-apply it (Phase 0 verified) — but it is
+  persisted with the parent session and is visible in its API/export/share
+  surface. The ordinary chat UI does not render it as message content.
+- The receipt is persisted as bounded text-part metadata on the acting user
+  message and rides the session's data the same way.
+- Advisor identities are not part of the synthesis text or the receipt's
+  blocks; provenance stays in the run store and the receipt's advisor rows.
+
 `consultRuntime.cancel(runId)` is idempotent. It records cancellation first
 (synchronously, before any await), then releases this run's owner-scoped queue
 admission hold (`consult:<runId>`), then aborts each known fork best-effort,
@@ -118,7 +134,13 @@ acting turn.
    → `updateSession({ permission: CONSULT_ADVISOR_PERMISSION })`. The wildcard
    deny-all ruleset removes the tool schema from the advisor request entirely
    (Phase 0 A3/A4/A9), so advisors cannot mutate files, run commands, ask
-   questions, or start sub-agents.
+   questions, or start sub-agents. **The written ruleset is verified by
+   read-back** (the `updateSession` echo, or one `getSession` refetch when the
+   echo omits `permission`): the effective ruleset must carry the exact
+   `*`/`*`/`deny` rule. A failed verification fails that advisor with
+   `permission-verification-failed` — the fork is deleted and the advisor is
+   never sent to — while the run continues with the remaining advisors. A
+   failed read-back request fails closed instead of sending unverified.
 6. A `forkSession` rejection is ambiguous: the server may have created the
    clone before the response was lost. The run never tries to recover, hide,
    mark, or delete such a clone. The only available signal — "the session id
@@ -175,81 +197,93 @@ turn was sent:
   `consultCaptureDisposition` (keep the capture cleared) plus the localized
   delivered-raw toast.
 
-`queueItemRestored` on `refused`/`failed` means the message was put back in
-(or left in) the queue and will be delivered normally, so the caller must not
-also restore the composer from its own captured payload. `cancel()` is
-idempotent and unavailable once the acting turn is being dispatched; the
+`queueItemRestored` on `refused`/`failed` is `true` only for the
+enqueue-rejection and unattributable-append edges (a copy of the message is
+still queued and will be delivered normally, so the caller must not also
+restore the composer). On the post-claim refusal/failure paths it is `false`
+and the caller restores the composer from its own captured payload. `cancel()`
+is idempotent and unavailable once the acting turn is being dispatched; the
 caller restores the composer on `cancelled`.
 
 The lifecycle:
 
 1. The run store starts at `waiting-admission`.
-2. The owner-scoped hold (`consult:<runId>`) is acquired and **awaited before
+2. Prevalidation (F2) runs BEFORE any hold or queue item exists: the advisor
+   surface and the parent's settled context are checked exactly as
+   `startConsultation` would check them, without creating a fork. An ordinary
+   start refusal happens here — nothing is queued, nothing is held, and the
+   caller restores the composer from its own captured payload.
+3. The owner-scoped hold (`consult:<runId>`) is acquired and **awaited before
    the item exists**, so the server's 500 ms dispatch quiet timer can never
    race the hold round trip; the heartbeat starts immediately after. The
    server re-checks the hold after its own idleness awaits, so a hold landing
    mid-tick still stops that send. If the hold fails, nothing is enqueued and
    the submission fails.
-3. The message is enqueued with `useMessageQueueStore.addToQueue` in the
-   composer's capture shape.
-4. The submission watches the queue projection and the directory status until
+4. The message is enqueued with `useMessageQueueStore.addToQueue` in the
+   composer's capture shape, marked `kind: 'consult'` — the generic
+   dispatcher never delivers it.
+5. The submission watches the queue projection and the directory status until
    its item is the queue head **and** `resolveQueuedSessionStatusType` reports
    `idle` (the same gate the queue's own auto-send uses). Cancellation (the
    handle, or a store phase of `cancelled`), a superseding run, a runtime
    change, and the item leaving the queue all stop the watcher before the
-   take. The hold is re-asserted every `CONSULT_HOLD_REASSERT_MS` (2 min, well
+   claim. The hold is re-asserted every `CONSULT_HOLD_REASSERT_MS` (2 min, well
    inside the server's 5 min TTL) while the item waits, so a long admission
    wait cannot let it expire.
-5. `takeForSend` removes exactly the consult item. If the take fails, the hold
-   is released and the item is left to the queue's normal delivery. If the
-   runtime changes here, nothing is taken and nothing is touched. A take that
-   resolves with no item is `delivered-raw`.
-6. The store moves to `consulting` and `consultRuntime.startConsultation` runs
+6. The consult item is claimed for this run's owner
+   (`claimConsultItem`): the item is reserved, the generic dispatcher is kept
+   away by the claim's hold, and re-polling tolerates a busy/not-head refusal.
+   A claim failure releases the hold and fails the submission (the item stays
+   queued until the server's expiry sweep reverts it). An item that vanished
+   is `delivered-raw`.
+7. The store moves to `consulting` and `consultRuntime.startConsultation` runs
    with `runId` (the store's run id) and `expectedRuntimeKey`.
-7. The hold is re-asserted once more for the fan-out (the heartbeat keeps
+8. The hold is re-asserted once more for the fan-out (the heartbeat keeps
    beating); the owner scoping means no other feature's or run's release can
    clear it.
-8. On a non-cancelled result the store moves through `settling` and
+9. On a non-cancelled result the store moves through `settling` and
    `dispatching`; the synthesis `system` and the receipt `textPartMetadata`
-   are built from the result, and the original message is sent through
-   `useSessionUIStore.sendMessage(..., { target, system, textPartMetadata })`
-   with the original provider/model/agent/variant/attachments. Because this is
-   the ordinary store send, the queue's delivery-time behavior is neither lost
-   nor duplicated: session knowledge is resolved, the message-sent notification
-   fires, and the captured agent mention travels as an agent part.
-9. `done` is recorded with the per-advisor outcomes and the degraded flag; the
-   hold is released and the heartbeat stops. Every terminal path releases the
-   hold exactly once: dispatch, cancel, refusal, and failure. Hold operations
-   are serialized per run: every re-assert chains behind the previous one, and
-   the terminal path marks the run inactive, awaits the in-flight hold
-   operation, and issues the release last, so a stale re-assert can never land
-   after the release and resurrect the hold (queue stalls until the TTL).
+   are merged onto the claimed item via `setConsultItemPayload`, and the item
+   is dispatched through its own route (`dispatchConsultItem`) — the server
+   verifies the claim, waits for idleness, sends the item with its payload,
+   removes it, and releases this owner's hold. The submission does not release
+   the hold again after a successful dispatch.
+10. `done` is recorded with the per-advisor outcomes and the degraded flag.
+   Every terminal path releases the hold exactly once — except the successful
+   dispatch, where the server already released it and the submission suppresses
+   its own release. Hold operations are serialized per run: every re-assert
+   chains behind the previous one, and the terminal path marks the run
+   inactive, awaits the in-flight hold operation, and issues the release last,
+   so a stale re-assert can never land after the release and resurrect the
+   hold (queue stalls until the TTL).
 
 Branches:
 
 - partial success dispatches with the successful blocks only; the receipt
   records the failed rows and their reasons;
 - all advisors failed dispatches the explicit degraded notice
-  (`buildDegradedConsultNotice`) and a `degraded` receipt;
-- a cancelled consultation or a cancel before dispatch never dispatches;
-- a start refusal or unexpected pre-dispatch failure re-adds the taken item to
-  the queue (when the runtime still matches) and releases the hold;
+  (`buildDegradedConsultNotice`) and a `degraded` receipt — degraded after a
+  real start still dispatches alone, never as a normal queue delivery;
+- a cancelled consultation or a cancel before dispatch never dispatches; the
+  claimed item is removed so it can never be delivered as a normal send;
+- a refusal or non-degraded failure AFTER the claim removes the consult item
+  and releases the hold — the message is never re-queued for normal delivery
+  (F2); `queueItemRestored` stays `false` and the caller restores the composer;
 - an enqueue rejection fails the submission and the caller restores its
   capture; if the server accepted the item before the rejection, that queued
   copy is delivered normally later (accepted v1 bound, see "Accepted v1
   limitations");
-- the item leaving the queue before the take — or a take that returns nothing
-  — is `delivered-raw`: never restore, never re-send;
+- the item leaving the queue before the claim — or a claim that cannot find
+  the item — is `delivered-raw`: never restore, never re-send;
 - a concurrent append that cannot be attributed to this submission is never
-  taken; the submission fails with `queueItemRestored: true` so the caller
+  claimed; the submission fails with `queueItemRestored: true` so the caller
   does not duplicate a message that is still queued;
 - a runtime change at any point stops the heartbeat and skips queue and hold
   operations entirely: both belong to the runtime that created them, and
-  session ids are not unique across runtimes. A take that already succeeded is
-  not restored across the change (the item is gone from the old runtime's
-  queue); an untaken item can still be delivered raw by the old runtime once
-  its hold expires, while the composer restores (accepted v1 bound, see
-  "Accepted v1 limitations");
+  session ids are not unique across runtimes. An already-claimed item is not
+  removed across the change (the claim belongs to the old runtime's owner and
+  lapses into the server's sweep); the composer restores (accepted v1 bound,
+  see "Accepted v1 limitations");
 - the hold release is idempotent per submission on every path, and a
   superseded submission releases only its own `consult:<runId>` owner — the
   superseding run's hold is untouched because it is a different owner.
@@ -311,8 +345,10 @@ cannot travel in the server batch.
 
 ## Invariants
 
-- One acting agent. The parent session is never written to, and no advisor
-  output reaches it through this module.
+- One acting agent. The parent session is never written to by the advisor
+  runtime, and no advisor output reaches it through this module (the acting
+  turn's stored `system`/receipt metadata is the submission's own send; see
+  "What is stored where").
 - One live run per parent. A new start supersedes the previous run: its
   cancellation is recorded before the new run forks anything, and its forks are
   aborted and deleted first.

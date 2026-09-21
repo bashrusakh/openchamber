@@ -104,7 +104,24 @@ export interface QueuedMessage {
     createdAt: number;
     /** Send config captured at queue time — used as-is when auto-sending */
     sendConfig?: QueuedMessageSendConfig;
+    /** A consult item is dispatched only through its claim → payload → dispatch route, never by the generic dispatcher. */
+    kind?: 'consult';
+    /** The consult's model-facing payload, delivered with the prompt. */
+    consult?: ConsultPayload;
+    /** The live reservation on a consult item, as the server projects it. */
+    claimed?: { owner: string; claimedAt: number } | null;
 }
+
+/**
+ * The model-facing payload a consult item carries: a standing system prompt
+ * and metadata attached to the primary text part. `textPartMetadata` is the
+ * UI's structured payload and is carried verbatim (the server bounds it as
+ * JSON); its shape is the consult flow's contract.
+ */
+export type ConsultPayload = {
+    system?: string;
+    textPartMetadata?: unknown;
+};
 
 interface QueuedMessageInput {
     content: string;
@@ -114,6 +131,8 @@ interface QueuedMessageInput {
     attachments?: AttachedFile[];
     context?: QueuedContextPart[];
     sendConfig?: QueuedMessageSendConfig;
+    kind?: 'consult';
+    consult?: ConsultPayload;
 }
 
 export type MessageQueueTarget = {
@@ -187,6 +206,15 @@ const serverItemSchema = z.object({
     context: z.array(serverContextPartSchema).optional(),
     contextPreview: z.string().optional(),
     sendConfig: serverSendConfigSchema,
+    kind: z.literal('consult').optional(),
+    consult: z.object({
+        system: z.string().optional(),
+        textPartMetadata: z.unknown().optional(),
+    }).optional(),
+    claimed: z.object({
+        owner: z.string(),
+        claimedAt: z.number(),
+    }).nullable().optional(),
 });
 
 const serverSessionSchema = z.object({
@@ -208,6 +236,26 @@ const serverSessionResponseSchema = z.object({
 
 const serverTakeResponseSchema = serverSessionResponseSchema.extend({ item: serverItemSchema });
 const serverTakeAllResponseSchema = serverSessionResponseSchema.extend({ items: z.array(serverItemSchema) });
+const serverClaimResponseSchema = z.object({ claimed: z.literal(true), item: serverItemSchema });
+/**
+ * The consult dispatch route's own body: `{ dispatched: true, item }` on
+ * success (the item is the removed consult item), and a refusal is a
+ * non-2xx status (409 busy/not-idle keeps the item; the caller re-polls).
+ */
+const serverConsultDispatchResponseSchema = z.object({
+  dispatched: z.literal(true),
+  item: serverItemSchema.optional(),
+});
+
+/** Error body of a refused consult route: `{ error: 'cannot claim ...: <reason>' }`. */
+const serverConsultErrorSchema = z.object({ error: z.string() });
+
+const consultReasonError = (status: number, body: z.infer<typeof serverConsultErrorSchema> | null): Error => {
+    const message = body?.error ?? `consult request failed (${status})`;
+    const error: Error & { status?: number } = new Error(message);
+    error.status = status;
+    return error;
+};
 
 type ServerQueueSession = z.infer<typeof serverSessionSchema>;
 type ServerQueueItem = z.infer<typeof serverItemSchema>;
@@ -264,6 +312,9 @@ const toQueuedMessage = (item: ServerQueueItem): QueuedMessage => {
     if (item.attachments.length > 0) message.attachments = item.attachments.map(toAttachedFile);
     if (item.context) message.context = item.context;
     if (item.contextPreview) message.contextPreview = item.contextPreview;
+    if (item.kind) message.kind = item.kind;
+    if (item.consult) message.consult = item.consult;
+    if (item.claimed) message.claimed = item.claimed;
     return message;
 };
 
@@ -277,12 +328,16 @@ type ServerQueueItemInput = {
     context: QueuedContextPart[];
     contextPreview?: string;
     sendConfig: QueuedMessageSendConfig;
+    kind?: 'consult';
+    consult?: ConsultPayload;
 };
 
 type ServerQueueRequestBody =
     | { directory: string; item: ServerQueueItemInput }
     | { itemIds: string[] }
-    | { held: boolean; owner?: string };
+    | { held: boolean; owner?: string }
+    | { owner?: string; ttlMs?: number }
+    | { owner?: string; consult: ConsultPayload };
 
 const toServerAttachment = (attachment: AttachedFile): ServerQueueAttachmentInput => {
     const input: ServerQueueAttachmentInput = {
@@ -306,6 +361,8 @@ const toServerItemInput = (message: QueuedMessageInput, sendConfig: QueuedMessag
         sendConfig,
     };
     if (message.agentMention) item.agentMention = message.agentMention;
+    if (message.kind) item.kind = message.kind;
+    if (message.consult) item.consult = message.consult;
     const contextPreview = getQueuedMessagePreview({ content: '', context: message.context });
     if (contextPreview) item.contextPreview = contextPreview;
     return item;
@@ -396,6 +453,16 @@ interface MessageQueueActions {
     applyServerSession: (session: ServerQueueSession, revision: number, expectedRuntimeKey: string) => void;
     /** Server-owned queue: tell the server to hold or release a session's delivery. */
     setServerHold: (sessionId: string, held: boolean, owner?: string) => Promise<void>;
+    /** Server-owned queue: reserve the head consult item for this owner. Throws on refusal. */
+    claimConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string, ttlMs?: number) => Promise<QueuedMessage>;
+    /** Server-owned queue: merge the claimed consult item's payload. */
+    setConsultItemPayload: (target: MessageQueueTarget, messageId: string, owner: string | undefined, consult: ConsultPayload) => Promise<void>;
+    /**
+     * Server-owned queue: dispatch the claimed consult item on its dedicated
+     * route. Resolves with the removed item on success; `null` on a
+     * `busy`/`not-idle` refusal (the item stays queued — the caller re-polls).
+     */
+    dispatchConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string) => Promise<QueuedMessage | null>;
     resetForRuntimeSwitch: (previousRuntimeKey: string | null | undefined) => void;
 }
 
@@ -545,6 +612,8 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         if (message.agentMention) queuedMessage.agentMention = message.agentMention;
                         if (message.attachments && message.attachments.length > 0) queuedMessage.attachments = message.attachments;
                         if (message.context && message.context.length > 0) queuedMessage.context = message.context;
+                        if (message.kind) queuedMessage.kind = message.kind;
+                        if (message.consult) queuedMessage.consult = message.consult;
 
                         set((state) => {
                             const currentQueue = state.queuedMessages[key] ?? [];
@@ -837,6 +906,50 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         if (owner) body.owner = owner;
                         const response = await runtimeFetch(`${sessionPath(sessionId)}/hold`, jsonInit('PUT', body));
                         if (!response.ok) throw new Error(`Message queue hold request failed (${response.status})`);
+                    },
+
+                    claimConsultItem: async (target, messageId, owner, ttlMs) => {
+                        if (!isServerOwnedMessageQueue()) throw new Error('The consult queue is only available on a server-owned message queue.');
+                        const body: Extract<ServerQueueRequestBody, { owner?: string; ttlMs?: number }> = {};
+                        if (owner) body.owner = owner;
+                        if (ttlMs !== undefined) body.ttlMs = ttlMs;
+                        const response = await runtimeFetch(
+                            `${sessionPath(target.sessionId)}/items/${encodeURIComponent(messageId)}/claim`,
+                            jsonInit('POST', body),
+                        );
+                        if (!response.ok) throw consultReasonError(response.status, await response.json().then((raw) => serverConsultErrorSchema.safeParse(raw)).then((parsed) => parsed.success ? parsed.data : null).catch(() => null));
+                        const result = serverClaimResponseSchema.parse(await response.json());
+                        return toQueuedMessage(result.item);
+                    },
+
+                    setConsultItemPayload: async (target, messageId, owner, consult) => {
+                        if (!isServerOwnedMessageQueue()) throw new Error('The consult queue is only available on a server-owned message queue.');
+                        const body: Extract<ServerQueueRequestBody, { owner?: string; consult: ConsultPayload }> = { consult };
+                        if (owner) body.owner = owner;
+                        const response = await runtimeFetch(
+                            `${sessionPath(target.sessionId)}/items/${encodeURIComponent(messageId)}/payload`,
+                            jsonInit('POST', body),
+                        );
+                        if (!response.ok) throw consultReasonError(response.status, await response.json().then((raw) => serverConsultErrorSchema.safeParse(raw)).then((parsed) => parsed.success ? parsed.data : null).catch(() => null));
+                    },
+
+                    dispatchConsultItem: async (target, messageId, owner) => {
+                        if (!isServerOwnedMessageQueue()) return null;
+                        const body: Extract<ServerQueueRequestBody, { owner?: string; ttlMs?: number }> = {};
+                        if (owner) body.owner = owner;
+                        const response = await runtimeFetch(
+                            `${sessionPath(target.sessionId)}/items/${encodeURIComponent(messageId)}/dispatch-consult`,
+                            jsonInit('POST', body),
+                        );
+                        if (response.status === 409) {
+                            // busy / not-idle: the server kept the item; the caller re-polls.
+                            return null;
+                        }
+                        if (!response.ok) throw consultReasonError(response.status, await response.json().then((raw) => serverConsultErrorSchema.safeParse(raw)).then((parsed) => parsed.success ? parsed.data : null).catch(() => null));
+                        // The dispatch route's own body carries the removed
+                        // item; no second fetch, the body is already in hand.
+                        const result = serverConsultDispatchResponseSchema.parse(await response.json());
+                        return result.item ? toQueuedMessage(result.item) : null;
                     },
 
                     resetForRuntimeSwitch: (previousRuntimeKey) => {

@@ -159,6 +159,70 @@ The hold is authoritative at send time, not just when the dispatch timer is
 armed: `tick` re-checks it after the idleness round-trips, so a hold that
 lands while a tick is in flight stops that send.
 
+## Consult items
+
+A consult item is enqueued by a consult flow (Consult Models) and dispatched
+only through its own claim → payload → dispatch route. The generic dispatcher
+never sends it. Three optional fields extend the item:
+
+```
+kind: 'consult'              // only the literal 'consult' is accepted; absent = normal
+consult: { system?, textPartMetadata? }  // model-facing payload, size-bounded
+claimed: { owner, claimedAt }            // set by a successful claim
+```
+
+`consult.system` is a string capped at 24 000 characters;
+`consult.textPartMetadata` is carried as JSON capped at 8 000 serialized
+characters and must be serializable. Violations are TypeErrors (→ 400), the
+same contract as every other item field. All three fields ride snapshots,
+broadcasts, and the JSON round-trip.
+
+### Dispatcher skip rule
+
+`tick` sends only normal items, and only the *deliverable head*: the first
+normal item is deliverable only while every item before it is a consult item
+whose claim owner still holds a live reservation. A claimed consult therefore
+blocks the items queued behind it (FIFO is preserved — the normal item never
+jumps ahead), and a consult item whose reservation lapsed blocks until the
+expiry sweep reverts it. Consult items are never tick-delivered; a stale claim
+never lets a consult go out raw.
+
+### Reserving and dispatching
+
+`claim(sessionId, itemId, owner, ttlMs = 5 min)` reserves the head consult
+item for one owner: it marks the item claimed, starts/refreshes that owner's
+hold (TTL capped at 10 min), and the same-owner re-claim extends the
+reservation. Only the queue head can be claimed, only while the session is
+idle (the same `isSessionIdle` gate the tick applies; a failed status read is
+"unknown, never idle" and refuses). `setConsultPayload` merges
+`item.consult` while the item is claimed by that owner and not in flight —
+the claim flow may refine the system prompt or text metadata between claim
+and dispatch.
+
+`dispatchConsult(sessionId, itemId, owner)` sends the consult item on the
+owner's explicit request: it verifies the claim and a live reservation
+(extended to the 10-min cap at entry), waits for idleness on the same gate
+(bounded polling, 60 s cap → 409; a busy answer returns
+`{ dispatched: false }` → 409), and re-verifies item/claim/hold/sending
+after every await — a lapsed reservation or removed item fails with 409
+instead of dispatching. The prompt body is built exactly as `sendItem` builds
+it, plus a top-level `system` and the consult metadata attached to the
+primary text part the way a context part carries its metadata; it always
+takes the prompt route. Success removes the item and releases the owner's
+hold; a prompt failure records the tick-style retry backoff, re-arms, keeps
+the item, and surfaces as 502.
+
+### Sweep and restart revert
+
+The expiry sweep (`pruneExpiredHolds`, running on every hold mutation and
+from the tick/snapshot read paths) reverts any consult item whose claim owner
+lost its hold: `claimed`, `kind`, and `consult` are dropped, the message
+content (text, attachments, context, sendConfig, contextPreview) stays, and
+the revert is committed and broadcast — the next tick delivers it as a normal
+item. Holds are memory-only, so on startup every persisted consult item is
+reverted to a normal item before the queue goes live: no reservation survives
+a restart.
+
 ## Routes (`/api/message-queue`)
 
 Normal authenticated OpenChamber runtime routes; never on browser URL-token
@@ -174,6 +238,9 @@ allowlists.
 | `PUT .../sessions/:id/order` | `{ itemIds }` must be a complete permutation |
 | `DELETE .../sessions/:id` | Clear; the in-flight item stays |
 | `PUT .../sessions/:id/hold` | `{ held, ttlMs?, owner? }`; per-owner TTL, held while any owner is live |
+| `POST .../sessions/:id/items/:itemId/claim` | `{ owner?, ttlMs? }`; reserve the head consult item; `409` reasons: `not found`, `not-consult`, `not-head`, `sending`, `already-claimed`, `not-idle` |
+| `POST .../sessions/:id/items/:itemId/payload` | `{ owner?, consult }`; merge the claimed item's consult payload; `409`: `not found`/`not-consult`/`not-claiming`/`sending`, `400` on size violations |
+| `POST .../sessions/:id/items/:itemId/dispatch-consult` | `{ owner? }`; dispatch the claimed consult item on its dedicated route; `409`: `not found`/`not-consult`/`not-claiming`/`sending`/`lost`/`not-idle`/`busy`, `502` on prompt failure |
 
 Every mutation broadcasts `openchamber:message-queue.updated` with
 `{ revision, session }` to all connected clients (SSE and WS), so several
