@@ -9,6 +9,10 @@ import { createRequire } from 'module';
 
 import { getGitExecutionEnv } from './execution-scope.js';
 import {
+  copyGitProcessMetadata,
+  createGitProcessError,
+} from './execution-errors.js';
+import {
   execFileProcessTree,
   isProcessTreeCleanupBlocked,
   killProcessTree,
@@ -576,7 +580,7 @@ const createGitPathError = (code, filePath) => Object.assign(new Error(GIT_PATH_
 // without stderr, which simple-git reports as success.
 const readGitEntryMode = async (repoRoot, args, repoPath, executionOptions = {}) => {
   const result = await runGitCommand(repoRoot, args, executionOptions);
-  if (isProcessTreeCleanupBlocked(result)) throw result;
+  if (isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result);
   if (!result.success) return null;
   for (const record of result.stdout.split('\0')) {
     const tab = record.indexOf('\t');
@@ -662,7 +666,7 @@ const readSubmoduleState = async (repoRoot, fileContext, executionOptions = {}) 
     executionOptions,
   );
   if (!status.success) {
-    if (isProcessTreeCleanupBlocked(status)) throw status;
+    if (isProcessTreeCleanupBlocked(status)) throw createGitProcessError(status);
     throw new Error(status.message || 'Failed to read submodule status');
   }
   // Changed: "1 XY S<c><m><u> mH mI mW hH hI path" ("2" adds rename fields
@@ -677,7 +681,7 @@ const readSubmoduleState = async (repoRoot, fileContext, executionOptions = {}) 
       ['rev-parse', '--verify', '--quiet', `HEAD:${fileContext.repoPath}`],
       executionOptions,
     );
-    if (isProcessTreeCleanupBlocked(result)) throw result;
+    if (isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result);
     return result.stdout.trim();
   };
   const head = record && !hasConflict ? record[6] : await readHead();
@@ -688,7 +692,7 @@ const readSubmoduleState = async (repoRoot, fileContext, executionOptions = {}) 
   const worktree = initialized
     ? await runGitCommand(fileContext.absolutePath, ['rev-parse', '--verify', 'HEAD'], executionOptions)
     : null;
-  if (isProcessTreeCleanupBlocked(worktree)) throw worktree;
+  if (isProcessTreeCleanupBlocked(worktree)) throw createGitProcessError(worktree);
   const commitOrNull = (value) => (value && !/^0+$/.test(value) ? value : null);
 
   return {
@@ -1108,14 +1112,6 @@ const isMissingDirectoryError = (error) => {
   return /directory that does not exist|does not exist|no such file or directory/i.test(text);
 };
 
-const copyProcessTreeMetadata = (target, source) => {
-  if (source?.cleanupBlocked === true) target.cleanupBlocked = true;
-  if (source?.descendantsTerminated === false) target.descendantsTerminated = false;
-  if (source?.rootClosed === true || source?.rootClosed === false) target.rootClosed = source.rootClosed;
-  if (Number.isInteger(source?.pid)) target.pid = source.pid;
-  return target;
-};
-
 const runGitCommand = async (
   cwd,
   args,
@@ -1151,7 +1147,7 @@ const runGitCommand = async (
       stderr: String(error?.stderr || ''),
       message: parseGitErrorText(error),
     };
-    return copyProcessTreeMetadata(result, error);
+    return copyGitProcessMetadata(result, error);
   }
 };
 
@@ -1200,13 +1196,7 @@ const createOwnedGit = (directory, { stallTimeoutMs = 0, signal = undefined } = 
   const raw = async (args) => {
     const result = await runGitCommand(directory, args, { idleTimeoutMs: stallTimeoutMs, signal });
     if (result.success) return result.stdout;
-    const error = Object.assign(new Error(result.message || result.stderr || 'Git command failed'), {
-      code: result.code || result.exitCode || 1,
-      stdout: result.stdout,
-      stderr: result.stderr,
-    });
-    copyProcessTreeMetadata(error, result);
-    throw error;
+    throw createGitProcessError(result);
   };
   return {
     raw,
@@ -1244,7 +1234,7 @@ const resolveGitCommitFilePath = async (repoRoot, hash, candidates) => {
 const runGitCommandOrThrow = async (cwd, args, fallbackMessage) => {
   const result = await runGitCommand(cwd, args);
   if (!result.success) {
-    throw new Error(result.message || fallbackMessage || 'Git command failed');
+    throw createGitProcessError(result, fallbackMessage);
   }
   return result;
 };
@@ -2350,11 +2340,13 @@ export async function isGitRepository(directory, { signal = undefined } = {}) {
   }
 
   const result = await runGitCommand(directoryPath, ['rev-parse', '--git-dir'], { timeoutMs: GIT_PROBE_TIMEOUT_MS, signal });
+  if (isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result);
   if (!result.success) return false;
 
   // `--show-toplevel` has no answer inside a bare repository or a .git
   // directory; those keep the previous answer rather than being rejected.
   const topLevel = await runGitCommand(directoryPath, ['rev-parse', '--show-toplevel'], { timeoutMs: GIT_PROBE_TIMEOUT_MS, signal });
+  if (isProcessTreeCleanupBlocked(topLevel)) throw createGitProcessError(topLevel);
   if (!topLevel.success) return true;
   const repoRoot = topLevel.stdout.trim();
   const reason = unsupportedRepositoryRootReason(repoRoot);
@@ -2979,6 +2971,7 @@ const getNoIndexDiff = async (repoRoot, repoPath, contextLines, executionOptions
   }
   args.push('--no-index', '--', '/dev/null', repoPath);
   const result = await runGitCommand(repoRoot, args, executionOptions);
+  if (isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result);
   // Exit 1 means differences, even when Git also writes warnings to stderr.
   // Spawn and buffer errors have no numeric exit code and must still fail.
   if (result.exitCode === 0 || result.exitCode === 1) {
@@ -3110,7 +3103,10 @@ export async function listUntrackedPaths(directory) {
     '--others',
     '--exclude-standard',
   ]);
-  if (!result.success) return [];
+  if (!result.success) {
+    if (isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result);
+    return [];
+  }
   return String(result.stdout || '')
     .split('\n')
     .map((line) => line.trim())
@@ -3142,7 +3138,8 @@ export async function getUntrackedDiffs(directory, filePaths = [], { concurrency
       try {
         const fileContext = await resolveGitFileContext(directoryPath, directoryGit, paths[index], repoRoot);
         results[index] = await getNoIndexDiff(repoRoot, fileContext.repoPath, contextLines);
-      } catch {
+      } catch (error) {
+        if (isProcessTreeCleanupBlocked(error)) throw error;
         results[index] = '';
       }
     }

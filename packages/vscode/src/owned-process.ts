@@ -20,7 +20,7 @@ const terminationFailure = (
     descendantsTerminated: false,
     cleanupBlocked: true,
     rootClosed,
-    cause,
+    cause: cause instanceof Error ? cause : String(cause),
     rootError: rootError || undefined,
   },
 );

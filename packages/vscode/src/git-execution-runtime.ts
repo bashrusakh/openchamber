@@ -21,6 +21,7 @@ import type { GitOperationClassification } from './git-operation-classification'
 import {
   runWithGitExecutionScope,
 } from './git-execution-scope';
+import { copyGitProcessMetadata } from './git-execution-errors';
 import type {
   GitContextResolver,
   GitResolvedContext,
@@ -109,13 +110,13 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
       const result = await runWithGitExecutionScope(true, () => execGit(args, cwd, {
         signal: options.signal,
       }));
-      return {
+      return copyGitProcessMetadata({
         success: result.exitCode === 0,
         stdout: result.stdout,
         stderr: result.stderr,
         exitCode: result.exitCode,
         code: result.code,
-      };
+      }, result);
     },
   });
 

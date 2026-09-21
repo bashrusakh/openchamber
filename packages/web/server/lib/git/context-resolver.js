@@ -2,6 +2,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import {
+  copyGitProcessMetadata,
   GitExecutionCancelledError,
   GitExecutionOverloadedError,
 } from './execution-errors.js';
@@ -102,7 +103,7 @@ const normalizeCommandResult = (result) => {
   const success = result.success === undefined
     ? result.exitCode === undefined || result.exitCode === 0
     : result.success === true;
-  return {
+  return copyGitProcessMetadata({
     success,
     stdout: String(result.stdout || ''),
     stderr: String(result.stderr || ''),
@@ -111,7 +112,7 @@ const normalizeCommandResult = (result) => {
     exitCode: result.exitCode,
     reason: result.reason || result.error?.reason,
     details: result.details || result.error?.details,
-  };
+  }, result);
 };
 
 const gitErrorText = (error) => [
@@ -181,7 +182,7 @@ const createDiscoveryError = (result, cwd) => {
     stdout: error.stdout,
     stderr: error.stderr,
   };
-  return error;
+  return copyGitProcessMetadata(error, result);
 };
 
 const isPathWithin = (candidate, parent) => (
