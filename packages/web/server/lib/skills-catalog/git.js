@@ -1,9 +1,5 @@
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-
 import { buildSshCommand, getGitBinary } from '../git/service.js';
-
-const execFileAsync = promisify(execFile);
+import { execFileProcessTree } from '../git/process-tree.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
@@ -23,7 +19,11 @@ export async function runGit(args, options = {}) {
   const cwd = options.cwd;
   const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
   const maxBuffer = Number.isFinite(options.maxBuffer) ? options.maxBuffer : DEFAULT_MAX_BUFFER;
-  const execute = options.execFileAsync ?? execFileAsync;
+  const execute = options.execFileAsync ?? ((command, commandArgs, execOptions) => execFileProcessTree({
+    command,
+    args: commandArgs,
+    ...execOptions,
+  }));
   const resolveGitBinaryForSpawn = options.resolveGitBinaryForSpawn ?? getGitBinary;
 
   const identity = options.identity || null;
@@ -52,6 +52,7 @@ export async function runGit(args, options = {}) {
       windowsHide: true,
       timeout: timeoutMs,
       maxBuffer,
+      signal: options.signal,
     });
 
     return { ok: true, stdout: stdout || '', stderr: stderr || '' };

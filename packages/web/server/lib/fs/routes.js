@@ -133,6 +133,7 @@ const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs,
   let settled = false;
   let terminationError;
   let terminationRequested = false;
+  let termination;
   let timeout;
 
   const cleanup = () => {
@@ -143,14 +144,14 @@ const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs,
     if (settled) return;
     settled = true;
     cleanup();
-    callback(value);
+    void Promise.resolve(termination).then(() => callback(value));
   };
   const requestTermination = (error) => {
     if (terminationRequested) return;
     terminationRequested = true;
     terminationError = error;
     try {
-      killProcessTree(child, { spawn, platform });
+      termination = killProcessTree(child, { spawn, platform });
     } catch {
       // The process may already have exited.
     }
@@ -692,6 +693,7 @@ export const registerFsRoutes = (app, dependencies) => {
     spawn,
     resolveGitBinaryForSpawn,
     gitExecutionService,
+    platform,
     timeoutMs: gitCheckIgnoreTimeoutMs,
   });
 

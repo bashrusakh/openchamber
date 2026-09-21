@@ -18,6 +18,7 @@ export type GitProcessExecutionOptions = {
   signal?: AbortSignal;
   binary?: string;
   timeoutMs?: number;
+  maxBuffer?: number;
 };
 
 const isSocketPath = async (candidate: string): Promise<boolean> => {
@@ -144,8 +145,39 @@ export const createGitProcessRuntime = ({
     let stderr = '';
     let timedOut = false;
     let cancelled = false;
+    let outputLimitExceeded: string | undefined;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let termination: Promise<void> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const maxBuffer = options.maxBuffer !== undefined
+      && Number.isFinite(options.maxBuffer)
+      && options.maxBuffer >= 0
+      ? options.maxBuffer
+      : Number.POSITIVE_INFINITY;
+    const appendOutput = (stream: 'stdout' | 'stderr', data: Buffer) => {
+      if (outputLimitExceeded) return;
+      const text = data.toString();
+      if (stream === 'stdout') {
+        stdoutBytes += Buffer.byteLength(text);
+        if (stdoutBytes > maxBuffer) {
+          outputLimitExceeded = `Git command stdout exceeded maxBuffer of ${maxBuffer} bytes`;
+        } else {
+          stdout += text;
+        }
+      } else {
+        stderrBytes += Buffer.byteLength(text);
+        if (stderrBytes > maxBuffer) {
+          outputLimitExceeded = `Git command stderr exceeded maxBuffer of ${maxBuffer} bytes`;
+        } else {
+          stderr += text;
+        }
+      }
+      if (outputLimitExceeded && !termination) {
+        termination = process.terminate();
+        void termination.catch(() => undefined);
+      }
+    };
     const onAbort = () => {
       if (termination) return;
       cancelled = true;
@@ -153,8 +185,8 @@ export const createGitProcessRuntime = ({
       void termination.catch(() => undefined);
     };
     options.signal?.addEventListener('abort', onAbort, { once: true });
-    process.child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-    process.child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
+    process.child.stdout?.on('data', (data: Buffer) => appendOutput('stdout', data));
+    process.child.stderr?.on('data', (data: Buffer) => appendOutput('stderr', data));
     try {
       const exit = await new Promise<Awaited<typeof process.closed>>((resolve, reject) => {
         void process.closed.then(resolve);
@@ -179,6 +211,14 @@ export const createGitProcessRuntime = ({
           stdout,
           stderr: stderr || 'Git process was cancelled',
           exitCode: 1,
+        };
+      }
+      if (outputLimitExceeded) {
+        return {
+          stdout,
+          stderr: outputLimitExceeded,
+          exitCode: 1,
+          code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
         };
       }
       if (exit.error) return processFailure(exit.error);

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterAll, beforeEach, describe, expect, it } from 'bun:test';
+import { getGitExecutionEnv } from './git-execution-scope';
 
 const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'openchamber-vscode-skills-test-'));
 const fakeGitPath = path.join(testRoot, 'git');
@@ -13,11 +14,16 @@ log="$OPENCHAMBER_VSCODE_SKILLS_GIT_LOG"
 mode="$OPENCHAMBER_VSCODE_SKILLS_GIT_MODE"
 printf 'args:%s\\n' "$*" >> "$log"
 printf 'marker:%s prompt:%s\\n' "$OPENCHAMBER_TEST_AUTH_MARKER" "$GIT_TERMINAL_PROMPT" >> "$log"
+printf 'optional:%s\\n' "$GIT_OPTIONAL_LOCKS" >> "$log"
 if [ "$1" = "--version" ]; then
   printf 'git version 2.0\\n'
   exit 0
 fi
 if [ "$1" = "clone" ]; then
+  if [ "$mode" = "output-limit" ]; then
+    dd if=/dev/zero bs=1048576 count=5 >&2 2>/dev/null
+    exit 1
+  fi
   target=""
   has_filter=0
   for arg in "$@"; do
@@ -63,13 +69,14 @@ const testExecGit = async (args, cwd, options = {}) => {
     const result = await execFileAsync(options.binary || 'git', args, {
       cwd,
       timeout: options.timeoutMs,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      maxBuffer: options.maxBuffer,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...getGitExecutionEnv() },
     });
     return { stdout: String(result.stdout || ''), stderr: String(result.stderr || ''), exitCode: 0 };
   } catch (error) {
     return {
       stdout: String(error.stdout || ''),
-      stderr: String(error.stderr || error.message || ''),
+      stderr: String(error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? error.message : error.stderr || error.message || ''),
       exitCode: 1,
       code: String(error.code) === error.code ? error.code : undefined,
     };
@@ -255,6 +262,35 @@ describe('VS Code skills catalog Git execution', () => {
 
     await expect(scan).resolves.toMatchObject({ ok: false, error: { kind: 'networkError' } });
     expect(gitCalls.filter((args) => args[0] === 'clone')).toHaveLength(1);
+  });
+
+  it('rejects Git output that exceeds the bounded process buffer', async () => {
+    process.env.OPENCHAMBER_VSCODE_SKILLS_GIT_MODE = 'output-limit';
+
+    await expect(scanSkillsRepository({ source: 'owner/skills' }, dependencies)).resolves.toMatchObject({
+      ok: false,
+      error: { kind: 'networkError', message: expect.stringMatching(/maxBuffer/i) },
+    });
+    expect((await readGitLog()).match(/^args:clone /gm)).toHaveLength(2);
+  });
+
+  it('uses the read-only lock scope for skill Git reads only', async () => {
+    const previousOptionalLocks = process.env.GIT_OPTIONAL_LOCKS;
+    process.env.GIT_OPTIONAL_LOCKS = '1';
+    try {
+      await expect(scanSkillsRepository({ source: 'owner/skills' }, dependencies)).resolves.toMatchObject({ ok: true });
+
+      const records = [];
+      for (const line of (await readGitLog()).trim().split('\n')) {
+        if (line.startsWith('args:')) records.push({ args: line.slice(5), optionalLocks: undefined });
+        if (line.startsWith('optional:') && records.length > 0) records.at(-1).optionalLocks = line.slice(9);
+      }
+      expect(records.find((record) => record.args.startsWith('-C ') && record.args.includes('ls-files'))?.optionalLocks).toBe('0');
+      expect(records.find((record) => record.args.startsWith('clone '))?.optionalLocks).toBe('1');
+    } finally {
+      if (previousOptionalLocks === undefined) delete process.env.GIT_OPTIONAL_LOCKS;
+      else process.env.GIT_OPTIONAL_LOCKS = previousOptionalLocks;
+    }
   });
 
   it('installs sparse-selected files locally and holds the destination lease through cleanup', async () => {

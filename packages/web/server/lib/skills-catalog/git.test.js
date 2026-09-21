@@ -79,6 +79,16 @@ describe('skills catalog Git helpers', () => {
     });
   });
 
+  it('bounds output when the shared process-tree executor is used', async () => {
+    await expect(runGit(['-e', "process.stderr.write('x'.repeat(5 * 1024 * 1024))"], {
+      resolveGitBinaryForSpawn: () => process.execPath,
+      timeoutMs: 5_000,
+    })).resolves.toMatchObject({
+      ok: false,
+      message: expect.stringMatching(/maxBuffer/i),
+    });
+  });
+
   it('recognizes authentication failures from either Git output or process errors', () => {
     expect(looksLikeAuthError('fatal: Authentication failed for origin')).toBe(true);
     expect(looksLikeAuthError('Permission denied (publickey).')).toBe(true);

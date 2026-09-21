@@ -1,4 +1,5 @@
 import { getGitExecutionEnv, runWithGitExecutionScope } from '../git/execution-scope.js';
+import { killProcessTree, withProcessTreeOwnership } from '../git/process-tree.js';
 
 const DEFAULT_TIMEOUT_MS = 2500;
 
@@ -46,15 +47,15 @@ const parseResult = (result, cwd) => {
   throw new Error(`Gitignore discovery failed for ${cwd}: ${detail}`);
 };
 
-const runCheckIgnore = ({ spawn, resolveGitBinaryForSpawn, cwd, names, signal }) => new Promise((resolve, reject) => {
+const runCheckIgnore = ({ spawn, resolveGitBinaryForSpawn, cwd, names, signal, platform }) => new Promise((resolve, reject) => {
   let child;
   try {
-    child = spawn(resolveGitBinaryForSpawn(), ['check-ignore', '-z', '--', ...names], {
+    child = spawn(resolveGitBinaryForSpawn(), ['check-ignore', '-z', '--', ...names], withProcessTreeOwnership({
       cwd,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...getGitExecutionEnv() },
-    });
+    }, platform));
   } catch (error) {
     reject(error);
     return;
@@ -64,19 +65,20 @@ const runCheckIgnore = ({ spawn, resolveGitBinaryForSpawn, cwd, names, signal })
   let stderr = '';
   let settled = false;
   let terminationRequested = false;
+  let termination;
 
   const finish = (result) => {
     if (settled) return;
     settled = true;
     signal?.removeEventListener('abort', onAbort);
-    resolve(result);
+    void Promise.resolve(termination).then(() => resolve(result));
   };
 
   const onAbort = () => {
     if (settled || terminationRequested) return;
     terminationRequested = true;
     try {
-      child.kill('SIGKILL');
+      termination = killProcessTree(child, { spawn, platform });
     } catch {
       // The process may already have exited.
     }
@@ -111,6 +113,7 @@ export const createGitIgnoreReader = ({
   spawn,
   resolveGitBinaryForSpawn,
   gitExecutionService,
+  platform = process.platform,
   timeoutMs = resolveTimeoutMs(),
 }) => {
   const getIgnoredNames = async (cwd, names, { signal } = {}) => {
@@ -138,6 +141,7 @@ export const createGitIgnoreReader = ({
       cwd,
       names,
       signal: controller.signal,
+      platform,
     });
 
     try {

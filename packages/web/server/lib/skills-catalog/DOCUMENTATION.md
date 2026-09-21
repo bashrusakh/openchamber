@@ -47,7 +47,7 @@ The following functions are exported and used by the web server:
 The following functions are internal helpers used by exported functions:
 
 ### Git Helpers (`git.js`)
-- `runGit(args, options)`: Execute git command with optional SSH identity, timeout, and max buffer. Returns `{ ok, stdout, stderr, message, code, signal }`.
+- `runGit(args, options)`: Execute git command with optional SSH identity, timeout, and max buffer. Returns `{ ok, stdout, stderr, message, code, signal }`. Timeout, cancellation, and output-limit termination use the shared Git process-tree lifecycle so descendants do not outlive the command.
 - `looksLikeAuthError(message)`: Detect if error message indicates authentication failure (permission denied, publickey, etc.).
 - `assertGitAvailable()`: Check if git is available in PATH.
 - `runWithGitCloneReservation({ destination, label, queueTimeoutMs, gitExecutionService }, task)`: Run a clone workflow under the shared bounded clone-destination reservation when the execution service is available.

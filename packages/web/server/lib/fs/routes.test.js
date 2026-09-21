@@ -326,13 +326,14 @@ const createCloneFs = ({ destinationExists = () => false, statDestination = fals
   rm: vi.fn(async (targetPath) => onClone?.('removed', targetPath)),
 });
 
-const registerClone = ({ fsPromises, spawn, gitExecutionService, resolveCloneGitIdentity } = {}) => {
+const registerClone = ({ fsPromises, spawn, gitExecutionService, resolveCloneGitIdentity, platform } = {}) => {
   const { app, getRoute } = createRouteRegistry();
   registerFsRoutes(app, {
     os: { homedir: () => '/home/user' },
     path: path.posix,
     fsPromises: fsPromises || createCloneFs(),
     spawn: spawn || vi.fn(),
+    platform,
     crypto: { randomUUID: () => 'job-0' },
     normalizeDirectoryPath: (value) => value,
     resolveProjectDirectory: async () => ({ directory: '/repo' }),
@@ -496,6 +497,43 @@ describe('fs clone', () => {
       clonePending: 0,
       cloneDestinations: 0,
     });
+  });
+
+  it('waits for Windows taskkill to finish before cleaning up a cancelled clone', async () => {
+    const fsPromises = createCloneFs();
+    let gitChild;
+    let taskkill;
+    const spawn = vi.fn((command) => {
+      if (command === 'taskkill') {
+        taskkill = new EventEmitter();
+        return taskkill;
+      }
+      gitChild = new EventEmitter();
+      gitChild.pid = 1234;
+      gitChild.stdout = new EventEmitter();
+      gitChild.stderr = new EventEmitter();
+      gitChild.kill = vi.fn();
+      return gitChild;
+    });
+    const handler = registerClone({
+      fsPromises,
+      spawn,
+      platform: 'win32',
+      resolveCloneGitIdentity: async () => null,
+    });
+    const request = beginClone(handler, cloneBody());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    request.req.emit('aborted');
+    gitChild.emit('close', 137, null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fsPromises.rm).not.toHaveBeenCalled();
+    expect(request.res.body).toBeNull();
+    expect(spawn).toHaveBeenLastCalledWith('taskkill', ['/pid', '1234', '/T', '/F'], expect.objectContaining({ windowsHide: true }));
+
+    taskkill.emit('close', 0, null);
+    await request.promise;
+    expect(fsPromises.rm).toHaveBeenCalledWith('/tmp/repository', { recursive: true, force: true });
   });
 
   it('cancels clone descendants before removing the destination', { skip: process.platform === 'win32' }, async () => {

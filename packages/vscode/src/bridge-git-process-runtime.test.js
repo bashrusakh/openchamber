@@ -103,4 +103,27 @@ describe('VS Code Git process runtime executable selection', () => {
     childProcess.emit('error', new Error('late child error'));
     expect(childProcess.kill).toHaveBeenCalledTimes(1);
   });
+
+  it('rejects a command when either output stream exceeds its buffer limit', async () => {
+    const childProcess = new EventEmitter();
+    childProcess.stdout = new EventEmitter();
+    childProcess.stderr = new EventEmitter();
+    childProcess.kill = mock();
+    spawn.mockImplementationOnce(() => childProcess);
+
+    const runtime = createGitProcessRuntime();
+    const pending = runtime.execGit(['status'], '/repo', { maxBuffer: 4 });
+    for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+    childProcess.stderr.emit('data', Buffer.from('12345'));
+    childProcess.emit('close', null);
+
+    await expect(pending).resolves.toMatchObject({
+      exitCode: 1,
+      code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+      stderr: expect.stringMatching(/maxBuffer/),
+    });
+    expect(childProcess.kill).toHaveBeenCalledWith('SIGKILL');
+  });
 });
