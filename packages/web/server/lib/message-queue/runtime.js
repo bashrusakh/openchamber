@@ -215,7 +215,6 @@ const toPublicItem = (item) => {
   if (item.kind) publicItem.kind = item.kind;
   if (item.consult) publicItem.consult = item.consult;
   if (item.claimed) publicItem.claimed = item.claimed;
-  if (item.agentMention) publicItem.agentMention = item.agentMention;
   publicItem.attachments = item.attachments.map(toPublicAttachment);
   // Older persisted items have no UI summary. Prefer their attached comment
   // before falling back to the model-facing context text.

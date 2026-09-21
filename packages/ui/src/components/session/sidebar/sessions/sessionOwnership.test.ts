@@ -121,7 +121,8 @@ describe('createSessionOwnershipIndex', () => {
     expect(ownership.bySessionId.has('btw')).toBe(false);
   });
 
-  test('requires exact workspace directories in VS Code', () => {    const ownership = createSessionOwnershipIndex(
+  test('requires exact workspace directories in VS Code', () => {
+    const ownership = createSessionOwnershipIndex(
       [
         { id: 'workspace', directory: '/projects/app' },
         { id: 'nested', directory: '/projects/app/packages/ui' },
