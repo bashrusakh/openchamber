@@ -45,6 +45,22 @@ afterAll(async () => {
   }
 });
 
+test('an advisor fork never appears in the archive list', async () => {
+  const advisor: Session = {
+    ...session('ses_advisor', 'Advisor fork'),
+    metadata: { openchamber: { kind: 'consult-advisor', originalSessionID: 'parent', consultRunID: 'run-1', advisorIndex: 0 } },
+  };
+  useGlobalSessionsStore.setState({
+    archivedSessions: [session('ses_visible', 'Visible archive'), advisor],
+    activeSessions: [],
+  });
+  await act(async () => root.render(<I18nProvider><ArchiveView /></I18nProvider>));
+
+  const titles = [...browser.document.querySelectorAll('[role="button"] > span:first-child')]
+    .map((row) => row.textContent);
+  expect(titles).toEqual(['Visible archive']);
+});
+
 test('archive search uses exact IDs and preserves title search and archive membership', async () => {
   const id = 'ses_f88b1a2b3c4d';
   useGlobalSessionsStore.setState({

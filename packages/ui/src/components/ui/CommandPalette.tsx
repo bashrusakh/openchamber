@@ -18,7 +18,8 @@ import {
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
-import { isBtwSession } from '@/lib/sessionBtwMetadata';
+import { isHiddenSession } from '@/lib/sessionVisibility';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
 import { useSessionPinnedStore } from '@/stores/useSessionPinnedStore';
 import {
   EMPTY_SESSION_ORDER_RANKS,
@@ -107,6 +108,7 @@ export const CommandPalette: React.FC = () => {
     (state) => isCommandPaletteOpen ? state.activeSessions : EMPTY_SESSIONS,
     [isCommandPaletteOpen],
   ));
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
   const pinnedSessionIds = useSessionPinnedStore(React.useCallback(
     (state) => isCommandPaletteOpen ? state.ids : EMPTY_PINNED_SESSION_IDS,
     [isCommandPaletteOpen],
@@ -434,10 +436,10 @@ export const CommandPalette: React.FC = () => {
   // Sessions
   // ---------------------------------------------------------------------------
   const orderedActiveSessions = React.useMemo(() => {
-    // btw forks stay hidden until promoted to a full session
-    const visibleSessions = activeSessions.filter((session) => !isBtwSession(session));
+    // btw forks and advisor forks stay hidden until promoted to a full session
+    const visibleSessions = activeSessions.filter((session) => !isHiddenSession(session, pendingHiddenSessionIds));
     return orderSessionsByLifecycleScopes(visibleSessions, pinnedSessionIds, sessionOrderRanks);
-  }, [activeSessions, pinnedSessionIds, sessionOrderRanks]);
+  }, [activeSessions, pinnedSessionIds, sessionOrderRanks, pendingHiddenSessionIds]);
 
   const allBranches = useGitAllBranches();
   const worktreeMetadata = useSessionUIStore((s) => s.worktreeMetadata);

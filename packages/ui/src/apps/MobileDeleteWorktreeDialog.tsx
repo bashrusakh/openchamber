@@ -10,6 +10,8 @@ import { getWorktreeStatus } from '@/lib/worktrees/worktreeStatus';
 import { getWorktreeDisplayName, removeProjectWorktree, type ProjectRef } from '@/lib/worktrees/worktreeManager';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
+import { isHiddenSession } from '@/lib/sessionVisibility';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useAllLiveSessions } from '@/sync/sync-context';
 import type { WorktreeMetadata } from '@/types/worktree';
@@ -47,6 +49,7 @@ export const MobileDeleteWorktreeDialog: React.FC<MobileDeleteWorktreeDialogProp
   const { t } = useI18n();
   const liveSessions = useAllLiveSessions();
   const globalActiveSessions = useGlobalSessionsStore((state) => state.activeSessions);
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
   const archiveSessions = useSessionUIStore((state) => state.archiveSessions);
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
 
@@ -59,15 +62,17 @@ export const MobileDeleteWorktreeDialog: React.FC<MobileDeleteWorktreeDialogProp
   const hasBranch = typeof worktree?.branch === 'string' && worktree.branch.trim().length > 0;
 
   // Sessions attached to this worktree — archived (not deleted) on removal,
-  // matching the desktop behavior.
+  // matching the desktop behavior. Hidden forks are not user sessions: they are
+  // left to the consult GC instead of being archived with the worktree.
   const linkedSessions = React.useMemo(() => {
     if (!worktreePath) return [] as Session[];
     const merged = new Map<string, Session>();
     for (const session of [...globalActiveSessions, ...liveSessions]) {
+      if (isHiddenSession(session, pendingHiddenSessionIds)) continue;
       if (getSessionDirectory(session) === worktreePath) merged.set(session.id, session);
     }
     return Array.from(merged.values());
-  }, [globalActiveSessions, liveSessions, worktreePath]);
+  }, [globalActiveSessions, liveSessions, pendingHiddenSessionIds, worktreePath]);
 
   React.useEffect(() => {
     if (!open) {

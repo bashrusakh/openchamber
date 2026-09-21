@@ -83,6 +83,12 @@ describe('multi-run identity', () => {
     for (const kind of ['btw', 'review']) {
       expect(getMultiRunIdentity({ ...old, metadata: { openchamber: { kind } } })).toBeNull();
     }
+    // An advisor fork clones its parent's title; its full marker must never read
+    // as a legacy run/fusion session.
+    expect(getMultiRunIdentity({
+      ...old,
+      metadata: { openchamber: { kind: 'consult-advisor', originalSessionID: 'parent', consultRunID: 'run-1' } },
+    })).toBeNull();
   });
 
   test('preserves unrelated metadata and invalidates row memoization only for relevant changes', () => {

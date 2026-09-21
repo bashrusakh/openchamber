@@ -16,6 +16,7 @@ import {
 import { prepareUserMarkdownContent, SKILL_TOKEN_PATTERN } from './userTextPartContent';
 import { extractTerminalContexts } from '@/lib/messages/terminalContext';
 import { readContextPart } from '@/lib/messages/contextParts';
+import { ConsultReceiptFromPart } from '../../consult/ConsultReceiptBlock';
 import UserContextPart from './UserContextPart';
 
 type PartWithText = Part & { text?: string; content?: string; value?: string };
@@ -310,6 +311,9 @@ const UserTextPart: React.FC<UserTextPartProps> = ({ part, messageId, agentMenti
                     plainTextContent
                 )}
             </div>
+            {/* A consulted turn carries its bounded receipt on this text
+                part's metadata; anything else renders nothing. */}
+            <ConsultReceiptFromPart metadata={part.type === 'text' ? part.metadata : null} />
             {terminalContextState.contexts.length > 0 ? (
                 <div className="mt-2 space-y-1.5">
                     {terminalContextState.contexts.map((context, index) => (

@@ -20,6 +20,8 @@ import type { GuestAttachItem } from '@/hooks/useGuestSurfaces';
 import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { ModelControls } from '../../ModelControls';
+import { ConsultActionButton } from '../../consult/ConsultActionButton';
+import type { ConsultUnavailableReason } from '../../consult/consultUi';
 import { ComposerActionButtons } from './ComposerActionButtons';
 import { ComposerAttachmentControls } from './ComposerAttachmentControls';
 import { FocusModeButton } from './FocusModeButton';
@@ -59,6 +61,10 @@ export interface ComposerFooterProps {
     onOpenPrPicker: () => void;
     showLinearPicker?: boolean;
     onOpenLinearPicker?: () => void;
+    /** Opens the Consult Models dialog; disabled states are explained in the tooltip. */
+    onOpenConsult: () => void;
+    /** Null while the consult action is available; otherwise why it is not. */
+    consultUnavailableReason: ConsultUnavailableReason | null;
     attachGuests?: readonly GuestAttachItem[];
     onOpenGuestAttach?: (guestId: string) => void;
     onOpenAttachSheet: () => void;
@@ -106,6 +112,8 @@ export function ComposerFooter(props: ComposerFooterProps) {
         onOpenPrPicker,
         showLinearPicker,
         onOpenLinearPicker,
+        onOpenConsult,
+        consultUnavailableReason,
         attachGuests,
         onOpenGuestAttach,
         onOpenAttachSheet,
@@ -123,6 +131,15 @@ export function ComposerFooter(props: ComposerFooterProps) {
         modelSessionId,
         btwSelection,
     } = props;
+
+    const consultAction = (
+        <ConsultActionButton
+            footerIconButtonClass={footerIconButtonClass}
+            iconSizeClass={iconSizeClass}
+            onOpenConsult={onOpenConsult}
+            unavailableReason={consultUnavailableReason}
+        />
+    );
 
     return (
         <div
@@ -174,6 +191,7 @@ export function ComposerFooter(props: ComposerFooterProps) {
                         </div>
                         <div className="flex items-center min-w-0 gap-x-1 justify-end">
                             <div className="flex items-center gap-x-1 flex-shrink-0">
+                                {consultAction}
                                 {!isBtw ? <button
                                     type="button"
                                     className={footerIconButtonClass}
@@ -255,6 +273,7 @@ export function ComposerFooter(props: ComposerFooterProps) {
                     </div>
                     <div className={cn('flex items-center flex-1 justify-end', footerGapClass, 'md:gap-x-3')}>
                         {isBtw ? <ModelControls className="flex-1 min-w-0 justify-end" sessionId={modelSessionId ?? null} selection={btwSelection} /> : <MemoModelControls className={cn('flex-1 min-w-0 justify-end')} />}
+                        {consultAction}
                         {!isBtw ? <MemoComposerDictation
                             radius={chatInputRadius}
                             isMobile={isMobile}

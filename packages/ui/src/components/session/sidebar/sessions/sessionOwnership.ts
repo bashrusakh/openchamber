@@ -1,6 +1,7 @@
 import type { Session } from '@opencode-ai/sdk/v2';
 import type { Project as OpenCodeProject } from '@opencode-ai/sdk/v2/client';
 import { getNormalizedParentDirectory, normalizePath } from '@/lib/pathNormalization';
+import { isHiddenSession } from '@/lib/sessionVisibility';
 
 type Project = {
   id: string;
@@ -188,6 +189,7 @@ export const createSessionOwnershipIndex = (
     scopeTarget?: Map<string, Set<string>>,
   ): void => {
     for (const session of input) {
+      if (isHiddenSession(session)) continue;
       const exactOwner = resolveOwner(resolveSessionDirectory(session));
       const owner = exactOwner ?? (!isVSCode
         ? canonicalOwnerByOpenCodeProjectId.get(getOpenCodeProjectId(session) ?? '') ?? null

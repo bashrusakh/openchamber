@@ -1,6 +1,19 @@
+import type { Session } from '@opencode-ai/sdk/v2';
 import { useSessionTabsStore } from '@/stores/useSessionTabsStore';
 import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
+import { isHiddenSession } from '@/lib/sessionVisibility';
+
+/** Renderable tab sessions: hidden forks are never in the strip, so they are
+ * never neighbours for close/step navigation either. */
+const renderableTabSessions = (): Map<string, Session> => {
+  const sessionsById = new Map<string, Session>();
+  for (const session of useGlobalSessionsStore.getState().activeSessions) {
+    if (isHiddenSession(session)) continue;
+    sessionsById.set(session.id, session);
+  }
+  return sessionsById;
+};
 
 /**
  * Close one header session tab. Closing the active tab activates its right
@@ -16,9 +29,7 @@ import { useSessionUIStore } from '@/sync/session-ui-store';
  */
 export const activateSessionTabByIndex = (index: number): boolean => {
   const { tabIds } = useSessionTabsStore.getState();
-  const sessionsById = new Map(
-    useGlobalSessionsStore.getState().activeSessions.map((session) => [session.id, session] as const),
-  );
+  const sessionsById = renderableTabSessions();
   const renderable = tabIds.filter((id) => sessionsById.has(id));
   const session = renderable[index] ? sessionsById.get(renderable[index]) : null;
   if (!session) return false;
@@ -34,9 +45,7 @@ export const activateSessionTabByIndex = (index: number): boolean => {
 export const activateAdjacentSessionTab = (delta: -1 | 1): boolean => {
   const { tabIds } = useSessionTabsStore.getState();
   const { currentSessionId, setCurrentSession } = useSessionUIStore.getState();
-  const sessionsById = new Map(
-    useGlobalSessionsStore.getState().activeSessions.map((session) => [session.id, session] as const),
-  );
+  const sessionsById = renderableTabSessions();
   const renderable = tabIds.filter((id) => sessionsById.has(id));
   if (!currentSessionId || renderable.length < 2) return false;
   const index = renderable.indexOf(currentSessionId);
@@ -54,9 +63,7 @@ export const closeSessionTabAndActivateNeighbour = (sessionId: string): void => 
 
   const { currentSessionId, setCurrentSession, openNewSessionDraft } = useSessionUIStore.getState();
   if (sessionId === currentSessionId) {
-    const sessionsById = new Map(
-      useGlobalSessionsStore.getState().activeSessions.map((session) => [session.id, session] as const),
-    );
+    const sessionsById = renderableTabSessions();
     const renderable = tabIds.filter((id) => sessionsById.has(id));
     const index = renderable.indexOf(sessionId);
     const neighbourId = renderable[index + 1] ?? renderable[index - 1] ?? null;

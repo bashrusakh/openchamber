@@ -11,6 +11,8 @@ import { useUIStore } from '@/stores/useUIStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { resolveGlobalSessionDirectory, useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
+import { filterVisibleSessions } from '@/lib/sessionVisibility';
 import { formatSessionDateLabel, normalizePath } from '@/components/session/sidebar/utils';
 import { useShallow } from 'zustand/react/shallow';
 import { SessionSearchInput } from '@/components/session/SessionSearchInput';
@@ -33,6 +35,11 @@ export function ArchiveView(): React.ReactNode {
   const unarchiveSession = useSessionUIStore((state) => state.unarchiveSession);
   const homeDirectory = useDirectoryStore((state) => state.homeDirectory);
   const archivedSessions = useGlobalSessionsStore(useShallow((state) => open ? state.archivedSessions : []));
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
+  const visibleArchivedSessions = React.useMemo(
+    () => filterVisibleSessions(archivedSessions, pendingHiddenSessionIds),
+    [archivedSessions, pendingHiddenSessionIds],
+  );
   const [query, setQuery] = React.useState('');
   const [selectedDirectory, setSelectedDirectory] = React.useState<string | null>(null);
   const [visibleCount, setVisibleCount] = React.useState(PAGE_SIZE);
@@ -41,8 +48,8 @@ export function ArchiveView(): React.ReactNode {
 
   const sortedSessions = React.useMemo(() => {
     if (!open) return [];
-    return [...archivedSessions].sort((a, b) => (b.time?.archived ?? 0) - (a.time?.archived ?? 0));
-  }, [archivedSessions, open]);
+    return [...visibleArchivedSessions].sort((a, b) => (b.time?.archived ?? 0) - (a.time?.archived ?? 0));
+  }, [open, visibleArchivedSessions]);
 
   const buckets = React.useMemo<DirectoryBucket[]>(() => {
     const byDirectory = new Map<string, DirectoryBucket>();
@@ -79,7 +86,7 @@ export function ArchiveView(): React.ReactNode {
 
   const visibleSessions = filteredSessions.slice(0, visibleCount);
   const remainingCount = filteredSessions.length - visibleSessions.length;
-  const totalCount = archivedSessions.length;
+  const totalCount = visibleArchivedSessions.length;
 
   const selectDirectory = React.useCallback((directory: string | null) => {
     setSelectedDirectory(directory);

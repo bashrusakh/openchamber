@@ -10,6 +10,8 @@ import { useSubagentCostRollup } from '@/components/chat/work-status/useSubagent
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useContextWindowLimits } from '@/hooks/useContextWindowLimits';
 import { resolveGlobalSessionDirectory, useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
+import { isHiddenSession } from '@/lib/sessionVisibility';
 import { buildSessionContextUsage, isSameContextUsage } from '@/stores/utils/tokenUtils';
 import { ContextUsageDisplay } from '@/components/ui/ContextUsageDisplay';
 import { toContextUsageReading } from '@/components/ui/contextUsageReading';
@@ -133,6 +135,7 @@ export const VSCodeLayout: React.FC = () => {
   const sessions = useSessions();
   const globalActiveSessions = useGlobalSessionsStore((state) => state.activeSessions);
   const globalArchivedSessions = useGlobalSessionsStore((state) => state.archivedSessions);
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
   const projects = useProjectsStore((state) => state.projects);
   const activeProjectId = useProjectsStore((state) => state.activeProjectId);
 
@@ -280,11 +283,12 @@ export const VSCodeLayout: React.FC = () => {
 
   const traversalSessions = React.useMemo(() => {
     const byId = new Map<string, Session>();
-    for (const session of sessions) byId.set(session.id, session);
-    for (const session of globalActiveSessions) byId.set(session.id, session);
-    for (const session of globalArchivedSessions) byId.set(session.id, session);
+    // Archive-all and subtree traversal must never reach a hidden fork.
+    for (const session of sessions) if (!isHiddenSession(session, pendingHiddenSessionIds)) byId.set(session.id, session);
+    for (const session of globalActiveSessions) if (!isHiddenSession(session, pendingHiddenSessionIds)) byId.set(session.id, session);
+    for (const session of globalArchivedSessions) if (!isHiddenSession(session, pendingHiddenSessionIds)) byId.set(session.id, session);
     return Array.from(byId.values());
-  }, [globalActiveSessions, globalArchivedSessions, sessions]);
+  }, [globalActiveSessions, globalArchivedSessions, pendingHiddenSessionIds, sessions]);
 
   /** Collect root session IDs and all descendants (subagent sessions). */
   const collectSessionIdsWithDescendants = React.useCallback(

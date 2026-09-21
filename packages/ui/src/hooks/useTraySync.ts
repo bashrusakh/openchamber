@@ -9,6 +9,8 @@ import { useGlobalBlockingRequestsStore } from '@/sync/global-blocking-requests'
 import { compareSessionsByLifecycleOrder, useSessionOrderingStore } from '@/sync/session-ordering';
 import { useNotificationStore } from '@/sync/notification-store';
 import { useSessionPinnedStore } from '@/stores/useSessionPinnedStore';
+import { useConsultPendingHideStore } from '@/stores/useConsultPendingHideStore';
+import { isHiddenSession } from '@/lib/sessionVisibility';
 import { respondToPermission } from '@/sync/session-actions';
 import {
   useGlobalSessionsStore,
@@ -296,8 +298,9 @@ const buildSnapshot = (instanceName: string, includeTray: boolean): TraySnapshot
   // The list source is the GLOBAL store — every project/worktree the backend
   // knows about, independent of which directories this client has opened. Live
   // status/unread/branch are merged in by id where we have them (the session's
-  // directory is synced); otherwise the row is shown as idle.
-  const allSessions = useGlobalSessionsStore.getState().activeSessions;
+  // directory is synced); otherwise the row is shown as idle. Hidden sessions
+  // (btw/advisor forks, pending fork ids) never become tray rows or badge counts.
+  const allSessions = useGlobalSessionsStore.getState().activeSessions.filter((session) => !isHiddenSession(session));
   const childrenByParent = new Map<string, string[]>();
   for (const session of allSessions) {
     if (!session?.id) continue;
@@ -518,6 +521,9 @@ export const useTraySync = (): void => {
     const unsubscribeGlobalRequests = useGlobalBlockingRequestsStore.subscribe(() => scheduleFlush());
     const unsubscribeSessionOrder = useSessionOrderingStore.subscribe(() => scheduleFlush());
     const unsubscribePinnedSessions = useSessionPinnedStore.subscribe(() => scheduleFlush());
+    // A fork registered or released after its fork call changes tray membership
+    // without touching the global session store.
+    const unsubscribePendingHide = useConsultPendingHideStore.subscribe(() => scheduleFlush());
 
     // Usage: push to the tray whenever the quota store changes, and do one
     // initial fetch for enabled providers so the submenu isn't empty on launch.
@@ -546,6 +552,7 @@ export const useTraySync = (): void => {
       unsubscribeGlobalRequests();
       unsubscribeSessionOrder();
       unsubscribePinnedSessions();
+      unsubscribePendingHide();
       unsubscribeQuota();
       unsubscribeRegistry?.();
       for (const unsub of storeUnsubs.values()) unsub();

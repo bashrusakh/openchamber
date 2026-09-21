@@ -17,21 +17,24 @@ animation. Do not restore separate draft and session composer branches:
 remounting the editor loses focus and interrupts the transition. Keep the
 existing mobile fixed-position rules unchanged.
 
-`ComposerFloatingPanel` is the shared frame for `BtwPanel` and
-`QueuedMessageChips`. They mount inside the composer form, outside both the
-full editor and collapsed mobile pill, with one absolute `bottom-full`
-anchor, input-column width, gap, and glass surface. Appearing, disappearing,
-or collapsing a panel does not resize the transcript or composer.
-The frame also owns the header row through its `header` and `compact` props;
-callers supply controls and content, not their own header padding.
-
-`SessionSuggestionChip` is not a frame: it renders as the composer's own top
-row, inside the box and inside the mobile pill, so the surface stays one
-shape. Visibility priority is BTW, then a nonempty queue, then suggestion.
+`ComposerFloatingPanel` is the shared frame for `BtwPanel`, the Consult
+Models progress panel, and `QueuedMessageChips`. They mount inside the
+composer form, outside both the full editor and collapsed mobile pill, with
+one absolute `bottom-full` anchor, input-column width, gap, and glass surface.
+Appearing, disappearing, or collapsing a panel does not resize the transcript
+or composer. The frame also owns the header row through its `header` and
+`compact` props; callers supply controls and content, not their own header
+padding. Only one of these frames may be mounted at a time: they share the
+same dock and would overlap. Visibility priority is BTW, then a consult run
+(active or waiting to be dismissed), then a nonempty queue, then suggestion.
 Every BTW frame, including its collapsed strip, creation state, and pending
 draft, hides the other two. Composer content also hides suggestion;
 new-session drafts hide both queue and suggestion. Hiding the queue does not
 pause its delivery.
+
+`SessionSuggestionChip` is not a frame: it renders as the composer's own top
+row, inside the box and inside the mobile pill, so the surface stays one
+shape.
 
 The queue header toggles an `aria-expanded` disclosure with the current count.
 Its open/closed state is one persisted preference in `useUIStore`
@@ -349,6 +352,48 @@ send, and a runtime change prevents fork creation and stale UI recovery.
 The unsent panel shows "Ask your question" until fork creation starts.
 Existing panels hide titles. Promotion retains the existing internal title, without
 transcript fetching or Small Model generation.
+
+## Consult models
+
+`components/chat/consult/` owns the Consult Models composer surface. The
+composer action (`ComposerFooter`, next to the model controls) opens
+`ConsultModelsDialog`, which collects 2–5 advisors, parallel/sequential, and a
+per-advisor timeout while the acting model stays read-only. On confirm the
+dialog calls `lib/consult/submission.ts#submitConsultMessage`; the composer
+only supplies the captured payload and keeps the returned handle for progress
+and cancel. Do not add a second send path: the submission queues the message,
+holds the session queue, waits for the head and an idle session, runs the
+advisors, and dispatches the acting turn with the turn-scoped guidance.
+
+Availability is computed in `ChatInput` by `consultUi.ts` and is deliberately
+independent of session activity: a busy session is admissible through the
+queue, so the action stays enabled while a turn runs. It is disabled without a
+session, for a `/` command or shell input, during an active consult or btw
+session, and on runtimes without the server-owned queue (VS Code), where the
+tooltip explains why instead of degrading silently.
+
+`ChatInput.captureComposerPayload` resolves the composer exactly as queueing
+does (mentions, document attachments, context drafts, synthetic parts, linked
+references). The queue action and the consult action share it, so a consulted
+message delivers the same payload as a queued one. The capture is consumed when
+the dialog confirms; a cancelled, refused, or failed run restores it without
+overwriting input typed while the consult waited, unless the submission already
+restored the queue item. A refusal with per-advisor rejections shows the
+rejected advisors and their localized reasons in one toast (the dialog has
+closed by then, so there are no rows to mark); the dialog hands the exact
+advisor selections to the composer with the handle for that. A `delivered-raw`
+result never restores the capture and never re-sends: the item left the queue
+without the submission taking it, so the message may already have been
+delivered or another client may have removed it. The toast tells the user the
+consultation did not happen and that the message may already have been sent.
+
+`ConsultPanel` renders `useConsultStore` only and is the dock's second
+priority. `waiting-admission` is the queue-admission state before the fan-out;
+cancel is offered only before `dispatching`. A finished run stays until
+dismissed, which is the store's `setPhase(..., 'idle')` write. The receipt is
+rendered from the acting user message's text-part metadata by
+`ConsultReceiptBlock` (see `message/parts/DOCUMENTATION.md`); the UI never
+writes metadata.
 
 ## Mobile
 

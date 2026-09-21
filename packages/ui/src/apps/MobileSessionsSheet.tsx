@@ -45,6 +45,7 @@ import { collectSessionSubtreeIds, runSessionSubtreeAction, type SessionSubtreeA
 import { createSessionOwnershipIndex } from '@/components/session/sidebar/sessions/sessionOwnership';
 import { resolveSidebarSessionLocations } from '@/components/session/sidebar/recent/sessionLocation';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
+import { isHiddenSession } from '@/lib/sessionVisibility';
 import { useI18n } from '@/lib/i18n';
 import { matchesRankQuery, rankByQuery } from '@/lib/search/fuzzySearch';
 import { updateDesktopSettings } from '@/lib/persistence';
@@ -62,6 +63,7 @@ import { useMobileSessionTreeStore } from '@/stores/useMobileSessionTreeStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useSessionDisplayStore, type ProjectSortOrder } from '@/stores/useSessionDisplayStore';
 import { useSessionPinnedStore } from '@/stores/useSessionPinnedStore';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
 import { orderWorktrees, useWorktreeOrderStore } from '@/stores/useWorktreeOrderStore';
 import {
   EMPTY_SESSION_ORDER_RANKS,
@@ -630,6 +632,7 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
   const ensureGitStatus = useGitStore((state) => state.ensureStatus);
   const liveSessions = useAllLiveSessions();
   const globalActiveSessions = useGlobalSessionsStore((state) => state.activeSessions);
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
   // Store reads the closed drawer does not need. They hold the last value seen
   // while presented rather than dropping to empty: the drawer stays mounted
   // through its exit slide, and swapping pins, order or branches to empty at
@@ -839,8 +842,10 @@ export const MobileSessionsSheet: React.FC<MobileSessionsSheetProps> = ({ open, 
     // Archived sessions never show on mobile (no archived view here): the live
     // overlay can carry them for the active directory, and they'd otherwise
     // surface in search and then "disappear" once the overlay refreshes.
-    return merged.filter((session) => !session.time?.archived);
-  }, [globalActiveSessions, liveSessions]);
+    // Hidden sessions (btw/advisor forks, pending fork ids) are dropped before
+    // counts, search, and hierarchy are derived from this list.
+    return merged.filter((session) => !session.time?.archived && !isHiddenSession(session, pendingHiddenSessionIds));
+  }, [globalActiveSessions, liveSessions, pendingHiddenSessionIds]);
 
   // Archive and delete take a session's subagents with it. Lineage is resolved
   // over the whole active list rather than the rendered bucket: a subagent can

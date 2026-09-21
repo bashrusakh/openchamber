@@ -32,6 +32,8 @@ import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
 import { useSessionTabsStore } from '@/stores/useSessionTabsStore';
 import { closeSessionTabAndActivateNeighbour } from '@/lib/sessionTabs';
+import { isHiddenSession } from '@/lib/sessionVisibility';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
 import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useGlobalSessionStatus } from '@/sync/sync-context';
@@ -301,6 +303,7 @@ export const SessionTabsStrip: React.FC<{
   const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
   const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
   const activeSessions = useGlobalSessionsStore((state) => state.activeSessions);
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
 
   // Opening a session anywhere (sidebar, palette, deep link) adds its tab.
   React.useEffect(() => {
@@ -309,9 +312,12 @@ export const SessionTabsStrip: React.FC<{
 
   const sessionsById = React.useMemo(() => {
     const map = new Map<string, Session>();
-    for (const session of activeSessions) map.set(session.id, session);
+    for (const session of activeSessions) {
+      if (isHiddenSession(session, pendingHiddenSessionIds)) continue;
+      map.set(session.id, session);
+    }
     return map;
-  }, [activeSessions]);
+  }, [activeSessions, pendingHiddenSessionIds]);
 
   // Only tabs with a known live session render; unknown ids stay stored.
   const tabs = React.useMemo<SessionTab[]>(() => {

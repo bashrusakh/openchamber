@@ -3,8 +3,11 @@ import { ComposerDictation } from '@/components/dictation/ComposerDictation';
 // sessionStore removed — currentSessionId comes from useSessionUIStore
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
-import { isServerOwnedMessageQueue, createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore, type QueuedContextPart, type QueuedMessage } from '@/stores/messageQueueStore';
+import { isServerOwnedMessageQueue, createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore, type MessageQueueTarget, type QueuedContextPart, type QueuedMessage } from '@/stores/messageQueueStore';
 import { useAutoReviewStore } from '@/stores/useAutoReviewStore';
+import { isConsultRunActive, useConsultRun, useConsultStore } from '@/stores/useConsultStore';
+import type { ConsultSubmissionHandle } from '@/lib/consult/submission';
+import type { ConsultAdvisorSelection } from '@/lib/consult/routing';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
 import { prepareLocalAttachments, useInputStore, type SyntheticContextPart } from '@/sync/input-store';
@@ -39,6 +42,15 @@ import {
 import { ReviewFlowDialog, type ReviewFlowExecution } from '@/components/session/ReviewFlowDialog';
 import { BtwPanel } from './btw/BtwPanel';
 import { useBtwPanelState } from './btw/useBtwPanelState';
+import { ConsultModelsDialog, type ConsultActingSelection } from './consult/ConsultModelsDialog';
+import { ConsultPanel } from './consult/ConsultPanel';
+import {
+    consultCaptureDisposition,
+    formatConsultRejections,
+    isDeliveredRawSubmission,
+    resolveConsultAvailability,
+    type ConsultSubmissionCapture,
+} from './consult/consultUi';
 import { resolveBtwSelection, useBtwStore } from '@/stores/useBtwStore';
 import { wasPromotedBtwSession } from '@/lib/sessionBtwMetadata';
 import { buildBtwSyntheticTexts, preparePendingBtwSend, startBtwSession } from '@/lib/btw';
@@ -70,7 +82,7 @@ import { isVSCodeRuntime } from '@/lib/desktop';
 import { useTabletLayout } from '@/lib/device';
 import { useHardwareKeyboard } from '@/lib/hardwareKeyboard';
 import { isIMECompositionEvent } from '@/lib/ime';
-import { getCycledPrimaryAgentName, type MobileControlsPanel } from './mobileControlsUtils';
+import { getCycledPrimaryAgentName, isPrimaryMode, type MobileControlsPanel } from './mobileControlsUtils';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { GitHubIssuePickerDialog } from '@/components/session/GitHubIssuePickerDialog';
@@ -264,6 +276,34 @@ type LinkedGitHubPr = {
 };
 type LinkedLinearIssueRef = { identifier: string; title: string; url: string; contextText: string; author?: LinkedReferenceAuthor };
 type LinkedReferences = { issue: LinkedGitHubIssue | null; pr: LinkedGitHubPr | null; linear: LinkedLinearIssueRef | null };
+
+/** The composer state a queue or consult capture resolves into one payload. */
+type CapturedComposerPayload = {
+    runtimeKey: string;
+    target: MessageQueueTarget;
+    sessionId: string;
+    /** The trimmed composer text, kept for display and editing. */
+    message: string;
+    /** The delivered text (agent mention stripped). */
+    text: string;
+    agentMention?: string;
+    /** Composer attachments plus document/file mentions, ready for delivery. */
+    attachments: AttachedFile[];
+    /** Just the composer's own attachments, for restoring the composer. */
+    composerAttachments: AttachedFile[];
+    context: QueuedContextPart[];
+    drafts: InlineCommentDraft[];
+    draftTarget: InlineCommentDraftTarget | null;
+    syntheticParts: SyntheticContextPart[];
+    linked: LinkedReferences;
+};
+
+type ComposerPayloadCapture =
+    | { status: 'ready'; payload: CapturedComposerPayload }
+    | { status: 'empty' }
+    | { status: 'no-target' }
+    | { status: 'runtime-changed' }
+    | { status: 'document-failed'; filename: string };
 
 /**
  * Record what a session was pointed at, so the work-status panel can show it
@@ -1233,40 +1273,35 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     };
     const handleSubmitRef = React.useRef<(options?: SubmitOptions) => Promise<void>>(async () => {});
 
-    // Add message to queue instead of sending
-    const handleQueueMessage = React.useCallback(async () => {
-        // The comment's exit paths are attach/cancel; queueing a real prompt
-        // underneath comment mode must never fire.
-        if (isMobileCommentOpen()) return;
+    /**
+     * What the composer has right now, resolved exactly as a queued message
+     * captures it: agent mention stripped, document mentions converted to
+     * attachments, context drafts and synthetic parts consumed, and linked
+     * references snapshotted. Both the queue action and the consult action use
+     * this, so a consulted message and a queued message deliver the same
+     * payload; only the delivery path differs.
+     */
+    const captureComposerPayload = React.useCallback(async (): Promise<ComposerPayloadCapture> => {
+        const target = messageQueueTarget;
+        if (!target || !currentSessionId) return { status: 'no-target' };
         const inputSnapshot = getCurrentInputSnapshot();
-        if (!inputSnapshot.hasContent || !currentSessionId || !messageQueueTarget) return;
-
-        // A local or extension command is run, not queued: the queue delivers
-        // text to the model, and `/compact`, `/btw`, or `/task` mean nothing there.
-        if (planLocalSlashCommand(inputSnapshot.message, inputMode, hasDrafts, true)
-            || routeGuestSlashCommand(inputSnapshot.message, inputMode, guestCommands)) {
-            void handleSubmitRef.current();
-            return;
-        }
-        const queueRuntimeKey = getRuntimeKey();
-        const queueTarget = messageQueueTarget;
-        const queueSessionId = currentSessionId;
+        if (!inputSnapshot.hasContent) return { status: 'empty' };
+        const runtimeKey = getRuntimeKey();
         const messageToQueue = inputSnapshot.message.replace(/^\n+|\n+$/g, '');
         const composerAttachments = sanitizeAttachmentsForSend(attachedFiles);
 
-        // A queued message is resolved now, not at delivery: the server that
-        // sends it has no agent list, no confirmed mentions, and no way to read
-        // a document the user named — and the mention must match what was
-        // visible when the user typed it.
+        // A queued (or consulted) message is resolved now, not at delivery: the
+        // server that sends it has no agent list, no confirmed mentions, and no
+        // way to read a document the user named — and the mention must match
+        // what was visible when the user typed it.
         const documentMentions = await prepareDocumentMentions(
             [messageToQueue],
             new Set(composerAttachments.map((attachment) => attachment.filename)),
-            queueRuntimeKey,
+            runtimeKey,
         );
-        if (documentMentions.status === 'runtime-changed') return;
+        if (documentMentions.status === 'runtime-changed') return { status: 'runtime-changed' };
         if (documentMentions.status === 'failed') {
-            toast.error(t('chat.chatInput.toast.attachNamedFailed', { name: documentMentions.filename }));
-            return;
+            return { status: 'document-failed', filename: documentMentions.filename };
         }
         const { sanitizedText, mention } = parseAgentMentions(messageToQueue, agents);
         const { attachments: mentionAttachments } = extractInlineFileMentions(sanitizedText, documentMentions.prepared);
@@ -1276,7 +1311,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         const skillInstruction = buildSkillMentionInstruction(collectInlineSkillMentions(sanitizedText, availableSkillNames));
 
         // Everything attached to the composer leaves with the message: the
-        // chips are part of what was queued, and come back if it is edited.
+        // chips are part of what is captured, and come back if it is restored.
         const syntheticParts = consumePendingSyntheticParts() ?? [];
         const draftTarget = inlineDraftTarget;
         const drafts = draftTarget ? consumeDrafts(draftTarget) : [];
@@ -1305,7 +1340,51 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 }
                 : null,
         }, skillInstruction);
-        const attachmentsToQueue = [...composerAttachments, ...mentionAttachments];
+
+        return {
+            status: 'ready',
+            payload: {
+                runtimeKey,
+                target,
+                sessionId: currentSessionId,
+                message: messageToQueue,
+                text: sanitizedText,
+                agentMention: mention?.name,
+                attachments: [...composerAttachments, ...mentionAttachments],
+                composerAttachments,
+                context,
+                drafts,
+                draftTarget,
+                syntheticParts,
+                linked,
+            },
+        };
+    }, [getCurrentInputSnapshot, currentSessionId, messageQueueTarget, attachedFiles, sanitizeAttachmentsForSend, prepareDocumentMentions, extractInlineFileMentions, agents, currentDirectory, consumePendingSyntheticParts, inlineDraftTarget, consumeDrafts, linkedIssue, linkedPr, linkedLinearIssue, linkedGuestIssue]);
+
+    // Add message to queue instead of sending
+    const handleQueueMessage = React.useCallback(async () => {
+        // The comment's exit paths are attach/cancel; queueing a real prompt
+        // underneath comment mode must never fire.
+        if (isMobileCommentOpen()) return;
+        const inputSnapshot = getCurrentInputSnapshot();
+        if (!inputSnapshot.hasContent || !currentSessionId || !messageQueueTarget) return;
+
+        // A local or extension command is run, not queued: the queue delivers
+        // text to the model, and `/compact`, `/btw`, or `/task` mean nothing there.
+        if (planLocalSlashCommand(inputSnapshot.message, inputMode, hasDrafts, true)
+            || routeGuestSlashCommand(inputSnapshot.message, inputMode, guestCommands)) {
+            void handleSubmitRef.current();
+            return;
+        }
+
+        const capture = await captureComposerPayload();
+        if (capture.status === 'runtime-changed') return;
+        if (capture.status === 'document-failed') {
+            toast.error(t('chat.chatInput.toast.attachNamedFailed', { name: capture.filename }));
+            return;
+        }
+        if (capture.status !== 'ready') return;
+        const { payload } = capture;
 
         // Sending while the agent works must still take the reader to the
         // live edge — a queued message produces no user row yet, so the
@@ -1317,7 +1396,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         // above, so nothing later needs them.
         setMessage('');
         confirmedMentionsRef.current.clear();
-        if (composerAttachments.length > 0) {
+        if (payload.composerAttachments.length > 0) {
             clearAttachedFiles(chatDraftIdentity);
         }
         setLinkedIssue(null);
@@ -1329,12 +1408,12 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         }
 
         try {
-            await addToQueue(queueTarget, {
-                content: messageToQueue,
-                text: sanitizedText,
-                agentMention: mention?.name,
-                attachments: attachmentsToQueue.length > 0 ? attachmentsToQueue : undefined,
-                context: context.length > 0 ? context : undefined,
+            await addToQueue(payload.target, {
+                content: payload.message,
+                text: payload.text,
+                agentMention: payload.agentMention,
+                attachments: payload.attachments.length > 0 ? payload.attachments : undefined,
+                context: payload.context.length > 0 ? payload.context : undefined,
                 sendConfig: currentProviderId && currentModelId ? {
                     providerID: currentProviderId,
                     modelID: currentModelId,
@@ -1349,30 +1428,225 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             // text is appended if the user has already typed something new.
             const currentInput = composerRef.current?.getValue() ?? messageRef.current;
             if (!currentInput) {
-                setMessage(messageToQueue);
+                setMessage(payload.message);
             } else {
-                useInputStore.getState().setPendingInputText(messageToQueue, 'append');
+                useInputStore.getState().setPendingInputText(payload.message, 'append');
             }
-            if (composerAttachments.length > 0) {
-                useInputStore.getState().restoreAttachedFiles(composerAttachments, chatDraftIdentity);
+            if (payload.composerAttachments.length > 0) {
+                useInputStore.getState().restoreAttachedFiles(payload.composerAttachments, chatDraftIdentity);
             }
-            if (draftTarget && drafts.length > 0) {
-                useInlineCommentDraftStore.getState().restoreDrafts(draftTarget, drafts);
+            if (payload.draftTarget && payload.drafts.length > 0) {
+                useInlineCommentDraftStore.getState().restoreDrafts(payload.draftTarget, payload.drafts);
             }
-            if (syntheticParts.length > 0) {
-                useInputStore.getState().setPendingSyntheticParts(syntheticParts);
+            if (payload.syntheticParts.length > 0) {
+                useInputStore.getState().setPendingSyntheticParts(payload.syntheticParts);
             }
-            setLinkedIssue(linked.issue);
-            setLinkedPr(linked.pr);
-            setLinkedLinearIssue(linked.linear);
+            setLinkedIssue(payload.linked.issue);
+            setLinkedPr(payload.linked.pr);
+            setLinkedLinearIssue(payload.linked.linear);
             return;
         }
-        recordLinkedReferences(queueSessionId, queueTarget.directory, linked);
-    }, [getCurrentInputSnapshot, currentSessionId, messageQueueTarget, inputMode, hasDrafts, guestCommands, attachedFiles, sanitizeAttachmentsForSend, prepareDocumentMentions, extractInlineFileMentions, agents, currentDirectory, consumePendingSyntheticParts, inlineDraftTarget, consumeDrafts, linkedIssue, linkedPr, linkedLinearIssue, linkedGuestIssue, scrollToLatest, clearAttachedFiles, chatDraftIdentity, isMobile, isMobileCommentOpen, addToQueue, currentProviderId, currentModelId, currentAgentName, currentVariant, t]);
+        recordLinkedReferences(payload.sessionId, payload.target.directory, payload.linked);
+    }, [getCurrentInputSnapshot, currentSessionId, messageQueueTarget, inputMode, hasDrafts, guestCommands, captureComposerPayload, scrollToLatest, clearAttachedFiles, chatDraftIdentity, isMobile, isMobileCommentOpen, addToQueue, currentProviderId, currentModelId, currentAgentName, currentVariant, t]);
+
+    // --- Consult Models (WP2.2/WP2.3) ---
+    // The action is available whenever a consult can be admitted through the
+    // server-owned queue; a busy session is admissible, so it is not part of
+    // the availability input at all. Auto-review is different: a consult would
+    // interleave with its queue-only loop, so the action disables while it
+    // runs. The resolver reads the runtime gate from
+    // `resolveConsultMechanismCapability()` itself.
+    const [consultDialogOpen, setConsultDialogOpen] = React.useState(false);
+    const consultRun = useConsultRun(currentSessionId ?? '');
+    const consultHandleRef = React.useRef<ConsultSubmissionHandle | null>(null);
+    const consultCaptureRef = React.useRef<{
+        linked: LinkedReferences;
+        sessionId: string;
+        directory: string;
+        restore: () => void;
+    } | null>(null);
+
+    const consultAvailability = resolveConsultAvailability({
+        hasSession: Boolean(currentSessionId && (currentSessionDirectoryForSync ?? currentDirectory)),
+        input: message,
+        shellMode: inputMode === 'shell',
+        btwActive: isBtwActive,
+        consultActive: isConsultRunActive(consultRun),
+        autoReviewActive: autoReviewRunning,
+    });
+    const consultUnavailableReason = consultAvailability.available ? null : consultAvailability.reason;
+    const isConsultPanelVisible = consultRun !== undefined;
+
+    // Advisors run under a primary agent; the session's own agent is used when
+    // it is primary, otherwise the first primary one. The runtime re-validates
+    // the exact selection before any fork, so this is only the default the
+    // dialog submits.
+    const consultAdvisorAgent = React.useMemo(() => {
+        const primaryAgents = agents.filter((agent) => isPrimaryMode(agent.mode));
+        const currentPrimary = primaryAgents.find((agent) => agent.name === currentAgentName);
+        return currentPrimary?.name ?? primaryAgents[0]?.name ?? null;
+    }, [agents, currentAgentName]);
+
+    const consultActing = React.useMemo<ConsultActingSelection>(() => ({
+        providerID: currentProviderId,
+        modelID: currentModelId,
+        variant: currentVariant ?? undefined,
+    }), [currentProviderId, currentModelId, currentVariant]);
+
+    /**
+     * Captures the composer payload for the submission at confirm time and
+     * keeps the restore closure for a cancelled/refused/failed run. The dialog
+     * owns the per-run options; the payload never leaves this component.
+     * `delivered-raw` is deliberately outside the restore set: the message may
+     * already have been sent without the consult, so restoring it could send
+     * it twice.
+     */
+    const captureConsultSubmission = React.useCallback(async (): Promise<ConsultSubmissionCapture | null> => {
+        if (!currentProviderId || !currentModelId) {
+            toast.error(t('chat.chatInput.toast.noModelSelected'));
+            return null;
+        }
+        const capture = await captureComposerPayload();
+        if (capture.status === 'runtime-changed') {
+            toast.error(t('chat.chatInput.toast.messageSendFailed'));
+            return null;
+        }
+        if (capture.status === 'document-failed') {
+            toast.error(t('chat.chatInput.toast.attachNamedFailed', { name: capture.filename }));
+            return null;
+        }
+        if (capture.status !== 'ready') return null;
+        const { payload } = capture;
+
+        consultCaptureRef.current = {
+            linked: payload.linked,
+            sessionId: payload.sessionId,
+            directory: payload.target.directory,
+            restore: () => {
+                if (payload.draftTarget && payload.drafts.length > 0) {
+                    useInlineCommentDraftStore.getState().restoreDrafts(payload.draftTarget, payload.drafts);
+                }
+                if (payload.syntheticParts.length > 0) {
+                    const inputState = useInputStore.getState();
+                    inputState.setPendingSyntheticParts([...payload.syntheticParts, ...(inputState.pendingSyntheticParts ?? [])]);
+                }
+                // The composer stayed usable while the consult waited, so new
+                // input is appended to instead of overwritten.
+                const currentInput = composerRef.current?.getValue() ?? messageRef.current;
+                if (!currentInput) {
+                    setMessage(payload.message);
+                } else {
+                    useInputStore.getState().setPendingInputText(payload.message, 'append');
+                }
+                if (payload.composerAttachments.length > 0) {
+                    useInputStore.getState().restoreAttachedFiles(payload.composerAttachments, chatDraftIdentity);
+                }
+                setLinkedIssue(payload.linked.issue);
+                setLinkedPr(payload.linked.pr);
+                setLinkedLinearIssue(payload.linked.linear);
+            },
+        };
+
+        return {
+            parentSessionId: payload.sessionId,
+            directory: payload.target.directory,
+            runtimeKey: payload.runtimeKey,
+            message: {
+                content: payload.message,
+                text: payload.text,
+                agentMentionName: payload.agentMention,
+                attachments: payload.attachments.length > 0 ? payload.attachments : undefined,
+                context: payload.context.length > 0 ? payload.context : undefined,
+            },
+            sendConfig: {
+                providerID: currentProviderId,
+                modelID: currentModelId,
+                agent: currentAgentName ?? undefined,
+                variant: currentVariant ?? undefined,
+            },
+        };
+    }, [captureComposerPayload, chatDraftIdentity, currentAgentName, currentModelId, currentProviderId, currentVariant, t]);
+
+    /**
+     * The consult item owns the payload now; restore it only without dispatch.
+     * A `delivered-raw` result must never restore it: the message may already
+     * have been sent without the consultation, so a restore could send it
+     * twice.
+     */
+    const handleConsultSubmitted = React.useCallback((
+        handle: ConsultSubmissionHandle,
+        advisors: readonly ConsultAdvisorSelection[],
+    ) => {
+        consultHandleRef.current = handle;
+        setMessage('');
+        messageRef.current = '';
+        confirmedMentionsRef.current.clear();
+        persistDraftImmediately(chatDraftIdentity, '');
+        messageHistory.reset();
+        if (attachedFiles.length > 0) clearAttachedFiles(chatDraftIdentity);
+        setLinkedIssue(null);
+        setLinkedPr(null);
+        setLinkedLinearIssue(null);
+        setLinkedGuestIssue(null);
+        if (!isBtwActive) setExpandedInput(false);
+        if (isMobile) composerRef.current?.blur();
+
+        void handle.result.then((result) => {
+            if (consultHandleRef.current === handle) consultHandleRef.current = null;
+            const capture = consultCaptureRef.current;
+            if (result.status === 'dispatched') {
+                if (capture) recordLinkedReferences(capture.sessionId, capture.directory, capture.linked);
+                consultCaptureRef.current = null;
+                return;
+            }
+            // Only an unrestored refusal/failure, or a cancel, gives the
+            // composer its payload back. `delivered-raw` keeps the capture
+            // cleared: the message may already have been sent, so restoring
+            // it could send it twice.
+            if (consultCaptureDisposition(result) === 'restore') capture?.restore();
+            if (result.status === 'cancelled') return;
+            if (isDeliveredRawSubmission(result.status)) {
+                toast.warning(t('chat.consult.toast.deliveredRaw'));
+                return;
+            }
+            if (result.status === 'refused') {
+                const rejectionLines = formatConsultRejections(t, result.rejections, advisors);
+                if (rejectionLines) {
+                    toast.error(t('chat.consult.toast.refused'), {
+                        description: (
+                            <div className="flex flex-col gap-0.5">
+                                {rejectionLines.map((line, index) => (
+                                    <div key={`${index}-${line}`}>{line}</div>
+                                ))}
+                            </div>
+                        ),
+                    });
+                } else {
+                    toast.error(t('chat.consult.toast.failed'), { description: result.error });
+                }
+                return;
+            }
+            if (result.status === 'failed') {
+                toast.error(t('chat.consult.toast.failed'), { description: result.error });
+            }
+        });
+    }, [attachedFiles.length, chatDraftIdentity, clearAttachedFiles, isBtwActive, isMobile, messageHistory, persistDraftImmediately, setExpandedInput, t]);
+
+    const handleOpenConsult = React.useCallback(() => {
+        setConsultDialogOpen(true);
+    }, []);
+
+    const handleCancelConsult = React.useCallback(() => {
+        consultHandleRef.current?.cancel();
+    }, []);
+
+    const handleDismissConsult = React.useCallback(() => {
+        if (!currentSessionId || !consultRun) return;
+        useConsultStore.getState().setPhase(currentSessionId, consultRun.runId, 'idle');
+    }, [consultRun, currentSessionId]);
 
     /** Put the context a queued message was captured with back on the composer chips. */
-    const restoreQueuedContext = React.useCallback((context: readonly QueuedContextPart[]) => {
-        const synthetic: SyntheticContextPart[] = [];
+    const restoreQueuedContext = React.useCallback((context: readonly QueuedContextPart[]) => {        const synthetic: SyntheticContextPart[] = [];
         for (const part of context) {
             if (part.kind === 'synthetic') {
                 synthetic.push({ text: part.text, synthetic: true });
@@ -3459,7 +3733,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     // The suggested follow-up is the composer's own top row on every surface
     // (inside the mobile pill and the box alike); on mobile the model and
     // agent are its bottom row too, so the surface stays one shape.
-    const suggestionHidden = hasContent || newSessionDraftOpen || isBtwActive || isBtwPanelVisible || hasQueuedMessages;
+    const suggestionHidden = hasContent || newSessionDraftOpen || isBtwActive || isBtwPanelVisible || hasQueuedMessages || isConsultPanelVisible;
     const suggestionRow = !isBtwActive ? (
         <SessionSuggestionChip
             sessionId={currentSessionId}
@@ -3899,6 +4173,8 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                         onOpenPrPicker={openPrPicker}
                         showLinearPicker={showLinearPicker}
                         onOpenLinearPicker={openLinearPicker}
+                        onOpenConsult={handleOpenConsult}
+                        consultUnavailableReason={consultUnavailableReason}
                         attachGuests={isMobile ? [] : guestAttachItems}
                         onOpenGuestAttach={openGuestAttach}
                         onOpenAttachSheet={openMobileAttachSheet}
@@ -3968,12 +4244,28 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             <QueuedMessageChips
                 key={parentMessageQueueKey}
                 target={parentMessageQueueTarget}
-                hidden={newSessionDraftOpen || isBtwActive || isBtwPanelVisible || mobileCommentActive}
+                hidden={newSessionDraftOpen || isBtwActive || isBtwPanelVisible || mobileCommentActive || isConsultPanelVisible}
                 onEditMessage={handleQueuedMessageEdit}
                 onSendMessage={handleQueuedMessageSend}
             />
+            {currentSessionId && consultRun && !isBtwPanelVisible ? (
+                <ConsultPanel
+                    run={consultRun}
+                    onCancel={handleCancelConsult}
+                    onDismiss={handleDismissConsult}
+                />
+            ) : null}
             {currentSessionId ? <BtwPanel parentSessionId={currentSessionId} panel={btwPanel} onExit={handleExitBtw} /> : null}
         </form>
+
+        <ConsultModelsDialog
+            open={consultDialogOpen}
+            onOpenChange={setConsultDialogOpen}
+            acting={consultActing}
+            advisorAgent={consultAdvisorAgent}
+            captureSubmission={captureConsultSubmission}
+            onSubmitted={handleConsultSubmitted}
+        />
 
         {/* Issue Picker Dialog */}
         <GitHubIssuePickerDialog

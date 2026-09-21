@@ -215,6 +215,12 @@ Why: only navigation tools use the compact static path; all other tools need obs
 ## Quick map of files in this folder
 
 - Text: `AssistantTextPart.tsx`, `UserTextPart.tsx`
+- Consult receipt: a Consult Models acting turn carries a bounded receipt on
+  its primary text part's metadata (`openchamberConsultReceipt`, written by
+  `lib/consult/synthesis.ts`). `UserTextPart` renders
+  `components/chat/consult/ConsultReceiptBlock.tsx` below the text; the
+  component parses the metadata and renders nothing when it is absent or
+  malformed, and never writes metadata back.
 - User-attached context (inline code comments, terminal selections, browser
   annotations, PR comments/checks): `UserContextPart.tsx`. `UserTextPart`
   routes to it when the part's metadata carries an `openchamberContext`

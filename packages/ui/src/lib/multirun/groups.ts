@@ -1,6 +1,7 @@
 import type { Session } from '@opencode-ai/sdk/v2';
 import type { WorktreeMetadata } from '@/types/worktree';
 import { normalizePath } from '@/lib/pathNormalization';
+import { isHiddenSession } from '@/lib/sessionVisibility';
 import { getMultiRunIdentity } from './identity';
 
 export interface AgentGroupSession {
@@ -27,7 +28,7 @@ export function buildAgentGroups(sessions: Session[], metaByPath: Map<string, Wo
   const groups = new Map<string, AgentGroup>();
   const seen = new Set<string>();
   for (const session of sessions) {
-    if (seen.has(session.id)) continue;
+    if (seen.has(session.id) || isHiddenSession(session)) continue;
     seen.add(session.id);
     const sessionPath = normalizePath(session.directory) ?? '';
     const meta = metaByPath.get(sessionPath);

@@ -11,6 +11,8 @@ import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSessions } from '@/sync/sync-context';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
+import { filterVisibleSessions } from '@/lib/sessionVisibility';
 import { useDeviceInfo } from '@/lib/device';
 import { checkIsGitRepository } from '@/lib/gitApi';
 import {
@@ -52,7 +54,15 @@ export const WorktreeSectionContent: React.FC<WorktreeSectionContentProps> = ({ 
   const projectPath = projectRefProp?.path ?? activeProject?.path ?? null;
 
   const getWorktreeMetadata = useSessionUIStore((s) => s.getWorktreeMetadata);
-  const sessions = useSessions();
+  const liveSessions = useSessions();
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
+  // Hidden forks (btw/advisor, pending fork ids) are not user sessions and must
+  // not surface in the worktree-delete confirmation. Their cleanup belongs to
+  // the consult GC (WP1.4), not to this action.
+  const sessions = React.useMemo(
+    () => filterVisibleSessions(liveSessions, pendingHiddenSessionIds),
+    [liveSessions, pendingHiddenSessionIds],
+  );
   const homeDirectory = useDirectoryStore((state) => state.homeDirectory);
 
   const [setupCommands, setSetupCommands] = React.useState<string[]>([]);

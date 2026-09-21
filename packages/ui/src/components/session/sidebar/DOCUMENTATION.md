@@ -83,6 +83,13 @@ buckets.
 Hosted mobile and Capacitor use their separate `MobileSessionsSheet` renderer.
 The shared directory-cache rules apply there, but this sidebar virtualizer does not.
 
+Session visibility has one owner: `lib/sessionVisibility.ts`
+(`isHiddenSession` / `filterVisibleSessions`). `partitionSidebarSessions`, the
+switcher, palette, tabs, archive view, and the mobile sheet all call it, so
+`/btw` forks, Consult Models advisor forks, and fork ids in the client-side
+pending-hide registry never reach a projection. The session data stores keep the
+session; only the projections that render sessions hide it.
+
 Both project display modes use `projects/CrossfadeZoneHeaders.tsx` for sticky
 zone headers. The live header keeps one portal host as it moves between its
 virtual row placeholder and a stationary layer inside the native scroller,

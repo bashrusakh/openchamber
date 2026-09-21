@@ -10,6 +10,8 @@ import { useI18n } from '@/lib/i18n';
 import { opencodeClient } from '@/lib/opencode/client';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { resolveGlobalSessionDirectory, useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
+import { isHiddenSession } from '@/lib/sessionVisibility';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useAllLiveSessions } from '@/sync/sync-context';
 import { getFusionSessionTitle } from '@/lib/multirun/title';
@@ -45,6 +47,7 @@ export function MultiRunFusionDialog({
   const liveSessions = useAllLiveSessions();
   const activeSessions = useGlobalSessionsStore((state) => state.activeSessions);
   const archivedSessions = useGlobalSessionsStore((state) => state.archivedSessions);
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
   const sessionsReady = useGlobalSessionsStore((state) => state.status === 'ready');
   const providers = useConfigStore((state) => state.providers);
   const currentProviderId = useConfigStore((state) => state.currentProviderId);
@@ -66,12 +69,12 @@ export function MultiRunFusionDialog({
     getSessionProjectDirectory(session.id, session.directory) ?? session.directory), [session]);
   const allSessions = React.useMemo(() => {
     const byId = new Map<string, Session>();
-    for (const candidate of liveSessions) byId.set(candidate.id, candidate);
-    for (const candidate of activeSessions) byId.set(candidate.id, candidate);
-    for (const candidate of archivedSessions) byId.set(candidate.id, candidate);
+    for (const candidate of liveSessions) if (!isHiddenSession(candidate, pendingHiddenSessionIds)) byId.set(candidate.id, candidate);
+    for (const candidate of activeSessions) if (!isHiddenSession(candidate, pendingHiddenSessionIds)) byId.set(candidate.id, candidate);
+    for (const candidate of archivedSessions) if (!isHiddenSession(candidate, pendingHiddenSessionIds)) byId.set(candidate.id, candidate);
     if (session.id) byId.set(session.id, session);
     return Array.from(byId.values());
-  }, [activeSessions, archivedSessions, liveSessions, session]);
+  }, [activeSessions, archivedSessions, liveSessions, pendingHiddenSessionIds, session]);
 
   React.useEffect(() => { setExcludedSources([]); }, [open, session.id]);
   const sources = React.useMemo(() => {

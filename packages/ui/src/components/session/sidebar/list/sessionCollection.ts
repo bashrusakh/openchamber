@@ -13,7 +13,8 @@ import { resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
 import { deriveRecentSessions } from '../recent/activitySections';
 import { normalizePath } from '../utils';
 import { isChatDirectoryPath } from '@/lib/chatDirectories';
-import { isBtwSession } from '@/lib/sessionBtwMetadata';
+import { isHiddenSession } from '@/lib/sessionVisibility';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
 import type { GlobalSessionStructure } from '@/stores/globalSessionStructure';
 import { countSyncPerformance } from '@/sync/performance-diagnostics';
 import type { SessionNode } from '../types';
@@ -36,15 +37,17 @@ const parentIdOf = (session: Session): string | null => {
 };
 
 // This boundary owns session visibility before Recent or projects take
-// ownership. Temporary /btw forks never leak into any sidebar projection.
+// ownership. Hidden sessions (btw forks, advisor forks, pending-hidden fork
+// ids) never leak into any sidebar projection.
 export const partitionSidebarSessions = (
   sessions: readonly Session[],
   isVSCode: boolean,
+  pendingHiddenIds?: ReadonlySet<string>,
 ): SidebarSessionPartitions => {
   const projectSessions: Session[] = [];
   const chatSessions: Session[] = [];
   for (const session of sessions) {
-    if (isBtwSession(session)) continue;
+    if (isHiddenSession(session, pendingHiddenIds)) continue;
     if (isChatDirectoryPath(session.directory)) {
       if (isVSCode) continue;
       chatSessions.push(session);
@@ -163,6 +166,7 @@ type SidebarSessionProjectionArgs = ProjectSidebarActiveSessionsArgs & {
 type SidebarSessionStructureArgs = Omit<ProjectSidebarActiveSessionsArgs, 'globalActiveSessions'> & {
   globalActiveSessions?: readonly Session[];
   globalStructure?: GlobalSessionStructure;
+  pendingHiddenIds?: ReadonlySet<string>;
 };
 
 const buildSidebarSessionStructure = ({
@@ -171,11 +175,12 @@ const buildSidebarSessionStructure = ({
   knownDirectories,
   isVSCode,
   globalStructure,
+  pendingHiddenIds,
 }: SidebarSessionStructureArgs) => {
   countSyncPerformance('sidebarStructureBuilds');
   const indexedGlobalSessions = globalActiveSessions ?? [];
   const visibleSessions = mergeSidebarSessionSources(indexedGlobalSessions, liveSessions);
-  const partition = partitionSidebarSessions(visibleSessions, isVSCode);
+  const partition = partitionSidebarSessions(visibleSessions, isVSCode, pendingHiddenIds);
   const knownDirectoryKeys = new Set([...knownDirectories].map((directory) => directory.toLowerCase()));
   const projectSessions = partition.projectSessions
     .filter((session) => isKnownActiveSessionDirectory(session, knownDirectoryKeys, isVSCode));
@@ -275,6 +280,10 @@ export const useSessionProjectCollection = ({
   const hasAuthoritativeGlobalSessions = useGlobalSessionsStore((state) => state.status === 'ready');
   const liveSessions = useAllLiveSessions();
   const pinnedSessionIds = useSessionPinnedStore((state) => state.ids);
+  // Read through `isHiddenSession` at projection time; this subscription is what
+  // makes a fork already present in the lists disappear when the advisor
+  // runtime registers its id after `session.fork` returned.
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
   const sessionOrderRanks = useSessionOrderingStore(React.useCallback(
     (state) => isVisible ? state.rankById : EMPTY_SESSION_ORDER_RANKS,
     [isVisible],
@@ -285,7 +294,8 @@ export const useSessionProjectCollection = ({
     liveSessions,
     knownDirectories,
     isVSCode,
-  }), [globalActiveSessions, globalStructure, isVSCode, knownDirectories, liveSessions]);
+    pendingHiddenIds: pendingHiddenSessionIds,
+  }), [globalActiveSessions, globalStructure, isVSCode, knownDirectories, liveSessions, pendingHiddenSessionIds]);
   const ordering = React.useMemo(
     () => orderSidebarSessionStructure(structure, pinnedSessionIds, sessionOrderRanks),
     [pinnedSessionIds, sessionOrderRanks, structure],

@@ -1,5 +1,6 @@
 import type { Session } from '@opencode-ai/sdk/v2';
 import { z } from 'zod';
+import { isConsultAdvisorSession } from '@/lib/consult/metadata';
 import { normalizePath } from '@/lib/pathNormalization';
 import { parseMultiRunSessionTitle } from './title';
 
@@ -43,7 +44,9 @@ export function getMultiRunIdentity(session: Session, legacyDirectory = session.
     const { group, groupSlug, runGroup, providerID, modelID, index, role } = membership;
     return { group, groupSlug, runGroup, providerID, modelID, index, role, key: multiRunGroupKey(group, groupSlug) };
   }
-  if (session.parentID || openchamber?.kind === 'btw' || openchamber?.kind === 'review') return null;
+  // Hidden sessions (btw, review, consult advisors) are never multi-run
+  // members: their cloned titles must not read as legacy run/fusion sessions.
+  if (session.parentID || openchamber?.kind === 'btw' || openchamber?.kind === 'review' || isConsultAdvisorSession(session)) return null;
   const title = parseMultiRunSessionTitle(session.title);
   const scope = normalizePath(legacyDirectory);
   if (!title || !scope) return null;

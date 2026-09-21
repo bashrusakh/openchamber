@@ -99,8 +99,29 @@ describe('createSessionOwnershipIndex', () => {
     ]);
   });
 
-  test('requires exact workspace directories in VS Code', () => {
+  test('never indexes hidden sessions, active or archived', () => {
+    const hiddenMarker = (kind: string): Record<string, unknown> => ({
+      openchamber: { kind, originalSessionID: 'parent', consultRunID: 'run-1' },
+    });
     const ownership = createSessionOwnershipIndex(
+      [
+        { id: 'advisor', directory: '/projects/app/src', metadata: hiddenMarker('consult-advisor') },
+        { id: 'btw', directory: '/projects/app/src', metadata: { openchamber: { kind: 'btw', originalSessionID: 'parent' } } },
+        { id: 'visible', directory: '/projects/app/src' },
+      ] as unknown as Session[],
+      [{ id: 'app', normalizedPath: '/projects/app' }],
+      new Map(),
+      false,
+      [{ id: 'archived-advisor', directory: '/projects/app/src', time: { archived: 1 }, metadata: hiddenMarker('consult-advisor') }] as unknown as Session[],
+    );
+
+    expect(ownership.sessionsByProject.get('app')?.map((session) => session.id)).toEqual(['visible']);
+    expect(ownership.archivedSessionsByProject.get('app')).toBeUndefined();
+    expect(ownership.bySessionId.has('advisor')).toBe(false);
+    expect(ownership.bySessionId.has('btw')).toBe(false);
+  });
+
+  test('requires exact workspace directories in VS Code', () => {    const ownership = createSessionOwnershipIndex(
       [
         { id: 'workspace', directory: '/projects/app' },
         { id: 'nested', directory: '/projects/app/packages/ui' },

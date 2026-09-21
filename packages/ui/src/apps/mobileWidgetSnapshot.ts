@@ -7,6 +7,7 @@ import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useSessionPinnedStore } from '@/stores/useSessionPinnedStore';
 import { useNotificationStore } from '@/sync/notification-store';
 import { compareSessionsByLifecycleOrder, useSessionOrderingStore } from '@/sync/session-ordering';
+import { isHiddenSession } from '@/lib/sessionVisibility';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 
 /**
@@ -82,6 +83,9 @@ const buildMobileWidgetSnapshot = (): MobileWidgetSnapshot => {
   const topLevel: Array<{ session: Session; unread: boolean; project: string }> = [];
 
   for (const session of sessions) {
+    // Hidden sessions (btw/advisor forks, pending fork ids) are never widget
+    // rows and never count toward the attention badge.
+    if (isHiddenSession(session)) continue;
     const isSubtask = parentIdOf(session) !== null;
     const unseenCount = unseenBySession[session.id] ?? 0;
     const needsAttention = unseenCount > 0 && (!isSubtask || notifyOnSubtasks);

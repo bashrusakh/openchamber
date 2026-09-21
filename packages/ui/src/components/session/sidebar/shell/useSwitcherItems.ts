@@ -2,7 +2,8 @@ import React from 'react';
 import type { Session } from '@opencode-ai/sdk/v2';
 
 import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
-import { isBtwSession } from '@/lib/sessionBtwMetadata';
+import { isHiddenSession } from '@/lib/sessionVisibility';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useSessionPinnedStore } from '@/stores/useSessionPinnedStore';
 import { useGitAllBranches } from '@/stores/useGitStore';
@@ -111,6 +112,7 @@ export const selectSwitcherParents = (
 export const useSwitcherItems = (enabled: boolean, options: SwitcherItemsOptions = {}): SwitcherItem[] => {
   const { scopeProjectId = null, currentSessionId = null, maxParents = MAX_PARENT_SESSIONS } = options;
   const activeSessions = useGlobalSessionsStore((state) => state.activeSessions);
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
   const projects = useProjectsStore((state) => state.projects);
   const pinnedSessionIds = useSessionPinnedStore((state) => state.ids);
   const sessionOrderRanks = useSessionOrderingStore((state) => state.rankById);
@@ -166,7 +168,7 @@ export const useSwitcherItems = (enabled: boolean, options: SwitcherItemsOptions
     for (const session of activeSessions) {
       const parentId = (session as Session & { parentID?: string | null }).parentID;
       if (!parentId) continue;
-      if (session.time?.archived) continue;
+      if (session.time?.archived || isHiddenSession(session, pendingHiddenSessionIds)) continue;
       const bucket = childrenByParent.get(parentId);
       if (bucket) {
         bucket.push(session);
@@ -186,8 +188,8 @@ export const useSwitcherItems = (enabled: boolean, options: SwitcherItemsOptions
       currentSessionId,
       (session) => findProjectForDirectory(resolveGlobalSessionDirectory(session))?.id ?? null,
       maxParents,
-      // btw forks stay hidden until promoted to a full session
-      (session) => isBtwSession(session) || (isVSCode && isChatDirectoryPath(resolveGlobalSessionDirectory(session))),
+      // btw forks and advisor forks stay hidden until promoted to a full session
+      (session) => isHiddenSession(session, pendingHiddenSessionIds) || (isVSCode && isChatDirectoryPath(resolveGlobalSessionDirectory(session))),
     );
 
     const buildNode = (session: Session): SessionNode => {
@@ -218,7 +220,7 @@ export const useSwitcherItems = (enabled: boolean, options: SwitcherItemsOptions
         },
       };
     });
-  }, [activeSessions, branchesByDirectory, currentSessionId, enabled, findProjectForDirectory, isVSCode, maxParents, pinnedSessionIds, scopeProjectId, sessionOrderRanks, worktreeInfoByPath]);
+  }, [activeSessions, branchesByDirectory, currentSessionId, enabled, findProjectForDirectory, isVSCode, maxParents, pendingHiddenSessionIds, pinnedSessionIds, scopeProjectId, sessionOrderRanks, worktreeInfoByPath]);
 
   return items;
 };

@@ -9,6 +9,8 @@ import { getAllSyncSessionMap, getDirectoryState, getSyncChildStores } from '@/s
 import { getLinkedIssues } from '@/lib/linkedIssues';
 import { normalizePath } from '@/lib/pathNormalization';
 import { getRuntimeKey, subscribeRuntimeEndpointChanged } from '@/lib/runtime-switch';
+import { isHiddenSession } from '@/lib/sessionVisibility';
+import { useConsultPendingHideStore } from '@/stores/useConsultPendingHideStore';
 import { useUIStore } from '@/stores/useUIStore';
 import type { WorktreeMetadata } from '@/types/worktree';
 
@@ -85,17 +87,20 @@ export const readGuestWorkspace = (query: GuestWorkspaceQuery, guestId: string):
   });
   const records = new Map<string, Session>();
   // Global records own complete membership, including archives. Child stores fill discovery gaps.
+  // Hidden sessions (btw/advisor forks, pending fork ids) never reach guest panels.
   for (const directory of directories) {
     for (const id of global.structure.activeIdsByDirectory.get(directory) ?? []) {
       const session = global.entityById.get(id);
-      if (session) records.set(id, session);
+      if (session && !isHiddenSession(session)) records.set(id, session);
     }
   }
   for (const session of global.archivedSessions) {
+    if (isHiddenSession(session)) continue;
     if (directories.has(normalizePath(session.directory) ?? session.directory)) records.set(session.id, session);
   }
   for (const directory of directories) {
     for (const session of getDirectoryState(directory)?.session ?? []) {
+      if (isHiddenSession(session)) continue;
       if (directories.has(normalizePath(session.directory) ?? session.directory)) {
         if (!records.has(session.id)) records.set(session.id, session);
       }
@@ -143,6 +148,9 @@ export const observeGuestWorkspace = (query: GuestWorkspaceQuery, guestId: strin
       const manager = getSyncChildStores();
       unsubs.push(
         useGlobalSessionsStore.subscribe((state, previous) => { if (state.activeSessions !== previous.activeSessions || state.archivedSessions !== previous.archivedSessions || state.status !== previous.status) update(); }),
+        // Registering or releasing a pending-hidden fork changes the projection
+        // without touching the session stores.
+        useConsultPendingHideStore.subscribe(update),
         useGlobalSessionStatusStore.subscribe(update),
         useConfigStore.subscribe((state, previous) => { if (state.isConnected !== previous.isConnected) update(); }),
         manager.subscribeBootstrap(update),

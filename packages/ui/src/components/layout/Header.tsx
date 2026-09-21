@@ -27,6 +27,8 @@ import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useQuotaAutoRefresh, useQuotaStore } from '@/stores/useQuotaStore';
 import { useGitBranchLabel } from '@/stores/useGitStore';
 import { useGlobalSessionsStore } from '@/stores/useGlobalSessionsStore';
+import { usePendingHiddenSessionIds } from '@/stores/useConsultPendingHideStore';
+import { isHiddenSession } from '@/lib/sessionVisibility';
 import { collectSessionSubtreeIds } from '@/components/session/sidebar/sessions/sessionSubtreeActions';
 import { streamPerfCount } from '@/stores/utils/streamDebug';
 import { useFeatureFlagsStore } from '@/stores/useFeatureFlagsStore';
@@ -288,11 +290,12 @@ export const Header: React.FC = () => {
   const currentSessionMessagesResolved = useSessionMessagesResolved(currentSessionId ?? '');
   const currentSessionStatus = useGlobalSessionStatus(currentSessionId ?? '');
   const isCurrentSessionMovingToWorktree = useIsSessionWorktreeMovePending(currentSessionId ?? '');
+  const pendingHiddenSessionIds = usePendingHiddenSessionIds();
   const currentGlobalSession = useGlobalSessionsStore(useShallow(React.useCallback(
     (state): HeaderSessionSnapshot | null => {
       if (!currentSessionId) return null;
        const session = [...state.activeSessions, ...state.archivedSessions]
-         .find((candidate) => candidate.id === currentSessionId);
+         .find((candidate) => candidate.id === currentSessionId && !isHiddenSession(candidate, pendingHiddenSessionIds));
       if (!session) return null;
       const record = session as typeof session & { directory?: string | null; slug?: string | null };
       return {
@@ -304,7 +307,7 @@ export const Header: React.FC = () => {
         parentId: session.parentID ?? null,
       };
     },
-    [currentSessionId],
+    [currentSessionId, pendingHiddenSessionIds],
   )));
   const activeProject = useProjectsStore(useShallow((state) => {
     if (!state.activeProjectId) {

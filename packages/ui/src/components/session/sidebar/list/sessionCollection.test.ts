@@ -7,6 +7,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { deriveRecentSessions } from '../recent/activitySections';
 import { applyGlobalSessionStatusEvent, replaceGlobalSessionStatusById } from '@/sync/global-session-status';
+import { useConsultPendingHideStore } from '@/stores/useConsultPendingHideStore';
 import {
   buildActiveSessionNode,
   buildSidebarSessionProjection,
@@ -257,6 +258,31 @@ describe('projectSidebarCollection', () => {
       metadata: { openchamber: {} },
     };
     expect(partitionSidebarSessions([promoted], false).chatSessions.map((entry) => entry.id)).toEqual(['fork']);
+  });
+
+  test('excludes an advisor fork and a pending-hidden fork from every sidebar projection', () => {
+    const advisor = {
+      ...session('advisor', '/workspace/a'),
+      metadata: { openchamber: { kind: 'consult-advisor', originalSessionID: 'parent', consultRunID: 'run-1', advisorIndex: 0 } },
+    };
+    const pending = session('pending', '/workspace/a');
+    const project = session('project', '/workspace/a');
+    const input = {
+      liveSessions: [],
+      knownDirectories: new Set(['/workspace/a']),
+      isVSCode: false,
+    };
+
+    expect(projectSidebarCollection({ ...input, globalActiveSessions: [advisor, project] }).map((entry) => entry.id)).toEqual(['project']);
+
+    useConsultPendingHideStore.getState().register('pending');
+    try {
+      expect(projectSidebarCollection({ ...input, globalActiveSessions: [pending, project] }).map((entry) => entry.id)).toEqual(['project']);
+      expect(partitionSidebarSessions([pending], false).projectSessions).toEqual([]);
+    } finally {
+      useConsultPendingHideStore.getState().release('pending');
+    }
+    expect(partitionSidebarSessions([pending], false).projectSessions.map((entry) => entry.id)).toEqual(['pending']);
   });
 
   test('keeps a ranked managed root and its active child in the Chats hierarchy', () => {
