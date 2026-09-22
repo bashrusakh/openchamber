@@ -10,6 +10,8 @@ const gitLibraries = {
   subscribeWorktreeTopologyChanges: vi.fn(),
   resolvePrimaryWorktreeRoot: vi.fn(),
   resolveWorktreeTopLevel: vi.fn(),
+  getPathDiff: vi.fn(),
+  getFileDiff: vi.fn(),
 };
 
 vi.mock('./index.js', () => ({
@@ -22,6 +24,8 @@ vi.mock('./index.js', () => ({
   subscribeWorktreeTopologyChanges: gitLibraries.subscribeWorktreeTopologyChanges,
   resolvePrimaryWorktreeRoot: gitLibraries.resolvePrimaryWorktreeRoot,
   resolveWorktreeTopLevel: gitLibraries.resolveWorktreeTopLevel,
+  getPathDiff: gitLibraries.getPathDiff,
+  getFileDiff: gitLibraries.getFileDiff,
 }));
 
 const { registerGitRoutes } = await import('./routes.js');
@@ -150,6 +154,61 @@ describe('git routes index mutations', () => {
     expect(response.statusCode).toBe(400);
     expect(response.body).toEqual({ error: 'path parameter is required' });
     expect(gitLibraries.stageFiles).not.toHaveBeenCalled();
+  });
+});
+
+describe('git diff routes', () => {
+  beforeEach(() => {
+    gitLibraries.getPathDiff.mockReset();
+    gitLibraries.getFileDiff.mockReset();
+  });
+
+  it('admits path diffs through the execution facade with request cancellation', async () => {
+    gitLibraries.getPathDiff.mockResolvedValue({ diff: 'patch', submodule: null });
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const response = createMockResponse();
+
+    await getRoute('GET', '/api/git/diff')(
+      { query: { directory: '/repo', path: 'file.ts' } },
+      response,
+    );
+
+    expect(response.body).toEqual({ diff: 'patch', submodule: null });
+    expect(gitLibraries.getPathDiff).toHaveBeenCalledWith('/repo', expect.objectContaining({
+      path: 'file.ts',
+      signal: expect.any(AbortSignal),
+    }));
+  });
+
+  it('passes request cancellation into file diffs without changing the response shape', async () => {
+    gitLibraries.getFileDiff.mockResolvedValue({
+      original: 'old',
+      modified: 'new',
+      path: 'file.ts',
+      isBinary: false,
+      submodule: null,
+    });
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const response = createMockResponse();
+
+    await getRoute('GET', '/api/git/file-diff')(
+      { query: { directory: '/repo', path: 'file.ts' } },
+      response,
+    );
+
+    expect(response.body).toEqual({
+      original: 'old',
+      modified: 'new',
+      path: 'file.ts',
+      isBinary: false,
+      submodule: null,
+    });
+    expect(gitLibraries.getFileDiff).toHaveBeenCalledWith('/repo', expect.objectContaining({
+      path: 'file.ts',
+      signal: expect.any(AbortSignal),
+    }));
   });
 });
 

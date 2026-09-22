@@ -1136,6 +1136,8 @@ const runGitCommand = async (
     envOverrides = undefined,
     signal = undefined,
     binary = getGitBinary(),
+    maxBuffer = 20 * 1024 * 1024,
+    encoding = 'utf8',
   } = {},
 ) => {
   try {
@@ -1143,7 +1145,8 @@ const runGitCommand = async (
       cwd,
       env: await buildGitEnv(envOverrides),
       windowsHide: true,
-      maxBuffer: 20 * 1024 * 1024,
+      maxBuffer,
+      encoding,
       timeout: timeoutMs,
       idleTimeout: idleTimeoutMs,
       signal,
@@ -1156,7 +1159,7 @@ const runGitCommand = async (
     return {
       success: true,
       exitCode: 0,
-      stdout: String(stdout || ''),
+      stdout: encoding === 'buffer' ? stdout : String(stdout || ''),
       stderr: String(stderr || ''),
     };
   } catch (error) {
@@ -2736,13 +2739,19 @@ export async function getTrackingBranch(directory, { signal = undefined } = {}) 
 
 // Whether `sha` is reachable from the checked-out HEAD. An object git has never
 // fetched fails the same way an unrelated commit does: not an ancestor.
-export async function isAncestorOfHead(directory, sha) {
+export async function isAncestorOfHead(directory, sha, { signal = undefined } = {}) {
   const normalizedDirectory = normalizeDirectoryPath(directory);
   const normalizedSha = isStringValue(sha) ? sha.trim() : '';
   if (!normalizedDirectory || !/^[0-9a-f]{7,64}$/i.test(normalizedSha)) {
     return false;
   }
-  const result = await runGitCommand(normalizedDirectory, ['merge-base', '--is-ancestor', normalizedSha, 'HEAD']);
+  const result = await runGitCommand(
+    normalizedDirectory,
+    ['merge-base', '--is-ancestor', normalizedSha, 'HEAD'],
+    { signal },
+  );
+  if (signal?.aborted) throw signal.reason || new Error('Git ancestor read was cancelled');
+  if (isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result);
   return result.success;
 }
 
@@ -3538,7 +3547,7 @@ const looksBinaryBySniff = async (absolutePath) => {
   }
 };
 
-const isBinaryDiff = async (directoryPath, filePath, staged) => {
+const isBinaryDiff = async (directoryPath, filePath, staged, signal = undefined) => {
   // Fast path: ask git for numstat. For binary, it returns "-\t-\t<path>".
   const args = ['diff', '--numstat'];
   if (staged) {
@@ -3546,16 +3555,24 @@ const isBinaryDiff = async (directoryPath, filePath, staged) => {
   }
   args.push('--', filePath);
 
-  const result = await runGitCommand(directoryPath, args);
+  const result = await runGitCommand(directoryPath, args, { signal });
   if (parseIsBinaryFromNumstat(result.stdout)) {
     return true;
   }
 
   // Fallback for untracked files (diff output is empty): use --no-index against /dev/null
   if (!staged) {
-    const tracked = await runGitCommand(directoryPath, ['ls-files', '--error-unmatch', '--', filePath]).then((r) => r.success);
+    const tracked = await runGitCommand(
+      directoryPath,
+      ['ls-files', '--error-unmatch', '--', filePath],
+      { signal },
+    ).then((r) => r.success);
     if (!tracked) {
-      const noIndex = await runGitCommand(directoryPath, ['diff', '--no-index', '--numstat', '--', '/dev/null', filePath]);
+      const noIndex = await runGitCommand(
+        directoryPath,
+        ['diff', '--no-index', '--numstat', '--', '/dev/null', filePath],
+        { signal },
+      );
       if (parseIsBinaryFromNumstat(noIndex.stdout) || parseIsBinaryFromNumstat(noIndex.stderr) || parseIsBinaryFromNumstat(noIndex.message)) {
         return true;
       }
@@ -3569,21 +3586,44 @@ const isBinaryDiff = async (directoryPath, filePath, staged) => {
   return false;
 };
 
-export async function getFileDiff(directory, { path: filePath, staged = false } = {}) {
+const readGitImage = async (repoRoot, ref, mimeType, signal) => {
+  const result = await runGitCommand(repoRoot, ['show', ref], {
+    signal,
+    maxBuffer: 50 * 1024 * 1024,
+    encoding: 'buffer',
+  });
+  if (isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result);
+  if (!result.success) throw createGitProcessError(result);
+  const content = Buffer.isBuffer(result.stdout)
+    ? result.stdout
+    : Buffer.from(String(result.stdout || ''));
+  return content.length > 0 ? `data:${mimeType};base64,${content.toString('base64')}` : '';
+};
+
+export async function getFileDiff(directory, { path: filePath, staged = false, signal = undefined } = {}) {
   if (!directory || !filePath) {
     throw new Error('directory and path are required for getFileDiff');
   }
 
-  const { directoryPath, directoryGit, repoRoot, git } = await createRepositoryGitContext(directory);
+  const { directoryPath, directoryGit, repoRoot, git } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: true,
+    signal,
+  });
   const isImage = isImageFile(filePath);
   const mimeType = isImage ? getImageMimeType(filePath) : null;
-  const fileContext = await resolveGitFileContext(directoryPath, directoryGit, filePath, repoRoot);
+  const fileContext = await resolveGitFileContext(
+    directoryPath,
+    directoryGit,
+    filePath,
+    repoRoot,
+    { signal },
+  );
   const { absolutePath, repoPath, isSymbolicLink } = fileContext;
 
   if (fileContext.isSubmodule) {
     // Git's own text form of a gitlink, so a plain two-pane view still shows
     // the recorded commits; `submodule` carries what the text cannot.
-    const submodule = await readSubmoduleState(repoRoot, fileContext);
+    const submodule = await readSubmoduleState(repoRoot, fileContext, { signal });
     const describeCommit = (commit) => (commit ? `Subproject commit ${commit}\n` : '');
     return {
       original: describeCommit(submodule.headCommit),
@@ -3596,7 +3636,7 @@ export async function getFileDiff(directory, { path: filePath, staged = false } 
 
   if (!isImage && !isSymbolicLink) {
     const isBinaryBySniff = await looksBinaryBySniff(absolutePath);
-    const isBinary = isBinaryBySniff || (await isBinaryDiff(repoRoot, repoPath, staged));
+    const isBinary = isBinaryBySniff || (await isBinaryDiff(repoRoot, repoPath, staged, signal));
     if (isBinary) {
       return {
         original: '',
@@ -3612,23 +3652,16 @@ export async function getFileDiff(directory, { path: filePath, staged = false } 
     if (isImage) {
       // For images, use git show with raw output and convert to base64
       try {
-        const { stdout } = await execFileAsync(getGitBinary(), ['show', `HEAD:${repoPath}`], {
-          cwd: repoRoot,
-          encoding: 'buffer',
-          env: await buildGitEnv(),
-          windowsHide: true,
-          maxBuffer: 50 * 1024 * 1024, // 50MB max
-        });
-        if (stdout && stdout.length > 0) {
-          original = `data:${mimeType};base64,${stdout.toString('base64')}`;
-        }
-      } catch {
+        original = await readGitImage(repoRoot, `HEAD:${repoPath}`, mimeType, signal);
+      } catch (error) {
+        if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
         original = '';
       }
     } else {
       original = await git.show([`HEAD:${repoPath}`]);
     }
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
     original = '';
   }
 
@@ -3636,16 +3669,7 @@ export async function getFileDiff(directory, { path: filePath, staged = false } 
   try {
     if (staged) {
       if (isImage) {
-        const { stdout } = await execFileAsync(getGitBinary(), ['show', `:${repoPath}`], {
-          cwd: repoRoot,
-          encoding: 'buffer',
-          env: await buildGitEnv(),
-          windowsHide: true,
-          maxBuffer: 50 * 1024 * 1024,
-        });
-        if (stdout && stdout.length > 0) {
-          modified = `data:${mimeType};base64,${stdout.toString('base64')}`;
-        }
+        modified = await readGitImage(repoRoot, `:${repoPath}`, mimeType, signal);
       } else {
         modified = await git.show([`:${repoPath}`]);
       }

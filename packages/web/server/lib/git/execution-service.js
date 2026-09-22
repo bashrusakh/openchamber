@@ -33,6 +33,7 @@ const operationKinds = Object.freeze({
   getRangeDiff: operation.read,
   getBranchBase: operation.read,
   getRangeFiles: operation.read,
+  getPathDiff: operation.read,
   getFileDiff: operation.read,
   listStashes: operation.read,
   countStashFiles: operation.read,
@@ -45,6 +46,7 @@ const operationKinds = Object.freeze({
   getCommitDiff: operation.read,
   getCommitFileDiff: operation.read,
   getTrackingBranch: operation.read,
+  isAncestorOfHead: operation.read,
   getRemotes: operation.read,
   isLinkedWorktree: operation.read,
   validateWorktreeDirectory: operation.read,
@@ -117,7 +119,7 @@ const operationDirectory = (name, args) => (
 );
 
 const operationExecutionOptions = (name, args) => {
-  const options = name === 'getUntrackedDiffs' ? args[2] : args[1];
+  const options = name === 'getUntrackedDiffs' || name === 'isAncestorOfHead' ? args[2] : args[1];
   if (!options || Object.prototype.toString.call(options) !== '[object Object]') return {};
   const executionOptions = {};
   if (options.signal) executionOptions.signal = options.signal;
@@ -476,6 +478,7 @@ export const {
   getRangeDiff,
   getBranchBase,
   getRangeFiles,
+  getPathDiff,
   getFileDiff,
   listStashes,
   countStashFiles,
@@ -496,6 +499,7 @@ export const {
   getCommitDiff,
   getCommitFileDiff,
   getTrackingBranch,
+  isAncestorOfHead,
   getRemotes,
   removeRemote,
   isLinkedWorktree,

@@ -1,3 +1,20 @@
+const createRequestAbortSignal = (req, res) => {
+  const controller = new AbortController();
+  const abort = () => {
+    if (!res?.writableEnded) controller.abort();
+  };
+  req?.once?.('aborted', abort);
+  res?.once?.('close', abort);
+  if (req?.aborted) controller.abort();
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      req?.off?.('aborted', abort);
+      res?.off?.('close', abort);
+    },
+  };
+};
+
 export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
   let gitLibraries = null;
   const getGitLibraries = async () => {
@@ -372,6 +389,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
   app.get('/api/git/diff', async (req, res) => {
     const { getPathDiff } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = req.query.directory;
       if (!directory) {
@@ -390,6 +408,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         path,
         staged,
         contextLines: Number.isFinite(context) ? context : 3,
+        signal: requestAbort.signal,
       });
 
       res.json({ diff, submodule });
@@ -397,11 +416,14 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       if (sendGitPathError(res, error)) return;
       console.error('Failed to get git diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get git diff' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
   app.get('/api/git/file-diff', async (req, res) => {
     const { getFileDiff } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = req.query.directory;
       if (!directory || typeof directory !== 'string') {
@@ -418,6 +440,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       const result = await getFileDiff(directory, {
         path: pathParam,
         staged,
+        signal: requestAbort.signal,
       });
 
       res.json({
@@ -431,6 +454,8 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       if (sendGitPathError(res, error)) return;
       console.error('Failed to get git file diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get git file diff' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 

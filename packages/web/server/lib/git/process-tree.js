@@ -256,6 +256,7 @@ export const execFileProcessTree = ({
   timeout = 0,
   maxBuffer = Infinity,
   idleTimeout = 0,
+  encoding = 'utf8',
   signal,
   spawn = nodeSpawn,
   platform = process.platform,
@@ -274,7 +275,7 @@ export const execFileProcessTree = ({
     return;
   }
 
-  let stdout = '';
+  let stdout = encoding === 'buffer' ? Buffer.alloc(0) : '';
   let stderr = '';
   let stdoutBytes = 0;
   let stderrBytes = 0;
@@ -332,6 +333,7 @@ export const execFileProcessTree = ({
   };
   const append = (stream, chunk) => {
     const text = chunk.toString();
+    const bytes = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(text);
     if (idleTimeout > 0) {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => requestTermination(
@@ -339,15 +341,17 @@ export const execFileProcessTree = ({
       ), idleTimeout);
     }
     if (stream === 'stdout') {
-      stdoutBytes += Buffer.byteLength(text);
+      stdoutBytes += bytes;
       if (stdoutBytes > maxBuffer) {
         requestTermination(createOutputLimitError('stdout', maxBuffer));
         return;
       }
-      stdout += text;
+      stdout = encoding === 'buffer'
+        ? Buffer.concat([stdout, chunk])
+        : stdout + text;
       return;
     }
-    stderrBytes += Buffer.byteLength(text);
+    stderrBytes += bytes;
     if (stderrBytes > maxBuffer) {
       requestTermination(createOutputLimitError('stderr', maxBuffer));
       return;
