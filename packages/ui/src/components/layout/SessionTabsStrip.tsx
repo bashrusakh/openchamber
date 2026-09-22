@@ -153,16 +153,21 @@ const contextComponents: SessionTabMenuComponents = {
 
 /**
  * One tab, active or not. The tab drags to reorder; the menu and close
- * controls sit in a hover-revealed overlay at the tab's end (menu first,
- * close after it). One session menu — supplied by the header via
- * `renderMenu` — backs both the "..." dropdown and the right-click context
- * menu, which opens under the cursor without changing the active tab. The
- * dropdown's anchor overlay stays mounted through the close animation so the
- * popup never flashes detached. A container query hides the overlay once the
- * slot is too narrow to show it without covering the title, leaving the
- * right-click menu and middle-click close as the reachable controls at the
- * floor. While the active tab is renaming, the overlay is suppressed entirely —
- * only the rename controls show.
+ * controls are in-flow flex items at the tab's end (menu first, close after
+ * it), so they reserve their own width instead of overlaying the title. The
+ * active tab shows them always. An inactive tab reserves their width but keeps
+ * them hidden and out of the tab order until the slot is hovered or focus
+ * enters the tab, or while its menu is open; below the narrow gate it drops
+ * them so the title keeps the full width, and below the `…` threshold even the
+ * active tab drops just the menu trigger while keeping its close (see
+ * `index.css` for the exact rules and width math). One session menu — supplied
+ * by the header via `renderMenu` — backs both the "..." dropdown and the
+ * right-click context menu, which opens under the cursor without changing the
+ * active tab. The dropdown's anchor stays mounted and visible through the
+ * close animation (`menuVisible`), so the popup never flashes detached and a
+ * resize that crosses a gate mid-close cannot hide the trigger or strand
+ * focus. While the active tab is renaming, the whole controls block is
+ * suppressed — only the rename controls show.
  */
 const SessionTabItem: React.FC<{
   tab: SessionTab;
@@ -177,12 +182,16 @@ const SessionTabItem: React.FC<{
 }> = ({ tab, isActive, suppressControls, onSelect, onClose, renderMenu, closeOtherTabs, onMenuOpenChangeComplete, children }) => {
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = React.useState(false);
-  // Keeps the overlay (the dropdown's anchor) mounted through the close animation.
+  // Stays true from open until the popup's close animation finishes, keeping
+  // the trigger laid out (and exempt from the narrow-gate `display: none`) so
+  // the anchor never detaches mid-close.
   const [menuVisible, setMenuVisible] = React.useState(false);
   const [contextMenuOpen, setContextMenuOpen] = React.useState(false);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: tab.id });
 
   const title = tab.session.title?.trim() || t('sessions.sidebar.session.untitled');
+  // Drives the open tab's highlight, keeps the controls shown while the menu is
+  // open or still animating closed, and backs `data-controls-open` on the slot.
   const overlayVisible = !suppressControls && (menuOpen || menuVisible);
 
   // Session state for the dot and the hover tooltip.
@@ -215,6 +224,7 @@ const SessionTabItem: React.FC<{
         isDragging && 'z-10 opacity-60',
       )}
       data-active={isActive ? 'true' : 'false'}
+      data-controls-open={overlayVisible ? 'true' : 'false'}
       {...(isActive ? { 'data-active-session-tab': true } : {})}
       {...attributes}
       {...listeners}
@@ -244,13 +254,19 @@ const SessionTabItem: React.FC<{
                       onClose(tab.id);
                     }
                   }}
-                  data-controls-open={overlayVisible ? 'true' : 'false'}
+                  onMouseDown={(event) => {
+                    // Suppress the browser's middle-click autoscroll on the tab
+                    // surface; the middle-click close still fires via onAuxClick.
+                    if (event.button === 1) {
+                      event.preventDefault();
+                    }
+                  }}
                   className={cn(
                     // No color transition: activation must snap. A crossfade
                     // here reads as the switch itself being slow, since the
                     // old and new tab trade colors over several frames right
                     // after the click.
-                    'session-tab group/session-tab relative flex h-7 w-full min-w-0 select-none items-center rounded-md px-2',
+                    'session-tab flex h-7 w-full min-w-0 select-none items-center rounded-md px-2',
                     isActive
                       ? 'bg-interactive-selection text-interactive-selection-foreground'
                       : cn(
@@ -259,16 +275,7 @@ const SessionTabItem: React.FC<{
                       ),
                   )}
                 >
-                  <div className={cn(
-                    // `session-tab-content` is the hook the narrow container
-                    // query uses to neutralize the hover padding below the
-                    // threshold where the controls it reserves room for are
-                    // hidden; see `index.css`.
-                    'session-tab-content flex min-w-0 flex-1 items-center',
-                    !suppressControls && 'group-hover/session-tab:pr-10',
-                    overlayVisible && 'pr-10',
-                  )}
-                  >
+                  <div className="flex min-w-0 flex-1 items-center">
                     {isAiRenaming ? (
                       <Icon name="loader-4" className="mr-1.5 size-3 shrink-0 animate-spin text-primary" aria-label={t('sessions.aiRename.generating')} />
                     ) : showDot ? (
@@ -299,12 +306,7 @@ const SessionTabItem: React.FC<{
                     <div
                       onClick={(event) => event.stopPropagation()}
                       onPointerDown={(event) => event.stopPropagation()}
-                      className={cn(
-                        'session-tab-controls absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5',
-                        'opacity-0 transition-opacity duration-150',
-                        'group-hover/session-tab:flex group-hover/session-tab:opacity-100',
-                        overlayVisible && 'flex opacity-100',
-                      )}
+                      className="session-tab-controls flex items-center gap-0.5"
                     >
                       <DropdownMenu
                         open={menuOpen}
@@ -321,7 +323,7 @@ const SessionTabItem: React.FC<{
                           <button
                             type="button"
                             aria-label={t('header.sessionTabs.tabMenuAria')}
-                            className="flex size-5 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+                            className="session-tab-menu flex size-5 items-center justify-center rounded text-muted-foreground hover:text-foreground"
                           >
                             <Icon name="more" className="size-4" />
                           </button>
@@ -446,7 +448,7 @@ export const SessionTabsStrip: React.FC<{
   renderMenu: (args: SessionTabMenuArgs) => React.ReactNode;
   /** Fires when a tab menu finishes opening/closing (deferred rename hook). */
   onMenuOpenChangeComplete?: (open: boolean) => void;
-  /** While the active tab renames, its hover controls stay hidden. */
+  /** While the active tab renames, its controls stay hidden. */
   suppressActiveTabControls?: boolean;
   children: React.ReactNode;
 }> = ({ renderMenu, onMenuOpenChangeComplete, suppressActiveTabControls = false, children }) => {
