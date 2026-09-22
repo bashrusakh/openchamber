@@ -17,6 +17,11 @@ import { runWithGitExecutionScope } from '../git/execution-scope.js';
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 const isStringValue = (value) => Object.prototype.toString.call(value) === '[object String]';
 
+const throwIfAborted = (signal) => {
+  if (!signal?.aborted) return;
+  throw signal.reason || new Error('Skills repository scan was cancelled');
+};
+
 function validateSkillName(skillName) {
   if (!isStringValue(skillName)) return false;
   if (skillName.length < 1 || skillName.length > 64) return false;
@@ -97,15 +102,17 @@ export async function scanSkillsRepository({
   gitExecutionService,
   resolveGitBinaryForSpawn,
   runGit: runGitCommand = runGit,
+  signal = undefined,
 } = {}) {
-  const runConfiguredGit = (args, options) => {
+  const runConfiguredGit = (args, options = {}) => {
     const command = args.find((arg) => ['clone', 'checkout', 'ls-files', 'ls-tree', 'show'].includes(arg));
     const readOnly = command === 'ls-files' || command === 'ls-tree' || command === 'show';
+    const runOptions = signal && !options.signal ? { ...options, signal } : options;
     return runWithGitExecutionScope(readOnly, () => runGitCommand(
       args,
       resolveGitBinaryForSpawn
-        ? { ...options, resolveGitBinaryForSpawn }
-        : options,
+        ? { ...runOptions, resolveGitBinaryForSpawn }
+        : runOptions,
     ));
   };
   const parsed = parseSkillRepoSource(source, { subpath });
@@ -116,6 +123,7 @@ export async function scanSkillsRepository({
   const effectiveSubpath = parsed.effectiveSubpath || (isStringValue(defaultSubpath) && defaultSubpath.trim() ? defaultSubpath.trim() : null);
   const cloneUrl = identity?.sshKey ? parsed.cloneUrlSsh : parsed.cloneUrlHttps;
 
+  throwIfAborted(signal);
   const tempBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openchamber-skills-scan-'));
   let cleaned = false;
   let cleanupBlocked = false;
@@ -128,7 +136,8 @@ export async function scanSkillsRepository({
 
   const scanRepository = async () => {
     try {
-      const gitCheck = await assertGitAvailable(runConfiguredGit);
+      throwIfAborted(signal);
+      const gitCheck = await assertGitAvailable(runConfiguredGit, { signal });
       if (!gitCheck.ok) {
         if (isProcessTreeCleanupBlocked(gitCheck)) {
           cleanupBlocked = true;
@@ -251,15 +260,19 @@ export async function scanSkillsRepository({
           const skillName = path.posix.basename(skillDir);
           const skillMdPath = path.posix.join(skillDir, 'SKILL.md');
 
+          throwIfAborted(signal);
+
           const warnings = [];
           let skillMdContent = '';
 
           // Prefer filesystem reads when sparse checkout succeeded.
           const filePath = toFsPath(skillMdPath);
           try {
+            throwIfAborted(signal);
             skillMdContent = await fs.promises.readFile(filePath, 'utf8');
-          } catch {
-             const showResult = await runConfiguredGit(['-C', tempBase, 'show', `HEAD:${skillMdPath}`], { identity, timeoutMs: 15_000 });
+          } catch (error) {
+            if (signal?.aborted) throw error;
+            const showResult = await runConfiguredGit(['-C', tempBase, 'show', `HEAD:${skillMdPath}`], { identity, timeoutMs: 15_000 });
             if (!showResult.ok) {
               if (isProcessTreeCleanupBlocked(showResult)) {
                 cleanupBlocked = true;
@@ -326,6 +339,7 @@ export async function scanSkillsRepository({
       destination: tempBase,
       label: 'skills-catalog/clone-repository',
       queueTimeoutMs: 60_000,
+      signal,
       gitExecutionService,
     }, scanRepository);
   } finally {

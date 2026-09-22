@@ -28,7 +28,12 @@ const createTempProject = () => {
   return projectRoot;
 };
 
-const startSkillsApp = ({ projectRoot, overrides = {} }) => {
+const startSkillsApp = ({
+  projectRoot,
+  scanSkillsRepository = async () => ({ ok: false }),
+  installSkillsFromRepository = async () => ({ ok: false }),
+  overrides = {},
+} = {}) => {
   const app = express();
   app.use(express.json());
 
@@ -71,8 +76,8 @@ const startSkillsApp = ({ projectRoot, overrides = {} }) => {
     getCacheKey: () => 'k',
     scanWithCache: async (_key, loader) => loader(),
     parseSkillRepoSource: () => ({ ok: false }),
-    scanSkillsRepository: async () => ({ ok: false }),
-    installSkillsFromRepository: async () => ({ ok: false }),
+    scanSkillsRepository,
+    installSkillsFromRepository,
     fetchGitHubRepoMetas: async () => ({}),
     getProfiles: () => [],
     getProfile: () => null,
@@ -332,5 +337,95 @@ describe('skill-routes directory soft fallback', () => {
     } finally {
       stubServer.close();
     }
+  });
+
+  it('cancels a direct repository scan when the HTTP request disconnects', async () => {
+    projectRoot = createTempProject();
+    let receivedSignal;
+    let resolveStarted;
+    let resolveStopped;
+    const started = new Promise((resolve) => { resolveStarted = resolve; });
+    const stopped = new Promise((resolve) => { resolveStopped = resolve; });
+
+    appHandle = startSkillsApp({
+      projectRoot,
+      scanSkillsRepository: async ({ signal }) => {
+        receivedSignal = signal;
+        resolveStarted();
+        await new Promise((resolve) => {
+          signal.addEventListener('abort', () => {
+            resolveStopped();
+            resolve();
+          }, { once: true });
+        });
+        return { ok: false, error: { kind: 'networkError', message: 'request cancelled' } };
+      },
+    });
+
+    const controller = new AbortController();
+    const request = fetch(`${appHandle.baseUrl}/api/config/skills/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'owner/repository' }),
+      signal: controller.signal,
+    });
+    const requestOutcome = request.then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error }),
+    );
+
+    await started;
+    expect(receivedSignal).toBeInstanceOf(AbortSignal);
+    controller.abort();
+    await stopped;
+    await expect(requestOutcome).resolves.toMatchObject({ ok: false, error: { name: 'AbortError' } });
+    expect(receivedSignal.aborted).toBe(true);
+  });
+
+  it('cancels a direct repository install when the HTTP request disconnects', async () => {
+    projectRoot = createTempProject();
+    let receivedSignal;
+    let resolveStarted;
+    let resolveStopped;
+    const started = new Promise((resolve) => { resolveStarted = resolve; });
+    const stopped = new Promise((resolve) => { resolveStopped = resolve; });
+
+    appHandle = startSkillsApp({
+      projectRoot,
+      installSkillsFromRepository: async ({ signal }) => {
+        receivedSignal = signal;
+        resolveStarted();
+        await new Promise((resolve) => {
+          signal.addEventListener('abort', () => {
+            resolveStopped();
+            resolve();
+          }, { once: true });
+        });
+        return { ok: false, error: { kind: 'networkError', message: 'request cancelled' } };
+      },
+    });
+
+    const controller = new AbortController();
+    const request = fetch(`${appHandle.baseUrl}/api/config/skills/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: 'owner/repository',
+        scope: 'project',
+        selections: [{ skillDir: 'skills/example' }],
+      }),
+      signal: controller.signal,
+    });
+    const requestOutcome = request.then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error }),
+    );
+
+    await started;
+    expect(receivedSignal).toBeInstanceOf(AbortSignal);
+    controller.abort();
+    await stopped;
+    await expect(requestOutcome).resolves.toMatchObject({ ok: false, error: { name: 'AbortError' } });
+    expect(receivedSignal.aborted).toBe(true);
   });
 });

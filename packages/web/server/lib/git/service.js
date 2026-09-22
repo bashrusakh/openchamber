@@ -18,6 +18,7 @@ import {
   killProcessTree,
   withProcessTreeOwnership,
 } from './process-tree.js';
+import { cleanupWorkingTreeRangeDirectory } from './range-cleanup.js';
 import { unsupportedRepositoryRootReason } from './repository-root.js';
 
 export { unsupportedRepositoryRootReason } from './repository-root.js';
@@ -3313,6 +3314,7 @@ async function runWorkingTreeRangeDiff(context, baseRef, headRef, args, paths = 
   if (!untracked) return readDiff(git);
 
   const temporaryDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), 'openchamber-branch-diff-'));
+  let operationError;
   try {
     const indexPath = (await git.raw(['rev-parse', '--git-path', 'index'])).trim();
     const temporaryIndex = path.join(temporaryDirectory, 'index');
@@ -3324,8 +3326,11 @@ async function runWorkingTreeRangeDiff(context, baseRef, headRef, args, paths = 
     comparisonGit.env('GIT_LITERAL_PATHSPECS', '1');
     await comparisonGit.raw(['add', '--intent-to-add', '--pathspec-from-file=' + pathspecFile, '--pathspec-file-nul']);
     return await readDiff(comparisonGit);
+  } catch (error) {
+    operationError = error;
+    throw error;
   } finally {
-    await fsp.rm(temporaryDirectory, { recursive: true, force: true });
+    await cleanupWorkingTreeRangeDirectory(temporaryDirectory, operationError);
   }
 }
 

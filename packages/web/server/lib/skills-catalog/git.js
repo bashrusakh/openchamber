@@ -97,8 +97,8 @@ export const runWithGitCloneReservation = ({
   return task({ releaseNetwork: () => {} });
 };
 
-export async function assertGitAvailable(runGitCommand = runGit) {
-  const result = await runGitCommand(['--version'], { timeoutMs: 5_000 });
+export async function assertGitAvailable(runGitCommand = runGit, { signal = undefined } = {}) {
+  const result = await runGitCommand(['--version'], { timeoutMs: 5_000, signal });
   if (!result.ok) {
     if (isProcessTreeCleanupBlocked(result)) {
       const metadata = copyGitProcessMetadata({}, result);
