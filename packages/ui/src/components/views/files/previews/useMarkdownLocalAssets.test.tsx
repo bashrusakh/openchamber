@@ -28,17 +28,17 @@ function Preview({ container, filePath, onOpenFile, enabled }: {
   return null;
 }
 
-const flush = async () => {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-};
-
 describe('useMarkdownLocalAssets', () => {
   let windowInstance: Window;
   let root: Root;
   let container: HTMLDivElement;
   let created: string[];
+
+  const flush = async () => {
+    await act(async () => {
+      await windowInstance.happyDOM.waitUntilComplete();
+    });
+  };
 
   beforeEach(() => {
     windowInstance = new Window();
