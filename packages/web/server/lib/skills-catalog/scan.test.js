@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { scanSkillsRepository } from './scan.js';
+import { getGitExecutionEnv } from '../git/execution-scope.js';
 
 const temporaryRoots = [];
 
@@ -19,7 +20,7 @@ const createGitRunner = ({
   const calls = [];
 
   const runGit = async (args, options) => {
-    calls.push({ args, options });
+    calls.push({ args, options, env: getGitExecutionEnv() });
     if (args[0] === '--version') {
       if (cloneFailure?.at === 'availability') return { ok: false, stderr: cloneFailure.message, message: cloneFailure.message, code: cloneFailure.code };
       return { ok: true, stdout: 'git version 2.0', stderr: '' };
@@ -140,6 +141,7 @@ describe('skills catalog repository scanning', () => {
     expect(runner.calls[1].args).toContain('--filter=blob:none');
     expect(runner.calls[2].args).toEqual(expect.arrayContaining(['clone', '--depth', '1', '--no-checkout']));
     expect(runner.calls.some(({ args }) => args.includes('show'))).toBe(false);
+    expect(runner.calls.find(({ args }) => args.includes('ls-files')).env).toEqual({ GIT_OPTIONAL_LOCKS: '0' });
     expect(events).toEqual([
       { event: 'sparse-set', networkReleased: false, reservationActive: true },
       { event: 'checkout', networkReleased: false, reservationActive: true },

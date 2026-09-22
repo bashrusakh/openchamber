@@ -21,6 +21,15 @@ const defaultGit = Object.freeze({
 // silently re-anchors onto an unstaged edit of the same lines.
 
 const WORKING_TREE_SCOPES = new Set(['all', 'staged', 'working']);
+const isStringValue = (value) => Object.prototype.toString.call(value) === '[object String]';
+const isObjectValue = (value) => Object.prototype.toString.call(value) === '[object Object]';
+const FUNCTION_VALUE_TAGS = new Set([
+  '[object Function]',
+  '[object AsyncFunction]',
+  '[object GeneratorFunction]',
+  '[object AsyncGeneratorFunction]',
+]);
+const isFunctionValue = (value) => FUNCTION_VALUE_TAGS.has(Object.prototype.toString.call(value));
 
 export class WalkthroughSourceError extends Error {
   constructor(message, statusCode = 400, code = undefined) {
@@ -34,12 +43,12 @@ export class WalkthroughSourceError extends Error {
  * Normalize and validate an untrusted source descriptor from the client.
  */
 export function parseSource(raw) {
-  if (!raw || typeof raw !== 'object') {
+  if (!raw || !isObjectValue(raw)) {
     throw new WalkthroughSourceError('source is required');
   }
 
   if (raw.kind === 'working-tree') {
-    const scope = typeof raw.scope === 'string' ? raw.scope : 'all';
+    const scope = isStringValue(raw.scope) ? raw.scope : 'all';
     if (!WORKING_TREE_SCOPES.has(scope)) {
       throw new WalkthroughSourceError(`Unknown working-tree scope "${scope}"`);
     }
@@ -47,8 +56,8 @@ export function parseSource(raw) {
   }
 
   if (raw.kind === 'branch') {
-    const baseRef = typeof raw.baseRef === 'string' ? raw.baseRef.trim() : '';
-    const headRef = typeof raw.headRef === 'string' ? raw.headRef.trim() : '';
+    const baseRef = isStringValue(raw.baseRef) ? raw.baseRef.trim() : '';
+    const headRef = isStringValue(raw.headRef) ? raw.headRef.trim() : '';
     if (!baseRef || !headRef) {
       throw new WalkthroughSourceError('branch sources require baseRef and headRef');
     }
@@ -108,7 +117,7 @@ const untrackedSections = async (directory, git, signal) => {
   if (untracked.length === 0) return [];
 
   const patches = await git.getUntrackedDiffs(directory, untracked, readOptions);
-  return patches.filter((patch) => typeof patch === 'string' && patch.trim());
+  return patches.filter((patch) => isStringValue(patch) && patch.trim());
 };
 
 /**
@@ -163,11 +172,14 @@ export async function loadSourceSections(
     };
   }
 
-  if (typeof getPullRequestDiff !== 'function') {
+  if (!isFunctionValue(getPullRequestDiff)) {
     throw new WalkthroughSourceError('Pull request diffs are unavailable', 500);
   }
 
-  const { patch, meta } = await getPullRequestDiff(directory, source.number, source.sourceRepo);
+  const result = signal
+    ? await getPullRequestDiff(directory, source.number, source.sourceRepo, { signal })
+    : await getPullRequestDiff(directory, source.number, source.sourceRepo);
+  const { patch, meta } = result;
   return {
     sections: patch && patch.trim() ? [{ scope: `pr:${source.number}`, patch }] : [],
     meta: meta || {},

@@ -30,6 +30,28 @@ type WorktreeBootstrapStatus = {
   updatedAt: number;
 };
 
+type GitFailureLike = {
+  message?: string;
+  stderr?: string;
+  stdout?: string;
+};
+
+const getGitFailureDetails = (cause: unknown): GitFailureLike => {
+  if (!(cause instanceof Error)) {
+    return { message: String(cause) };
+  }
+  // SAFETY: Node child-process failures are Error objects with optional stderr/stdout fields.
+  return cause as Error & GitFailureLike;
+};
+
+const getNodeErrorCode = (cause: unknown): string | undefined => {
+  if (!(cause instanceof Error)) {
+    return undefined;
+  }
+  // SAFETY: Node filesystem and child-process errors expose an optional errno code.
+  return (cause as NodeJS.ErrnoException).code;
+};
+
 const worktreeBootstrapState = new Map<string, WorktreeBootstrapStatus>();
 const activeWorktreeBootstrapTasks = new Map<string, Promise<unknown>>();
 
@@ -65,20 +87,20 @@ const setWorktreeBootstrapState = (
   const state: WorktreeBootstrapStatus = {
     status,
     phase,
-    error: typeof error === 'string' && error.trim().length > 0 ? error.trim() : null,
+    error: error && error.trim().length > 0 ? error.trim() : null,
     updatedAt: Date.now(),
   };
   worktreeBootstrapState.set(key, state);
   return state;
 };
 
-const setWorktreeBootstrapFailure = (directory: string, error: unknown): void => {
+const setWorktreeBootstrapFailure = (directory: string, cause: unknown): void => {
   const current = worktreeBootstrapState.get(toBootstrapStateKey(directory));
   setWorktreeBootstrapState(
     directory,
     WORKTREE_BOOTSTRAP_FAILED,
     current?.phase ?? WORKTREE_PHASE_DIRECTORY_CREATED,
-    error instanceof Error ? error.message : String(error),
+    cause instanceof Error ? cause.message : String(cause),
   );
 };
 
@@ -129,7 +151,7 @@ async function isSocketPath(candidate: string): Promise<boolean> {
   }
   try {
     const stat = await fs.promises.stat(candidate);
-    return typeof stat.isSocket === 'function' && stat.isSocket();
+    return stat.isSocket();
   } catch {
     return false;
   }
@@ -282,10 +304,6 @@ function normalizePath(p: string): string {
 }
 
 function normalizeDirectoryPath(value: string): string {
-  if (typeof value !== 'string') {
-    return value;
-  }
-
   const trimmed = value.trim();
   if (!trimmed) {
     return trimmed;
@@ -456,28 +474,42 @@ type GitStatusOptions = {
  */
 function mapStatus(status: Status): string {
   // Status enum values
-  const statusMap: Record<number, string> = {
-    0: 'M',   // INDEX_MODIFIED
-    1: 'A',   // INDEX_ADDED
-    2: 'D',   // INDEX_DELETED
-    3: 'R',   // INDEX_RENAMED
-    4: 'C',   // INDEX_COPIED
-    5: 'M',   // MODIFIED
-    6: 'D',   // DELETED
-    7: '?',   // UNTRACKED
-    8: '!',   // IGNORED
-    9: 'A',   // INTENT_TO_ADD
-    10: 'R',  // INTENT_TO_RENAME
-    11: 'T',  // TYPE_CHANGED
-    12: 'U',  // ADDED_BY_US
-    13: 'U',  // ADDED_BY_THEM
-    14: 'U',  // DELETED_BY_US
-    15: 'U',  // DELETED_BY_THEM
-    16: 'U',  // BOTH_ADDED
-    17: 'U',  // BOTH_DELETED
-    18: 'U',  // BOTH_MODIFIED
-  };
-  return statusMap[status] || ' ';
+  const statusMap = new Map<number, string>([
+    [0, 'M'],   // INDEX_MODIFIED
+    [1, 'A'],   // INDEX_ADDED
+    [2, 'D'],   // INDEX_DELETED
+    [3, 'R'],   // INDEX_RENAMED
+    [4, 'C'],   // INDEX_COPIED
+    [5, 'M'],   // MODIFIED
+    [6, 'D'],   // DELETED
+    [7, '?'],   // UNTRACKED
+    [8, '!'],   // IGNORED
+    [9, 'A'],   // INTENT_TO_ADD
+    [10, 'R'],  // INTENT_TO_RENAME
+    [11, 'T'],  // TYPE_CHANGED
+    [12, 'U'],  // ADDED_BY_US
+    [13, 'U'],  // ADDED_BY_THEM
+    [14, 'U'],  // DELETED_BY_US
+    [15, 'U'],  // DELETED_BY_THEM
+    [16, 'U'],  // BOTH_ADDED
+    [17, 'U'],  // BOTH_DELETED
+    [18, 'U'],  // BOTH_MODIFIED
+  ]);
+  return statusMap.get(status) || ' ';
+}
+
+function isConfirmedNonRepositoryResult(result: GitProcessExecutionResult): boolean {
+  if (isGitProcessCleanupBlocked(result)) {
+    return false;
+  }
+
+  const exitCode = Number(result.exitCode);
+  const code = String(result.code || '');
+  if (exitCode !== 128 && code !== '128') {
+    return false;
+  }
+
+  return /fatal:\s+not a git repository\b/i.test(result.stderr);
 }
 
 function getRepositoryRelativePath(repo: Repository, uri: vscode.Uri): string {
@@ -548,10 +580,11 @@ async function checkInProgressOperations(directory: string): Promise<{
   mergeInProgress?: GitMergeInProgress | null;
   rebaseInProgress?: GitRebaseInProgress | null;
 }> {
-  const result: {
+  type InProgressState = {
     mergeInProgress?: GitMergeInProgress | null;
     rebaseInProgress?: GitRebaseInProgress | null;
-  } = {};
+  };
+  const result: InProgressState = {};
 
   const gitDir = path.join(directory, '.git');
 
@@ -616,14 +649,17 @@ async function getGitStatusRaw(directory: string, options: GitStatusOptions = {}
     if (isGitProcessCleanupBlocked(statusResult)) {
       throw createGitProcessError(statusResult, 'Git status cleanup was not confirmed');
     }
-    return {
-      current: '',
-      tracking: null,
-      ahead: 0,
-      behind: 0,
-      files: [],
-      isClean: true,
-    };
+    if (isConfirmedNonRepositoryResult(statusResult)) {
+      return {
+        current: '',
+        tracking: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        isClean: true,
+      };
+    }
+    throw createGitProcessError(statusResult, 'Git status failed');
   }
 
   const lines = statusResult.stdout.trim().split('\n').filter(Boolean);
@@ -772,7 +808,10 @@ async function getGitBranchesRaw(directory: string): Promise<GitBranchResult> {
   const result = await execGit(['branch', '-a', '-v', '--format=%(refname:short)|%(objectname:short)|%(upstream:short)|%(HEAD)'], directory);
   
   if (result.exitCode !== 0) {
-    return { all: [], current: '', branches: {} };
+    if (isConfirmedNonRepositoryResult(result)) {
+      return { all: [], current: '', branches: {} };
+    }
+    throw createGitProcessError(result, 'Git branch listing failed');
   }
 
   const lines = result.stdout.trim().split('\n').filter(Boolean);
@@ -1161,7 +1200,7 @@ const getFileIdentity = async (filePath: string): Promise<string | null> => {
     const stat = await fs.promises.stat(filePath);
     return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+    if (getNodeErrorCode(error) === 'ENOENT') {
       return null;
     }
     throw error;
@@ -1236,7 +1275,7 @@ const populateWorktreeWithLockRecovery = async (directory: string): Promise<void
   }
 
   await fs.promises.unlink(lockPath).catch((error) => {
-    if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+    if (getNodeErrorCode(error) !== 'ENOENT') {
       throw error;
     }
   });
@@ -1432,7 +1471,7 @@ const resolveBranchForExistingMode = async (primaryWorktree: string, existingBra
       localBranch: normalizedLocal,
       checkoutRef: normalizedLocal,
       createLocalBranch: false,
-      remoteRef: null as ReturnType<typeof parseRemoteBranchRef>,
+      remoteRef: null,
     };
   }
 
@@ -1493,7 +1532,7 @@ const runWorktreeStartCommand = async (directory: string, command: string): Prom
       });
       return { success: true, stdout: String(stdout || ''), stderr: String(stderr || '') };
     } catch (error) {
-      const err = error as { stdout?: string; stderr?: string; message?: string };
+      const err = getGitFailureDetails(error);
       return {
         success: false,
         stdout: err.stdout,
@@ -1511,7 +1550,7 @@ const runWorktreeStartCommand = async (directory: string, command: string): Prom
     });
     return { success: true, stdout: String(stdout || ''), stderr: String(stderr || '') };
   } catch (error) {
-    const err = error as { stdout?: string; stderr?: string; message?: string };
+    const err = getGitFailureDetails(error);
     return {
       success: false,
       stdout: err.stdout,
@@ -1525,6 +1564,7 @@ const loadProjectStartCommand = async (projectID: string): Promise<string> => {
   const storagePath = path.join(getOpenCodeDataPath(), 'storage', 'project', `${projectID}.json`);
   try {
     const raw = await fs.promises.readFile(storagePath, 'utf8');
+    // SAFETY: only the optional commands.start string is read from this persisted JSON.
     const parsed = JSON.parse(raw) as { commands?: { start?: string } };
     return parsed?.commands?.start?.trim() || '';
   } catch {
@@ -1571,7 +1611,7 @@ const cleanupFailedFastWorktreeCreate = async (
       await fs.promises.rmdir(candidateDirectory);
     }
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    const code = getNodeErrorCode(error);
     if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(String(code || ''))) {
       console.warn('[GitService] Failed to clean up empty worktree directory after creation failure:', error instanceof Error ? error.message : String(error));
     }
@@ -2314,7 +2354,7 @@ export async function getGitDiff(
 
   const args = ['diff'];
   if (staged) args.push('--cached');
-  if (typeof contextLines === 'number') args.push(`-U${contextLines}`);
+  args.push(`-U${contextLines}`);
   args.push('--', target.repoPath);
 
   const result = await execGit(args, directory);
@@ -2561,11 +2601,11 @@ export async function unstageGitFiles(directory: string, filePaths: string[]): P
   }
 }
 
-const HUNK_ACTION_ARGS: Record<'stage' | 'unstage' | 'discard', string[]> = {
+const HUNK_ACTION_ARGS = {
   stage: ['--cached'],
   unstage: ['--cached', '--reverse'],
   discard: ['--reverse'],
-};
+} satisfies { stage: string[]; unstage: string[]; discard: string[] };
 
 const parsePatchPathToken = (line: string): string | null => {
   const value = String(line || '').replace(/^(?:-{3}|\+{3})\s+/, '');
@@ -2589,6 +2629,7 @@ const parsePatchPathToken = (line: string): string | null => {
     }
 
     try {
+      // SAFETY: Git's quoted patch path token is a JSON string by construction.
       return JSON.parse(token) as string;
     } catch {
       return token.slice(1, token.endsWith('"') ? -1 : undefined);
@@ -2644,7 +2685,7 @@ export async function applyGitHunk(
   if (!filePath) {
     throw new Error('path is required');
   }
-  if (typeof patch !== 'string' || !patch.trim()) {
+  if (!patch.trim()) {
     throw new Error('patch is required');
   }
   if (!/^@@\s/m.test(patch)) {
@@ -2812,7 +2853,11 @@ export async function createGitCommit(
  * Supports both array format ['--set-upstream', '--force'] and 
  * object format { '--set-upstream': null, '--force': true }
  */
-function normalizeGitOptions(options?: string[] | Record<string, unknown>): string[] {
+type GitOptionsMap = {
+  [option: string]: string | boolean | null | undefined;
+};
+
+function normalizeGitOptions(options?: string[] | GitOptionsMap): string[] {
   if (!options) return [];
   
   if (Array.isArray(options)) {
@@ -2834,7 +2879,7 @@ function normalizeGitOptions(options?: string[] | Record<string, unknown>): stri
 /**
  * Check if options contain a specific flag
  */
-function hasOption(options: string[] | Record<string, unknown> | undefined, flag: string): boolean {
+function hasOption(options: string[] | GitOptionsMap | undefined, flag: string): boolean {
   if (!options) return false;
   
   if (Array.isArray(options)) {
@@ -2849,23 +2894,23 @@ function hasOption(options: string[] | Record<string, unknown> | undefined, flag
  */
 export async function gitPush(
   directory: string,
-  options?: { remote?: string; branch?: string; options?: string[] | Record<string, unknown> }
+  options?: { remote?: string; branch?: string; options?: string[] | GitOptionsMap }
 ): Promise<{ success: boolean; pushed: Array<{ local: string; remote: string }>; repo: string; ref: unknown }> {
   const remote = options?.remote?.trim();
   const branch = options?.branch;
   const gitOptions = options?.options;
 
-  const describePushFailure = (value: unknown): string => {
+  const describePushFailure = (value: GitFailureLike): string => {
     const message = String(
-      (value as { message?: string } | undefined)?.message ||
-      (value as { stderr?: string } | undefined)?.stderr ||
-      (value as { stdout?: string } | undefined)?.stdout ||
+      value.message ||
+      value.stderr ||
+      value.stdout ||
       ''
     ).trim();
     return message || 'Failed to push to remote';
   };
 
-  const buildUpstreamOptions = (raw?: string[] | Record<string, unknown>): string[] => {
+  const buildUpstreamOptions = (raw?: string[] | GitOptionsMap): string[] => {
     const normalized = normalizeGitOptions(raw);
     if (hasOption(normalized, '--set-upstream') || hasOption(normalized, '-u')) {
       return normalized;
@@ -2873,10 +2918,10 @@ export async function gitPush(
     return [...normalized, '--set-upstream'];
   };
 
-  const looksLikeMissingUpstream = (value: unknown): boolean => {
+  const looksLikeMissingUpstream = (value: GitFailureLike): boolean => {
     const message = String(
-      (value as { message?: string } | undefined)?.message ||
-      (value as { stderr?: string } | undefined)?.stderr ||
+      value.message ||
+      value.stderr ||
       ''
     ).toLowerCase();
     return (
@@ -2938,15 +2983,16 @@ export async function gitPush(
         ref: null,
       };
     } catch (error) {
-      if (!looksLikeMissingUpstream(error)) {
-        throw new Error(describePushFailure(error));
+      const failure = getGitFailureDetails(error);
+      if (!looksLikeMissingUpstream(failure)) {
+        throw new Error(describePushFailure(failure));
       }
 
       const currentBranch = await getCurrentBranch();
       const remotes = await getRemotes();
       const fallbackRemote = remotes.includes('origin') ? 'origin' : remotes[0];
       if (!currentBranch || !fallbackRemote) {
-        throw new Error(describePushFailure(error));
+        throw new Error(describePushFailure(failure));
       }
 
       const args = ['push', ...buildUpstreamOptions(gitOptions), fallbackRemote, currentBranch];
@@ -2979,13 +3025,14 @@ export async function gitPush(
     await pushRaw(args);
     return normalizePushResult(branch || '', remoteName);
   } catch (error) {
-    if (!looksLikeMissingUpstream(error)) {
-      throw new Error(describePushFailure(error));
+    const failure = getGitFailureDetails(error);
+    if (!looksLikeMissingUpstream(failure)) {
+      throw new Error(describePushFailure(failure));
     }
 
     const fallbackBranch = branch || await getCurrentBranch();
     if (!fallbackBranch) {
-      throw new Error(describePushFailure(error));
+      throw new Error(describePushFailure(failure));
     }
 
     const args = ['push', ...buildUpstreamOptions(gitOptions), remoteName, fallbackBranch];
@@ -3167,7 +3214,7 @@ async function resolveBaseRefForLog(
   from: string | undefined,
   directory: string
 ): Promise<string | undefined> {
-  const normalized = typeof from === 'string' ? from.trim() : undefined;
+  const normalized = from?.trim();
   if (!normalized) return undefined;
 
   const checkRef = async (ref: string): Promise<boolean> => {
@@ -3532,7 +3579,8 @@ export async function setGitIdentity(
   
   // Build SSH command once if needed
   const sshCommand = sshKey ? buildSshCommand(sshKey) : null;
-  const shouldSignCommits = signCommits === true && typeof signingKey === 'string' && signingKey.trim().length > 0;
+  const normalizedSigningKey = signingKey?.trim() || '';
+  const shouldSignCommits = signCommits === true && normalizedSigningKey.length > 0;
   
   if (repo) {
     try {
@@ -3543,7 +3591,7 @@ export async function setGitIdentity(
       }
       if (shouldSignCommits) {
         await repo.setConfig('gpg.format', 'ssh');
-        await repo.setConfig('user.signingkey', signingKey.trim());
+        await repo.setConfig('user.signingkey', normalizedSigningKey);
         await repo.setConfig('commit.gpgsign', 'true');
       }
       return { success: true };
@@ -3560,7 +3608,7 @@ export async function setGitIdentity(
   }
   if (shouldSignCommits) {
     await execGit(['config', 'gpg.format', 'ssh'], directory);
-    await execGit(['config', 'user.signingkey', signingKey.trim()], directory);
+    await execGit(['config', 'user.signingkey', normalizedSigningKey], directory);
     await execGit(['config', 'commit.gpgsign', 'true'], directory);
   }
 

@@ -4,12 +4,14 @@ import {
   isProcessTreeCleanupBlocked,
 } from '../git/process-tree.js';
 import { copyGitProcessMetadata } from '../git/execution-errors.js';
+import { getGitExecutionEnv } from '../git/execution-scope.js';
 
 export { isProcessTreeCleanupBlocked };
 export { copyGitProcessMetadata };
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
+const isStringValue = (value) => Object.prototype.toString.call(value) === '[object String]';
 
 export function looksLikeAuthError(message) {
   const text = String(message || '');
@@ -39,6 +41,7 @@ export async function runGit(args, options = {}) {
   // Non-interactive git (avoid prompts / hangs)
   const env = {
     ...process.env,
+    ...getGitExecutionEnv(),
     GIT_TERMINAL_PROMPT: '0',
   };
 
@@ -65,8 +68,8 @@ export async function runGit(args, options = {}) {
     return { ok: true, stdout: stdout || '', stderr: stderr || '' };
   } catch (error) {
     const err = error;
-    const stdout = typeof err?.stdout === 'string' ? err.stdout : '';
-    const stderr = typeof err?.stderr === 'string' ? err.stderr : '';
+    const stdout = isStringValue(err?.stdout) ? err.stdout : '';
+    const stderr = isStringValue(err?.stderr) ? err.stderr : '';
     const message = err instanceof Error ? err.message : String(err);
 
     const result = copyGitProcessMetadata({
@@ -75,7 +78,7 @@ export async function runGit(args, options = {}) {
       stderr,
       message,
       code: err?.code ?? null,
-      signal: typeof err?.signal === 'string' ? err.signal : null,
+      signal: isStringValue(err?.signal) ? err.signal : null,
     }, err);
     return result;
   }

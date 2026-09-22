@@ -72,7 +72,12 @@ describe('Git execution service', () => {
     let service;
     const raw = {
       createGit: async (cwd, options) => {
-        observations.push({ type: 'discovery', cwd, env: options?.envOverrides });
+        observations.push({
+          type: 'discovery',
+          cwd,
+          env: options?.envOverrides,
+          ownedProcessTree: options?.ownedProcessTree,
+        });
         return {
           raw: async () => `${repositoryRoot}\n${repositoryRoot}/.git\n${repositoryRoot}/.git\n`,
         };
@@ -116,12 +121,13 @@ describe('Git execution service', () => {
     await expect(service.getTrackingBranch(directory)).resolves.toBe('origin/main');
     await expect(service.stageFile(directory, 'file.ts')).resolves.toBeUndefined();
 
-    expect(observations).toEqual([
-      {
-        type: 'discovery',
-        cwd: directory,
-        env: { GIT_OPTIONAL_LOCKS: '0' },
-      },
+      expect(observations).toEqual([
+        {
+          type: 'discovery',
+          cwd: directory,
+          env: { GIT_OPTIONAL_LOCKS: '0' },
+          ownedProcessTree: true,
+        },
       {
         type: 'read',
         env: { GIT_OPTIONAL_LOCKS: '0' },

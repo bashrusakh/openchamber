@@ -21,7 +21,7 @@ The following functions are exported and used by the web server:
 - `getCurrentIdentity(directory)`: Get local Git identity (fallback to global if not set locally).
 - `hasLocalIdentity(directory)`: Check if local Git identity is configured.
 - `setLocalIdentity(directory, profile)`: Set local Git identity (userName, userEmail, authType, sshKey/host).
-- `getRemoteUrl(directory, remoteName)`: Get URL for a specific remote.
+- `getRemoteUrl(directory, remoteName, { signal })`: Get URL for a specific remote. A signal uses the owned Git process boundary so canceled repository resolution waits for child cleanup.
 
 ### Status and Diff Operations
 - `getStatus(directory, { mode })`: Get comprehensive Git status including current branch, tracking, ahead/behind, file changes, diff stats, merge/rebase state. `mode: 'light'` skips the diff stats. One read runs per directory at a time and at most four run across directories (`serial-refresh.js`): a call made while a read is running waits for one follow-up read that starts after the call, so no caller gets a snapshot older than its request, and every caller that arrives during one read shares that single follow-up at the widest mode any of them asked for. Clients refresh after every completed agent tool call and from several surfaces at once; on a large repository (a status read is a dozen Git processes walking the working tree) this bound is what keeps identical `git status` processes from piling up side by side. A slot is held only while the read is alive: every process the read spawns is killed after two minutes without output (one minute for the untracked-directory listing, thirty seconds for the repository probe), so a Git process that hangs, which happens on Windows, fails that read instead of holding a slot until someone kills it by hand. On Windows the listing is ended with `taskkill /T`, because the spawned `git.exe` is Git for Windows' launcher and killing it alone leaves the real `git` child walking the tree as an orphan. Untracked files are listed with `-unormal` and each new directory is then expanded to its files with a bounded `ls-files` listing (`UNTRACKED_DIRECTORY_EXPANSION_LIMIT`, 1000): up to that many files the result equals `-uall`; beyond it the directory stays one `dir/` entry, because `-uall` would walk a forgotten build or dependency directory in full on every read. A nested repository stays a `dir/` entry as before.
@@ -156,6 +156,8 @@ mutation runs.
 and re-entrancy errors returned by the coordinator.
 Raw Git reads owned by adjacent web features use `gitExecutionService.withRawRead()`
 so they receive the same repository/worktree admission and read-only environment.
+Bounded range and commit reads, plus context discovery, use the owned process-tree
+adapter so cancellation waits for descendant cleanup before releasing their lease.
 Gitignore checks and skills-catalog Git processes use the shared process-tree
 lifecycle rather than root-only termination.
 `checkoutBranch` admits its remote-name probe as a read. A configured remote

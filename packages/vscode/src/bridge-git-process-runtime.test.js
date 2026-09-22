@@ -22,6 +22,7 @@ mock.module('./gitService', () => ({
   getGitExecutablePath,
 }));
 
+const { spawnOwnedProcess } = await import('./owned-process');
 const { createGitProcessRuntime, stopGitProcesses } = await import('./bridge-git-process-runtime');
 
 describe('VS Code Git process runtime executable selection', () => {
@@ -104,6 +105,35 @@ describe('VS Code Git process runtime executable selection', () => {
     await expect(pending).resolves.toMatchObject({ exitCode: 1 });
     childProcess.emit('error', new Error('late child error'));
     expect(childProcess.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs Windows tree cleanup even after the root has already closed', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      const childProcess = new EventEmitter();
+      childProcess.stdout = new EventEmitter();
+      childProcess.stderr = new EventEmitter();
+      childProcess.pid = 1233;
+      childProcess.exitCode = 0;
+      childProcess.signalCode = null;
+      childProcess.kill = mock();
+      spawn.mockImplementationOnce(() => childProcess);
+      execFile.mockImplementationOnce((_command, _args, _options, callback) => callback(null));
+
+      const owned = spawnOwnedProcess('git', ['status'], { cwd: '/repo', env: process.env });
+      childProcess.emit('close', 0);
+
+      await expect(owned.terminate()).resolves.toBeUndefined();
+      expect(execFile).toHaveBeenCalledWith(
+        'taskkill',
+        ['/PID', '1233', '/T', '/F'],
+        expect.objectContaining({ timeout: 5_000, windowsHide: true }),
+        expect.any(Function),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+    }
   });
 
   it('rejects a command when either output stream exceeds its buffer limit', async () => {
@@ -212,15 +242,27 @@ describe('VS Code Git process runtime executable selection', () => {
       childProcess.signalCode = null;
       childProcess.kill = mock();
       spawn.mockImplementationOnce(() => childProcess);
+      let finishTaskkill;
       execFile.mockImplementationOnce((_command, _args, _options, callback) => {
-        callback(new Error('taskkill failed during deactivation'));
+        finishTaskkill = () => callback(new Error('taskkill failed during deactivation'));
       });
 
-      const pending = createGitProcessRuntime().execGit(['status'], '/repo');
+      const controller = new AbortController();
+      const pending = createGitProcessRuntime().execGit(['status'], '/repo', { signal: controller.signal });
       for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
         await Promise.resolve();
       }
-      await stopGitProcesses();
+      controller.abort();
+      childProcess.emit('close', null);
+      await Promise.resolve();
+
+      const stopping = stopGitProcesses();
+      let stopSettled = false;
+      void stopping.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      finishTaskkill();
+      await stopping;
       const result = await pending;
 
       expect(result).toMatchObject({

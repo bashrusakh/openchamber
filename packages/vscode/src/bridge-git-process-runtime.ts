@@ -168,9 +168,24 @@ export const createGitProcessRuntime = ({
       env: { ...env, ...getGitExecutionEnv() },
     });
     activeProcesses.add(process);
-    const forgetProcess = () => { activeProcesses.delete(process); };
-    void process.closed.then(forgetProcess);
-    void process.failedTermination.then(forgetProcess);
+    let processReleased = false;
+    const forgetProcess = () => {
+      if (processReleased) return;
+      processReleased = true;
+      activeProcesses.delete(process);
+    };
+    const forgetAfterCleanup = () => {
+      const cleanup = process.termination;
+      if (cleanup) {
+        void cleanup.then(forgetProcess, forgetProcess);
+        return;
+      }
+      forgetProcess();
+    };
+    // A root close only ends the command's stdio. If termination has already
+    // started, retain the registry entry until taskkill/process-group cleanup
+    // settles so deactivation cannot release ownership early.
+    void process.closed.then(forgetAfterCleanup);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -265,8 +280,7 @@ export const createGitProcessRuntime = ({
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', onAbort);
-      void process.closed.then(forgetProcess);
-      void process.failedTermination.then(forgetProcess);
+      void process.closed.then(forgetAfterCleanup);
     }
   };
 

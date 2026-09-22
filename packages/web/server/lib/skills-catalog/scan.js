@@ -12,18 +12,19 @@ import {
   runWithGitCloneReservation,
 } from './git.js';
 import { parseSkillRepoSource } from './source.js';
+import { runWithGitExecutionScope } from '../git/execution-scope.js';
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 const isStringValue = (value) => Object.prototype.toString.call(value) === '[object String]';
 
 function validateSkillName(skillName) {
-  if (typeof skillName !== 'string') return false;
+  if (!isStringValue(skillName)) return false;
   if (skillName.length < 1 || skillName.length > 64) return false;
   return SKILL_NAME_PATTERN.test(skillName);
 }
 
 function parseSkillMd(content) {
-  const text = typeof content === 'string' ? content : '';
+  const text = isStringValue(content) ? content : '';
   const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
   if (!match) {
     return {
@@ -97,18 +98,22 @@ export async function scanSkillsRepository({
   resolveGitBinaryForSpawn,
   runGit: runGitCommand = runGit,
 } = {}) {
-  const runConfiguredGit = (args, options) => runGitCommand(
-    args,
-    resolveGitBinaryForSpawn
-      ? { ...options, resolveGitBinaryForSpawn }
-      : options,
-  );
+  const runConfiguredGit = (args, options) => {
+    const command = args.find((arg) => ['clone', 'checkout', 'ls-files', 'ls-tree', 'show'].includes(arg));
+    const readOnly = command === 'ls-files' || command === 'ls-tree' || command === 'show';
+    return runWithGitExecutionScope(readOnly, () => runGitCommand(
+      args,
+      resolveGitBinaryForSpawn
+        ? { ...options, resolveGitBinaryForSpawn }
+        : options,
+    ));
+  };
   const parsed = parseSkillRepoSource(source, { subpath });
   if (!parsed.ok) {
     return { ok: false, error: parsed.error };
   }
 
-  const effectiveSubpath = parsed.effectiveSubpath || (typeof defaultSubpath === 'string' && defaultSubpath.trim() ? defaultSubpath.trim() : null);
+  const effectiveSubpath = parsed.effectiveSubpath || (isStringValue(defaultSubpath) && defaultSubpath.trim() ? defaultSubpath.trim() : null);
   const cloneUrl = identity?.sshKey ? parsed.cloneUrlSsh : parsed.cloneUrlHttps;
 
   const tempBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openchamber-skills-scan-'));

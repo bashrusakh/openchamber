@@ -163,6 +163,7 @@ const createDiscoveryRunner = (gitModule = rawGit) => async (cwd, args, options 
   try {
     const git = await gitModule.createGit(cwd, {
       envOverrides: GIT_READ_ONLY_ENV,
+      ownedProcessTree: true,
       signal: options.signal,
     });
     return { success: true, stdout: await git.raw(args), stderr: '' };
@@ -447,7 +448,12 @@ export const createGitExecutionService = (dependencies = {}) => {
     args[0],
     args,
   );
-  wrapped.getRemoteUrl = (...args) => runOperation('getRemoteUrl', args[0], args);
+  wrapped.getRemoteUrl = (directory, remoteName = 'origin', options = {}) => runOperation(
+    'getRemoteUrl',
+    directory,
+    [directory, remoteName, options],
+    operationExecutionOptions('getRemoteUrl', [directory, options]),
+  );
   wrapped.getCurrentIdentity = (...args) => runOperation('getCurrentIdentity', args[0], args);
   wrapped.hasLocalIdentity = (...args) => runOperation('hasLocalIdentity', args[0], args);
 
