@@ -375,6 +375,7 @@ export const createGitExecutionService = (dependencies = {}) => {
         label: 'raw-read',
         signal: options.signal,
         queueTimeoutMs: options.queueTimeoutMs,
+        waitForCleanup: options.waitForCleanup === true,
       }, () => runWithGitExecutionScope(true, task));
     })
   );

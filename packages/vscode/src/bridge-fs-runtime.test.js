@@ -120,6 +120,7 @@ describe('bridge fs exec git read cache', () => {
     expect(readOptions[0]).toEqual({
       signal: expect.any(AbortSignal),
       queueTimeoutMs: 10,
+      waitForCleanup: true,
     });
     expect(execOptions[0]).toEqual({
       signal: readOptions[0].signal,
@@ -235,5 +236,33 @@ describe('bridge fs exec git read cache', () => {
       cleanupBlocked: true,
       descendantsTerminated: false,
     });
+  });
+
+  it('waits for coordinated cleanup before propagating a delayed list failure', async () => {
+    const cleanupBlocked = {
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+    };
+    const result = handleFsBridgeMessage(
+      { id: 'gitignore-list-cleanup-delayed', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
+      {
+        ...deps,
+        listDirectoryEntries: async () => [
+          { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+        ],
+        runGitRead: async (_cwd, _task, options) => new Promise((resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            if (options.waitForCleanup !== true) {
+              reject(Object.assign(new Error('Git execution was cancelled'), { code: 'GIT_EXECUTION_CANCELLED' }));
+              return;
+            }
+            setTimeout(() => reject(cleanupBlocked), 5);
+          }, { once: true });
+        }),
+      },
+    );
+
+    await expect(result).rejects.toMatchObject(cleanupBlocked);
   });
 });

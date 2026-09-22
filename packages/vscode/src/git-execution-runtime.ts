@@ -32,6 +32,7 @@ type OperationOptions = {
   signal?: AbortSignal;
   queueTimeoutMs?: number;
   lease?: GitExecutionLease;
+  waitForCleanup?: boolean;
 };
 
 type GitExecutionRuntimeOptions = {
@@ -283,7 +284,7 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
   const withRawRead = <T>(
     directory: string,
     task: () => Promise<T> | T,
-    options: Pick<OperationOptions, 'signal' | 'queueTimeoutMs'> = {},
+    options: Pick<OperationOptions, 'signal' | 'queueTimeoutMs' | 'waitForCleanup'> = {},
   ): Promise<T> => (
     discover(directory, { signal: options.signal }).then((context) => {
       if (!context.isRepository) {
@@ -299,6 +300,7 @@ export const createGitExecutionRuntime = (options: GitExecutionRuntimeOptions = 
         label: 'raw-read',
         signal: options.signal,
         queueTimeoutMs: options.queueTimeoutMs,
+        waitForCleanup: options.waitForCleanup === true,
       }, () => runWithGitExecutionScope(true, task));
     })
   );

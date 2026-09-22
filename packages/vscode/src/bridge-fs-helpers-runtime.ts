@@ -127,6 +127,7 @@ export const normalizeFsPath = (value: string) => value.replace(/\\/g, '/');
 type GitReadOptions = {
   signal?: AbortSignal;
   queueTimeoutMs?: number;
+  waitForCleanup?: boolean;
 };
 
 type GitReadRunner = <T>(
@@ -210,7 +211,11 @@ const execGitCheckIgnore = async (
   const waiterController = GIT_CHECK_IGNORE_TIMEOUT_MS > 0 ? new AbortController() : undefined;
   const taskController = GIT_CHECK_IGNORE_TIMEOUT_MS > 0 ? new AbortController() : undefined;
   const readOptions = waiterController
-    ? { signal: waiterController.signal, queueTimeoutMs: GIT_CHECK_IGNORE_TIMEOUT_MS }
+    ? {
+      signal: waiterController.signal,
+      queueTimeoutMs: GIT_CHECK_IGNORE_TIMEOUT_MS,
+      waitForCleanup: true,
+    }
     : undefined;
   const read = () => runGitRead
     ? runGitRead(cwd, () => execGit(args, cwd, { signal: taskController?.signal }), readOptions)

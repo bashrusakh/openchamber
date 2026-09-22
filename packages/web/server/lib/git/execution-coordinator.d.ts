@@ -69,6 +69,7 @@ export type GitExecutionRunOptions = {
   label?: string;
   signal?: AbortSignal;
   queueTimeoutMs?: number;
+  waitForCleanup?: boolean;
   lease?: GitExecutionLease | GitCloneLease;
 };
 
