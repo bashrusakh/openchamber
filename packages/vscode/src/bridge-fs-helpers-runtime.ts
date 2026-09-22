@@ -207,28 +207,25 @@ const execGitCheckIgnore = async (
   cwd: string,
   runGitRead?: GitReadRunner,
 ): Promise<GitCheckIgnoreResult | null> => {
-  const controller = GIT_CHECK_IGNORE_TIMEOUT_MS > 0 ? new AbortController() : undefined;
-  const readOptions = controller
-    ? { signal: controller.signal, queueTimeoutMs: GIT_CHECK_IGNORE_TIMEOUT_MS }
+  const waiterController = GIT_CHECK_IGNORE_TIMEOUT_MS > 0 ? new AbortController() : undefined;
+  const taskController = GIT_CHECK_IGNORE_TIMEOUT_MS > 0 ? new AbortController() : undefined;
+  const readOptions = waiterController
+    ? { signal: waiterController.signal, queueTimeoutMs: GIT_CHECK_IGNORE_TIMEOUT_MS }
     : undefined;
   const read = () => runGitRead
-    ? runGitRead(cwd, () => execGit(args, cwd, { signal: readOptions?.signal }), readOptions)
-    : runWithGitExecutionScope(true, () => execGit(args, cwd, { signal: readOptions?.signal }));
+    ? runGitRead(cwd, () => execGit(args, cwd, { signal: taskController?.signal }), readOptions)
+    : runWithGitExecutionScope(true, () => execGit(args, cwd, { signal: taskController?.signal }));
   if (GIT_CHECK_IGNORE_TIMEOUT_MS <= 0) {
     return read();
   }
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([
-      read(),
-      new Promise<null>((resolve) => {
-        timeout = setTimeout(() => {
-          controller?.abort('Gitignore discovery timed out');
-          resolve(null);
-        }, GIT_CHECK_IGNORE_TIMEOUT_MS);
-      }),
-    ]);
+    timeout = setTimeout(() => {
+      waiterController?.abort('Gitignore discovery timed out');
+      taskController?.abort('Gitignore discovery timed out');
+    }, GIT_CHECK_IGNORE_TIMEOUT_MS);
+    return await read();
   } finally {
     if (timeout) {
       clearTimeout(timeout);

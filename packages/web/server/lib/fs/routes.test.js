@@ -575,6 +575,8 @@ describe('fs clone', () => {
       request.req.emit('aborted');
       expect(taskkill).toBeTruthy();
       taskkill.emit('close', 0, null);
+      expect(request.res.body).toBeNull();
+      expect(fsPromises.rm).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(5_000);
       await request.promise;
 

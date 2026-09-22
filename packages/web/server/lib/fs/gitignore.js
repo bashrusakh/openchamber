@@ -145,18 +145,22 @@ export const createGitIgnoreReader = ({
       return new Set();
     }
 
-    const controller = new AbortController();
-    const onExternalAbort = () => controller.abort(signal.reason);
+    const waiterController = new AbortController();
+    const taskController = new AbortController();
+    const onExternalAbort = () => taskController.abort(signal.reason);
     let timer;
     if (signal) {
       if (signal.aborted) {
-        controller.abort(signal.reason);
+        taskController.abort(signal.reason);
       } else {
         signal.addEventListener('abort', onExternalAbort, { once: true });
       }
     }
     if (timeoutMs > 0) {
-      timer = setTimeout(() => controller.abort('Gitignore discovery timed out'), timeoutMs);
+      timer = setTimeout(() => {
+        waiterController.abort('Gitignore discovery timed out');
+        taskController.abort('Gitignore discovery timed out');
+      }, timeoutMs);
     }
 
     const read = () => runCheckIgnore({
@@ -164,7 +168,7 @@ export const createGitIgnoreReader = ({
       resolveGitBinaryForSpawn,
       cwd,
       names,
-      signal: controller.signal,
+      signal: taskController.signal,
       platform,
     });
 
@@ -174,7 +178,7 @@ export const createGitIgnoreReader = ({
           cwd,
           read,
           {
-            signal: controller.signal,
+            signal: signal || (timeoutMs > 0 ? waiterController.signal : undefined),
             queueTimeoutMs: timeoutMs > 0 ? timeoutMs : undefined,
           },
         )

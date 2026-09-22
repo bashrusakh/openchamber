@@ -2536,7 +2536,7 @@ const GIT_PROBE_TIMEOUT_MS = 30_000;
 // from a streamed `ls-files` that is stopped once the bound is exceeded so a
 // huge directory is never listed in full. `paths` is complete when
 // `truncated` is false.
-const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
+const listUntrackedFilesBounded = async (repoRoot, dirPath, limit, signal) => {
   const env = await buildGitEnv();
   return new Promise((resolve, reject) => {
     const child = spawn(getGitBinary(), ['ls-files', '--others', '--exclude-standard', '-z', '--', dirPath], withProcessTreeOwnership({
@@ -2551,10 +2551,12 @@ const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
     let settled = false;
     let stallTimer = null;
     let termination;
+    let terminationRequested = false;
     const finish = (error) => {
       if (settled) return;
       settled = true;
       if (stallTimer) clearTimeout(stallTimer);
+      signal?.removeEventListener('abort', onAbort);
       void Promise.resolve(termination).then(
         () => {
           if (error) {
@@ -2565,6 +2567,19 @@ const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
         },
         (terminationFailure) => reject(terminationFailure),
       );
+    };
+    const onAbort = () => {
+      if (settled || terminationRequested) return;
+      terminationRequested = true;
+      const error = Object.assign(new Error('The Git untracked-file expansion was aborted'), {
+        code: 'ABORT_ERR',
+      });
+      try {
+        termination = killProcessTree(child);
+      } catch (terminationError) {
+        termination = Promise.reject(terminationError);
+      }
+      finish(error);
     };
     // A listing that goes silent is killed rather than left holding the
     // status read (and its limiter slot) open.
@@ -2599,6 +2614,12 @@ const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
         finish();
         return;
       }
+      if (terminationRequested) {
+        finish(Object.assign(new Error('The Git untracked-file expansion was aborted'), {
+          code: 'ABORT_ERR',
+        }));
+        return;
+      }
       if (code !== 0) {
         finish(new Error(`git ls-files exited with code ${code} for ${dirPath}`));
         return;
@@ -2606,6 +2627,11 @@ const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
       if (pending) paths.push(pending);
       finish();
     });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 };
 
@@ -2615,9 +2641,12 @@ const listUntrackedFilesBounded = async (repoRoot, dirPath, limit) => {
 // lists as itself and stays a `dir/` entry too, which is what the diff routes
 // expect. A listing failure keeps the `dir/` entry rather than dropping the
 // change from the status.
-const expandUntrackedDirectories = async (repoRoot, files) => {
+const expandUntrackedDirectories = async (repoRoot, files, signal) => {
   const expanded = [];
   for (const file of files) {
+    if (signal?.aborted) {
+      throw Object.assign(new Error('The Git status read was aborted'), { code: 'ABORT_ERR' });
+    }
     const isUntrackedDirectory = file.path.endsWith('/')
       && (file.working_dir || '').trim() === '?'
       && (file.index || '').trim() === '?';
@@ -2625,9 +2654,14 @@ const expandUntrackedDirectories = async (repoRoot, files) => {
       expanded.push(file);
       continue;
     }
-    const listing = await listUntrackedFilesBounded(repoRoot, file.path, UNTRACKED_DIRECTORY_EXPANSION_LIMIT)
+    const listing = await listUntrackedFilesBounded(
+      repoRoot,
+      file.path,
+      UNTRACKED_DIRECTORY_EXPANSION_LIMIT,
+      signal,
+    )
       .catch((error) => {
-        if (isProcessTreeCleanupBlocked(error)) throw error;
+        if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
         console.warn(`[GitService] Could not expand untracked directory ${file.path}:`, error?.message || error);
         return null;
       });
@@ -2732,7 +2766,7 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
     // tens of thousands of files and hundreds of megabytes per status read.
     // Directories are expanded to their files afterwards, up to a bound.
     const status = await git.status(['-unormal']);
-    status.files = await expandUntrackedDirectories(repoRoot, status.files);
+    status.files = await expandUntrackedDirectories(repoRoot, status.files, signal);
 
     // Light mode: skip numstat + new-file line counting for faster response.
     // Staged (`--cached`: HEAD -> index) and working (`--numstat`: index -> worktree)
@@ -2995,7 +3029,7 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
       rebaseInProgress,
     };
   } catch (error) {
-    if (isProcessTreeCleanupBlocked(error)) {
+    if (signal?.aborted || isProcessTreeCleanupBlocked(error)) {
       throw error;
     }
     if (isNotGitRepositoryError(error) || isMissingDirectoryError(error)) {
