@@ -2,6 +2,14 @@ import { describe, it, expect } from 'bun:test';
 import { resolveSmallModel, parseModelRef, isUsableAuthEntry } from './resolve.js';
 
 const catalog = {
+  openai: {
+    id: 'openai',
+    models: {
+      'gpt-5.6-luna': { id: 'gpt-5.6-luna', family: 'gpt-luna', release_date: '2026-09-01' },
+      'gpt-5.5-luna': { id: 'gpt-5.5-luna', family: 'gpt-luna', release_date: '2026-06-01' },
+      'gpt-5-nano': { id: 'gpt-5-nano', family: 'gpt-nano', release_date: '2025-08-01' },
+    },
+  },
   google: {
     id: 'google',
     models: {
@@ -89,6 +97,50 @@ describe('resolveSmallModel', () => {
     expect(result).toEqual({ providerID: 'google', modelID: 'gemini-2.5-flash', source: 'family-scan' });
   });
 
+  it('prefers the newest GPT Luna model for OpenAI OAuth', () => {
+    const result = resolveSmallModel({
+      auth: {
+        google: { type: 'api', key: 'g-key' },
+        openai: { type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 60_000 },
+      },
+      catalog,
+      configSmallModel: null,
+    });
+    expect(result).toEqual({ providerID: 'openai', modelID: 'gpt-5.6-luna', source: 'family-scan' });
+  });
+
+  it('does not fall back to API-only GPT models for OpenAI OAuth', () => {
+    const result = resolveSmallModel({
+      auth: { openai: { type: 'oauth', access: 'a', refresh: 'r', expires: Date.now() + 60_000 } },
+      catalog: {
+        openai: {
+          id: 'openai',
+          models: {
+            'gpt-5-nano': { id: 'gpt-5-nano', family: 'gpt-nano', release_date: '2025-08-01' },
+          },
+        },
+      },
+      configSmallModel: null,
+    });
+    expect(result).toBeNull();
+  });
+
+  it('keeps GPT Mini as a compatibility fallback for API-key providers', () => {
+    const result = resolveSmallModel({
+      auth: { custom: { type: 'api', key: 'custom-key' } },
+      catalog: {
+        custom: {
+          id: 'custom',
+          models: {
+            'gpt-5-mini': { id: 'gpt-5-mini', family: 'gpt-mini', release_date: '2025-08-01' },
+          },
+        },
+      },
+      configSmallModel: null,
+    });
+    expect(result).toEqual({ providerID: 'custom', modelID: 'gpt-5-mini', source: 'family-scan' });
+  });
+
   it('skips providers without a usable credential', () => {
     const result = resolveSmallModel({
       auth: {
@@ -149,7 +201,7 @@ describe('resolveSmallModel', () => {
       preferredProviderID: 'opencode',
       preferredModelID: 'big-pickle',
     });
-    expect(result).toEqual({ providerID: 'openai', modelID: 'gpt-5.4-mini', source: 'codex-small' });
+    expect(result).toEqual({ providerID: 'openai', modelID: 'gpt-5.6-luna', source: 'family-scan' });
   });
 
   it('resolves nothing on a vanilla setup with no logins at all', () => {

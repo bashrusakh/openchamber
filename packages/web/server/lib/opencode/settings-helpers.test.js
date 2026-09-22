@@ -175,18 +175,18 @@ describe('settings helpers', () => {
 
     expect(helpers.sanitizeSettingsUpdate({
       sidebarProjectDisplayMode: 'single',
-      sidebarSessionGroupingMode: 'flat',
+      sidebarViewMode: 'timeline',
       sidebarProjectSortOrder: 'z-a',
       sidebarShowRecentSection: false,
     })).toEqual({
       sidebarProjectDisplayMode: 'single',
-      sidebarSessionGroupingMode: 'flat',
+      sidebarViewMode: 'timeline',
       sidebarProjectSortOrder: 'z-a',
       sidebarShowRecentSection: false,
     });
     expect(helpers.sanitizeSettingsUpdate({
       sidebarProjectDisplayMode: 'grid',
-      sidebarSessionGroupingMode: 'project',
+      sidebarViewMode: 'grid',
       sidebarProjectSortOrder: 'random',
       sidebarShowRecentSection: 'false',
     })).toEqual({});
@@ -820,7 +820,7 @@ describe('settings registry gate', () => {
     idleInstanceTimeoutMs: 1800000,
     managedRemoteTunnelHostname: 'x.example', managedRemoteTunnelToken: 'token', managedRemoteTunnelPresets: [{ id: 'a', name: 'A', hostname: 'a.example' }],
     managedRemoteTunnelSelectedPresetId: 'a', managedRemoteTunnelPresetTokens: { a: 'token' },
-    sidebarProjectDisplayMode: 'all', sidebarSessionGroupingMode: 'flat', sidebarProjectSortOrder: 'manual', sidebarShowRecentSection: true,
+    sidebarProjectDisplayMode: 'all', sidebarViewMode: 'timeline', sidebarProjectSortOrder: 'manual', sidebarShowRecentSection: true,
     workStatusPanelEnabled: true, workStatusHiddenSections: ['mcp'], workStatusHiddenSectionsExplicit: true, workStatusSectionOrder: ['mcp', 'session'],
     showReasoningTraces: true, streamingAutoFollowEnabled: true, collapsibleThinkingBlocks: true, showTextJustificationActivity: true,
     chatRenderMode: 'live', activityRenderMode: 'summary', mermaidRenderingMode: 'svg', userMessageRenderingMode: 'markdown', collapsibleUserMessages: true,

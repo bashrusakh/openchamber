@@ -13,6 +13,7 @@ or extending these scripts. The methodology rules they enforce come from
 | `bun run profile:session` | What receiving and rendering a live assistant response costs. |
 | `bun run profile:animation` | What a CSS animation costs, isolated from the app. |
 | `bun run profile:switch` | How long switching sessions from the sidebar takes, cold and warm. |
+| `bun run profile:startup` | How long a packaged Desktop build takes from process spawn to a visible window and a mounted interface. |
 | `bun run profile:browser` | A manually driven capture, for interactions that cannot be scripted. |
 
 All of them measure a real browser over CDP. Pass `--help` to any of them for
@@ -154,6 +155,7 @@ Measured on this repository's fixture, at any element count from 1 to 32:
 |---|---|---|
 | none | 0 | 0 |
 | `transform` (rotate, translate, scale) | 0 | 0 |
+| `transform` + `steps(30)` | 0 | 0 |
 | `opacity`, `filter` | 0 | 0 |
 | `rotate` (the individual property) | 60 | 0 |
 | `background-position` | 60 | 0 |
@@ -177,6 +179,11 @@ frames: `busy-dots-steps-aligned` makes one step equal to the stagger and
 measures 4.7% against 10.3%. A running animation has a floor of its own, so
 fewer steps do not approach zero, and a timer that writes the same frames
 (`busy-dots-timer`) measured no cheaper.
+
+VS Code uses `steps(30)` over 1.5 seconds specifically to reduce CPU usage.
+Local repeated 32-element runs showed median main-thread busy 0.04% smooth vs
+0.02% stepped, but these tiny values are environment-sensitive and the
+documented contract is transform-only zero recalc/layout.
 
 Add a variant to `animation-fixture.html` to measure a property or technique
 that is not listed.
@@ -205,6 +212,58 @@ the sidebar, so pass explicit ids to compare runs across days. The row must be
 present in the sidebar; the command fails rather than measuring a click on
 nothing.
 
+## profile:startup
+
+Launches a packaged Desktop build and reports, per launch, milliseconds since
+the process was spawned: the main process's own `[startup-performance]` marks
+(entry module, Electron ready, window created and shown, main module loaded,
+server start and ready, OpenCode ready, application navigation and load), and
+renderer readiness polled over CDP (React mounted into `#root`, the composer
+present, and `rendererIdle` once the renderer main thread stayed quiet for
+`--settle-ms`). Medians with min…max over the measured runs.
+
+```bash
+bun run electron:build           # or the package steps with --dir; only the .app is needed
+bun run profile:startup -- --runs 5 --warmup 1 --window-at 1400,100
+bun run profile:startup -- --app dist-a/OpenChamber.app --compare dist-b/OpenChamber.app
+```
+
+The app runs in an isolated home (`--home`, default under the OS temp
+directory): its own settings, Electron profile, logs and OpenCode data, with
+`OPENCHAMBER_*`, `OPENCODE_*` and `ELECTRON_*` stripped from the environment.
+It never touches the installed app, and the installed app can keep running.
+Electron on macOS resolves the home directory from the user record rather than
+`$HOME`, so the profile is moved through the `OPENCHAMBER_DESKTOP_USER_DATA_DIR`
+hook the entry module honours; a build without that hook would hit the
+installed app's single-instance lock and exit at once.
+
+`--compare` alternates launches of two builds so machine drift affects both
+equally; compare builds rather than remembered numbers, because background
+load on the machine moves every figure by tens of percent between sessions.
+`--warmup` launches are discarded: the first launch of a new binary pays the
+Gatekeeper scan and takes seconds. `--opencode cold` (default) lets the app
+start its own OpenCode on every launch, the way a user's login does;
+`--opencode warm` starts one from the bundled CLI before the runs and attaches
+every launch to it through `OPENCODE_PORT`, which isolates OpenChamber's own
+startup from OpenCode's. `--fresh` wipes the home before every launch to
+measure the first launch after an install.
+
+`--screen` (macOS, with `--window-at`) samples the window's pixels from the
+screen and reports when they first changed and when they stopped changing.
+Chromium stops painting an occluded window and a splash reads as "painted"
+long before the interface is on screen, so this is the ground truth for what a
+user sees. It needs the Screen Recording permission for the terminal running
+the benchmark; without it the run reports the sampler as unavailable instead
+of a number.
+
+What the marks showed on the 2026-09-20 baseline (M-series Mac, packaged
+build, isolated profile): Electron's own initialisation puts the first line
+of our code at ~130 ms and `ready` at ~170 ms; a `BrowserWindow` costs ~55 ms
+to construct and its first `ready-to-show` follows ~70 ms later; importing
+the server module graph costs ~300 ms of main-thread time. A window whose
+first paint is queued behind that import shows at ~600 ms; created on `ready`
+and given the thread until it is on screen, it shows at ~320 ms.
+
 ## Reading The Results
 
 Every run writes a JSON summary next to any raw capture, so results can be
@@ -212,6 +271,7 @@ compared later without re-running:
 
 - `profile:idle` → `idle-summary.json`, `cpu-profile.cpuprofile`
 - `profile:session` → `session-summary.json`, `cpu-profile.cpuprofile`
+- `profile:startup` → `startup-summary.json`
 
 `--baseline <directory>` prints a per-metric delta table against a previous run
 of the same command. `--budget-*` options make the command exit non-zero, so the
@@ -241,6 +301,9 @@ of these failure modes once produced a confident, wrong "everything is fast":
   leaves the session idle within seconds with the user message rendered, which
   passes the check above. The run asks the session for an assistant message and
   says so when there is none.
+- **A launch that never became the app.** `profile:startup` fails a run whose
+  application document never mounted React within the timeout, rather than
+  reporting the milestones it did reach as a fast launch.
 - **A path no user takes.** Streaming state follows the app's active directory.
   A session opened by URL from another directory renders, but its timeline
   re-renders in full on every flush instead of only the streaming tail. The run

@@ -9,6 +9,10 @@ const DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
  * Runs one executable with an argument array and resolves `{ code, stdout, stderr }`
  * for any exit code. The executable is spawned directly, never through a shell.
  *
+ * `options.stdin` is a string or a Buffer. A Buffer goes to the child byte for byte, which is
+ * how the tarballs of a development build reach the tools filler. `options.cwd` is the
+ * working directory of the child.
+ *
  * Rejects with a SpaceError when the process cannot start (`command_spawn_failed`),
  * runs past `timeoutMs` (`command_timeout`), prints more than `maxOutputBytes`
  * (`command_output_too_large`), or dies from a signal (`command_killed`). The child
@@ -25,6 +29,7 @@ export function runCommand(file, args, options = {}) {
       child = spawn(file, args, {
         shell: false,
         windowsHide: true,
+        cwd: options.cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {

@@ -2501,6 +2501,18 @@ export async function getTrackingBranch(directory) {
   return tracking || null;
 }
 
+// Whether `sha` is reachable from the checked-out HEAD. An object git has never
+// fetched fails the same way an unrelated commit does: not an ancestor.
+export async function isAncestorOfHead(directory, sha) {
+  const normalizedDirectory = normalizeDirectoryPath(directory);
+  const normalizedSha = typeof sha === 'string' ? sha.trim() : '';
+  if (!normalizedDirectory || !/^[0-9a-f]{7,64}$/i.test(normalizedSha)) {
+    return false;
+  }
+  const result = await runGitCommand(normalizedDirectory, ['merge-base', '--is-ancestor', normalizedSha, 'HEAD']);
+  return result.success;
+}
+
 async function readStatus(normalizedDirectory, lightMode) {
   try {
     // Prefer an explicit non-repo check before simple-git status so a missing

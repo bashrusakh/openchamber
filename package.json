@@ -93,7 +93,8 @@
     "profile:idle": "node scripts/profile-idle.mjs",
     "profile:session": "node scripts/profile-session.mjs",
     "profile:animation": "node scripts/profile-animation.mjs",
-    "profile:switch": "node scripts/profile-switch.mjs"
+    "profile:switch": "node scripts/profile-switch.mjs",
+    "profile:startup": "node scripts/profile-startup.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.0",
@@ -140,7 +141,7 @@
     "express": "^5.1.0",
     "http-proxy-middleware": "^3.0.5",
     "next-themes": "^0.4.6",
-    "node-pty": "1.2.0-beta.12",
+    "node-pty": "1.2.0-beta.15",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",

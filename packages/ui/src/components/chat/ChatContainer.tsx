@@ -35,6 +35,8 @@ const FLOATING_COMPOSER_DEFAULT_HEIGHT = 128;
 // for this many consecutive frames, or after the cap.
 const TIMELINE_SETTLE_STABLE_FRAMES = 2;
 const TIMELINE_SETTLE_CAP_MS = 300;
+// Mirrors the oc-chat-hydration-reveal duration in index.css.
+const TIMELINE_REVEAL_FADE_MS = 100;
 import { PermissionCard } from './PermissionCard';
 import { QuestionCard } from './QuestionCard';
 import { hasActiveQuestionToolInCurrentTurn, recoverPendingQuestionWithRetry } from '@/sync/question-recovery';
@@ -432,6 +434,7 @@ const ChatViewport = React.memo(({
         let finished = false;
         let timer: number | null = null;
         let frame: number | null = null;
+        let fadeTimer: number | null = null;
         // Revealed once the geometry has settled: after the last hold the
         // list still lays rows out from its own measurements over a few
         // frames, so the timeline stays hidden — pinned to the end on every
@@ -462,8 +465,28 @@ const ChatViewport = React.memo(({
                     frame = window.requestAnimationFrame(settle);
                     return;
                 }
-                if (fade) root.setAttribute('data-timeline-reveal', 'fading');
-                else root.removeAttribute('data-timeline-reveal');
+                if (!fade) {
+                    root.removeAttribute('data-timeline-reveal');
+                    return;
+                }
+                root.setAttribute('data-timeline-reveal', 'fading');
+                // The fade is a filled opacity animation, and a filled
+                // animation keeps the root a stacking context for as long
+                // as the attribute stays. That would trap the overlay
+                // scrollbar (z-30) under the composer slot (z-10): the thumb
+                // paints over the composer band but cannot be grabbed there.
+                // Drop the attribute once the fade has run (or immediately
+                // under reduced motion, where the animation never fires).
+                const clearFade = (event?: AnimationEvent) => {
+                    // Child entrance animations bubble here too.
+                    if (event && event.target !== root) return;
+                    if (fadeTimer !== null) window.clearTimeout(fadeTimer);
+                    fadeTimer = null;
+                    root.removeEventListener('animationend', clearFade);
+                    root.removeAttribute('data-timeline-reveal');
+                };
+                root.addEventListener('animationend', clearFade);
+                fadeTimer = window.setTimeout(clearFade, TIMELINE_REVEAL_FADE_MS * 2);
             };
             frame = window.requestAnimationFrame(settle);
         };
@@ -484,6 +507,7 @@ const ChatViewport = React.memo(({
             finished = true;
             if (timer !== null) window.clearTimeout(timer);
             if (frame !== null) window.cancelAnimationFrame(frame);
+            if (fadeTimer !== null) window.clearTimeout(fadeTimer);
             revealGate.onEmpty = null;
         };
     }, [revealGate, scrollRef]);

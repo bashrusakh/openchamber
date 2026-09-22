@@ -1,14 +1,18 @@
 import { getCatalogProvider } from './catalog.js';
 
 // Mirrors OpenCode's getSmallModel fallback chain:
-// 1. `small_model` from the merged config layers ("provider/model").
-// 2. GitHub Copilot's hidden utility models when Copilot is logged in.
-// 3. Family-priority scan of the authenticated providers' catalog models.
-const FAMILY_PRIORITY = ['gemini-flash', 'gpt-nano', 'claude-haiku'];
+// 1. OpenChamber settings and `small_model` config overrides.
+// 2. Family-priority scan of the authenticated providers' catalog models.
+// 3. GitHub Copilot's hidden utility models when Copilot is logged in.
+const FAMILY_PRIORITY = [
+  'gpt-luna',
+  'gemini-flash-lite',
+  'gemini-flash',
+  'claude-haiku',
+  'gpt-nano',
+  'gpt-mini',
+];
 const COPILOT_UTILITY_MODELS = ['gpt-5.4-nano', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini'];
-// The ChatGPT-plan codex backend only accepts a small allowlist of models
-// (nano/API-key models are rejected with 400) — this is its cheapest one.
-const OPENAI_OAUTH_SMALL_MODEL = 'gpt-5.4-mini';
 
 const AUTH_PROVIDER_ALIASES = {
   'github-copilot': ['github-copilot', 'copilot'],
@@ -55,14 +59,13 @@ const pickByFamily = (models, family) => {
   return matches[0];
 };
 
-// Small-model candidates within ONE provider, by family priority. Copilot and
-// ChatGPT-plan OpenAI have fixed small models that never appear in the
-// catalog; everyone else is scanned through the catalog families.
+// Small-model candidates within one provider, by family priority. Copilot's
+// utility models never appear in the catalog.
 const pickWithinProvider = (providerID, auth, catalog, family) => {
   if (providerID === 'openai' && auth.openai?.type === 'oauth') {
-    return family === 'gpt-nano'
-      ? { providerID, modelID: OPENAI_OAUTH_SMALL_MODEL, source: 'codex-small' }
-      : null;
+    // Other OpenAI catalog entries describe API-key availability, not the
+    // ChatGPT/Codex allowlist.
+    if (family !== 'gpt-luna') return null;
   }
   if (providerID === 'github-copilot') {
     return family === 'gpt-nano'

@@ -34,6 +34,8 @@ type ContextDisplay =
   | { state: 'measured'; percentage: number; tokens: string; colorClass: string }
   /** Compacted since the last response that reported tokens: the fill is unknown. */
   | { state: 'compacted'; tokens: string }
+  /** Nothing to measure yet: a draft, or a session without a response. */
+  | { state: 'pending' }
   | null;
 
 const UNKNOWN_VALUE = '\u2014';
@@ -233,16 +235,23 @@ const SessionMetadataOverlay: React.FC<{
               iconNode={<ContextProgressIcon percentage={contextDisplay.state === 'measured' ? contextDisplay.percentage : null} />}
               label={t('mobile.header.metadata.context')}
             >
-              <span className="inline-flex items-baseline gap-1.5 tabular-nums">
-                {contextDisplay.state === 'measured'
-                  ? <span className={cn('font-semibold', contextDisplay.colorClass)}>{contextDisplay.percentage.toFixed(1)}%</span>
-                  : null}
-                <span className="text-muted-foreground">{contextDisplay.tokens}</span>
-              </span>
+              {contextDisplay.state === 'pending' ? null : (
+                <span className="inline-flex items-baseline gap-1.5 tabular-nums">
+                  {contextDisplay.state === 'measured'
+                    ? <span className={cn('font-semibold', contextDisplay.colorClass)}>{contextDisplay.percentage.toFixed(1)}%</span>
+                    : null}
+                  <span className="text-muted-foreground">{contextDisplay.tokens}</span>
+                </span>
+              )}
             </MetadataRow>
           ) : null}
           {contextDisplay?.state === 'compacted' ? (
             <p className="px-2.5 pb-1 typography-meta text-muted-foreground">{t('contextUsage.compacted.description')}</p>
+          ) : null}
+          {/* The header ring is empty on a draft; this row says why, so the
+              empty ring reads as "nothing yet" rather than "still loading". */}
+          {contextDisplay?.state === 'pending' ? (
+            <p className="px-2.5 pb-1 typography-meta text-muted-foreground">{t('mobile.header.metadata.contextPending')}</p>
           ) : null}
           <MobileUsageLimits
             groups={usageGroups}
@@ -403,7 +412,8 @@ export const MobileSessionMetadataButton = React.memo(function MobileSessionMeta
   const contextFill = React.useMemo(() => findLatestContextFill(activeSessionMessages), [activeSessionMessages]);
 
   const contextDisplay = React.useMemo<ContextDisplay>(() => {
-    if (isNewSessionDraftOpen || !contextFill || contextLimit <= 0) return null;
+    if (contextLimit <= 0) return null;
+    if (isNewSessionDraftOpen || !contextFill) return { state: 'pending' };
     if (contextFill.state === 'compacted') {
       return { state: 'compacted', tokens: `${UNKNOWN_VALUE}/${formatTokens(contextLimit)}` };
     }
@@ -442,7 +452,11 @@ export const MobileSessionMetadataButton = React.memo(function MobileSessionMeta
       >
         {/* Live context gauge doubles as the metadata trigger: filled by the
             session's context usage, an empty ring on a fresh draft. */}
-        <ContextProgressIcon percentage={contextDisplay?.state === 'compacted' ? null : contextDisplay?.percentage ?? 0} />
+        <ContextProgressIcon
+          percentage={contextDisplay?.state === 'measured'
+            ? contextDisplay.percentage
+            : contextDisplay?.state === 'compacted' ? null : 0}
+        />
       </button>
       <SessionMetadataOverlay
         open={open}

@@ -266,6 +266,32 @@ describe('OpenChamber control service', () => {
   });
 });
 
+describe('file.open', () => {
+  it('hands the path, the session directory and the session to the file viewer', async () => {
+    const request = vi.fn(async () => ({ path: '/repo/out.csv', size: 3, opened: true }));
+    const { service } = createService({ fileOpen: { request } });
+
+    const result = await service.execute('file.open', { path: 'out.csv' }, '/repo', { contextSessionId: 'ses_1' });
+
+    expect(request).toHaveBeenCalledWith({ path: 'out.csv', directory: '/repo', sessionId: 'ses_1' });
+    expect(result).toEqual({ path: '/repo/out.csv', size: 3, opened: true });
+  });
+
+  it('lets an explicit directory win over the session directory', async () => {
+    const request = vi.fn(async () => ({ path: '/other/out.csv', size: 3, opened: true }));
+    const { service } = createService({ fileOpen: { request } });
+
+    await service.execute('file.open', { path: 'out.csv', directory: '/other' }, '/repo');
+
+    expect(request).toHaveBeenCalledWith({ path: 'out.csv', directory: '/other', sessionId: null });
+  });
+
+  it('answers 503 when this server has no file viewer wired', async () => {
+    const { service } = createService({});
+    await expect(service.execute('file.open', { path: 'out.csv' }, '/repo')).rejects.toMatchObject({ statusCode: 503 });
+  });
+});
+
 describe('browser capture', () => {
   const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 

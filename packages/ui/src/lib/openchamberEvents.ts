@@ -47,6 +47,17 @@ type BrowserControlRequestEvent = {
 };
 
 /**
+ * The agent asked for a file to be shown in the user's file panel. Every
+ * client receives it; one showing that project opens the file.
+ */
+const fileOpenRequestSchema = z.object({
+  path: z.string().min(1),
+  directory: z.string().min(1).nullable(),
+  sessionId: z.string().min(1).nullable(),
+});
+type FileOpenRequestEvent = { type: 'file-open-request' } & z.infer<typeof fileOpenRequestSchema>;
+
+/**
  * The agent changed what it remembers. Carries only which store moved, not the
  * entries: listeners re-read from the server, so the event cannot go stale
  * between being sent and being handled.
@@ -106,7 +117,18 @@ type RoutingDecisionEvent = { type: 'routing-decision'; decision: z.infer<typeof
 type RoutingPermissionHeldEvent = { type: 'routing-permission-held' } & z.infer<typeof routingPermissionHeldSchema>;
 type RoutingSafetySkippedEvent = { type: 'routing-safety-skipped' } & z.infer<typeof routingSafetySkippedSchema>;
 
+const notificationPropertiesSchema = z.object({
+  title: z.string().optional(),
+  body: z.string().optional(),
+  tag: z.string().optional(),
+  kind: z.string().optional(),
+  sessionId: z.string().optional(),
+  directory: z.string().optional(),
+  requireHidden: z.boolean().optional(),
+});
+
 type OpenChamberEvent =
+  | { type: 'notification'; payload: z.infer<typeof notificationPropertiesSchema> }
   | { type: 'event-stream-ready' }
   | RoutingUpdatedEvent
   | RoutingDecisionEvent
@@ -117,6 +139,7 @@ type OpenChamberEvent =
   | SessionCreatedEvent
   | WorktreeChangedEvent
   | BrowserControlRequestEvent
+  | FileOpenRequestEvent
   | BrowserProviderResetEvent
   | AgentMemoryChangedEvent;
 type Listener = (event: OpenChamberEvent) => void;
@@ -201,6 +224,14 @@ const getEventProperties = (properties: unknown): Record<string, unknown> | null
 };
 
 const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) => {
+  if (envelope.type === 'openchamber:notification') {
+    const parsed = notificationPropertiesSchema.safeParse(envelope.properties);
+    if (parsed.success) {
+      for (const listener of listeners) listener({ type: 'notification', payload: parsed.data });
+    }
+    return;
+  }
+
   if (envelope.type === 'openchamber:event-stream-ready') {
     reconnectAttempt = 0;
     for (const listener of listeners) listener({ type: 'event-stream-ready' });
@@ -240,6 +271,12 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
   if (envelope.type === 'openchamber:routing.safety-skipped') {
     const parsed = routingSafetySkippedSchema.safeParse(envelope.properties);
     if (parsed.success) for (const listener of listeners) listener({ type: 'routing-safety-skipped', ...parsed.data });
+    return;
+  }
+
+  if (envelope.type === 'openchamber:file-open-request') {
+    const parsed = fileOpenRequestSchema.safeParse(envelope.properties);
+    if (parsed.success) for (const listener of listeners) listener({ type: 'file-open-request', ...parsed.data });
     return;
   }
 

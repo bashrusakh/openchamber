@@ -853,6 +853,13 @@ describe('createIdleInstanceReaper', () => {
       getActiveTunnelController: () => null,
       setActiveTunnelController: vi.fn(),
       tunnelAuthController: { clearActiveTunnel: vi.fn() },
+      beginGuestServiceShutdown: vi.fn(),
+      stopAllGuestServices: vi.fn(),
+      getGuestSurfaceRuntime: () => null,
+      getRealtimeProxyRuntime: () => null,
+      getDictationRuntime: () => null,
+      getRelayService: () => null,
+      getRelayReconcileTimer: () => null,
     });
 
     await shutdownRuntime.gracefulShutdown({ exitProcess: false });
