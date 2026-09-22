@@ -107,4 +107,27 @@ describe('filesystem Gitignore handling', () => {
         { name: 'visible.ts', path: '/repo/visible.ts', relativePath: 'visible.ts', extension: 'ts' },
       ]);
   });
+
+  it('waits for coordinated cleanup before propagating a delayed search failure', async () => {
+    const cleanupBlocked = {
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+    };
+    const runGitRead = mock(async (_cwd, _task, options) => {
+      await new Promise((resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          if (options.waitForCleanup !== true) {
+            reject(Object.assign(new Error('Git execution was cancelled'), { code: 'GIT_EXECUTION_CANCELLED' }));
+            return;
+          }
+          setTimeout(() => reject(cleanupBlocked), 5);
+        }, { once: true });
+      });
+    });
+
+    const pending = searchDirectory('/repo', 'visible', 60, false, true, runGitRead);
+    await expect(pending).rejects.toMatchObject(cleanupBlocked);
+    expect(runGitRead.mock.calls[0][2]).toMatchObject({ waitForCleanup: true });
+  });
 });

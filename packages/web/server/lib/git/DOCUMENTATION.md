@@ -156,6 +156,9 @@ mutation runs.
 and re-entrancy errors returned by the coordinator.
 Raw Git reads owned by adjacent web features use `gitExecutionService.withRawRead()`
 so they receive the same repository/worktree admission and read-only environment.
+Optional-filter reads set `waitForCleanup` when they cancel an admitted task: the
+caller waits for the task's process-tree result, while an unconfirmed cleanup
+keeps the coordinator lease and carries its termination metadata to the caller.
 Bounded range and commit reads, plus context discovery, use the owned process-tree
 adapter so cancellation waits for descendant cleanup before releasing their lease.
 Gitignore checks and skills-catalog Git processes use the shared process-tree

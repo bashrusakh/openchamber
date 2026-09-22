@@ -125,6 +125,44 @@ describe('GitExecutionCoordinator', () => {
     expect(coordinator.getStats()).toMatchObject({ active: 0, pending: 0 });
   });
 
+  it('can defer an admitted read cancellation until its owned cleanup result is known', async () => {
+    const coordinator = createGitExecutionCoordinator({ globalConcurrency: 1 });
+    const controller = new AbortController();
+    const cleanupBlocked = {
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+    };
+    let started = false;
+    let settled = false;
+    const pending = coordinator.run({
+      context: context(),
+      kind: GIT_OPERATION_KIND.READ,
+      signal: controller.signal,
+      waitForCleanup: true,
+    }, () => {
+      started = true;
+      return new Promise((resolve) => {
+        controller.signal.addEventListener('abort', () => {
+          setTimeout(() => resolve(cleanupBlocked), 10);
+        }, { once: true });
+      });
+    });
+    await waitFor(() => started);
+
+    controller.abort('optional Gitignore filter timed out');
+    void pending.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    await tick();
+    expect(settled).toBe(false);
+    expect(coordinator.getStats()).toMatchObject({ active: 1, pending: 0 });
+
+    await expect(pending).resolves.toMatchObject(cleanupBlocked);
+    expect(coordinator.getStats()).toMatchObject({ active: 1, pending: 0 });
+  });
+
   it('coalesces full and light status work in the safe direction', async () => {
     const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
     let release;

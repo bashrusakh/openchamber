@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createGitIgnoreReader } from './gitignore.js';
 import { createFsSearchRuntime } from './search.js';
+import {
+  createGitExecutionCoordinator,
+  GIT_OPERATION_KIND,
+} from '../git/execution-coordinator.js';
 
 const createChild = () => {
   const child = new EventEmitter();
@@ -215,6 +219,58 @@ describe('web Gitignore reader', () => {
     }
   });
 
+  it('waits for coordinated cleanup before exposing a delayed Windows failure', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = createChild();
+      child.pid = 1238;
+      let taskkill;
+      const spawn = vi.fn((command) => {
+        if (command === 'taskkill') {
+          taskkill = new EventEmitter();
+          return taskkill;
+        }
+        return child;
+      });
+      const coordinator = createGitExecutionCoordinator({ platform: 'win32' });
+      const gitExecutionService = {
+        withRawRead: (cwd, task, options) => coordinator.run({
+          context: { isRepository: true, commonId: cwd, worktreeId: cwd },
+          kind: GIT_OPERATION_KIND.READ,
+          signal: options.signal,
+          queueTimeoutMs: options.queueTimeoutMs,
+          waitForCleanup: options.waitForCleanup,
+        }, () => task()),
+      };
+      const reader = createGitIgnoreReader({
+        spawn,
+        resolveGitBinaryForSpawn: () => 'git',
+        gitExecutionService,
+        platform: 'win32',
+        timeoutMs: 1,
+      });
+      const pending = reader.getIgnoredNames('/repo', ['dist']);
+      let settled = false;
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(taskkill).toBeTruthy();
+      taskkill.emit('error', new Error('taskkill unavailable'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(pending).rejects.toMatchObject({
+        code: 'ERR_PROCESS_TREE_TERMINATION',
+        cleanupBlocked: true,
+        descendantsTerminated: false,
+      });
+      expect(coordinator.getStats()).toMatchObject({ active: 1, pending: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves permission failures instead of treating them as no matches', async () => {
     const child = createChild();
     const spawn = vi.fn(() => {
@@ -310,5 +366,51 @@ describe('web Gitignore reader', () => {
       relativePath: 'visible.ts',
       extension: 'ts',
     }]);
+  });
+
+  it('does not turn delayed coordinated cleanup failure into unfiltered search success', async () => {
+    vi.useFakeTimers();
+    try {
+      const cleanupBlocked = {
+        code: 'ERR_PROCESS_TREE_TERMINATION',
+        cleanupBlocked: true,
+        descendantsTerminated: false,
+      };
+      const runtime = createFsSearchRuntime({
+        fsPromises: {
+          readdir: async () => [
+            { name: 'visible.ts', isDirectory: () => false, isFile: () => true },
+          ],
+        },
+        path,
+        spawn: vi.fn(),
+        resolveGitBinaryForSpawn: () => 'git',
+        gitExecutionService: {
+          withRawRead: (_directory, _task, options) => new Promise((resolve, reject) => {
+            options.signal.addEventListener('abort', () => {
+              if (options.waitForCleanup !== true) {
+                reject(Object.assign(new Error('Git execution was cancelled'), { code: 'GIT_EXECUTION_CANCELLED' }));
+                return;
+              }
+              setTimeout(() => reject(cleanupBlocked), 10);
+            }, { once: true });
+          }),
+        },
+      });
+      const pending = runtime.searchFilesystemFiles('/repo', {
+        query: 'visible',
+        limit: 10,
+        includeHidden: false,
+        respectGitignore: true,
+      });
+      await vi.advanceTimersByTimeAsync(2_500);
+      let settled = false;
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(pending).rejects.toMatchObject(cleanupBlocked);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

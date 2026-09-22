@@ -528,6 +528,7 @@ export class GitExecutionCoordinator {
       task,
       label: options.label,
       signal: options.signal,
+      waitForCleanup: options.waitForCleanup === true,
       resolve: null,
       reject: null,
       settled: false,
@@ -566,6 +567,10 @@ export class GitExecutionCoordinator {
       entry.reject = reject;
       const onAbort = () => {
         if (entry.started) {
+          if (entry.waitForCleanup) {
+            this.cancellationForEntry(entry, 'Git execution was cancelled');
+            return;
+          }
           if (!entry.settled) {
             this.settleEntry(
               entry,

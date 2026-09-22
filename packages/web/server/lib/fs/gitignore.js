@@ -180,6 +180,7 @@ export const createGitIgnoreReader = ({
           {
             signal: signal || (timeoutMs > 0 ? waiterController.signal : undefined),
             queueTimeoutMs: timeoutMs > 0 ? timeoutMs : undefined,
+            waitForCleanup: true,
           },
         )
         : await runWithGitExecutionScope(true, read);

@@ -53,6 +53,9 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
     environment scoping. Shared status sources receive a cancellation signal,
     remain tracked until their Git task closes, and never cross a queued
     mutation when status requests coalesce.
+  - Optional Gitignore reads use the shared `waitForCleanup` admission option:
+    an admitted waiter does not settle before its owned process reports confirmed
+    cleanup, and blocked cleanup keeps the read lease with its termination metadata.
   - Clone reservations remain held through sparse checkout, skill file
     processing, and temporary-directory cleanup; network capacity is released
     after that materialization work completes.
