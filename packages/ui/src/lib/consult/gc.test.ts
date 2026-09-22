@@ -128,12 +128,13 @@ describe('stale advisor fork GC', () => {
   });
 
   test('never deletes a consult-looking session that carries no marker', async () => {
-    // A lost forkSession response leaves an unmarked clone that copies the
-    // parent's title and metadata wholesale — so it looks consult-like by
-    // title and is old by the clock, but has no valid marker. The marker (or
-    // its kind) is the only identification the GC accepts; without it the
-    // session is a user-visible session and must never be a deletion
-    // candidate, no matter how consult-like its surface looks.
+    // A lost forkSession response leaves an unmarked clone whose title is
+    // derived as the parent title plus " (fork #N)" and whose metadata is
+    // cloned wholesale — so it looks consult-like by title and is old by the
+    // clock, but has no valid marker. The marker (or its kind) is the only
+    // identification the GC accepts; without it the session is a
+    // user-visible session and must never be a deletion candidate, no matter
+    // how consult-like its surface looks.
     const { deps, state } = createDeps();
     const consultLooking = {
       ...normalSession('What should we do next? — consult', NOW - 2 * CONSULT_GC_THRESHOLD_MS),

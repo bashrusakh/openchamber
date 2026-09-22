@@ -167,7 +167,8 @@ acting turn.
    accepted limitation: reconciliation without guessing is impossible. The
    SDK fork contract (`SessionForkData`) carries only `messageID` — no
    idempotency key and no client-supplied metadata; a clone carries no
-   `parentID` and copies the parent's title and metadata wholesale; the v2
+   `parentID`, its title is derived as the parent title plus ` (fork #N)`, and
+   its metadata is cloned wholesale; the v2
    sessions list query (`SessionListData`) does carry a `start` filter (the
    `time.updated` cursor), but a time window alone cannot identify a lost
    fork: parallel sibling forks and ordinary user sessions can be created in

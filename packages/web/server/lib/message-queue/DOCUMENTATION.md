@@ -266,8 +266,12 @@ marker found → `dispatched delivered: 'confirmed'` with exactly-once removal
 and the claimed owner's hold released (a non-empty owner only: an unclaimed or
 owner-less item never clears the shared owner-less slot); marker absent and
 the item unclaimed → `unresolved` with `recoverable: true` (the item keeps
-blocking the head; clients may Resume or remove); no `runId`, a live claim, or
-a failed read → `unresolved` untouched. The tail read awaits, so the decision
+blocking the head; clients may Resume or remove). Without a receipt `runId`
+the acting payload was never merged, so no prompt for the item can have been
+sent: unclaimed → `resumable` (provably never reached the acting payload,
+nothing mutated; clients may claim or resume), still claimed → `unresolved`
+untouched (the owner is mid-flow). A failed tail read → `unresolved`
+untouched. The tail read awaits, so the decision
 is re-checked against the queue afterwards: when the item vanished, its claim
 identity changed (owner and `claimedAt`), or a send started meanwhile, the
 answer is `unresolved` and nothing is mutated. The live reservation decides,
@@ -356,7 +360,7 @@ allowlists.
 | `POST .../sessions/:id/items/:itemId/claim` | `{ owner?, ttlMs? }`; reserve the head consult item; `409` reasons: `not found`, `not-consult`, `not-head`, `sending`, `already-claimed`, `not-idle` |
 | `POST .../sessions/:id/items/:itemId/payload` | `{ owner?, consult }`; merge the claimed item's consult payload; `409`: `not found`/`not-consult`/`not-claiming`/`sending`, `400` on size violations |
 | `POST .../sessions/:id/items/:itemId/dispatch-consult` | `{ owner? }`; dispatch the claimed consult item on its dedicated route; always `200` with a structured outcome (`dispatched`/`busy`/`claim-lost`/`not-found`/`not-consult`/`sending`/`send-failed`), `400`/`500` only for malformed/unexpected errors |
-| `POST .../sessions/:id/items/:itemId/resolve-consult` | Reconnect-time outcome check for a stranded consult item; always `200` with a structured outcome (`dispatched` with `delivered: 'confirmed'`, `unresolved` with optional `recoverable`, `not-found`/`not-consult`/`sending`), `400`/`500` only for malformed/unexpected errors; never sends a prompt |
+| `POST .../sessions/:id/items/:itemId/resolve-consult` | Reconnect-time outcome check for a stranded consult item; always `200` with a structured outcome (`dispatched` with `delivered: 'confirmed'`, `resumable` (provably never reached the acting payload, nothing mutated; clients may claim or resume), `unresolved` with optional `recoverable`, `not-found`/`not-consult`/`sending`), `400`/`500` only for malformed/unexpected errors; never sends a prompt |
 
 Every mutation broadcasts `openchamber:message-queue.updated` with
 `{ revision, session }` to all connected clients (SSE and WS), so several
