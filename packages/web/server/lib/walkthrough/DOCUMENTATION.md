@@ -57,6 +57,10 @@ written against staged code never silently re-anchors onto an unstaged edit.
 | `commit` | `commit` | `getCommitDiff` compares the full selected commit hash with its first parent; root commits compare with an empty tree |
 | `pr` | `pr:<number>` | GitHub's committed pull-request diff, without local working-tree changes |
 
+Local working-tree and branch sources pass the request's abort signal through
+each Git collection read. A canceled read keeps its execution lease until the
+owned Git child has closed, and a failed cleanup remains visible to the caller.
+
 Changes and walkthrough resolve the current branch's base through
 `packages/ui/src/hooks/useBranchComparisonBase.ts`. An explicit choice in Changes
 outranks reflog detection. Both toolbars use

@@ -2075,6 +2075,7 @@ describe('fs stat directory error handling', () => {
       await copyFile(new URL('../git/execution-coordinator.js', import.meta.url), path.join(directory, 'git/execution-coordinator.js'));
       await copyFile(new URL('../git/execution-errors.js', import.meta.url), path.join(directory, 'git/execution-errors.js'));
       await copyFile(new URL('../git/process-tree.js', import.meta.url), path.join(directory, 'git/process-tree.js'));
+      await copyFile(new URL('../git/repository-root.js', import.meta.url), path.join(directory, 'git/repository-root.js'));
       expect(() => execFileSync('node', [
         '--input-type=module',
         '--eval',

@@ -7,6 +7,7 @@ import {
   GitExecutionQueueTimeoutError,
   GitExecutionReentrancyError,
 } from './execution-errors.js';
+import { canonicalPathKey } from './repository-root.js';
 
 export const GIT_OPERATION_KIND = Object.freeze({
   READ: 'read',
@@ -72,6 +73,17 @@ const nowValue = (now) => {
 };
 
 const contextKey = (context) => `${context.commonId}\0${context.worktreeId}`;
+
+const canonicalIdentity = (value, platform) => {
+  if (platform !== 'win32' || !isStringValue(value)) return value;
+  return canonicalPathKey(value, platform);
+};
+
+const normalizeContext = (context, platform) => ({
+  ...context,
+  commonId: canonicalIdentity(context.commonId, platform),
+  worktreeId: canonicalIdentity(context.worktreeId, platform),
+});
 
 const ensureContext = (context) => {
   if (!context || context.isRepository !== true) {
@@ -144,27 +156,28 @@ const cancellationError = (signal, message) => new GitExecutionCancelledError(
   { reason: signal?.reason },
 );
 
-const canonicalizeMissingPath = async (destination) => {
+const canonicalizeMissingPath = async (destination, platform = process.platform) => {
   // Clone reservations happen before the destination exists. Resolve the
   // nearest existing ancestor so symlinked parent aliases share one key.
-  const resolved = path.resolve(destination);
+  const pathApi = platform === 'win32' ? path.win32 : path;
+  const resolved = pathApi.resolve(destination);
   const missingParts = [];
   let current = resolved;
 
   while (true) {
     try {
       const canonical = await fsp.realpath(current);
-      return path.join(path.resolve(canonical), ...missingParts.reverse());
+      return pathApi.join(pathApi.resolve(canonical), ...missingParts.reverse());
     } catch (error) {
       if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') {
         throw error;
       }
 
-      const parent = path.dirname(current);
+      const parent = pathApi.dirname(current);
       if (parent === current) {
         return resolved;
       }
-      missingParts.push(path.basename(current));
+      missingParts.push(pathApi.basename(current));
       current = parent;
     }
   }
@@ -173,11 +186,12 @@ const canonicalizeMissingPath = async (destination) => {
 export class GitExecutionCoordinator {
   constructor(options = {}) {
     this.limits = normalizeLimits(options);
+    this.platform = options.platform || process.platform;
     this.now = options.now || Date.now;
     this.setTimer = options.setTimer || ((callback, delay) => setTimeout(callback, delay));
     this.clearTimer = options.clearTimer || ((handle) => clearTimeout(handle));
     this.canonicalizeCloneDestination = options.canonicalizeCloneDestination
-      || canonicalizeMissingPath;
+      || ((destination) => canonicalizeMissingPath(destination, this.platform));
     this.contexts = new Map();
     this.pending = [];
     this.activeEntries = new Set();
@@ -258,6 +272,7 @@ export class GitExecutionCoordinator {
 
   getOrCreateStates(context) {
     ensureContext(context);
+    context = normalizeContext(context, this.platform);
     const hadContext = this.contexts.has(context.commonId);
     const hadWorktree = hadContext && this.contexts.get(context.commonId).worktrees.has(context.worktreeId);
     const contextState = this.createContextState(context.commonId);
@@ -272,6 +287,7 @@ export class GitExecutionCoordinator {
 
   getGeneration(context) {
     ensureContext(context);
+    context = normalizeContext(context, this.platform);
     const contextState = this.contexts.get(context.commonId);
     const worktreeState = contextState?.worktrees.get(context.worktreeId);
     return {
@@ -284,13 +300,14 @@ export class GitExecutionCoordinator {
     if (!isStringValue(commonId) || !commonId.trim() || !Array.isArray(worktreeIds)) {
       return 0;
     }
-    const contextState = this.contexts.get(commonId);
+    const normalizedCommonId = canonicalIdentity(commonId, this.platform);
+    const contextState = this.contexts.get(normalizedCommonId);
     if (!contextState) {
       return 0;
     }
     let removed = 0;
     for (const worktreeId of worktreeIds) {
-      const state = contextState.worktrees.get(worktreeId);
+      const state = contextState.worktrees.get(canonicalIdentity(worktreeId, this.platform));
       if (!state || state.active.size > 0 || state.pending > 0) {
         continue;
       }
@@ -298,7 +315,7 @@ export class GitExecutionCoordinator {
       removed += 1;
     }
     if (contextState.worktrees.size === 0 && contextState.active.size === 0 && contextState.pending === 0) {
-      this.contexts.delete(commonId);
+      this.contexts.delete(normalizedCommonId);
     }
     return removed;
   }
@@ -466,7 +483,7 @@ export class GitExecutionCoordinator {
     ensureKind(kind);
     const entry = {
       id: this.nextEntryId++,
-      context: options.context,
+      context: normalizeContext(options.context, this.platform),
       contextState,
       worktreeState,
       createdContext,
@@ -554,6 +571,7 @@ export class GitExecutionCoordinator {
     try {
       ensureContext(options.context);
       ensureKind(options.kind);
+      options = { ...options, context: normalizeContext(options.context, this.platform) };
     } catch (error) {
       return Promise.reject(error);
     }
@@ -692,6 +710,7 @@ export class GitExecutionCoordinator {
     let generation;
     try {
       ensureContext(options.context);
+      options = { ...options, context: normalizeContext(options.context, this.platform) };
       generation = this.getGeneration(options.context);
     } catch (error) {
       return Promise.reject(error);
@@ -788,7 +807,8 @@ export class GitExecutionCoordinator {
     if (!isStringValue(destination) || !destination.trim()) {
       throw new TypeError('Clone destination is required');
     }
-    return this.canonicalizeCloneDestination(destination.trim());
+    return Promise.resolve(this.canonicalizeCloneDestination(destination.trim()))
+      .then((value) => canonicalIdentity(value, this.platform));
   }
 
   cloneCanStart(entry) {

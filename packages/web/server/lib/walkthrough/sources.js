@@ -102,11 +102,12 @@ export function sourceKey(source) {
 // `git diff` never reports untracked files, so a brand-new file would be
 // invisible in a walkthrough of local work. The batch helper resolves the
 // repository once and bounds how many diff processes run at a time.
-const untrackedSections = async (directory, git) => {
-  const untracked = await git.listUntrackedPaths(directory);
+const untrackedSections = async (directory, git, signal) => {
+  const readOptions = signal ? { signal } : {};
+  const untracked = await git.listUntrackedPaths(directory, readOptions);
   if (untracked.length === 0) return [];
 
-  const patches = await git.getUntrackedDiffs(directory, untracked);
+  const patches = await git.getUntrackedDiffs(directory, untracked, readOptions);
   return patches.filter((patch) => typeof patch === 'string' && patch.trim());
 };
 
@@ -120,17 +121,18 @@ export async function loadSourceSections(
   source,
   { getPullRequestDiff, git = defaultGit, signal } = {},
 ) {
+  const readOptions = signal ? { signal } : {};
   if (source.kind === 'working-tree') {
     const sections = [];
 
     if (source.scope === 'all' || source.scope === 'staged') {
-      const patch = await git.getDiff(directory, { staged: true });
+      const patch = await git.getDiff(directory, { staged: true, ...readOptions });
       if (patch && patch.trim()) sections.push({ scope: 'staged', patch });
     }
 
     if (source.scope === 'all' || source.scope === 'working') {
-      const patch = await git.getDiff(directory, { staged: false });
-      const untracked = await untrackedSections(directory, git);
+      const patch = await git.getDiff(directory, { staged: false, ...readOptions });
+      const untracked = await untrackedSections(directory, git, signal);
       const combined = [patch, ...untracked].filter((value) => value && value.trim()).join('\n');
       if (combined.trim()) sections.push({ scope: 'working', patch: combined });
     }
@@ -143,6 +145,7 @@ export async function loadSourceSections(
       base: source.baseRef,
       head: source.headRef,
       includeWorkingTree: true,
+      ...readOptions,
     });
     return {
       sections: patch && patch.trim() ? [{ scope: 'branch', patch }] : [],

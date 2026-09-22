@@ -21,6 +21,7 @@ const killRoot = (child) => {
 };
 
 const WINDOWS_TERMINATION_TIMEOUT_MS = 5_000;
+const POSIX_TERMINATION_POLL_MS = 10;
 
 const observeChildClose = (child) => {
   if (!child?.pid || child.exitCode !== null && child.exitCode !== undefined
@@ -75,9 +76,9 @@ const confirmChildClose = (observation, timeoutMs) => new Promise((resolve) => {
   timer?.unref?.();
 });
 
-const processTreeTerminationError = (pid, cause, rootError, rootClosed) => Object.assign(
+const processTreeTerminationError = (pid, cause, rootError, rootClosed, platform) => Object.assign(
   new Error(
-    `Failed to terminate the Windows process tree for PID ${pid}; `
+    `Failed to terminate the ${platform === 'win32' ? 'Windows' : 'POSIX'} process tree for PID ${pid}; `
     + 'descendant termination was not confirmed',
   ),
   {
@@ -88,13 +89,14 @@ const processTreeTerminationError = (pid, cause, rootError, rootClosed) => Objec
     rootClosed,
     cause,
     rootError: rootError || undefined,
+    platform,
   },
 );
 
 const failWindowsTermination = async (child, pid, cause, timeoutMs, observation = observeChildClose(child)) => {
   const rootError = killRoot(child);
   const rootClosed = await confirmChildClose(observation, timeoutMs);
-  throw processTreeTerminationError(pid, cause, rootError, rootClosed);
+  throw processTreeTerminationError(pid, cause, rootError, rootClosed, 'win32');
 };
 
 const confirmSuccessfulWindowsTermination = async (child, pid, timeoutMs, observation) => {
@@ -105,7 +107,62 @@ const confirmSuccessfulWindowsTermination = async (child, pid, timeoutMs, observ
     new Error(`Windows process tree for PID ${pid} did not close within ${timeoutMs}ms after taskkill`),
     null,
     false,
+    'win32',
   );
+};
+
+const confirmProcessGroupGone = (pid, timeoutMs) => new Promise((resolve) => {
+  const startedAt = Date.now();
+  let timer;
+  const finish = (confirmed) => {
+    if (timer) clearTimeout(timer);
+    resolve(confirmed);
+  };
+  const check = () => {
+    try {
+      process.kill(-pid, 0);
+    } catch (error) {
+      if (error?.code === 'ESRCH') {
+        finish(true);
+        return;
+      }
+    }
+    if (Date.now() - startedAt >= timeoutMs) {
+      finish(false);
+      return;
+    }
+    timer = setTimeout(check, POSIX_TERMINATION_POLL_MS);
+    timer?.unref?.();
+  };
+  check();
+});
+
+const terminatePosixProcessTree = async (child, pid, timeoutMs) => {
+  const observation = observeChildClose(child);
+  let signalError = null;
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch (error) {
+    signalError = error;
+    if (error?.code !== 'ESRCH') {
+      killRoot(child);
+    }
+  }
+
+  const rootClosed = await confirmChildClose(observation, timeoutMs);
+  const groupGone = rootClosed && await confirmProcessGroupGone(pid, timeoutMs);
+  if (signalError && signalError.code !== 'ESRCH') {
+    throw processTreeTerminationError(pid, signalError, signalError, rootClosed, 'posix');
+  }
+  if (!rootClosed || !groupGone) {
+    throw processTreeTerminationError(
+      pid,
+      new Error(`POSIX process tree for PID ${pid} did not close within ${timeoutMs}ms after SIGKILL`),
+      signalError,
+      rootClosed,
+      'posix',
+    );
+  }
 };
 
 export const killProcessTree = (
@@ -179,14 +236,7 @@ export const killProcessTree = (
     });
   }
 
-  try {
-    process.kill(-child.pid, 'SIGKILL');
-  } catch (error) {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) {
-      killRoot(child);
-    }
-  }
-  return Promise.resolve();
+  return terminatePosixProcessTree(child, child.pid, terminationTimeoutMs);
 };
 
 const createOutputLimitError = (stream, maxBuffer) => Object.assign(

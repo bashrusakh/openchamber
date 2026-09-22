@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,7 @@ import {
 import {
   GIT_EXECUTION_ERROR_CODES,
 } from './execution-errors.js';
+import { killProcessTree } from './process-tree.js';
 
 const context = (worktreeId = 'worktree') => ({
   isRepository: true,
@@ -395,5 +397,43 @@ describe('GitExecutionCoordinator', () => {
     } finally {
       await fsp.rm(root, { recursive: true, force: true });
     }
+  });
+
+  it('deduplicates Windows clone destinations by casing without changing the supplied path', async () => {
+    let release;
+    const coordinator = createGitExecutionCoordinator({
+      platform: 'win32',
+      canonicalizeCloneDestination: async (destination) => destination,
+      globalConcurrency: 4,
+    });
+    const first = coordinator.runClone({ destination: 'C:\\Work\\Skills' }, () => (
+      new Promise((resolve) => { release = resolve; })
+    ));
+    await waitFor(() => coordinator.getStats().active === 1);
+
+    const alias = coordinator.runClone({ destination: 'c:\\work\\skills' }, () => 'alias');
+    await waitFor(() => coordinator.getStats().clonePending === 1);
+    expect(coordinator.getStats()).toMatchObject({ active: 1, clonePending: 1, cloneDestinations: 1 });
+
+    release('first');
+    await expect(first).resolves.toBe('first');
+    await expect(alias).resolves.toBe('alias');
+    expect(coordinator.getStats()).toMatchObject({ active: 0, clonePending: 0, cloneDestinations: 0 });
+  });
+
+  it('holds the execution lease until POSIX process cleanup closes', async () => {
+    const coordinator = createGitExecutionCoordinator();
+    const child = new EventEmitter();
+    child.pid = 987655;
+    child.kill = () => {};
+    const running = coordinator.run({
+      context: context(),
+      kind: GIT_OPERATION_KIND.READ,
+    }, () => killProcessTree(child, { platform: 'linux', terminationTimeoutMs: 30 }));
+
+    await waitFor(() => coordinator.getStats().active === 1);
+    child.emit('close', 137, 'SIGKILL');
+    await running;
+    expect(coordinator.getStats()).toMatchObject({ active: 0 });
   });
 });

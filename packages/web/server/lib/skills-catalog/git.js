@@ -3,8 +3,10 @@ import {
   execFileProcessTree,
   isProcessTreeCleanupBlocked,
 } from '../git/process-tree.js';
+import { copyGitProcessMetadata } from '../git/execution-errors.js';
 
 export { isProcessTreeCleanupBlocked };
+export { copyGitProcessMetadata };
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
@@ -67,16 +69,14 @@ export async function runGit(args, options = {}) {
     const stderr = typeof err?.stderr === 'string' ? err.stderr : '';
     const message = err instanceof Error ? err.message : String(err);
 
-    const result = {
+    const result = copyGitProcessMetadata({
       ok: false,
       stdout,
       stderr,
       message,
       code: err?.code ?? null,
       signal: typeof err?.signal === 'string' ? err.signal : null,
-    };
-    if (err?.descendantsTerminated === false) result.descendantsTerminated = false;
-    if (err?.cleanupBlocked === true) result.cleanupBlocked = true;
+    }, err);
     return result;
   }
 }
@@ -97,6 +97,14 @@ export const runWithGitCloneReservation = ({
 export async function assertGitAvailable(runGitCommand = runGit) {
   const result = await runGitCommand(['--version'], { timeoutMs: 5_000 });
   if (!result.ok) {
+    if (isProcessTreeCleanupBlocked(result)) {
+      const metadata = copyGitProcessMetadata({}, result);
+      const error = copyGitProcessMetadata({
+        kind: 'networkError',
+        message: 'Git process cleanup was not confirmed; Git availability is unknown',
+      }, result);
+      return { ok: false, error, cleanupBlocked: true, ...metadata };
+    }
     return { ok: false, error: { kind: 'gitUnavailable', message: 'Git is not available in PATH' } };
   }
   return { ok: true };

@@ -202,7 +202,15 @@ async function runGit(
   }
 }
 
-function terminationMetadata(value: Error | ProcessTerminationMetadata): ProcessTerminationMetadata {
+type ProcessTerminationValue = ProcessTerminationMetadata & {
+  ok?: boolean;
+  stdout?: string;
+  stderr?: string;
+  message?: string;
+  error?: ProcessTerminationMetadata;
+};
+
+function terminationMetadata(value: Error | ProcessTerminationValue): ProcessTerminationMetadata {
   const metadata: ProcessTerminationMetadata = {};
   if ('cleanupBlocked' in value && value.cleanupBlocked === true) metadata.cleanupBlocked = true;
   if ('descendantsTerminated' in value && value.descendantsTerminated === false) {
@@ -217,18 +225,23 @@ function terminationMetadata(value: Error | ProcessTerminationMetadata): Process
 
 type ProcessCleanupCandidate = {
   ok?: boolean;
+  code?: string | number;
   message?: string;
   cleanupBlocked?: boolean;
   descendantsTerminated?: boolean;
   rootClosed?: boolean;
   pid?: number;
-  error?: { kind?: string; message?: string; cleanupBlocked?: boolean; descendantsTerminated?: boolean };
+  error?: { kind?: string; message?: string; code?: string | number; cleanupBlocked?: boolean; descendantsTerminated?: boolean };
 };
 
 function isProcessCleanupBlocked(value: ProcessCleanupCandidate | undefined): boolean {
   const topLevel = value && 'cleanupBlocked' in value && value.cleanupBlocked === true;
   const nested = value && 'error' in value && value.error?.cleanupBlocked === true;
-  return Boolean(topLevel || nested);
+  const topLevelTermination = value?.code === 'ERR_PROCESS_TREE_TERMINATION'
+    && value.descendantsTerminated === false;
+  const nestedTermination = value?.error?.code === 'ERR_PROCESS_TREE_TERMINATION'
+    && value.error.descendantsTerminated === false;
+  return Boolean(topLevel || nested || topLevelTermination || nestedTermination);
 }
 
 function processCleanupBlockedResult(result: ProcessCleanupCandidate): ({ ok: false; error: SkillsRepoError } & ProcessTerminationMetadata) {
@@ -260,6 +273,18 @@ async function assertGitAvailable(
     executeGit,
   );
   if (!result.ok) {
+    if (isProcessCleanupBlocked(result)) {
+      const metadata = terminationMetadata(result);
+      return {
+        ok: false as const,
+        error: {
+          kind: 'networkError' as const,
+          message: 'Git process cleanup was not confirmed; Git availability is unknown',
+          ...metadata,
+        },
+        ...metadata,
+      };
+    }
     return { ok: false as const, error: { kind: 'gitUnavailable' as const, message: 'Git is not available in PATH' } };
   }
   return { ok: true as const };

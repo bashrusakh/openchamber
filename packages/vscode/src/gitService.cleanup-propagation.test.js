@@ -24,7 +24,13 @@ mock.module('vscode', () => ({
 }));
 mock.module('./bridge-git-process-runtime', () => ({ execGit }));
 
-const { getGitStatus, listGitWorktrees } = await import('./gitService.ts?cleanup-propagation');
+const {
+  getGitStatus,
+  getGitDiff,
+  getGitFileDiff,
+  getGitRangeDiff,
+  listGitWorktrees,
+} = await import('./gitService.ts?cleanup-propagation');
 const { createGitExecutionRuntime } = await import('./git-execution-runtime.ts?cleanup-propagation');
 
 const context = {
@@ -81,5 +87,19 @@ describe('VS Code Git cleanup propagation', () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it.each([
+    ['path diff', () => getGitDiff('/repo', 'file.txt')],
+    ['file diff', () => getGitFileDiff('/repo', 'file.txt')],
+    ['range diff', () => getGitRangeDiff('/repo', 'main', 'feature', 'file.txt')],
+  ])('keeps cleanup metadata on the %s error adapter', async (_name, operation) => {
+    result = cleanupResult;
+    await expect(operation()).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+      pid: 5151,
+    });
   });
 });

@@ -81,6 +81,41 @@ describe('Git process-tree ownership', () => {
     expect(settled).toBe(true);
   });
 
+  it('waits for an owned POSIX child to close before resolving', async () => {
+    const child = new EventEmitter();
+    child.pid = 987654;
+    child.kill = vi.fn();
+
+    const termination = killProcessTree(child, {
+      platform: 'linux',
+      terminationTimeoutMs: 30,
+    });
+    let settled = false;
+    void termination.then(() => { settled = true; });
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    child.emit('close', 137, 'SIGKILL');
+    await termination;
+    expect(settled).toBe(true);
+  });
+
+  it('reports bounded POSIX cleanup failure when the child never closes', async () => {
+    const child = new EventEmitter();
+    child.pid = 987656;
+    child.kill = vi.fn();
+
+    await expect(killProcessTree(child, {
+      platform: 'linux',
+      terminationTimeoutMs: 5,
+    })).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+      rootClosed: false,
+    });
+  });
+
   it('reports a bounded confirmation failure when taskkill succeeds without root close', async () => {
     const child = new EventEmitter();
     child.pid = 1234;
