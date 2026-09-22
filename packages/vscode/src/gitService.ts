@@ -2354,7 +2354,8 @@ export async function getGitDiff(
 
   const args = ['diff'];
   if (staged) args.push('--cached');
-  args.push(`-U${contextLines}`);
+  const effectiveContextLines = Number.isFinite(contextLines) ? contextLines : 3;
+  args.push(`-U${effectiveContextLines}`);
   args.push('--', target.repoPath);
 
   const result = await execGit(args, directory);
