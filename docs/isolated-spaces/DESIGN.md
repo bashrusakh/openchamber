@@ -1,6 +1,6 @@
 # Isolated spaces: design
 
-Status: design agreed on 2026-09-19. [STAGES.md](STAGES.md) says what is built. Owner and reviewer: Yulia.
+Status: design agreed on 2026-09-19. [STAGES.md](STAGES.md) says what is built. Owner and reviewer: the maintainer.
 
 Read this file before working on any stage. Then read the stage you are building in [STAGES.md](STAGES.md), the rules in [TESTING.md](TESTING.md), and the facts in [LESSONS.md](LESSONS.md) when a decision looks strange. LESSONS.md explains why.
 
@@ -33,7 +33,7 @@ The host treats everything that comes out of a space as untrusted data to displa
 
 1. Code enters as a copy. Nothing from the host is mounted into a space.
 2. Start from a clean commit or with the user's uncommitted changes. Files matched by `.gitignore` never travel.
-3. Network is the user's choice per space: allowlist or open internet. In both modes the gatekeeper blocks the user's private networks, link-local ranges, and cloud metadata addresses.
+3. Network is the user's choice per space: allowlist or open internet. In both modes the gatekeeper blocks the user's private networks, link-local ranges, and cloud metadata addresses, takes names and not addresses, and allows port 443 only, so a space can never attack a third party's other services from the user's address.
 4. Grants can be given at creation and during work. They cannot be taken back. They disappear with the space.
 5. OpenChamber stores no secret values. It remembers only the name of the host source (an env variable, a file, the `gh` token) so "same as last time" is one click.
 6. The agent in a space asks for no tool permissions by default. The existing per-session switch stays. A grant dialog says that the agent can use the grant without confirmation.
@@ -47,6 +47,9 @@ The host treats everything that comes out of a space as untrusted data to displa
 14. Previewing a dev server that runs inside a space is part of the first release.
 15. Default image first. Project-defined images (`devcontainer.json`, Dockerfile) are a later stage.
 16. Surfaces: web, desktop, mobile. VS Code never gets this feature. The entry point is absent there on purpose, and that must be visible in code.
+17. The user turns the feature on. A switch in Settings, off by default. It is the same switch the feature hides behind while it is built: at the first release it becomes the user's instead of being removed. The feature needs a container runtime, makes containers on the user's machine and downloads an image of about 1.6 GB, so it should not be in the way of people who will not use it.
+18. Turning the switch off stops every space and keeps its files, so turning it back on finds them where they were. A banner beside the switch says that before the user commits, and it appears only when there is something to stop: how many spaces, that their files are kept, and that they come back. A space that could not be stopped, because a runtime is not running or a place cannot be reached, is reported as still running rather than quietly counted as stopped, and for a place on another machine the promise is only what OpenChamber can do from here. Removing spaces is never part of turning the switch off. It is its own action, offered once the switch is off, and it goes through the confirmation that lists what would be lost. A checkbox that deletes a user's work alongside a settings toggle is not a confirmation: the two decisions differ in cost, one is reversible and the other is not, and one checkbox cannot tell five empty spaces from two that hold a day's work.
+19. While the switch is off the feature does nothing at all: no process, no `docker` or other runtime command, no connection, no reading of runtime state, no route, no entry point. Its first process is a consequence of the user turning the switch on or acting in the feature's own screens. In particular, nothing probes whether a runtime is available in order to decide whether to show an entry point — the entry point is there because the switch is on, and the probe lives inside the funnel. A probe at start-up would run `docker` for everyone, including people who never asked for any of this.
 
 ## User journey
 
@@ -111,13 +114,15 @@ The runtime's labels are the single source of truth about spaces. The host keeps
 
 The base image is a public image pinned by digest, independent of OpenChamber releases. It needs Node on glibc, because both terminal libraries ship prebuilt glibc binaries. Stage 0 used `node:22-bookworm`.
 
-The manager fills a tools volume from a trusted one-shot container that can reach the npm registry, and mounts it read-only into spaces. The volume holds the host's OpenChamber server version, a matching OpenCode, and OpenCode's first-start plugin, so a space downloads nothing to start. The server refuses to start without OpenCode beside it. Measured in stage 0: install about 27 seconds once per place, space start 1.2 seconds, 377 MB on disk, about 0.5 GB of memory per idle space, most of it OpenCode.
+The place fills a tools volume from a trusted one-shot container that can reach the npm registry, and mounts it read-only into spaces. The volume holds the host's OpenChamber server version, a matching OpenCode, and OpenCode's plugin package, so a space downloads nothing to start. The server refuses to start without OpenCode beside it. A filled volume never changes. Other content means another volume, so a running space keeps the programs it started with. Measured in stage 1b: a fill takes about 36 seconds once per tools content, 438 MB on disk, 2.3 seconds from create to a healthy server, about 370 MiB of memory per idle space, most of it OpenCode.
+
+OpenCode itself runs without the plugin package. Project tools under `.opencode/tool` import it, and OpenCode's tool listing waits for a background install of it. With no network that wait took 131 seconds. A link to the plugin above the project directories removes it. `NODE_PATH` does not help. Stage 1b also set `npm_config_fetch_retries=0` for the wait; stage 2 removed that variable, because the corridor refuses an unallowed request at once and npm does not retry a refusal.
 
 Run the space with an init process and `openchamber serve --foreground`. Without them the container cannot stop cleanly.
 
-No new release artifact. When the host updates, spaces pick up the new version at their next start, or when the agent finishes its turn. A busy agent is never interrupted for an update.
+No new release artifact. When the host updates, a stopped space moves to the new tools at its next start: the place makes its container again on the new volume, and the space's files stay in its own volumes. A running space is never touched. Moving a running space when the agent finishes its turn needs session activity, which only the dispatcher stage knows, so it is not built yet.
 
-A development build cannot reuse the registry install, because same-numbered local packages differ from the published ones. Stage 1 packs the local `web` and `sdk` packages and installs those tarballs in the filler container. Nothing delivers a server bundle today: the SSH manager's `uploadBundleOverSsh` option is stored but never read.
+A development build cannot reuse the registry install, because same-numbered local packages differ from the published ones. The place installs packed tarballs of the local `web` and `sdk` packages instead, with an npm override so that the local `sdk` wins everywhere. Deciding that a host is a development build is wiring and not built yet. Nothing delivers a server bundle today: the SSH manager's `uploadBundleOverSsh` option is stored but never read.
 
 ### Code in and out
 
@@ -136,7 +141,9 @@ The host always drives. Exact command sequences, timings, and the hostile-contai
 
 ### Gatekeeper
 
-The space sits on an internal network whose only other member is the gatekeeper. The gatekeeper also resolves DNS for the space.
+The space sits on an internal network whose only other member is the gatekeeper.
+
+On Docker the gatekeeper runs no DNS server. Measured in stage 2 on Engine 29.2.1: the embedded DNS resolves the gatekeeper's network alias from inside the space, and public names still do not resolve there. So the space resolves container aliases only, and the gatekeeper resolves a public name itself when it opens a tunnel. A place where alias resolution on a host-only network does not work, such as Apple `container`, needs the gatekeeper to resolve for the space, and brings that with it.
 
 - **Corridor.** A CONNECT tunnel to allowed domains. The gatekeeper sees the destination only.
 - **Window.** Reverse-proxy mode for services that need a secret. The tool in the space talks to the gatekeeper, which adds the secret and forwards over TLS. OpenCode's provider base URL, git's URL rewrite, and npm's registry setting point at it. No certificates are installed in the space and no TLS is intercepted.
@@ -148,8 +155,10 @@ The space sits on an internal network whose only other member is the gatekeeper.
 Stage 0 proved the window and the corridor with fake keys and a fake model server. Details and the working `opencode.json` are in [stage-0/e3-model-window-and-short-token.md](stage-0/e3-model-window-and-short-token.md).
 
 - The window sets the secret header per provider: `Authorization` for OpenAI-style APIs, `x-api-key` for Anthropic. With `options.baseURL` and a dummy `options.apiKey` in the space's provider config and no stored auth entry, OpenCode's built-in auth plugins stay out of the way.
-- Space environment: `HTTPS_PROXY` and `HTTP_PROXY` for the corridor, `NO_PROXY` naming the gatekeeper so window traffic skips the corridor, `NODE_USE_ENV_PROXY=1` so the agent's Node scripts use the proxy, `OPENCODE_DISABLE_MODELS_FETCH=1`, and `OPENCODE_DISABLE_AUTOUPDATE=1`. Tools that ignore the proxy, such as ssh, fail because no route exists.
-- Short OpenAI token: the record is an `oauth` entry with the real short `access`, a dummy `refresh`, and the real `expires`. The manager pushes a fresh one over `exec` with `PUT /auth/openai` on the OpenCode server inside the space, and it takes effect on the next request. If the space had no OpenAI record when its project instance loaded, dispose that instance after the first push. Keep `auth.openai.com` off every allowlist so a space can never rotate the user's refresh token. When the token expires the user sees a clean "Token refresh failed", once, with no retry loop.
+- Space environment, as stage 2 built it: `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY` and `http_proxy` for the corridor, `NO_PROXY` and `no_proxy` naming the gatekeeper, `localhost` and `127.0.0.1`, `NODE_USE_ENV_PROXY=1` so the agent's Node scripts use the proxy, `OPENCODE_DISABLE_MODELS_FETCH=1`, `OPENCODE_DISABLE_AUTOUPDATE=1`, and `OPENCHAMBER_RELAY_HOST=off` so a space never hosts the relay. Tools that ignore the proxy, such as ssh, fail because no route exists. Three things were measured and each of them decided a line above. curl 7.88.1 ignores an uppercase `HTTP_PROXY` on purpose, so the lowercase spelling is not optional. curl and Node both send loopback traffic to the proxy, so loopback must be in `NO_PROXY` or the host's own health check inside a space goes to the corridor. Node 22 ignores proxy variables entirely without `NODE_USE_ENV_PROXY=1`.
+- `npm_config_fetch_retries=0` is gone, which answers the question stage 1b left. Measured with `npm view opencode-ai version` from a space-like container: with no route at all, 70 seconds; through a corridor that answers an immediate 403, 0.3 seconds with npm's default retry settings, because npm does not retry a 403. The agent's own `npm install` has its retries back.
+- Short OpenAI token: the record is an `oauth` entry with the real short `access`, a dummy `refresh`, and the real `expires`. The manager pushes a fresh one over `exec` with `PUT /auth/openai` on the OpenCode server inside the space, and it takes effect on the next request. When the token expires the user sees a clean "Token refresh failed", once, with no retry loop. If the space had no OpenAI record when its project instance loaded, dispose that instance after the first push.
+- What protects the user's login is that the long-lived refresh token never enters the space. That holds in both network modes. The gatekeeper refuses `auth.openai.com` on top of it, and what that refusal is worth depends on the mode: in allowlist mode the host is unreachable; in open mode it is only made harder, because the space reaches every public host on 443 and can go through a third-party intermediary, whose name is all the corridor sees. Measured in stage 2: refusing the name alone was not even a lock, because the space could reach the same host by its address, so the corridor takes names and refuses address targets in both modes.
 - Never set `OPENCODE_AUTH_CONTENT` in a space. It wins over the file until restart.
 - Read a turn's failure from session events. `opencode run --attach` exits 0 on a provider error.
 - A space with an OpenAI browser login must leave `provider.openai.options.baseURL` unset. Whether the two conflict is unverified.
@@ -163,16 +172,16 @@ Stage 0 proved the window and the corridor with fake keys and a fake model serve
 - Session-keyed actions take the directory from the session record and fail without a server-confirmed one. The current-directory fallback in the session actions goes away once spaces exist.
 - Host only, never prefixed: provider and auth pages, settings, GitHub, Linear, voice, guests, project routes. Refused across the boundary: moving a session, worktree and git-integrate actions, `/api/fs/serve`, and `/api/preview/proxy`. `/api/fs/raw` from a space is forwarded with `nosniff` and safe content types only.
 - The new socket and asset paths must join the exact-match allowlists for the relay, URL-token auth, and the Electron realtime proxy, or mobile fails silently.
-- The manager issues a fresh space token over `exec` at every host start. Responses from a space cannot set cookies, and files from a space never render as pages under the app's origin.
+- The manager issues a fresh space token over `exec` at every host start. Since stage 1b the place writes one token at create, into a file under the space's HOME, and the server inside reads it only when it starts. The host reads it back over `exec`. A fresh token therefore needs a restart of the server inside, and the dispatcher stage decides whether that is worth it. The agent can read the token, so it protects the server from others and never from the agent. Responses from a space cannot set cookies, and files from a space never render as pages under the app's origin.
 - The session list is the host list plus each reachable space's list, with a completeness mark per space. An unreachable space keeps its last known sessions, marked stale. Missing answers never mean deletion. The merge treats a space's list and events as untrusted: it drops any record whose directory lies outside that space's root and never lets a space overwrite a host session id.
-- Unverified until stage 1: that OpenCode inside a space reports a session's directory exactly as the space path, without canonicalising it.
+- Verified in stage 1b with OpenCode 1.18.31: a session created for `/spaces/<id>/<repo>` reports exactly that directory. A directory reached through a symlink comes back as its real path. So the host hands OpenCode real paths only, and compares what comes back against the real space root.
 - Each space has its own event connection with its own state, attached after the v2 event translation layer, with exponential backoff. After a gap the client re-reads that one space.
 - Activity dots, unread marks, and notifications work for space sessions because their events feed the same watcher. At startup the host asks spaces for their state.
 - The idle timer lives inside the space, so it works while OpenChamber is closed.
 
 ### Skills to load
 
-`openchamber-change-discipline` always. `ui-api-decoupling`, `relay-transport`, and `sync-state-invariants` for the dispatcher, sessions, and events. `desktop-shell` for every child process. `theme-system`, `locale-ui-patterns`, and `settings-ui-patterns` for UI. All user-facing text goes through the locale system in every supported language.
+`openchamber-change-discipline` always. `isolated-space-boundary` for trust-boundary changes in hardening, networks and gatekeeper policy, exec and lifecycle, grants and credentials, code transfer and apply, dispatcher isolation, preview content, or protection tests. `ui-api-decoupling`, `relay-transport`, and `sync-state-invariants` for the dispatcher, sessions, and events. `desktop-shell` for every child process. `theme-system`, `locale-ui-patterns`, and `settings-ui-patterns` for UI. All user-facing text goes through the locale system in every supported language.
 
 ## Later
 

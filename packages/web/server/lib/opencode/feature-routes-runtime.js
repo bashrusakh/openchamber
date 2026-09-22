@@ -86,7 +86,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
         import('../walkthrough/index.js'),
         import('../walkthrough/pull-request.js'),
       ]);
-      walkthroughService = { ...service, getPullRequestDiff: pullRequest.getPullRequestDiff };
+      walkthroughService = { ...service, getPullRequestDiff: pullRequest.getPullRequestDiff, getPullRequestFileContents: pullRequest.getPullRequestFileContents };
     }
     return walkthroughService;
   };

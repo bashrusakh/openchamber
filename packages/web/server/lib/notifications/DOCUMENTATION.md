@@ -136,3 +136,30 @@ The `settings` parameter for `prepareNotificationLastMessage` supports `maxLastM
 ### Testing
 - Run `bun run type-check`, `bun run lint`, and `bun run build` before finalizing changes.
 - Unit tests should cover truncation behavior and edge cases (empty strings, invalid inputs).
+
+## Browser event delivery
+
+Web notifications subscribe to the shared `/api/openchamber/events` control
+stream. The emitter sends each notification there and through the existing
+global broadcaster. The broadcaster owns the main WebSocket and the legacy
+`/api/notifications/stream` endpoint, which remains available to older clients.
+Do not call both global and control broadcasters for one notification: they
+share the WebSocket client set and would send each frame twice.
+
+The web hook preserves `tag`, `sessionId`, `kind`, and the remaining notification
+fields so the web notification API recognizes duplicate control-SSE and main-WS
+delivery. Its existing five-second claim suppresses duplicate native alerts.
+Native alerts remain best-effort live events, with no historical replay or
+synthetic catch-up alerts. Authoritative session attention is owned by sync.
+
+This removes one persistent HTTP connection per browser tab in both main-WS and
+main-SSE modes. Two tabs use two control SSE connections, or four connections
+when their main event pipelines also use SSE. It does not make HTTP/1.1 support
+an unlimited number of tabs. The notification hook retains the app's background
+work enablement, settings, focus, and runtime gates; it no longer opens a second
+connection or switches sources when the main pipeline changes transport.
+
+The control stream retains its browser-control capability declaration, runtime
+switch cleanup, stale-source rejection, heartbeat, and reconnect-ready events.
+Electron uses its native notification path; VS Code does not subscribe to this
+server-only stream. Mobile shells retain their existing push behavior.

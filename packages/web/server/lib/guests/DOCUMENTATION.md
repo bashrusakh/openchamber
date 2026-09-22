@@ -68,3 +68,14 @@ A missing folder is omitted from the list. Other guests stay. A corrupt `extensi
 - File access is decided in `files.js` on canonical paths, never on the string the guest sent. `matchesFilesystemPattern`, `expandHome`, and `globToRegExp` are pure; `resolveGuestFilePath` and `runGuestFileOperation` take `fsPromises` / `nodePath` so tests can stub the OS. The project directory is whatever `resolveOptionalProjectDirectory` validated for this request, so a guest cannot name a project the UI did not open.
 - Update swap (`updates.js` `updateGuest`): the new clone lands in `{dataDir}/extensions/.tmp-<id>-<random>` and is inspected exactly like an install before anything else moves. Only then: stop the guest's service, rename current → `.old-<id>`, rename temp → final, delete `.old-<id>`. Any failure before the swap deletes the temp dir and leaves the install untouched; a failed second rename moves `.old-<id>` back. The store row is not rewritten (same path, same id), the catalog cache and that guest's update cache entry are dropped.
 - The OAuth callback skips UI auth. Everything else under `/api/guests` stays behind the usual session.
+
+## Host shutdown
+
+`beginGuestServiceShutdown` closes service admission synchronously. Requests retain
+their host lifecycle across store reads and startup awaits, so a late completion
+cannot spawn a process during shutdown or enter a later host lifecycle.
+`stopAllGuestServices` cancels and drains pending starts as well as running and
+already-stopping children. Per-guest Pause and ordinary cleanup do not close host
+admission. `beginGuestServiceHost` opens a new lifecycle only after that drain.
+The common graceful-shutdown runtime stops surface viewers before the services.
+Crash/SIGKILL recovery remains outside this in-memory registry.

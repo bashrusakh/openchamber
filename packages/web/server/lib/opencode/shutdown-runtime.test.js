@@ -3,7 +3,7 @@ import http from 'node:http';
 
 import { createGracefulShutdownRuntime } from './shutdown-runtime.js';
 
-const createRuntime = (server) => createGracefulShutdownRuntime({
+const createRuntime = (server, overrides = {}) => createGracefulShutdownRuntime({
   process: { exit: vi.fn() },
   shutdownTimeoutMs: 1000,
   getExitOnShutdown: () => false,
@@ -31,6 +31,14 @@ const createRuntime = (server) => createGracefulShutdownRuntime({
   getActiveTunnelController: () => null,
   setActiveTunnelController: vi.fn(),
   tunnelAuthController: { clearActiveTunnel: vi.fn() },
+  beginGuestServiceShutdown: vi.fn(),
+  stopAllGuestServices: vi.fn(),
+  getGuestSurfaceRuntime: () => null,
+  getRealtimeProxyRuntime: () => null,
+  getDictationRuntime: () => null,
+  getRelayService: () => null,
+  getRelayReconcileTimer: () => null,
+  ...overrides,
 });
 
 describe('graceful shutdown runtime', () => {
@@ -78,5 +86,92 @@ describe('graceful shutdown runtime', () => {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+
+  it('stops guest services during shutdown', async () => {
+    const server = {
+      close: vi.fn((callback) => {
+        callback();
+      }),
+    };
+    const stopAllGuestServices = vi.fn(async () => {});
+
+    const runtime = createRuntime(server, { stopAllGuestServices });
+    await runtime.gracefulShutdown({ exitProcess: false });
+
+    expect(stopAllGuestServices).toHaveBeenCalledTimes(1);
+  });
+
+  it('continues shutdown when stopping guest services fails', async () => {
+    const server = {
+      close: vi.fn((callback) => {
+        callback();
+      }),
+    };
+    const stopAllGuestServices = vi.fn(async () => {
+      throw new Error('guest teardown failed');
+    });
+    const terminalRuntime = { shutdown: vi.fn(async () => {}) };
+
+    const runtime = createRuntime(server, {
+      stopAllGuestServices,
+      getTerminalRuntime: () => terminalRuntime,
+    });
+    await runtime.gracefulShutdown({ exitProcess: false });
+
+    expect(stopAllGuestServices).toHaveBeenCalledTimes(1);
+    expect(terminalRuntime.shutdown).toHaveBeenCalledTimes(1);
+    expect(server.close).toHaveBeenCalled();
+  });
+
+  it('closes guest admission synchronously and cleans every runtime once across repeated shutdown calls', async () => {
+    vi.useFakeTimers();
+    const order = [];
+    const cleanup = (name) => vi.fn(() => { order.push(name); });
+    const viewers = { stop: cleanup('viewers') };
+    const proxy = { stop: cleanup('proxy') };
+    const dictation = { stop: cleanup('dictation') };
+    const relay = { stop: cleanup('relay') };
+    const gate = cleanup('gate');
+    const guests = cleanup('guests');
+    const reconcile = vi.fn();
+    const timer = setInterval(reconcile, 100);
+    const runtime = createRuntime(null, {
+      beginGuestServiceShutdown: gate,
+      stopAllGuestServices: guests,
+      getGuestSurfaceRuntime: () => viewers,
+      getRealtimeProxyRuntime: () => proxy,
+      getDictationRuntime: () => dictation,
+      getRelayService: () => relay,
+      getRelayReconcileTimer: () => timer,
+    });
+    const first = runtime.gracefulShutdown();
+    expect(gate).toHaveBeenCalledTimes(1);
+    expect(runtime.gracefulShutdown()).toBe(first);
+    await first;
+    await runtime.gracefulShutdown();
+    expect(order).toEqual(['gate', 'viewers', 'proxy', 'relay', 'dictation', 'guests']);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('isolates failed viewer and relay cleanup and still drains guests and exits', async () => {
+    const stop = vi.fn(() => { throw new Error('stop failed'); });
+    const stopAllGuestServices = vi.fn(async () => {});
+    const dictation = { stop: vi.fn() };
+    const process = { exit: vi.fn() };
+    const runtime = createRuntime(null, {
+      process,
+      getGuestSurfaceRuntime: () => ({ stop }),
+      getRelayService: () => ({ stop }),
+      getDictationRuntime: () => dictation,
+      stopAllGuestServices,
+    });
+    await runtime.gracefulShutdown({ exitProcess: true });
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(dictation.stop).toHaveBeenCalledTimes(1);
+    expect(stopAllGuestServices).toHaveBeenCalledTimes(1);
+    expect(process.exit).toHaveBeenCalledWith(0);
   });
 });

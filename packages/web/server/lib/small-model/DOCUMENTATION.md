@@ -31,10 +31,15 @@ other runtime API.
      `settings-helpers.js` (server), `persistence.ts` (client), and
      `bridge-settings-runtime.ts` (VS Code).
   1. `small_model` from the merged OpenCode config layers (`provider/model`).
-  2. Family-priority scan (`gemini-flash` → `gpt-nano` → `claude-haiku`)
+  2. Family-priority scan (`gpt-luna` → `gemini-flash-lite` →
+     `gemini-flash` → `claude-haiku`, then compatibility fallbacks `gpt-nano`
+     and `gpt-mini`)
      **within the session's provider first** (`preferredProviderID`, like
      OpenCode resolves within the current provider), then over the other
      providers with a usable auth entry, newest `release_date` first.
+     OpenAI OAuth only accepts `gpt-luna` from the general catalog because the
+     other OpenAI entries describe API-key availability, not the ChatGPT/Codex
+     model set.
   3. GitHub Copilot hidden utility models (`gpt-*-nano/mini`) — these never
      appear in the catalog, so they participate as the `gpt-nano` family entry
      and as a final utility fallback.

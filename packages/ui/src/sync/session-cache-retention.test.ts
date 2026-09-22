@@ -8,6 +8,11 @@ const cleanups: Array<() => void> = []
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup() })
 const flush = async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve() }
 const IDLE_TTL_MS = 40
+// Tests of the count limit and warm switches must not race the idle grace: a
+// slow CI runner can take longer than IDLE_TTL_MS to select a handful of
+// sessions, and idle expiry then evicts the oldest ones legitimately. Only
+// tests that exercise the idle grace opt into the short one.
+const COUNT_ONLY_TTL_MS = 60 * 60 * 1000
 const waitIdle = async () => { await new Promise((resolve) => setTimeout(resolve, IDLE_TTL_MS * 2)); await flush() }
 
 function transcript(sessionID: string, turns = 8, steps = 12) {
@@ -36,7 +41,7 @@ function transcript(sessionID: string, turns = 8, steps = 12) {
   return records
 }
 
-function setup(surface: "desktop" | "mobile" | "vscode" = "desktop", recordsFor = transcript) {
+function setup(surface: "desktop" | "mobile" | "vscode" = "desktop", recordsFor = transcript, idleTtlMs = COUNT_ONLY_TTL_MS) {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window")
   Object.defineProperty(globalThis, "window", { configurable: true, value: {
     __OPENCHAMBER_SURFACE__: surface === "mobile" ? "mobile" : "desktop",
@@ -82,7 +87,7 @@ function setup(surface: "desktop" | "mobile" | "vscode" = "desktop", recordsFor 
   const releases: SessionMessageTarget[] = []
   const active = new Set<string>()
   loader.startCacheRetention({
-    idleTtlMs: IDLE_TTL_MS,
+    idleTtlMs,
     isCurrent: () => current,
     isViewed: (target) => target.directory === viewed.directory && target.sessionID === viewed.sessionID,
     isActive: (target) => target.directory === "/repo" && active.has(target.sessionID),
@@ -115,7 +120,7 @@ function setup(surface: "desktop" | "mobile" | "vscode" = "desktop", recordsFor 
 
 describe("session cache retention", () => {
   for (const surface of ["desktop", "mobile", "vscode"] as const) {
-    test(`${surface}: keeps a left session whole, evicts it after the idle grace, reloads on return`, async () => {
+    test(`${surface}: keeps a left session whole and returns to it without a request`, async () => {
       const env = setup(surface)
       await env.select("a")
       await env.loader.loadComplete(env.target("a"))
@@ -127,7 +132,16 @@ describe("session cache retention", () => {
       await env.select("a")
       expect(env.requests).toHaveLength(calls)
       expect(env.messages("a")).toBe(original)
+    })
+
+    test(`${surface}: evicts a left session after the idle grace and reloads it on return`, async () => {
+      const env = setup(surface, transcript, IDLE_TTL_MS)
+      await env.select("a")
+      await env.loader.loadComplete(env.target("a"))
+      const original = env.messages("a") ?? []
+      expect(original).toHaveLength(104)
       await env.select("b")
+      const calls = env.requests.length
       await waitIdle()
       expect(env.messages("a")).toBeUndefined()
       expect(env.childStores.getChild("/repo")?.getState().part[original[0].id]).toBeUndefined()
@@ -154,7 +168,7 @@ describe("session cache retention", () => {
   }
 
   test("busy and blocking background sessions outlive the idle grace until they settle", async () => {
-    const env = setup()
+    const env = setup("desktop", transcript, IDLE_TTL_MS)
     await env.select("a")
     const store = env.childStores.getChild("/repo")!
     store.setState({ session_status: { a: { type: "busy" } } })
@@ -173,7 +187,7 @@ describe("session cache retention", () => {
   })
 
   test("a session that is live in the global status store is protected while it runs", async () => {
-    const env = setup()
+    const env = setup("desktop", transcript, IDLE_TTL_MS)
     await env.select("a")
     env.setActive("a", true)
     await env.select("b")
@@ -187,7 +201,7 @@ describe("session cache retention", () => {
   })
 
   test("the open session is never evicted, and leaving to a draft starts the grace", async () => {
-    const env = setup()
+    const env = setup("desktop", transcript, IDLE_TTL_MS)
     await env.select("a")
     await waitIdle()
     expect(env.messages("a")).toHaveLength(104)
@@ -199,7 +213,7 @@ describe("session cache retention", () => {
   })
 
   test("a background history reader holds the transcript until its snapshot is consumed", async () => {
-    const env = setup()
+    const env = setup("desktop", transcript, IDLE_TTL_MS)
     await env.select("b")
     const release = env.loader.retainSessionHistory(env.target("a"))
     await env.loader.loadComplete(env.target("a"))
@@ -211,7 +225,7 @@ describe("session cache retention", () => {
   })
 
   test("a rendered transcript stays through a deferred switch until it leaves the screen", async () => {
-    const env = setup()
+    const env = setup("desktop", transcript, IDLE_TTL_MS)
     const release = env.loader.retainSessionHistory(env.target("a"), "rendered")
     await env.select("a")
     await env.select("b")
@@ -223,7 +237,7 @@ describe("session cache retention", () => {
   })
 
   test("runtime changes cancel scheduled cleanup and directories isolate equal session IDs", async () => {
-    const env = setup()
+    const env = setup("desktop", transcript, IDLE_TTL_MS)
     await env.select("a")
     env.leave()
     env.changeRuntime()

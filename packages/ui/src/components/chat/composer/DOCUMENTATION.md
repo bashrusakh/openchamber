@@ -283,7 +283,11 @@ and the send path reading the same grammar.
   through the existing project-change flow only on explicit activation.
   Filtering changes the result area below the anchored input without moving
   the search field. The worktree picker remains a Select; mobile keeps its
-  bottom sheets. The selectors only consume their shared prefix while the
+  bottom sheets. `ProjectPickerSheet` shares the mobile project list and
+  transient search state with the Settings selector. Settings passes its own
+  directory selection callback, so choosing a project there leaves chat in
+  place. Both callers use the same ranked label/path search and project icons.
+  The selectors only consume their shared prefix while the
   draft target UI is mounted.
   Keyboard selection returns focus to the current form's composer, including
   when the selected value is unchanged.
@@ -354,6 +358,15 @@ mobile browsers dismissing the keyboard before a tap's click lands, iOS
 refusing programmatic focus outside a gesture, WebKit leaving the layout
 viewport panned after the keyboard hides, overlay chains handing off through a
 frame where nothing is open.
+
+Typed text and salvage text shown after a failed dictation use the same measured
+line and screen-height limits. Once the viewport reports usable space, content
+scrolls inside the composer so the failed-dictation action row stays inside the
+chat screen. A transient non-positive viewport measurement keeps the existing
+line cap until the next resize instead of collapsing the editor to zero height.
+The salvage reader follows the end only while already there; rewrapping text
+keeps a reader who scrolled up in place. Expanding the composer releases this
+height floor and uses the existing fullscreen layout.
 
 **Every timeout and `flushSync` in them has a reason recorded next to it, and
 none of them is verifiable outside a real device.** Change them only against

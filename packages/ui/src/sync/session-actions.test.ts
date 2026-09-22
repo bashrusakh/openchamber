@@ -1042,7 +1042,7 @@ describe("archiving a batch through the server", () => {
 })
 
 describe("session restore (unarchive)", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     replyCalls.length = 0
     registeredSessionDirectories.length = 0
     movedSessionDirectories.length = 0
@@ -1060,6 +1060,8 @@ describe("session restore (unarchive)", () => {
     controlPlaneMoveErrorsById.clear()
     globalHasLoaded = true
     deletedChatDirectories.length = 0
+    const { resetSessionOrdering } = await import("./session-ordering")
+    resetSessionOrdering()
   })
 
   test("does not restore locally until the server returns the restored session", async () => {
@@ -1072,11 +1074,14 @@ describe("session restore (unarchive)", () => {
     expect(await unarchiveSession("session-a")).toBe(false)
     expect(globalUpsertedSessions).toEqual([])
     expect(registeredSessionDirectories).toEqual([])
+    const { useSessionOrderingStore } = await import("./session-ordering")
+    expect(useSessionOrderingStore.getState().rankById.has("session-a")).toBe(false)
   })
 
   test("sends the archive-clearing sentinel and upserts the restored session after confirmation", async () => {
+    const restored = { id: "session-a", directory: "/test/project", time: { created: 1, updated: 7, archived: 0 } }
     sessionUpdateResult = {
-      data: { id: "session-a", directory: "/test/project", time: { created: 1, archived: 0 } } as Session,
+      data: restored,
     }
     const source = createStore({}, {
       session: [],
@@ -1091,8 +1096,11 @@ describe("session restore (unarchive)", () => {
       method: "session.update",
       params: { sessionID: "session-a", time: { archived: 0 }, directory: "/test/project" },
     }])
-    expect((globalUpsertedSessions[0] as Session)?.time?.archived).toBe(0)
+    expect(globalUpsertedSessions).toEqual([restored])
     expect(registeredSessionDirectories).toEqual([{ sessionID: "session-a", directory: "/test/project" }])
+    const { useSessionOrderingStore } = await import("./session-ordering")
+    const rank = useSessionOrderingStore.getState().rankById.get("session-a")
+    expect(rank ?? 0).toBeGreaterThan(0)
   })
 
   test("fails when the server keeps the session archived", async () => {
@@ -1109,6 +1117,8 @@ describe("session restore (unarchive)", () => {
     expect(await unarchiveSession("session-a")).toBe(false)
     expect(globalUpsertedSessions).toEqual([])
     expect(registeredSessionDirectories).toEqual([])
+    const { useSessionOrderingStore } = await import("./session-ordering")
+    expect(useSessionOrderingStore.getState().rankById.has("session-a")).toBe(false)
   })
 
   test("keeps an existing worktree restore in place without a control-plane move", async () => {
@@ -1239,6 +1249,8 @@ describe("session restore (unarchive)", () => {
     // The stale response must not reconcile the runtime the user switched to.
     expect(globalUpsertedSessions).toEqual([])
     expect(registeredSessionDirectories).toEqual([])
+    const { useSessionOrderingStore } = await import("./session-ordering")
+    expect(useSessionOrderingStore.getState().rankById.has("session-a")).toBe(false)
   })
 
   test("keeps confirmed sessions and fails the rest when the runtime changes mid-batch", async () => {
@@ -1265,6 +1277,9 @@ describe("session restore (unarchive)", () => {
     // as failures instead of being silently dropped.
     expect(result).toEqual({ restoredIds: ["session-a"], failedIds: ["session-b", "session-c"] })
     expect(globalUpsertedSessions).toHaveLength(1)
+    const { useSessionOrderingStore } = await import("./session-ordering")
+    expect(useSessionOrderingStore.getState().rankById.has("session-a")).toBe(true)
+    expect(useSessionOrderingStore.getState().rankById.has("session-b")).toBe(false)
     // session-c must not reach the SDK after the runtime changed.
     expect(replyCalls.filter((call) => call.method === "session.update").map((call) => call.params.sessionID))
       .toEqual(["session-a", "session-b"])
@@ -1432,6 +1447,31 @@ describe("updateSessionTitle live state", () => {
     expect(updateCall?.params.directory).toBe("/test/project")
     expect(globalUpsertedSessions).toEqual([updatedSession])
     expect(sessionStore.getState().session[0].title).toBe("New Title")
+  })
+
+  test("renames a worktree session against its own directory, not the project root that indexes its status", async () => {
+    const worktreeSession = {
+      id: "session-wt",
+      directory: "/test/project/.worktrees/feature",
+      title: "Old Title",
+      time: { created: 1, updated: 1 },
+    } as Session
+    const updatedSession = { ...worktreeSession, title: "New Title", time: { created: 1, updated: 2 } } as Session
+    globalActiveSessions = [worktreeSession]
+    // The project root's store knows the session only through the status index
+    // it receives for its worktrees; the session record itself lives elsewhere.
+    const rootStore = createStore({}, { session: [], session_status: { "session-wt": { type: "idle" } } })
+    const childStores = createChildStores([["/test/project", rootStore]])
+    sessionUpdateResult = { data: updatedSession }
+
+    const { setActionRefs, updateSessionTitle } = await import("./session-actions")
+    setActionRefs(mockSdk as unknown as OpencodeClient, childStores, () => "/test/project")
+
+    await updateSessionTitle("session-wt", "New Title")
+
+    const updateCall = replyCalls.find((call) => call.method === "session.update")
+    expect(updateCall?.params.directory).toBe("/test/project/.worktrees/feature")
+    globalActiveSessions = []
   })
 })
 

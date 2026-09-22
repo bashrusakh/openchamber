@@ -31,6 +31,13 @@ export const createGracefulShutdownRuntime = (dependencies) => {
     getActiveTunnelController,
     setActiveTunnelController,
     tunnelAuthController,
+    beginGuestServiceShutdown,
+    stopAllGuestServices,
+    getGuestSurfaceRuntime,
+    getRealtimeProxyRuntime,
+    getDictationRuntime,
+    getRelayService,
+    getRelayReconcileTimer,
   } = dependencies;
 
   let shutdownPromise = null;
@@ -39,17 +46,35 @@ export const createGracefulShutdownRuntime = (dependencies) => {
     if (getIsShuttingDown()) return;
 
     setIsShuttingDown(true);
+    beginGuestServiceShutdown();
     syncToHmrState();
     console.log('Starting graceful shutdown...');
     const exitProcess = typeof options.exitProcess === 'boolean' ? options.exitProcess : getExitOnShutdown();
 
-    openCodeWatcherRuntime.stop();
-    sessionRuntime.dispose();
-    sessionAssistRuntime?.stop?.();
-    sessionGoalRuntime?.stop?.();
-    contextObligatoryRuntime?.stop?.();
-    messageQueueRuntime?.stop?.();
-    scheduledTasksRuntime?.stop?.();
+    // Both embedded stop() and daemon exits use this sequence. Close admission
+    // synchronously above, then stop viewers before draining their services.
+    const cleanupOperations = [
+      () => clearInterval(getRelayReconcileTimer()),
+      () => getGuestSurfaceRuntime()?.stop(),
+      () => getRealtimeProxyRuntime()?.stop(),
+      () => getRelayService()?.stop(),
+      () => getDictationRuntime()?.stop(),
+      () => openCodeWatcherRuntime.stop(),
+      () => sessionRuntime.dispose(),
+      () => sessionAssistRuntime?.stop?.(),
+      () => sessionGoalRuntime?.stop?.(),
+      () => contextObligatoryRuntime?.stop?.(),
+      () => messageQueueRuntime?.stop?.(),
+      () => scheduledTasksRuntime?.stop?.(),
+      stopAllGuestServices,
+    ];
+    for (const cleanup of cleanupOperations) {
+      try {
+        await cleanup();
+      } catch {
+        // One failed runtime must not skip the rest of host teardown.
+      }
+    }
 
     const healthCheckInterval = getHealthCheckInterval();
     if (healthCheckInterval) {

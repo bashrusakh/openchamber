@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+
 import { describe, expect, it } from 'vitest';
 
 import { runCommand } from './run-command.js';
@@ -13,6 +16,18 @@ describe('runCommand', () => {
   it('writes stdin to the child and closes it', async () => {
     const result = await runCommand(node, ['-e', 'process.stdin.pipe(process.stdout)'], { stdin: 'hello' });
     expect(result).toEqual({ code: 0, stdout: 'hello', stderr: '' });
+  });
+
+  it('writes a Buffer to the child byte for byte', async () => {
+    const bytes = Buffer.from([0, 255, 10, 13, 128, 0]);
+    const result = await runCommand(node, ['-e', 'const chunks = []; process.stdin.on("data", (chunk) => chunks.push(chunk)).on("end", () => process.stdout.write(Buffer.concat(chunks).toString("hex")))'], { stdin: bytes });
+    expect(result.stdout).toBe(bytes.toString('hex'));
+  });
+
+  it('runs the child in the given working directory', async () => {
+    const directory = fs.realpathSync(os.tmpdir());
+    const result = await runCommand(node, ['-e', 'process.stdout.write(process.cwd())'], { cwd: directory });
+    expect(result.stdout).toBe(directory);
   });
 
   it('closes stdin when there is no input, so a reader does not hang', async () => {

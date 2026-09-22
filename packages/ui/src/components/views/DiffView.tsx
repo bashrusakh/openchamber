@@ -55,7 +55,7 @@ import { useWalkthroughStore } from '@/stores/useWalkthroughStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSessionMessages } from '@/sync/sync-context';
 import { getFirstChangedModifiedLineFromPatch } from './diffPatchUtils';
-import type { FileDiffMetadata } from '@pierre/diffs';
+import { parseDiffFromFile, type FileDiffMetadata } from '@pierre/diffs';
 
 // Minimum width for side-by-side diff view (px)
 const SIDE_BY_SIDE_MIN_WIDTH = 1100;
@@ -1343,7 +1343,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
         return null;
     }, [activeDiffScope, branchBase, currentBranch, selectedCommitHash, selectedPr]);
     const comparison = useGitComparison(effectiveDirectory ?? null, comparisonSource, visible && !isVSCodeRuntime(), activeDiffScope === 'branch' ? branchRevision : '');
-    const { fetchDiff: loadComparisonDiff } = comparison;
+    const { fetchDiff: loadComparisonDiff, fetchFullFile: loadComparisonFullFile } = comparison;
     const commitFiles = activeDiffScope === 'commit' ? comparison.files : null;
     const commitFilesError = activeDiffScope === 'commit' ? comparison.error : null;
     const branchFiles = activeDiffScope === 'branch' ? comparison.files : null;
@@ -1371,13 +1371,31 @@ export const DiffView: React.FC<DiffViewProps> = ({
         },
         [loadComparisonDiff, t]
     );
-    // PR diffs come from the provider at fixed context; branch and commit
-    // diffs can be re-read from git with the whole file as context.
+    // Branch and commit diffs are re-read from git with the whole file as
+    // context; a PR diff comes from GitHub at fixed context, so its full view
+    // is built from both sides of the file as GitHub has them.
+    const fetchComparisonFullFileEntry = React.useCallback(
+        async (filePath: string): Promise<ComparisonDiffResult> => {
+            try {
+                const { original, modified } = await loadComparisonFullFile(filePath);
+                // Complete-file metadata, like the git-backed full patches: the
+                // viewer keeps the highlighted partial diff on screen until this
+                // one is highlighted, then replays the requested expansion.
+                const fileDiff = parseDiffFromFile({ name: filePath, contents: original }, { name: filePath, contents: modified });
+                return { status: 'ready', data: { original, modified, fileDiff, contextMode: 'full' } };
+            } catch (error) {
+                return { status: 'error', message: error instanceof Error ? error.message : t('diffView.state.failedToLoadDiff') };
+            }
+        },
+        [loadComparisonFullFile, t]
+    );
     const loadFullComparisonDiff = React.useMemo(
         () => activeDiffScope === 'branch' || activeDiffScope === 'commit'
             ? (filePath: string) => fetchComparisonDiffEntry(filePath, true)
+            : activeDiffScope === 'pr'
+            ? fetchComparisonFullFileEntry
             : undefined,
-        [activeDiffScope, fetchComparisonDiffEntry]
+        [activeDiffScope, fetchComparisonDiffEntry, fetchComparisonFullFileEntry]
     );
 
     const comparisonDiffData = useRangeKeyedCache<ComparisonDiffResult>(

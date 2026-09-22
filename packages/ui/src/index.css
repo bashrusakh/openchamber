@@ -425,8 +425,8 @@ button svg,
  * value only WebKit parses, which keeps the rule where it was written for.
  */
 @supports (font: -apple-system-body) {
-  button svg:not(.animate-spin),
-  [role="button"] svg:not(.animate-spin) {
+  button svg:not(.animate-spin):not(.activity-spinner),
+  [role="button"] svg:not(.animate-spin):not(.activity-spinner) {
     transform: translateZ(0);
     -webkit-transform: translateZ(0);
   }
@@ -635,12 +635,6 @@ html:not(.dark) .chat-scroll {
   scrollbar-gutter: unset !important;
 }
 
-/* Extensions can cross the overflow threshold as cards expand or the catalog loads. */
-.overlay-scrollbar-target:has(> .extensions-settings-page),
-.extensions-settings-page > .overlay-scrollbar-target {
-  scrollbar-gutter: stable !important;
-}
-
 .overlay-scrollbar-target::-webkit-scrollbar {
   width: 0 !important;
   height: 0 !important;
@@ -671,6 +665,13 @@ html:not(.dark) .chat-scroll {
    Follow overflow, not hover visibility, so showing the thumb never shifts text.
    Direct-child matching prevents nested scrollers from reserving space twice. */
 .overlay-scrollbar-wrapper:has(> .overlay-scrollbar > .overlay-scrollbar__thumb--vertical:not([hidden])) {
+  padding-right: 6px;
+}
+
+/* Settings pages cross the overflow threshold all the time (collapsible
+   sections, catalogs loading), so they reserve the thumb's space up front
+   instead of shifting content the moment a scrollbar appears. */
+.overlay-scrollbar-wrapper--stable-gutter {
   padding-right: 6px;
 }
 
@@ -1803,6 +1804,21 @@ textarea[data-terminal-hidden-input="true"]::placeholder {
 
 .animate-status-logo {
   animation: oc-status-logo 4s steps(10, jump-none) infinite;
+}
+
+@keyframes activity-spin {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* Running-session spinner (opt-in). steps() limits rotation changes to 20 per
+   second. This still adds compositor work while a running indicator is visible.
+   Technique from VS Code's codicon-modifier-spin. */
+.activity-spinner {
+  animation: activity-spin 1.5s steps(30) infinite;
+  transform-box: fill-box;
+  transform-origin: center center;
 }
 
 @keyframes navrail-dot-wave {
