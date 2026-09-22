@@ -1,20 +1,25 @@
 import { afterEach, beforeEach, describe, expect, mock, setSystemTime, test } from 'bun:test';
+import { fileURLToPath } from 'node:url';
 
 const listMock = mock(async () => ({ data: [] }));
 
 const isAncestorMock = mock(async () => false);
 
-mock.module('../git/index.js', () => ({
+const gitModulePath = fileURLToPath(new URL('../git/index.js', import.meta.url));
+const repoModulePath = fileURLToPath(new URL('./repo/index.js', import.meta.url));
+const rateLimitModulePath = fileURLToPath(new URL('./rate-limit.js', import.meta.url));
+
+mock.module(gitModulePath, () => ({
   getRemotes: async () => [],
   getTrackingBranch: async () => null,
   isAncestorOfHead: isAncestorMock,
 }));
 
-mock.module('./repo/index.js', () => ({
+mock.module(repoModulePath, () => ({
   resolveGitHubRepoFromDirectory: async () => null,
 }));
 
-mock.module('./rate-limit.js', () => ({
+mock.module(rateLimitModulePath, () => ({
   noteIfGitHubRateLimit: () => {},
 }));
 
