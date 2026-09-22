@@ -15,6 +15,11 @@ import { OPENCODE_CONFIG_DIR } from '../opencode/shared.js';
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 
+const throwIfAborted = (signal) => {
+  if (!signal?.aborted) return;
+  throw signal.reason || new Error('Skills repository installation was cancelled');
+};
+
 function normalizeUserSkillDir(userSkillDir) {
   if (!userSkillDir) return null;
   const legacySkillDir = path.join(OPENCODE_CONFIG_DIR, 'skill');
@@ -65,13 +70,15 @@ async function ensureDir(dirPath) {
   await fs.promises.mkdir(dirPath, { recursive: true });
 }
 
-async function copyDirectoryNoSymlinks(srcDir, dstDir) {
+async function copyDirectoryNoSymlinks(srcDir, dstDir, signal) {
   const srcReal = await fs.promises.realpath(srcDir);
   await ensureDir(dstDir);
 
   const walk = async (currentSrc, currentDst) => {
+    throwIfAborted(signal);
     const entries = await fs.promises.readdir(currentSrc, { withFileTypes: true });
     for (const entry of entries) {
+      throwIfAborted(signal);
       const nextSrc = path.join(currentSrc, entry.name);
       const nextDst = path.join(currentDst, entry.name);
 
@@ -168,13 +175,14 @@ export async function installSkillsFromRepository({
   gitExecutionService,
   resolveGitBinaryForSpawn,
   runGit: runGitCommand = runGit,
+  signal = undefined,
 } = {}) {
-  const runConfiguredGit = (args, options) => runGitCommand(
-    args,
-    resolveGitBinaryForSpawn
-      ? { ...options, resolveGitBinaryForSpawn }
-      : options,
-  );
+  const runConfiguredGit = (args, options = {}) => {
+    const runOptions = { ...options };
+    if (signal && !runOptions.signal) runOptions.signal = signal;
+    if (resolveGitBinaryForSpawn) runOptions.resolveGitBinaryForSpawn = resolveGitBinaryForSpawn;
+    return runGitCommand(args, runOptions);
+  };
   const normalizedUserSkillDir = normalizeUserSkillDir(userSkillDir);
   if (normalizedUserSkillDir) {
     userSkillDir = normalizedUserSkillDir;
@@ -204,6 +212,7 @@ export async function installSkillsFromRepository({
   const effectiveSubpath = parsed.effectiveSubpath || (typeof defaultSubpath === 'string' && defaultSubpath.trim() ? defaultSubpath.trim() : null);
   void effectiveSubpath;
 
+  throwIfAborted(signal);
   const cloneUrl = identity?.sshKey ? parsed.cloneUrlSsh : parsed.cloneUrlHttps;
 
   const requestedDirs = Array.isArray(selections) ? selections.map((s) => String(s?.skillDir || '').trim()).filter(Boolean) : [];
@@ -256,7 +265,8 @@ export async function installSkillsFromRepository({
 
   const installRepository = async () => {
     try {
-      const gitCheck = await assertGitAvailable(runConfiguredGit);
+      throwIfAborted(signal);
+      const gitCheck = await assertGitAvailable(runConfiguredGit, { signal });
       if (!gitCheck.ok) {
         if (isProcessTreeCleanupBlocked(gitCheck)) {
           cleanupBlocked = true;
@@ -311,6 +321,7 @@ export async function installSkillsFromRepository({
       const skipped = [];
 
       for (const plan of skillPlans) {
+        throwIfAborted(signal);
         if (!plan.installable) {
           skipped.push({ skillName: plan.skillName, reason: 'Invalid skill name (directory basename)' });
           continue;
@@ -346,10 +357,11 @@ export async function installSkillsFromRepository({
         await ensureDir(path.dirname(targetDir));
 
         try {
-          await copyDirectoryNoSymlinks(srcDir, targetDir);
+          await copyDirectoryNoSymlinks(srcDir, targetDir, signal);
           installed.push({ skillName: plan.skillName, scope, source: targetSource === 'agents' ? 'agents' : 'opencode' });
         } catch (error) {
           await safeRm(targetDir);
+          if (signal?.aborted) throw error;
           skipped.push({
             skillName: plan.skillName,
             reason: error instanceof Error ? error.message : 'Failed to copy skill files',
@@ -374,6 +386,7 @@ export async function installSkillsFromRepository({
       destination: tempBase,
       label: 'skills-catalog/clone-repository',
       queueTimeoutMs: 90_000,
+      signal,
       gitExecutionService,
     }, installRepository);
   } finally {

@@ -5,6 +5,7 @@ import { OpenCode, type OpenCodeClient } from '@opencode/client';
 import * as gitService from './gitService';
 import { chooseBridgeGitGenerationModel, type BridgeGitGenerationPayloadModel } from './bridge-git-generation-model';
 import { gitExecutionRuntime } from './git-execution-runtime';
+import { createGitProcessError, isGitProcessCleanupBlocked } from './git-execution-errors';
 import type { BridgeContext, BridgeResponse } from './bridge';
 import type { GitProcessExecutionOptions } from './bridge-git-process-runtime';
 
@@ -14,7 +15,19 @@ type BridgeMessageInput = {
   payload?: unknown;
 };
 
-type ExecGitResult = { stdout: string; stderr: string; exitCode: number };
+type ExecGitResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  code?: string;
+  cleanupBlocked?: boolean;
+  descendantsTerminated?: boolean;
+  rootClosed?: boolean;
+  pid?: number;
+  cause?: Error | string | null;
+  rootError?: Error;
+  operationError?: Error;
+};
 
 type SpecialGitDeps = {
   readSettings: (ctx?: BridgeContext) => Record<string, unknown>;
@@ -52,6 +65,28 @@ const createGitReadTimeout = (message: string) => {
 
 const createGitStatusTimeout = () => createGitReadTimeout('Git status timed out');
 const createGitRangeTimeout = () => createGitReadTimeout('Git range read timed out');
+
+const isCleanupBlockedResult = (result: ExecGitResult): boolean => (
+  result.code === 'ERR_PROCESS_TREE_TERMINATION'
+  || isGitProcessCleanupBlocked(result)
+);
+
+const throwIfCleanupBlocked = (result: ExecGitResult): void => {
+  if (!isCleanupBlockedResult(result)) return;
+
+  throw createGitProcessError(result, 'Git process cleanup was not confirmed');
+};
+
+const runConflictGit = async (
+  execGit: SpecialGitDeps['execGit'],
+  args: string[],
+  directory: string,
+  signal: AbortSignal,
+): Promise<ExecGitResult> => {
+  const result = await execGit(args, directory, { signal });
+  throwIfCleanupBlocked(result);
+  return result;
+};
 
 const createBridgeGitClient = (apiUrl: string, authHeaders?: Record<string, string>): OpenCodeClient => OpenCode.make({
   baseUrl: apiUrl.replace(/\/+$/, ''),
@@ -296,14 +331,14 @@ export async function handleSpecialGitBridgeMessage(
       try {
         const statusResult = await gitExecutionRuntime.withRawRead(
           directory,
-          () => deps.execGit(['status', '--porcelain'], directory, { signal: statusTimeout.signal }),
+          () => runConflictGit(deps.execGit, ['status', '--porcelain'], directory, statusTimeout.signal),
           statusTimeout,
         );
         const statusPorcelain = statusResult.stdout;
 
         const unmergedResult = await gitExecutionRuntime.withRawRead(
           directory,
-          () => deps.execGit(['diff', '--name-only', '--diff-filter=U'], directory, { signal: statusTimeout.signal }),
+          () => runConflictGit(deps.execGit, ['diff', '--name-only', '--diff-filter=U'], directory, statusTimeout.signal),
           statusTimeout,
         );
         const unmergedFiles = unmergedResult.stdout
@@ -313,7 +348,7 @@ export async function handleSpecialGitBridgeMessage(
 
         const diffResult = await gitExecutionRuntime.withRawRead(
           directory,
-          () => deps.execGit(['diff'], directory, { signal: statusTimeout.signal }),
+          () => runConflictGit(deps.execGit, ['diff'], directory, statusTimeout.signal),
           statusTimeout,
         );
         const diff = diffResult.stdout;
@@ -323,7 +358,7 @@ export async function handleSpecialGitBridgeMessage(
 
         const mergeHeadResult = await gitExecutionRuntime.withRawRead(
           directory,
-          () => deps.execGit(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], directory, { signal: statusTimeout.signal }),
+          () => runConflictGit(deps.execGit, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], directory, statusTimeout.signal),
           statusTimeout,
         );
         const mergeHeadExists = mergeHeadResult.exitCode === 0;
@@ -342,7 +377,7 @@ export async function handleSpecialGitBridgeMessage(
         } else {
           const rebaseHeadResult = await gitExecutionRuntime.withRawRead(
             directory,
-            () => deps.execGit(['rev-parse', '--verify', '--quiet', 'REBASE_HEAD'], directory, { signal: statusTimeout.signal }),
+            () => runConflictGit(deps.execGit, ['rev-parse', '--verify', '--quiet', 'REBASE_HEAD'], directory, statusTimeout.signal),
             statusTimeout,
           );
           const rebaseHeadExists = rebaseHeadResult.exitCode === 0;

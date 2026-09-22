@@ -282,4 +282,32 @@ describe('bridge git special runtime', () => {
     expect(rawReadOptions.every((options) => options?.signal instanceof AbortSignal
       && options.queueTimeoutMs === 3_000)).toBe(true);
   });
+
+  it('does not interpret cleanup-blocked conflict output as an empty successful result', async () => {
+    const cleanupBlocked = {
+      stdout: '',
+      stderr: 'Git process cleanup was not confirmed',
+      exitCode: 1,
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+    };
+
+    const response = await handleSpecialGitBridgeMessage({
+      id: 'conflict-cleanup-blocked',
+      type: 'api:git/conflict-details',
+      payload: { directory: '/repo' },
+    }, undefined, {
+      readSettings: () => ({}),
+      execGit: async () => cleanupBlocked,
+    });
+
+    expect(response).toEqual({
+      id: 'conflict-cleanup-blocked',
+      type: 'api:git/conflict-details',
+      success: false,
+      error: 'Git process cleanup was not confirmed',
+    });
+    expect(rawReadOptions).toHaveLength(1);
+  });
 });

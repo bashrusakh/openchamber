@@ -1,6 +1,6 @@
-import { OpenCode } from '@opencode/client';
 import { buildAppliedResponse } from './config-mutation-response.js';
 import { OPENCODE_CONFIG_DIR } from './shared.js';
+import { createRequestAbortSignal } from '../request-abort.js';
 
 /**
  * Matches how OpenCode reads its own boolean env flags: any value other than
@@ -136,6 +136,7 @@ export const registerSkillRoutes = (app, dependencies) => {
     }
 
     try {
+      const { OpenCode } = await import('@opencode/client');
       const client = OpenCode.make({
         baseUrl: buildOpenCodeUrl('/', '').replace(/\/$/, ''),
         headers: {
@@ -441,6 +442,7 @@ export const registerSkillRoutes = (app, dependencies) => {
   });
 
   app.post('/api/config/skills/scan', async (req, res) => {
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const { source, subpath, gitIdentityId } = req.body || {};
       const identity = resolveGitIdentity(gitIdentityId);
@@ -451,7 +453,10 @@ export const registerSkillRoutes = (app, dependencies) => {
         identity,
         resolveGitBinaryForSpawn,
         gitExecutionService,
+        signal: requestAbort.signal,
       });
+
+      if (requestAbort.signal.aborted) return;
 
       if (!result.ok) {
         if (result.error?.kind === 'authRequired') {
@@ -469,12 +474,16 @@ export const registerSkillRoutes = (app, dependencies) => {
 
       res.json({ ok: true, items: result.items });
     } catch (error) {
+      if (requestAbort.signal.aborted) return;
       console.error('Failed to scan skills repository:', error);
       res.status(500).json({ ok: false, error: { kind: 'unknown', message: error.message || 'Failed to scan repository' } });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
   app.post('/api/config/skills/install', async (req, res) => {
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const {
         source,
@@ -514,7 +523,10 @@ export const registerSkillRoutes = (app, dependencies) => {
         conflictDecisions,
         resolveGitBinaryForSpawn,
         gitExecutionService,
+        signal: requestAbort.signal,
       });
+
+      if (requestAbort.signal.aborted) return;
 
       if (!result.ok) {
         if (result.error?.kind === 'conflicts') {
@@ -550,8 +562,11 @@ export const registerSkillRoutes = (app, dependencies) => {
           }),
       });
     } catch (error) {
+      if (requestAbort.signal.aborted) return;
       console.error('Failed to install skills:', error);
       res.status(500).json({ ok: false, error: { kind: 'unknown', message: error.message || 'Failed to install skills' } });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
