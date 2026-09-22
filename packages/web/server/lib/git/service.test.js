@@ -20,6 +20,7 @@ import {
   getBranchBase,
   getCommitDiff,
   getCommitFiles,
+  getCommitFileDiff,
   getLog,
   getStatus,
   getTrackingBranch,
@@ -2272,6 +2273,25 @@ describe.runIf(canRunGit())('commit comparisons', () => {
     expect(() => parseSource({ kind: 'commit', hash: [root] })).toThrow();
     await expect(getCommitDiff(repository, { hash: 'HEAD' })).rejects.toThrow();
     await expect(getCommitFiles(repository, '0'.repeat(40))).rejects.toThrow();
+  });
+
+  it('propagates cancellation through committed-object reads', async () => {
+    const { repository } = createRepositoryWithRemote();
+    const hash = runGit(repository, ['rev-parse', 'HEAD']).trim();
+    const filesController = new AbortController();
+    const fileController = new AbortController();
+    filesController.abort('commit files request disconnected');
+    fileController.abort('commit file request disconnected');
+
+    await expect(getCommitFiles(repository, hash, { signal: filesController.signal }))
+      .rejects.toMatchObject({ code: 'ABORT_ERR' });
+    await expect(getCommitFileDiff(
+      repository,
+      hash,
+      'README.md',
+      false,
+      { signal: fileController.signal },
+    )).rejects.toMatchObject({ code: 'ABORT_ERR' });
   });
 
   it('keeps rename paths and original contents together, including whitespace in names', async () => {

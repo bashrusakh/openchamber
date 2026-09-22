@@ -8,6 +8,8 @@ const gitLibraries = {
   getRangeDiff: vi.fn(),
   getRangeFiles: vi.fn(),
   getCommitDiff: vi.fn(),
+  getCommitFiles: vi.fn(),
+  getCommitFileDiff: vi.fn(),
   getWorktrees: vi.fn(),
   observeWorktreeTopology: vi.fn(),
   subscribeWorktreeTopologyChanges: vi.fn(),
@@ -25,6 +27,8 @@ vi.mock('./index.js', () => ({
   getRangeDiff: gitLibraries.getRangeDiff,
   getRangeFiles: gitLibraries.getRangeFiles,
   getCommitDiff: gitLibraries.getCommitDiff,
+  getCommitFiles: gitLibraries.getCommitFiles,
+  getCommitFileDiff: gitLibraries.getCommitFileDiff,
   getWorktrees: gitLibraries.getWorktrees,
   observeWorktreeTopology: gitLibraries.observeWorktreeTopology,
   subscribeWorktreeTopologyChanges: gitLibraries.subscribeWorktreeTopologyChanges,
@@ -90,6 +94,8 @@ describe('git routes index mutations', () => {
     gitLibraries.getRangeDiff.mockReset();
     gitLibraries.getRangeFiles.mockReset();
     gitLibraries.getCommitDiff.mockReset();
+    gitLibraries.getCommitFiles.mockReset();
+    gitLibraries.getCommitFileDiff.mockReset();
     gitLibraries.resolvePrimaryWorktreeRoot.mockReset();
     gitLibraries.resolveWorktreeTopLevel.mockReset();
   });
@@ -228,6 +234,8 @@ describe('git collection routes', () => {
     gitLibraries.getRangeDiff.mockReset();
     gitLibraries.getRangeFiles.mockReset();
     gitLibraries.getCommitDiff.mockReset();
+    gitLibraries.getCommitFiles.mockReset();
+    gitLibraries.getCommitFileDiff.mockReset();
     gitLibraries.observeWorktreeTopology.mockReset();
     gitLibraries.observeWorktreeTopology.mockResolvedValue(undefined);
   });
@@ -253,6 +261,33 @@ describe('git collection routes', () => {
     expect(gitLibraries[operation]).toHaveBeenCalledWith(
       '/repo',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it('passes request cancellation through committed-file routes', async () => {
+    gitLibraries.getCommitFiles.mockResolvedValue({ files: [] });
+    gitLibraries.getCommitFileDiff.mockResolvedValue({ original: '', modified: '', isBinary: false });
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+
+    await getRoute('GET', '/api/git/commit-files')(
+      { query: { directory: '/repo', hash: 'a'.repeat(40) } },
+      createMockResponse(),
+    );
+    await getRoute('GET', '/api/git/commit-file-diff')(
+      { query: { directory: '/repo', hash: 'a'.repeat(40), path: 'file.ts' } },
+      createMockResponse(),
+    );
+
+    expect(gitLibraries.getCommitFiles).toHaveBeenCalledWith('/repo', 'a'.repeat(40), {
+      signal: expect.any(AbortSignal),
+    });
+    expect(gitLibraries.getCommitFileDiff).toHaveBeenCalledWith(
+      '/repo',
+      'a'.repeat(40),
+      'file.ts',
+      false,
+      { signal: expect.any(AbortSignal) },
     );
   });
 

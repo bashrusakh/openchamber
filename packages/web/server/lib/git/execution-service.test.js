@@ -853,6 +853,78 @@ describe('Git execution service', () => {
     ]);
   });
 
+  it('passes cancellation options through committed-object facades', async () => {
+    const calls = [];
+    const controller = new AbortController();
+    const raw = {
+      getCommitFiles: async (...args) => {
+        calls.push({ type: 'commit-files', args });
+        return { files: [] };
+      },
+      getCommitFileDiff: async (...args) => {
+        calls.push({ type: 'commit-file-diff', args });
+        return { original: '', modified: '', isBinary: false };
+      },
+    };
+    const service = createGitExecutionService({
+      raw,
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+
+    await expect(service.getCommitFiles('/repo', 'a'.repeat(40), { signal: controller.signal }))
+      .resolves.toEqual({ files: [] });
+    await expect(service.getCommitFileDiff(
+      '/repo',
+      'a'.repeat(40),
+      'file.ts',
+      false,
+      { signal: controller.signal },
+    )).resolves.toEqual({ original: '', modified: '', isBinary: false });
+
+    expect(calls).toEqual([
+      {
+        type: 'commit-files',
+        args: ['/repo', 'a'.repeat(40), { signal: controller.signal }],
+      },
+      {
+        type: 'commit-file-diff',
+        args: ['/repo', 'a'.repeat(40), 'file.ts', false, { signal: controller.signal }],
+      },
+    ]);
+  });
+
+  it('holds a cancelled committed-file read lease until owned cleanup settles', async () => {
+    const controller = new AbortController();
+    let finishCleanup;
+    let started = false;
+    const service = createGitExecutionService({
+      raw: {
+        getCommitFiles: async (_directory, _hash, options) => new Promise((resolve) => {
+          started = true;
+          options.signal.addEventListener('abort', () => {
+            finishCleanup = () => resolve({ files: [] });
+          }, { once: true });
+        }),
+      },
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+
+    const pending = service.getCommitFiles('/repo', 'a'.repeat(40), { signal: controller.signal });
+    await waitFor(() => started);
+    controller.abort('client disconnected');
+
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    await tick();
+    expect(settled).toBe(false);
+    expect(service.coordinator.getStats()).toMatchObject({ active: 1, pending: 0 });
+
+    finishCleanup();
+    await expect(pending).resolves.toEqual({ files: [] });
+    await waitFor(() => service.coordinator.getStats().active === 0);
+    expect(service.coordinator.getStats()).toMatchObject({ active: 0, pending: 0 });
+  });
+
   it('classifies path and ancestry diffs as coordinated read operations', async () => {
     const calls = [];
     const controller = new AbortController();

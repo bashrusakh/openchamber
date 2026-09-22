@@ -1351,6 +1351,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
   app.get('/api/git/commit-files', async (req, res) => {
     const { getCommitFiles } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const { directory, hash } = req.query;
       if (!directory) {
@@ -1360,11 +1361,13 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         return res.status(400).json({ error: 'hash parameter is required' });
       }
 
-      const result = await getCommitFiles(directory, hash);
+      const result = await getCommitFiles(directory, hash, { signal: requestAbort.signal });
       res.json(result);
     } catch (error) {
       console.error('Failed to get commit files:', error);
       res.status(500).json({ error: error.message || 'Failed to get commit files' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
@@ -1393,6 +1396,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
   app.get('/api/git/commit-file-diff', async (req, res) => {
     const { getCommitFileDiff } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const { directory, hash, path: filePath } = req.query;
       if (!directory || typeof directory !== 'string') {
@@ -1409,11 +1413,15 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       }
 
       const isBinary = req.query.binary === 'true';
-      const result = await getCommitFileDiff(directory, hash, filePath, isBinary);
+      const result = await getCommitFileDiff(directory, hash, filePath, isBinary, {
+        signal: requestAbort.signal,
+      });
       res.json(result);
     } catch (error) {
       console.error('Failed to get commit file diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get commit file diff' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
