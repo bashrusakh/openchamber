@@ -116,6 +116,15 @@ const operationDirectory = (name, args) => (
   repositoryInputOperations.has(name) ? args[0]?.repoRoot : args[0]
 );
 
+const operationExecutionOptions = (name, args) => {
+  const options = name === 'getUntrackedDiffs' ? args[2] : args[1];
+  if (!options || Object.prototype.toString.call(options) !== '[object Object]') return {};
+  const executionOptions = {};
+  if (options.signal) executionOptions.signal = options.signal;
+  if (Number.isFinite(options.queueTimeoutMs)) executionOptions.queueTimeoutMs = options.queueTimeoutMs;
+  return executionOptions;
+};
+
 const errorText = (error) => [
   error?.message,
   error?.stderr,
@@ -394,9 +403,12 @@ export const createGitExecutionService = (dependencies = {}) => {
       );
       continue;
     }
-    wrapped[name] = (...args) => runOperation(name, operationDirectory(name, args), args, {
-      network: undefined,
-    });
+    wrapped[name] = (...args) => runOperation(
+      name,
+      operationDirectory(name, args),
+      args,
+      { network: undefined, ...operationExecutionOptions(name, args) },
+    );
   }
 
   wrapped.setLocalIdentity = (directory, profile, options) => runOperation(

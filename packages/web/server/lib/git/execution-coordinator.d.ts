@@ -58,6 +58,7 @@ export type GitExecutionCoordinatorOptions = Partial<GitExecutionLimits> & {
   canonicalizeCloneDestination?: (destination: string) => Promise<string> | string;
   setTimer?: (callback: () => void, delayMs: number) => GitTimerHandle;
   clearTimer?: (handle: GitTimerHandle) => void;
+  platform?: NodeJS.Platform;
 };
 
 export type GitExecutionRunOptions = {

@@ -340,9 +340,17 @@ async function execGit(
   });
 }
 
-function createGitCommandFailure(operation: string, directory: string, args: string[], result: { stderr: string; exitCode: number }): Error {
+function createGitCommandFailure(
+  operation: string,
+  directory: string,
+  args: string[],
+  result: { stderr: string; exitCode: number } & GitProcessTerminationMetadata,
+): Error {
   const detail = result.stderr.trim() || `Git exited with code ${result.exitCode}`;
-  return new Error(`${operation} failed in ${directory}: ${detail} (git ${args.join(' ')})`);
+  return copyGitProcessMetadata(
+    new Error(`${operation} failed in ${directory}: ${detail} (git ${args.join(' ')})`),
+    result,
+  );
 }
 
 function isValidCommitHash(hash: string): boolean {
@@ -377,6 +385,7 @@ function extractGitNumstatDestinationPath(filePath: string): string {
  */
 export async function checkIsGitRepository(directory: string): Promise<boolean> {
   const result = await execGit(['rev-parse', '--is-inside-work-tree'], directory);
+  if (isGitProcessCleanupBlocked(result)) throw createGitProcessError(result, 'Git repository check cleanup was not confirmed');
   return result.exitCode === 0 && result.stdout.trim() === 'true';
 }
 
@@ -2310,7 +2319,10 @@ export async function getGitDiff(
 
   const result = await execGit(args, directory);
   if (result.exitCode !== 0) {
-    throw new Error(result.stderr.trim() || 'Failed to get Git diff');
+    throw copyGitProcessMetadata(
+      new Error(result.stderr.trim() || 'Failed to get Git diff'),
+      result,
+    );
   }
   const submodule = target.kind === 'submodule' ? await readSubmoduleState(execGit, directory, target) : null;
   return { kind: 'diff', diff: result.stdout, submodule };
@@ -2341,7 +2353,8 @@ export async function getGitRangeDiff(
     if (verify.exitCode === 0) {
       resolvedBase = `origin/${baseRef}`;
     }
-  } catch {
+  } catch (error) {
+    if (isGitProcessCleanupBlocked(error)) throw error;
     // ignore
   }
 
@@ -2376,7 +2389,8 @@ export async function getGitRangeFiles(
     if (verify.exitCode === 0) {
       resolvedBase = `origin/${baseRef}`;
     }
-  } catch {
+  } catch (error) {
+    if (isGitProcessCleanupBlocked(error)) throw error;
     // ignore
   }
 
@@ -2436,6 +2450,7 @@ export async function getGitFileDiff(
       let modified: string;
       if (staged) {
         const stagedResult = await execGit(['show', `:${filePath}`], directory);
+        if (isGitProcessCleanupBlocked(stagedResult)) throw createGitProcessError(stagedResult, 'Git staged file read cleanup was not confirmed');
         modified = stagedResult.exitCode === 0 ? stagedResult.stdout : '';
       } else {
         const fileUri = vscode.Uri.file(path.join(directory, filePath));
@@ -2445,6 +2460,7 @@ export async function getGitFileDiff(
       
       return { kind: 'file-diff', original, modified, path: filePath, submodule: null };
     } catch (error) {
+      if (isGitProcessCleanupBlocked(error)) throw error;
       console.error('[GitService] Failed to get file diff:', error);
     }
   }

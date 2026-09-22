@@ -5,6 +5,7 @@ import yaml from 'yaml';
 
 import {
   assertGitAvailable,
+  copyGitProcessMetadata,
   isProcessTreeCleanupBlocked,
   looksLikeAuthError,
   runGit,
@@ -74,6 +75,19 @@ async function cloneRepo({ cloneUrl, identity, tempDir, runGitCommand }) {
   };
 }
 
+function cleanupBlockedResult(result) {
+  const metadata = copyGitProcessMetadata({}, result);
+  return {
+    ok: false,
+    error: copyGitProcessMetadata({
+      kind: 'networkError',
+      message: 'Git process cleanup was not confirmed; temporary clone retained',
+    }, result),
+    cleanupBlocked: true,
+    ...metadata,
+  };
+}
+
 export async function scanSkillsRepository({
   source,
   subpath,
@@ -111,6 +125,10 @@ export async function scanSkillsRepository({
     try {
       const gitCheck = await assertGitAvailable(runConfiguredGit);
       if (!gitCheck.ok) {
+        if (isProcessTreeCleanupBlocked(gitCheck)) {
+          cleanupBlocked = true;
+          return cleanupBlockedResult(gitCheck);
+        }
         return { ok: false, error: gitCheck.error };
       }
 
@@ -123,16 +141,7 @@ export async function scanSkillsRepository({
       if (!cloned.ok) {
         if (cloned.cleanupBlocked) {
           cleanupBlocked = true;
-          return {
-            ok: false,
-            error: {
-              kind: 'networkError',
-              message: 'Git process cleanup was not confirmed; temporary clone retained',
-              cleanupBlocked: true,
-              descendantsTerminated: false,
-            },
-            cleanupBlocked: true,
-          };
+          return cleanupBlockedResult(cloned.error);
         }
         const msg = `${cloned.error?.stderr || ''}\n${cloned.error?.message || ''}`.trim();
         if (looksLikeAuthError(msg)) {
@@ -154,61 +163,25 @@ export async function scanSkillsRepository({
       const sparseInit = await runConfiguredGit(['-C', tempBase, 'sparse-checkout', 'init', '--no-cone'], { identity, timeoutMs: 15_000 });
       if (isProcessTreeCleanupBlocked(sparseInit)) {
         cleanupBlocked = true;
-        return {
-          ok: false,
-          error: {
-            kind: 'networkError',
-            message: 'Git process cleanup was not confirmed; temporary clone retained',
-            cleanupBlocked: true,
-            descendantsTerminated: false,
-          },
-          cleanupBlocked: true,
-        };
+        return cleanupBlockedResult(sparseInit);
       }
       if (sparseInit.ok) {
         const sparseSet = await runConfiguredGit(['-C', tempBase, 'sparse-checkout', 'set', ...patterns], { identity, timeoutMs: 30_000 });
         if (isProcessTreeCleanupBlocked(sparseSet)) {
           cleanupBlocked = true;
-          return {
-            ok: false,
-            error: {
-              kind: 'networkError',
-              message: 'Git process cleanup was not confirmed; temporary clone retained',
-              cleanupBlocked: true,
-              descendantsTerminated: false,
-            },
-            cleanupBlocked: true,
-          };
+          return cleanupBlockedResult(sparseSet);
         }
         if (sparseSet.ok) {
           const checkout = await runConfiguredGit(['-C', tempBase, 'checkout', '--force', 'HEAD'], { identity, timeoutMs: 60_000 });
           if (isProcessTreeCleanupBlocked(checkout)) {
             cleanupBlocked = true;
-            return {
-              ok: false,
-              error: {
-                kind: 'networkError',
-                message: 'Git process cleanup was not confirmed; temporary clone retained',
-                cleanupBlocked: true,
-                descendantsTerminated: false,
-              },
-              cleanupBlocked: true,
-            };
+            return cleanupBlockedResult(checkout);
           }
           if (checkout.ok) {
             const lsFiles = await runConfiguredGit(['-C', tempBase, 'ls-files'], { identity, timeoutMs: 15_000 });
             if (isProcessTreeCleanupBlocked(lsFiles)) {
               cleanupBlocked = true;
-              return {
-                ok: false,
-                error: {
-                  kind: 'networkError',
-                  message: 'Git process cleanup was not confirmed; temporary clone retained',
-                  cleanupBlocked: true,
-                  descendantsTerminated: false,
-                },
-                cleanupBlocked: true,
-              };
+              return cleanupBlockedResult(lsFiles);
             }
             if (lsFiles.ok) {
               skillMdPaths = lsFiles.stdout
@@ -232,16 +205,7 @@ export async function scanSkillsRepository({
         if (!listResult.ok) {
           if (isProcessTreeCleanupBlocked(listResult)) {
             cleanupBlocked = true;
-            return {
-              ok: false,
-              error: {
-                kind: 'networkError',
-                message: 'Git process cleanup was not confirmed; temporary clone retained',
-                cleanupBlocked: true,
-                descendantsTerminated: false,
-              },
-              cleanupBlocked: true,
-            };
+            return cleanupBlockedResult(listResult);
           }
           const message = `${listResult.stderr || ''}\n${listResult.message || ''}`.trim();
           const authError = looksLikeAuthError(message);
@@ -294,16 +258,7 @@ export async function scanSkillsRepository({
             if (!showResult.ok) {
               if (isProcessTreeCleanupBlocked(showResult)) {
                 cleanupBlocked = true;
-                return {
-                  ok: false,
-                  error: {
-                    kind: 'networkError',
-                    message: 'Git process cleanup was not confirmed; temporary clone retained',
-                    cleanupBlocked: true,
-                    descendantsTerminated: false,
-                  },
-                  cleanupBlocked: true,
-                };
+                return cleanupBlockedResult(showResult);
               }
               warnings.push('Failed to read SKILL.md');
             } else {

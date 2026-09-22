@@ -147,6 +147,12 @@ describe('unsupportedRepositoryRootReason', () => {
     expect(unsupportedRepositoryRootReason(path.join(os.tmpdir(), 'repo'), home)).toBeNull();
     expect(unsupportedRepositoryRootReason('', home)).toBeNull();
   });
+
+  it('treats Windows home and filesystem-root casing as the same identity', () => {
+    expect(unsupportedRepositoryRootReason('c:\\', 'C:\\Users\\Alice', 'win32')).toBe('filesystem-root');
+    expect(unsupportedRepositoryRootReason('c:\\users\\alice\\', 'C:\\Users\\Alice', 'win32')).toBe('home');
+    expect(unsupportedRepositoryRootReason('C:\\Users\\Alice\\project', 'c:\\users\\alice', 'win32')).toBeNull();
+  });
 });
 
 describe('resolveBaseRefForLog', () => {

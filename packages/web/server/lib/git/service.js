@@ -2645,6 +2645,8 @@ export async function getTrackingBranch(directory, { signal = undefined } = {}) 
     return null;
   }
   const head = await runGitCommand(normalizedDirectory, ['symbolic-ref', '--quiet', 'HEAD'], { signal });
+  if (signal?.aborted) throw signal.reason || new Error('Git tracking-branch read was cancelled');
+  if (isProcessTreeCleanupBlocked(head)) throw createGitProcessError(head);
   const headRef = head.success ? head.stdout.trim() : '';
   if (!headRef.startsWith('refs/heads/')) {
     return null;
@@ -2654,6 +2656,8 @@ export async function getTrackingBranch(directory, { signal = undefined } = {}) 
     ['for-each-ref', '--format=%(upstream:short)', headRef],
     { signal },
   );
+  if (signal?.aborted) throw signal.reason || new Error('Git tracking-branch read was cancelled');
+  if (isProcessTreeCleanupBlocked(upstream)) throw createGitProcessError(upstream);
   const tracking = upstream.success ? upstream.stdout.trim() : '';
   return tracking || null;
 }
@@ -2903,7 +2907,8 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
           };
         }
       }
-    } catch {
+    } catch (error) {
+      if (isProcessTreeCleanupBlocked(error)) throw error;
       // ignore
     }
 
@@ -2930,7 +2935,8 @@ async function readStatus(normalizedDirectory, lightMode, signal) {
           };
         }
       }
-    } catch {
+    } catch (error) {
+      if (isProcessTreeCleanupBlocked(error)) throw error;
       // ignore
     }
 
@@ -2980,10 +2986,11 @@ const getNoIndexDiff = async (repoRoot, repoPath, contextLines, executionOptions
   throw new Error(result.stderr || result.message || 'Failed to get untracked Git diff');
 };
 
-export async function getDiff(directory, { path: filePath, staged = false, contextLines = 3 } = {}) {
+export async function getDiff(directory, { path: filePath, staged = false, contextLines = 3, signal = undefined } = {}) {
   const context = await createRepositoryGitContext(directory, {
     ownedProcessTree: true,
     stallTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS,
+    signal,
   });
   const fileContext = filePath
     ? await resolveGitFileContext(
@@ -2991,10 +2998,10 @@ export async function getDiff(directory, { path: filePath, staged = false, conte
       context.directoryGit,
       filePath,
       context.repoRoot,
-      { idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS },
+      { idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS, signal },
     )
     : null;
-  return readDiff(context, fileContext, { staged, contextLines });
+  return readDiff(context, fileContext, { staged, contextLines, signal });
 }
 
 /**
@@ -3002,31 +3009,32 @@ export async function getDiff(directory, { path: filePath, staged = false, conte
  * empty when only untracked files changed inside it, so callers need the state
  * to show anything truthful.
  */
-export async function getPathDiff(directory, { path: filePath, staged = false, contextLines = 3 } = {}) {
+export async function getPathDiff(directory, { path: filePath, staged = false, contextLines = 3, signal = undefined } = {}) {
   const context = await createRepositoryGitContext(directory, {
     ownedProcessTree: true,
     stallTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS,
+    signal,
   });
   const fileContext = await resolveGitFileContext(
     context.directoryPath,
     context.directoryGit,
     filePath,
     context.repoRoot,
-    { idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS },
+    { idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS, signal },
   );
-  const diff = await readDiff(context, fileContext, { staged, contextLines });
+  const diff = await readDiff(context, fileContext, { staged, contextLines, signal });
   if (!fileContext.isSubmodule) return { diff, submodule: null };
   return {
     diff,
     submodule: await readSubmoduleState(
       context.repoRoot,
       fileContext,
-      { idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS },
+      { idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS, signal },
     ),
   };
 }
 
-async function readDiff({ repoRoot, git }, fileContext, { staged, contextLines }) {
+async function readDiff({ repoRoot, git }, fileContext, { staged, contextLines, signal }) {
   try {
     const args = ['diff', '--no-color', '--full-index'];
 
@@ -3076,6 +3084,7 @@ async function readDiff({ repoRoot, git }, fileContext, { staged, contextLines }
 
       return await getNoIndexDiff(repoRoot, fileContext.repoPath, contextLines, {
         idleTimeoutMs: GIT_STATUS_STALL_TIMEOUT_MS,
+        signal,
       });
     }
   } catch (error) {
@@ -3096,13 +3105,14 @@ async function readDiff({ repoRoot, git }, fileContext, { staged, contextLines }
  * computes ahead/behind, diff stats, and merge state — an order of magnitude
  * more work for an answer they throw away.
  */
-export async function listUntrackedPaths(directory) {
-  const { repoRoot } = await createRepositoryGitContext(directory);
+export async function listUntrackedPaths(directory, { signal = undefined } = {}) {
+  const { repoRoot } = await createRepositoryGitContext(directory, { signal });
   const result = await runGitCommand(repoRoot, [
     'ls-files',
     '--others',
     '--exclude-standard',
-  ]);
+  ], { signal });
+  if (signal?.aborted) throw signal.reason || new Error('Git untracked-path listing was cancelled');
   if (!result.success) {
     if (isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result);
     return [];
@@ -3124,22 +3134,23 @@ export async function listUntrackedPaths(directory) {
  * Returns one entry per input path, in order; unreadable paths yield `''`
  * rather than failing the batch.
  */
-export async function getUntrackedDiffs(directory, filePaths = [], { concurrency = 8, contextLines = 3 } = {}) {
+export async function getUntrackedDiffs(directory, filePaths = [], { concurrency = 8, contextLines = 3, signal = undefined } = {}) {
   const paths = (Array.isArray(filePaths) ? filePaths : []).filter((value) => typeof value === 'string' && value);
   if (paths.length === 0) return [];
 
-  const { directoryPath, directoryGit, repoRoot } = await createRepositoryGitContext(directory);
+  const { directoryPath, directoryGit, repoRoot } = await createRepositoryGitContext(directory, { signal });
   const results = new Array(paths.length).fill('');
   let cursor = 0;
 
   const worker = async () => {
     while (cursor < paths.length) {
+      if (signal?.aborted) throw signal.reason || new Error('Git untracked diff collection was cancelled');
       const index = cursor++;
       try {
-        const fileContext = await resolveGitFileContext(directoryPath, directoryGit, paths[index], repoRoot);
-        results[index] = await getNoIndexDiff(repoRoot, fileContext.repoPath, contextLines);
+        const fileContext = await resolveGitFileContext(directoryPath, directoryGit, paths[index], repoRoot, { signal });
+        results[index] = await getNoIndexDiff(repoRoot, fileContext.repoPath, contextLines, { signal });
       } catch (error) {
-        if (isProcessTreeCleanupBlocked(error)) throw error;
+        if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
         results[index] = '';
       }
     }
@@ -3149,10 +3160,13 @@ export async function getUntrackedDiffs(directory, filePaths = [], { concurrency
   return results;
 }
 
-const refResolvesToCommit = async (git, ref) => git
+const refResolvesToCommit = async (git, ref, signal) => git
   .raw(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
   .then((value) => Boolean(String(value || '').trim()))
-  .catch(() => false);
+  .catch((error) => {
+    if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
+    return false;
+  });
 
 /**
  * The branch list includes remote-only branches that `ls-remote` reported but
@@ -3160,9 +3174,9 @@ const refResolvesToCommit = async (git, ref) => git
  * not exist locally. Say that plainly instead of letting git's "ambiguous
  * argument" surface as an opaque failure.
  */
-async function assertRangeRefsResolve(git, refs) {
+async function assertRangeRefsResolve(git, refs, signal) {
   for (const ref of refs) {
-    if (!(await refResolvesToCommit(git, ref))) {
+    if (!(await refResolvesToCommit(git, ref, signal))) {
       throw new Error(`Ref "${ref}" is not available locally. Fetch it before comparing.`);
     }
   }
@@ -3171,7 +3185,7 @@ async function assertRangeRefsResolve(git, refs) {
 // A private index lets git include untracked paths in the same tree comparison
 // as tracked files, including a staged deletion recreated at the same path.
 // Intent-to-add records only their existence; diff reads current file contents.
-async function runWorkingTreeRangeDiff(context, baseRef, headRef, args, paths = []) {
+async function runWorkingTreeRangeDiff(context, baseRef, headRef, args, paths = [], signal = undefined) {
   const { git, repoRoot } = context;
   const readHead = async () => {
     const commit = (await git.raw(['rev-parse', '--verify', 'HEAD'])).trim();
@@ -3202,7 +3216,7 @@ async function runWorkingTreeRangeDiff(context, baseRef, headRef, args, paths = 
     await fsp.copyFile(path.resolve(repoRoot, indexPath), temporaryIndex);
     const pathspecFile = path.join(temporaryDirectory, 'paths');
     await fsp.writeFile(pathspecFile, untracked);
-    const comparisonGit = await createGit(repoRoot);
+    const comparisonGit = await createGit(repoRoot, { signal });
     comparisonGit.env('GIT_INDEX_FILE', temporaryIndex);
     comparisonGit.env('GIT_LITERAL_PATHSPECS', '1');
     await comparisonGit.raw(['add', '--intent-to-add', '--pathspec-from-file=' + pathspecFile, '--pathspec-file-nul']);
@@ -3212,15 +3226,15 @@ async function runWorkingTreeRangeDiff(context, baseRef, headRef, args, paths = 
   }
 }
 
-export async function getRangeDiff(directory, { base, head, path: filePath, contextLines = 3, includeWorkingTree = false } = {}) {
-  const { directoryPath, directoryGit, repoRoot, git } = await createRepositoryGitContext(directory);
+export async function getRangeDiff(directory, { base, head, path: filePath, contextLines = 3, includeWorkingTree = false, signal = undefined } = {}) {
+  const { directoryPath, directoryGit, repoRoot, git } = await createRepositoryGitContext(directory, { signal });
   const baseRef = typeof base === 'string' ? base.trim() : '';
   const headRef = typeof head === 'string' ? head.trim() : '';
   if (!baseRef || !headRef) {
     throw new Error('base and head are required');
   }
 
-  await assertRangeRefsResolve(git, [baseRef, headRef]);
+  await assertRangeRefsResolve(git, [baseRef, headRef], signal);
 
   const args = ['diff', '--no-color'];
   if (typeof contextLines === 'number' && !Number.isNaN(contextLines)) {
@@ -3229,7 +3243,7 @@ export async function getRangeDiff(directory, { base, head, path: filePath, cont
   const paths = [];
   if (filePath) {
     try {
-      const fileContext = await resolveGitFileContext(directoryPath, directoryGit, filePath, repoRoot);
+      const fileContext = await resolveGitFileContext(directoryPath, directoryGit, filePath, repoRoot, { signal });
       paths.push(fileContext.repoPath);
     } catch (error) {
       if (error.code !== GIT_PATH_NOT_FOUND) throw error;
@@ -3250,7 +3264,7 @@ export async function getRangeDiff(directory, { base, head, path: filePath, cont
     }
   }
   if (includeWorkingTree) {
-    return runWorkingTreeRangeDiff({ git, repoRoot }, baseRef, headRef, args, paths);
+    return runWorkingTreeRangeDiff({ git, repoRoot }, baseRef, headRef, args, paths, signal);
   }
   args.push(`${baseRef}...${headRef}`, '--', ...paths);
   const diff = await git.raw(args);
@@ -3350,22 +3364,22 @@ export async function getBranchBase(directory, branch) {
   return { base: source };
 }
 
-export async function getRangeFiles(directory, { base, head, includeWorkingTree = false } = {}) {
-  const { git, repoRoot } = await createRepositoryGitContext(directory);
+export async function getRangeFiles(directory, { base, head, includeWorkingTree = false, signal = undefined } = {}) {
+  const { git, repoRoot } = await createRepositoryGitContext(directory, { signal });
   const baseRef = typeof base === 'string' ? base.trim() : '';
   const headRef = typeof head === 'string' ? head.trim() : '';
   if (!baseRef || !headRef) {
     throw new Error('base and head are required');
   }
 
-  await assertRangeRefsResolve(git, [baseRef, headRef]);
+  await assertRangeRefsResolve(git, [baseRef, headRef], signal);
 
   // `-C` (copy detection among changed files only, so cheap) makes copies
   // surface as C entries instead of plain additions; rename detection is on
   // by default.
   const args = ['diff', '--name-status', '-z', '-C'];
   const raw = includeWorkingTree
-    ? await runWorkingTreeRangeDiff({ git, repoRoot }, baseRef, headRef, args)
+    ? await runWorkingTreeRangeDiff({ git, repoRoot }, baseRef, headRef, args, [], signal)
     : await git.raw([...args, `${baseRef}...${headRef}`, '--']);
   // -z format: STATUS\0PATH\0[ORIG\0] repeated. For rename/copy entries
   // (`R100`, `C75`) the first path token is the ORIGINAL path and the second

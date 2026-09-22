@@ -1,4 +1,5 @@
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -6,7 +7,7 @@ import {
   GitExecutionCancelledError,
   GitExecutionOverloadedError,
 } from './execution-errors.js';
-import { unsupportedRepositoryRootReason } from './repository-root.js';
+import { canonicalPathKey, unsupportedRepositoryRootReason } from './repository-root.js';
 
 const DEFAULTS = Object.freeze({
   discoveryConcurrency: 8,
@@ -24,11 +25,11 @@ const isObjectRecord = (value) => (
   && Object.prototype.toString.call(value) === '[object Object]'
 );
 
-const normalizeDirectory = (directory) => {
+const normalizeDirectory = (directory, pathApi = path) => {
   if (!isStringValue(directory) || !directory.trim()) {
     throw new TypeError('Git directory is required');
   }
-  return path.resolve(directory.trim());
+  return pathApi.resolve(directory.trim());
 };
 
 const defaultPathExists = async (value) => {
@@ -185,28 +186,31 @@ const createDiscoveryError = (result, cwd) => {
   return copyGitProcessMetadata(error, result);
 };
 
-const isPathWithin = (candidate, parent) => (
-  candidate === parent
-  || (parent === path.parse(parent).root
-    ? candidate.startsWith(parent)
-    : candidate.startsWith(`${parent}${path.sep}`))
-);
+const isPathWithin = (candidate, parent, pathApi = path, platform = process.platform) => {
+  const candidateKey = canonicalPathKey(candidate, platform);
+  const parentKey = canonicalPathKey(parent, platform);
+  return candidateKey === parentKey
+    || (parentKey === canonicalPathKey(pathApi.parse(parent).root, platform)
+      ? candidateKey.startsWith(parentKey)
+      : candidateKey.startsWith(`${parentKey}${pathApi.sep}`));
+};
 
-const isPathIdentity = (value) => (
+const isPathIdentity = (value, pathApi = path) => (
   isStringValue(value)
   && value.length > 0
   && !/[\u0000\r\n]/.test(value)
-  && path.isAbsolute(value)
+  && pathApi.isAbsolute(value)
 );
 
-const validateDiscoveryIdentity = (requestedDirectory, lines, context) => {
-  if (!isPathIdentity(context.topLevel)
-    || !isPathIdentity(context.gitDir)
-    || !isPathIdentity(context.commonDir)) {
+const validateDiscoveryIdentity = (requestedDirectory, lines, context, pathApi = path) => {
+  if (!isPathIdentity(context.topLevel, pathApi)
+    || !isPathIdentity(context.gitDir, pathApi)
+    || !isPathIdentity(context.commonDir, pathApi)) {
     return 'Git context discovery returned non-absolute repository identity';
   }
 
-  if (!isPathWithin(requestedDirectory, context.topLevel)) {
+  const platform = pathApi === path.win32 ? 'win32' : process.platform;
+  if (!isPathWithin(requestedDirectory, context.topLevel, pathApi, platform)) {
     return 'Git context discovery returned a repository root outside the requested directory';
   }
 
@@ -217,13 +221,13 @@ const validateDiscoveryIdentity = (requestedDirectory, lines, context) => {
   // `--git-common-dir` may be emitted relative to the discovery CWD by Git.
   // Keep accepting fully relative command output for compatibility, while
   // validating the normal absolute form as a coherent Git identity.
-  const allLinesRelative = lines.every((line) => !path.isAbsolute(line));
-  if (!allLinesRelative && (!path.isAbsolute(lines[0]) || !path.isAbsolute(lines[1]))) {
+  const allLinesRelative = lines.every((line) => !pathApi.isAbsolute(line));
+  if (!allLinesRelative && (!pathApi.isAbsolute(lines[0]) || !pathApi.isAbsolute(lines[1]))) {
     return 'Git context discovery returned a non-absolute repository identity';
   }
   if (!allLinesRelative
-    && !isPathWithin(context.gitDir, context.commonDir)
-    && !isPathWithin(context.commonDir, context.gitDir)) {
+    && !isPathWithin(context.gitDir, context.commonDir, pathApi, platform)
+    && !isPathWithin(context.commonDir, context.gitDir, pathApi, platform)) {
     return 'Git context discovery returned unrelated Git and common directories';
   }
 
@@ -327,6 +331,9 @@ export class GitContextResolver {
     }
 
     this.runGit = options.runGit;
+    this.platform = options.platform || process.platform;
+    this.pathApi = this.platform === 'win32' ? path.win32 : path;
+    this.home = options.home || os.homedir();
     this.realpath = options.realpath || ((value) => fsp.realpath(value));
     this.pathExists = options.pathExists || defaultPathExists;
     this.getPathFingerprint = options.getPathFingerprint || defaultPathFingerprint;
@@ -345,10 +352,10 @@ export class GitContextResolver {
   }
 
   async canonicalize(value) {
-    const resolved = path.resolve(value);
+    const resolved = this.pathApi.resolve(value);
     try {
       const real = await this.realpath(resolved);
-      return path.resolve(String(real || resolved));
+      return this.pathApi.resolve(String(real || resolved));
     } catch (error) {
       if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') {
         return resolved;
@@ -371,8 +378,9 @@ export class GitContextResolver {
     if (!fingerprint) {
       return;
     }
-    this.aliases.delete(alias);
-    this.aliases.set(alias, { context, fingerprint });
+    const key = canonicalPathKey(alias, this.platform);
+    this.aliases.delete(key);
+    this.aliases.set(key, { context, fingerprint });
     while (this.aliases.size > this.maxInFlightAliases) {
       const oldest = this.aliases.keys().next().value;
       if (oldest === undefined) {
@@ -436,9 +444,9 @@ export class GitContextResolver {
 
     const canonicalizeDiscoveredPath = async (value) => {
       try {
-        const result = await this.canonicalize(path.isAbsolute(value)
+        const result = await this.canonicalize(this.pathApi.isAbsolute(value)
           ? value
-          : path.resolve(directory, value));
+          : this.pathApi.resolve(directory, value));
         if (signal?.aborted) {
           throw abortError(signal);
         }
@@ -462,7 +470,7 @@ export class GitContextResolver {
       commonId: commonDir,
       worktreeId: topLevel,
     };
-    const identityError = validateDiscoveryIdentity(directory, lines, context);
+    const identityError = validateDiscoveryIdentity(directory, lines, context, this.pathApi);
     if (identityError) {
       throw createDiscoveryError({
         message: identityError,
@@ -475,7 +483,7 @@ export class GitContextResolver {
     if (signal?.aborted) {
       throw abortError(signal);
     }
-    const unsupportedRoot = unsupportedRepositoryRootReason(context.topLevel);
+    const unsupportedRoot = unsupportedRepositoryRootReason(context.topLevel, this.home, this.platform);
     if (unsupportedRoot) {
       return {
         isRepository: false,
@@ -488,7 +496,10 @@ export class GitContextResolver {
     if (signal?.aborted) {
       throw abortError(signal);
     }
-    this.contexts.set(`${context.commonId}\0${context.worktreeId}`, context);
+    this.contexts.set(
+      `${canonicalPathKey(context.commonId, this.platform)}\0${canonicalPathKey(context.worktreeId, this.platform)}`,
+      context,
+    );
     this.evictContexts();
     this.rememberAlias(directory, context, fingerprint);
     this.rememberAlias(topLevel, context, fingerprint);
@@ -507,7 +518,8 @@ export class GitContextResolver {
       timer: undefined,
     };
 
-    this.inFlightContexts.add(canonicalDirectory);
+    const key = canonicalPathKey(canonicalDirectory, this.platform);
+    this.inFlightContexts.add(key);
     entry.promise = this.discover(canonicalDirectory, requestedDirectory, controller.signal)
       .finally(() => {
         entry.settled = true;
@@ -519,12 +531,12 @@ export class GitContextResolver {
           this.clearTimer(entry.abortTimer);
           entry.abortTimer = undefined;
         }
-        this.inFlightContexts.delete(canonicalDirectory);
-        if (this.inFlightAliases.get(canonicalDirectory) === entry) {
-          this.inFlightAliases.delete(canonicalDirectory);
+        this.inFlightContexts.delete(key);
+        if (this.inFlightAliases.get(key) === entry) {
+          this.inFlightAliases.delete(key);
         }
       });
-    this.inFlightAliases.set(canonicalDirectory, entry);
+    this.inFlightAliases.set(key, entry);
     entry.timer = this.setTimer(() => {
       if (!entry.settled && !controller.signal.aborted) {
         controller.abort(new GitExecutionCancelledError(
@@ -608,7 +620,7 @@ export class GitContextResolver {
   }
 
   resolve(directory, options = {}) {
-    const requestedDirectory = normalizeDirectory(directory);
+    const requestedDirectory = normalizeDirectory(directory, this.pathApi);
     if (options.signal?.aborted) {
       return Promise.reject(abortError(options.signal));
     }
@@ -619,18 +631,19 @@ export class GitContextResolver {
       if (options.signal?.aborted) {
         throw abortError(options.signal);
       }
-      const cachedEntry = this.aliases.get(canonicalDirectory);
+      const canonicalKey = canonicalPathKey(canonicalDirectory, this.platform);
+      const cachedEntry = this.aliases.get(canonicalKey);
       if (cachedEntry) {
         const fingerprint = await this.getPathFingerprint(cachedEntry.context).catch(() => null);
         if (fingerprint !== null && fingerprint === cachedEntry.fingerprint) {
-          this.aliases.delete(canonicalDirectory);
-          this.aliases.set(canonicalDirectory, cachedEntry);
+          this.aliases.delete(canonicalKey);
+          this.aliases.set(canonicalKey, cachedEntry);
           return cachedEntry.context;
         }
         this.forgetContext(cachedEntry.context);
       }
 
-      const inFlight = this.inFlightAliases.get(canonicalDirectory);
+      const inFlight = this.inFlightAliases.get(canonicalKey);
       if (inFlight) {
         return this.waitForDiscovery(inFlight, options.signal);
       }

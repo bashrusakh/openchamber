@@ -79,6 +79,30 @@ describe('skills catalog Git helpers', () => {
     });
   });
 
+  it('does not convert blocked process cleanup into Git unavailable', async () => {
+    const blocked = {
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+      rootClosed: false,
+      pid: 8080,
+    };
+    const runGitCommand = async () => ({ ok: false, message: 'cleanup blocked', ...blocked });
+
+    await expect(assertGitAvailable(runGitCommand)).resolves.toMatchObject({
+      ok: false,
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+      error: {
+        kind: 'networkError',
+        cleanupBlocked: true,
+        descendantsTerminated: false,
+        rootClosed: false,
+        pid: 8080,
+      },
+    });
+  });
+
   it('bounds output when the shared process-tree executor is used', async () => {
     await expect(runGit(['-e', "process.stderr.write('x'.repeat(5 * 1024 * 1024))"], {
       resolveGitBinaryForSpawn: () => process.execPath,

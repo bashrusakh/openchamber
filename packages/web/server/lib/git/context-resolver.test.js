@@ -88,6 +88,43 @@ describe('GitContextResolver', () => {
     });
   });
 
+  it('shares Windows context aliases whose casing differs', async () => {
+    const runGit = vi.fn(async () => ({
+      success: true,
+      stdout: 'C:\\Users\\Alice\\Repo\nC:\\Users\\Alice\\Repo\\.git\nC:\\Users\\Alice\\Repo\\.git\n',
+    }));
+    const resolver = createGitContextResolver({
+      platform: 'win32',
+      pathExists: async () => true,
+      realpath: async (value) => value,
+      getPathFingerprint: async () => 'stable',
+      runGit,
+    });
+
+    await resolver.resolve('C:\\Users\\Alice\\Repo\\src');
+    await resolver.resolve('c:\\users\\alice\\repo\\SRC');
+
+    expect(runGit).toHaveBeenCalledOnce();
+  });
+
+  it('applies the Windows home-root guard without changing the returned path', async () => {
+    const resolver = createGitContextResolver({
+      platform: 'win32',
+      home: 'C:\\Users\\Alice',
+      pathExists: async () => true,
+      runGit: async () => ({
+        success: true,
+        stdout: 'c:\\users\\alice\nc:\\users\\alice\\.git\nc:\\users\\alice\\.git\n',
+      }),
+    });
+
+    await expect(resolver.resolve('C:\\Users\\Alice\\project')).resolves.toMatchObject({
+      isRepository: false,
+      reason: 'unsupported-repository-root',
+      unsupportedRoot: 'home',
+    });
+  });
+
   it('returns a missing requested directory as non-repository without invoking Git', async () => {
     const runGit = vi.fn();
     const resolver = createGitContextResolver({

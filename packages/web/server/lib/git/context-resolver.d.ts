@@ -48,6 +48,8 @@ export type GitContextResolverOptions = {
   maxInFlightAliases?: number;
   maxInFlightContexts?: number;
   discoveryTimeoutMs?: number;
+  platform?: NodeJS.Platform;
+  home?: string;
 };
 
 export type GitContextResolveOptions = {
