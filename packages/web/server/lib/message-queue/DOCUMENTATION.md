@@ -263,18 +263,27 @@ item stranded by an ambiguous dispatch (route
 `POST .../items/:itemId/resolve-consult`): it never prompts. With the receipt
 `runId` present it reads a deeper tail (200 messages vs. the dispatch's 20) —
 marker found → `dispatched delivered: 'confirmed'` with exactly-once removal
-and the claimed owner's hold released; marker absent and the item unclaimed →
-`unresolved` with `recoverable: true` (the item keeps blocking the head;
-clients may Resume or remove); no `runId`, a live claim, or a failed read →
-`unresolved` untouched.
+and the claimed owner's hold released (a non-empty owner only: an unclaimed or
+owner-less item never clears the shared owner-less slot); marker absent and
+the item unclaimed → `unresolved` with `recoverable: true` (the item keeps
+blocking the head; clients may Resume or remove); no `runId`, a live claim, or
+a failed read → `unresolved` untouched. The tail read awaits, so the decision
+is re-checked against the queue afterwards: when the item vanished, its claim
+identity changed (owner and `claimedAt`), or a send started meanwhile, the
+answer is `unresolved` and nothing is mutated. The live reservation decides,
+never the stale read.
 
 The prompt body is built exactly as `sendItem` builds it, plus a top-level
 `system` and the consult metadata attached to the primary text part the way a
 context part carries its metadata; it always takes the prompt route. The
-metadata carrier must be a text part: when the prompt has no text part at all
-(attachment-only), one synthetic carrier text part (`CONSULT_RECEIPT_CARRIER_TEXT`,
-`[consult receipt]`) is inserted before the files so the receipt still lands and
-runId correlation stays possible; the UI mirror keeps the same rule.
+metadata carrier must be a text part, and it never overwrites another part's
+metadata: the receipt attaches to the first text part only while that part
+carries no metadata of its own (the user's text, or a command part); when the
+first text part is a captured-context part with its own payload, or the prompt
+has no text part at all (attachment-only), one synthetic carrier text part
+(`CONSULT_RECEIPT_CARRIER_TEXT`, `[consult receipt]`) is inserted before the
+files, so the receipt still lands, the context metadata survives, and runId
+correlation stays possible; the UI mirror keeps the same rule.
 
 ### Parent-session prompt gate
 
@@ -297,17 +306,22 @@ A consult item never turns back into a normal item: the user's consult intent
 survives a lapsed reservation and a server restart. The expiry sweep
 (`pruneExpiredHolds`, running on every hold mutation and from the
 tick/snapshot read paths) clears a lapsed claim: `claimed` and the stale
-`consult` payload are dropped, `kind: 'consult'` stays, and the cleared claim
-is committed and broadcast. The item keeps its message content (text,
-attachments, context, sendConfig, contextPreview) and keeps blocking the queue
-— the generic dispatcher still refuses to send it. Holds are memory-only, so
-on startup every persisted consult item is restored unclaimed (stale `claimed`
-and `consult` dropped, kind kept) and is likewise never tick-delivered. A
-stuck consult item is removed only by an explicit user action (`remove`/
-`clear`); `take` refuses consult items with a 409 `consult-item` reason and
-`takeAll` skips them, so a raw-send client can never lose the consult intent.
-This is the no-raw-delivery guarantee: a consult message is either dispatched
-through its own route or deleted by the user.
+synthesis `consult.system` are dropped, `kind: 'consult'` stays, and the
+cleared claim is committed and broadcast. The receipt metadata
+(`consult.textPartMetadata`) survives: it is the acting run's
+delivery-correlation identity, so a later Resume can re-check whether that
+turn already landed before it re-fans-out, and the payload stays bounded
+because the metadata was capped when it was parsed. The item keeps its message
+content (text, attachments, context, sendConfig, contextPreview) and keeps
+blocking the queue, because the generic dispatcher still refuses to send it.
+Holds are memory-only, so on startup every persisted consult item is restored
+unclaimed (stale `claimed` and `consult.system` dropped, kind and receipt
+metadata kept) and is likewise never tick-delivered. A stuck consult item is
+removed only by an explicit user action (`remove`/`clear`); `take` refuses
+consult items with a 409 `consult-item` reason and `takeAll` skips them, so a
+raw-send client can never lose the consult intent. This is the
+no-raw-delivery guarantee: a consult message is either dispatched through its
+own route or deleted by the user.
 
 ### Recovery (`recoverable`)
 
@@ -319,7 +333,10 @@ broadcasts, and persistence like the other item fields; it is a hint for
 clients, not a behavior switch: the item keeps blocking the head exactly as
 before and is never raw-sent. A client may resume the consult by claiming the
 recoverable head item through the existing claim route (the marker is cleared
-on the claim) or the user may remove it.
+on the claim) or the user may remove it. The kept receipt metadata is what
+makes a resume safe: `resolveConsult` can still correlate the acting turn, so
+a marker found in the parent tail proves the turn already landed and the
+resume must not re-send it.
 
 ## Routes (`/api/message-queue`)
 

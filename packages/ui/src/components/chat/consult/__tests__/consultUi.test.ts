@@ -348,6 +348,8 @@ describe('consultCaptureDisposition', () => {
     expect(consultCaptureDisposition({ status: 'cancelled' })).toBe('restore');
     // Delivered raw: may already have been sent, so restoring could send it twice.
     expect(consultCaptureDisposition({ status: 'delivered-raw', queueItemRestored: false })).toBe('keep');
+    // A resume's delivery check confirmed the turn landed: nothing to restore.
+    expect(consultCaptureDisposition({ status: 'delivered', queueItemRestored: false })).toBe('keep');
     // A restored queue item is delivered normally.
     expect(consultCaptureDisposition({ status: 'refused', queueItemRestored: true })).toBe('keep');
     expect(consultCaptureDisposition({ status: 'failed', queueItemRestored: true })).toBe('keep');

@@ -7,6 +7,7 @@ import {
   createMessageQueueTarget,
   useMessageQueueStore,
   type ConsultDispatchOutcome,
+  type ConsultResolveOutcome,
   type MessageQueueTarget,
   type QueuedContextPart,
   type QueuedMessage,
@@ -247,6 +248,19 @@ export type ConsultSubmissionResult =
     status: 'delivered-raw';
     runId: string;
     queueItemRestored: false;
+  }
+  | {
+    /**
+     * A resume's delivery-first resolve found the item's receipt marker: a
+     * previous run already delivered this exact message and the server removed
+     * the item exactly once. Nothing was claimed, fanned out, or dispatched,
+     * and the composer must not restore the capture. A neutral "already
+     * delivered" state, never a failure.
+     */
+    status: 'delivered';
+    runId: string;
+    resumedResolvedDelivered: true;
+    queueItemRestored: false;
   };
 
 export type ConsultSubmissionHandle = {
@@ -289,6 +303,12 @@ export type ConsultSubmissionQueue = {
   ) => Promise<void>;
   /** Dispatches the claimed consult item; answers every control-flow case with a structured outcome. */
   dispatchConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string) => Promise<ConsultDispatchOutcome>;
+  /**
+   * Outcome check for a dangling consult item: the server correlates the
+   * item's receipt runId with the parent transcript and answers whether the
+   * turn already landed. Never sends; non-2xx throws.
+   */
+  resolveConsultItem: (target: MessageQueueTarget, messageId: string) => Promise<ConsultResolveOutcome>;
   getQueueForTarget: (target: MessageQueueTarget) => readonly QueuedMessage[];
   /** `owner` scopes the hold so it never clears another feature's hold. */
   setServerHold: (sessionId: string, held: boolean, owner?: string) => Promise<void>;
@@ -945,9 +965,11 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         attachments: toAdvisorAttachments(takenItem.attachments),
         // F4/REQ-4: the advisors must analyze the same current input as the
         // acting turn, so the captured context parts (and their instructions)
-        // ride the advisor send exactly as the server delivers them to the
-        // acting turn — after the standing-knowledge prefix, matching the
-        // acting prompt's part order.
+        // ride the advisor send. The standing-knowledge prefix leads, which
+        // mirrors the UI send's part order (`session-ui-store.ts` prepends the
+        // knowledge part before the captured context), not the server consult
+        // acting turn, whose order is text → files → context → knowledge
+        // (`buildPromptBody` in the message-queue runtime).
         additionalParts: [...knowledgePrefix, ...queuedContextToParts(takenItem.context ?? [])],
         mode: input.mode,
         timeoutMs: input.timeoutMs,
@@ -1278,6 +1300,21 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
    * same claim → fan-out → payload → dispatch route as a new submission. The
    * stranded item never reached a fan-out, so there is nothing stale to
    * reuse: advisors, mode, and timeout come fresh from the caller.
+   *
+   * Delivery-first: the server keeps the item's receipt metadata
+   * (`textPartMetadata`) through a claim lapse and a restart, so a stranded
+   * item still carries its run's delivery marker. Before any claim or
+   * prevalidation the resume asks the server's never-sending resolve route
+   * whether the turn already landed: `dispatched` means the acting turn was
+   * delivered and the item was removed exactly once, so the resume reports
+   * the neutral `delivered` result instead of running a duplicate
+   * consultation. Every other outcome falls through to the normal resume, and
+   * a resolve failure fails open to the claim route, which re-checks the
+   * reservation server-side.
+   *
+   * The body carries the same outer safety as `submitConsultMessage`: an
+   * unexpected throw finishes the run terminal and releases any hold this
+   * resume acquired, so no heartbeat is left running.
    */
   const resumeConsultItem = async (
     target: MessageQueueTarget,
@@ -1320,123 +1357,169 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       terminal: false,
     };
 
-    const capability = await (async (): Promise<{ available: true } | { available: false; reason: string; message?: string }> => {
-      try {
-        return await deps.verifyCapability();
-      } catch (error) {
-        return {
-          available: false,
-          reason: 'version-unknown',
-          message: `The connected server could not be verified: ${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-    })();
-    if (!capability.available) {
-      const error = capability.message ?? capabilityRefusalMessage(capability.reason);
-      deps.runs.finish(input.parentSessionId, runId, { phase: 'failed', error });
-      return {
-        status: 'refused',
-        runId,
-        code: 'capability-unavailable',
-        error,
-        rejections: [],
-        queueItemRestored: false,
-      };
-    }
-
-    if (item.kind !== 'consult') {
-      return failRun(capture, 'The queued message is not a consult item, so it cannot be resumed as one.');
-    }
-    if (item.claimed) {
-      return failRun(capture, 'The consult item is reserved by another owner, so it cannot be resumed right now.');
-    }
-    if (!deps.queue.getQueueForTarget(target).some((entry) => entry.id === item.id)) {
-      return failRun(capture, 'The queued consult message is no longer in the queue, so there is nothing to resume.');
-    }
-
-    // Auto-review owns the parent and drives it through the queue only: a
-    // consult must not claim, hold, or dispatch while that loop runs.
-    if (deps.isAutoReviewRunning(input.parentSessionId)) {
-      return {
-        status: 'refused',
-        runId,
-        code: 'auto-review-active',
-        error: AUTO_REVIEW_ACTIVE_MESSAGE,
-        rejections: [],
-        queueItemRestored: false,
-      };
-    }
-
     try {
-      await deps.runtime.prevalidateConsultation({
-        parentSessionId: input.parentSessionId,
-        directory: input.directory,
-        expectedRuntimeKey: capture.runtimeKey,
-        advisors: input.advisors,
-        messageText: input.message.text ?? input.message.content,
-        attachments: toAdvisorAttachments(input.message.attachments),
-        mode: input.mode,
-        timeoutMs: input.timeoutMs,
-      });
-    } catch (error) {
-      deps.runs.finish(input.parentSessionId, runId, { phase: 'failed', error: error instanceof Error ? error.message : String(error) });
-      if (error instanceof ConsultationRefusedError) {
+      // Delivery-first (the doc comment above): the resolve route only reads,
+      // so it runs before the capability read, the item checks, prevalidation,
+      // and the claim. A landed turn is reported as delivered and nothing else
+      // happens — no claim, no fan-out, no dispatch, no composer restore.
+      try {
+        const resolution = await deps.queue.resolveConsultItem(target, item.id);
+        if (resolution.status === 'dispatched') {
+          return { status: 'delivered', runId, resumedResolvedDelivered: true, queueItemRestored: false };
+        }
+      } catch {
+        // Fail open: the claim route re-checks the reservation server-side,
+        // so a resolve transport failure never blocks a legitimate resume.
+      }
+
+      const capability = await (async (): Promise<{ available: true } | { available: false; reason: string; message?: string }> => {
+        try {
+          return await deps.verifyCapability();
+        } catch (error) {
+          return {
+            available: false,
+            reason: 'version-unknown',
+            message: `The connected server could not be verified: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      })();
+      if (!capability.available) {
+        const error = capability.message ?? capabilityRefusalMessage(capability.reason);
+        deps.runs.finish(input.parentSessionId, runId, { phase: 'failed', error });
         return {
           status: 'refused',
           runId,
-          code: error.code,
-          error: error.message,
-          rejections: error.rejections,
+          code: 'capability-unavailable',
+          error,
+          rejections: [],
           queueItemRestored: false,
         };
       }
-      return failRun(capture, `Could not start the consultation: ${error instanceof Error ? error.message : String(error)}`);
-    }
 
-    // The hold is acquired BEFORE the claim so the server's 500 ms dispatch
-    // quiet timer can never race the claim round trip, exactly like the
-    // normal path acquires it before its enqueue.
-    capture.holdAttempted = true;
-    try {
-      await deps.queue.setServerHold(input.parentSessionId, true, consultHoldOwner(runId));
-    } catch (error) {
-      await releaseHold(capture);
-      return failRun(capture, `Could not hold the session queue for the consult: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    startHoldHeartbeat(capture);
+      if (item.kind !== 'consult') {
+        return failRun(capture, 'The queued message is not a consult item, so it cannot be resumed as one.');
+      }
+      if (item.claimed) {
+        return failRun(capture, 'The consult item is reserved by another owner, so it cannot be resumed right now.');
+      }
+      if (!deps.queue.getQueueForTarget(target).some((entry) => entry.id === item.id)) {
+        return failRun(capture, 'The queued consult message is no longer in the queue, so there is nothing to resume.');
+      }
 
-    if (capture.cancelled) {
-      await releaseHold(capture);
-      return finishCancelledRun(capture);
-    }
-    if (!runtimeMatches(capture, deps)) return finishRuntimeChangedRun(capture);
+      // Auto-review owns the parent and drives it through the queue only: a
+      // consult must not claim, hold, or dispatch while that loop runs.
+      if (deps.isAutoReviewRunning(input.parentSessionId)) {
+        return {
+          status: 'refused',
+          runId,
+          code: 'auto-review-active',
+          error: AUTO_REVIEW_ACTIVE_MESSAGE,
+          rejections: [],
+          queueItemRestored: false,
+        };
+      }
 
-    deps.runs.start({
-      parentSessionId: input.parentSessionId,
-      runId,
-      mode: input.mode,
-      timeoutMs: input.timeoutMs,
-      advisors: input.advisors,
-    });
-    deps.runs.setPhase(input.parentSessionId, runId, 'waiting-admission');
+      try {
+        await deps.runtime.prevalidateConsultation({
+          parentSessionId: input.parentSessionId,
+          directory: input.directory,
+          expectedRuntimeKey: capture.runtimeKey,
+          advisors: input.advisors,
+          messageText: input.message.text ?? input.message.content,
+          attachments: toAdvisorAttachments(input.message.attachments),
+          mode: input.mode,
+          timeoutMs: input.timeoutMs,
+        });
+      } catch (error) {
+        deps.runs.finish(input.parentSessionId, runId, { phase: 'failed', error: error instanceof Error ? error.message : String(error) });
+        if (error instanceof ConsultationRefusedError) {
+          return {
+            status: 'refused',
+            runId,
+            code: error.code,
+            error: error.message,
+            rejections: error.rejections,
+            queueItemRestored: false,
+          };
+        }
+        return failRun(capture, `Could not start the consultation: ${error instanceof Error ? error.message : String(error)}`);
+      }
 
-    let claimedItem: QueuedMessage;
-    try {
-      claimedItem = await deps.queue.claimConsultItem(target, item.id, consultHoldOwner(runId));
-    } catch (error) {
+      // The hold is acquired BEFORE the claim so the server's 500 ms dispatch
+      // quiet timer can never race the claim round trip, exactly like the
+      // normal path acquires it before its enqueue.
+      capture.holdAttempted = true;
+      try {
+        await deps.queue.setServerHold(input.parentSessionId, true, consultHoldOwner(runId));
+      } catch (error) {
+        await releaseHold(capture);
+        return failRun(capture, `Could not hold the session queue for the consult: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      startHoldHeartbeat(capture);
+
+      if (capture.cancelled) {
+        await releaseHold(capture);
+        return finishCancelledRun(capture);
+      }
       if (!runtimeMatches(capture, deps)) return finishRuntimeChangedRun(capture);
-      await releaseHold(capture);
-      return failRun(capture, `Could not claim the queued consult item: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (!claimedItem) {
-      // The claim resolved with nothing: the item left the queue without
-      // reaching this resume (another client removed it).
-      await releaseHold(capture);
-      return finishDeliveredRawRun(capture);
-    }
-    if (!runtimeMatches(capture, deps)) return finishRuntimeChangedRun(capture);
 
-    return runClaimedConsult(input, target, capture, claimedItem);
+      deps.runs.start({
+        parentSessionId: input.parentSessionId,
+        runId,
+        mode: input.mode,
+        timeoutMs: input.timeoutMs,
+        advisors: input.advisors,
+      });
+      deps.runs.setPhase(input.parentSessionId, runId, 'waiting-admission');
+
+      let claimedItem: QueuedMessage;
+      try {
+        claimedItem = await deps.queue.claimConsultItem(target, item.id, consultHoldOwner(runId));
+      } catch (error) {
+        if (!runtimeMatches(capture, deps)) return finishRuntimeChangedRun(capture);
+        await releaseHold(capture);
+        return failRun(capture, `Could not claim the queued consult item: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!claimedItem) {
+        // The claim resolved with nothing: the item left the queue without
+        // reaching this resume (another client removed it).
+        await releaseHold(capture);
+        return finishDeliveredRawRun(capture);
+      }
+      if (!runtimeMatches(capture, deps)) return finishRuntimeChangedRun(capture);
+
+      return runClaimedConsult(input, target, capture, claimedItem);
+    } catch (error) {
+      const message = `The consult resume failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`;
+      // The run must not stay non-terminal: a stuck record would block the
+      // parent's auto-review through the symmetric exclusion guard.
+      deps.runs.finish(input.parentSessionId, runId, { phase: 'failed', error: message });
+      // Mirror the submission's outer catch: an error raised while a dispatch
+      // request was in flight may have been accepted, so releasing here would
+      // clear the owner hold the proxy prompt gate needs.
+      if (capture.dispatching) {
+        capture.holdRelease = Promise.resolve();
+        return {
+          status: 'failed',
+          runId,
+          error: message,
+          queueItemRestored: false,
+          uncertain: true,
+        };
+      }
+      await releaseHold(capture);
+      return {
+        status: 'failed',
+        runId,
+        error: message,
+        queueItemRestored: false,
+      };
+    } finally {
+      capture.terminal = true;
+      // Every terminal path releases, but never leave a live interval behind
+      // if a future path forgets to.
+      stopHoldHeartbeat(capture);
+    }
   };
 
   return { submitConsultMessage, resumeConsultItem };
@@ -1452,6 +1535,8 @@ const defaultDeps = (): ConsultSubmissionDeps => ({
       useMessageQueueStore.getState().setConsultItemPayload(target, messageId, owner, consult),
     dispatchConsultItem: (target, messageId, owner) =>
       useMessageQueueStore.getState().dispatchConsultItem(target, messageId, owner),
+    resolveConsultItem: (target, messageId) =>
+      useMessageQueueStore.getState().resolveConsultItem(target, messageId),
     getQueueForTarget: (target) => useMessageQueueStore.getState().getQueueForTarget(target),
     setServerHold: (sessionId, held, owner) => useMessageQueueStore.getState().setServerHold(sessionId, held, owner),
   },

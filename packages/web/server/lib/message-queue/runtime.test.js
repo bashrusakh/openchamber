@@ -1116,16 +1116,17 @@ describe('message queue runtime', () => {
       expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
     });
 
-    it('a consult with context parts rides the metadata on the first existing text part without an extra part', async () => {
+    it('a consult with context parts keeps the context metadata and carries the receipt on a synthetic part', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
       openCode.state.statuses = {};
       const metadata = { openchamberConsultReceipt: { runID: 'run-1' } };
+      const contextMetadata = { openchamberContext: { kind: 'chat-quote', quote: 'q', text: 'why?' } };
       const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
         content: '',
         text: '',
         attachments: [{ id: 'a1', filename: 'shot.png', mimeType: 'image/png', size: 3, source: 'local', dataUrl: 'data:image/png;base64,AAA=' }],
-        context: [{ kind: 'context', text: 'the diff', metadata: { openchamberContext: { kind: 'chat-quote', quote: 'q', text: 'why?' } } }],
+        context: [{ kind: 'context', text: 'the diff', metadata: contextMetadata }],
         consult: { system: 'be terse', textPartMetadata: metadata },
       }));
       await runtime.claim(SESSION, itemId, 'consult:run-1');
@@ -1134,12 +1135,14 @@ describe('message queue runtime', () => {
       expect(result.status).toBe('dispatched');
       expect(openCode.state.sent).toHaveLength(1);
       const parts = openCode.state.sent[0].body.parts;
-      // No extra carrier part: the receipt rides the first text part, which
-      // here is the context part (the user text is empty). As today, the
-      // assignment replaces that part's own metadata.
+      // The first existing text part (the context part, since the user text is
+      // empty) already carries its own metadata: attaching the receipt there
+      // would overwrite it. The synthetic carrier goes before the files
+      // instead, and the context part keeps its own payload.
       expect(parts).toEqual([
+        { type: 'text', text: CONSULT_RECEIPT_CARRIER_TEXT, synthetic: true, metadata },
         { type: 'file', mime: 'image/png', filename: 'shot.png', url: 'data:image/png;base64,AAA=' },
-        { type: 'text', text: 'the diff', synthetic: true, metadata },
+        { type: 'text', text: 'the diff', synthetic: true, metadata: contextMetadata },
       ]);
     });
 
@@ -1526,6 +1529,64 @@ describe('message queue runtime', () => {
       expect((await pending).status).toBe('dispatched');
     });
 
+    it('stays unresolved when a dispatch starts during the tail read (the stale read never clobbers it)', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // Park resolve's marker read, then start a dispatch while it is still in
+      // flight: the read proves delivery, but removing the item on that stale
+      // proof would clobber a live send that owns it now.
+      let releaseRead;
+      let releasePrompt;
+      openCode.fetchImpl
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          releaseRead = () => resolve(Response.json([markerFor('run-1')]));
+        }))
+        .mockImplementationOnce(async () => Response.json({}))
+        .mockImplementationOnce(async () => Response.json([]))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          releasePrompt = () => resolve(new Response(null, { status: 204 }));
+        }));
+      const pendingResolve = runtime.resolveConsult(SESSION, itemId);
+      await settle(5);
+      const pendingDispatch = runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      await settle(5);
+      expect(runtime.sessionSnapshot(SESSION).sendingId).toBe(itemId);
+
+      releaseRead();
+      expect(await pendingResolve).toEqual({ status: 'unresolved' });
+      // Nothing was removed and no hold was released: the item, claim, and
+      // reservation are exactly the live dispatch's.
+      const snapshot = runtime.sessionSnapshot(SESSION).items;
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+
+      releasePrompt();
+      expect((await pendingDispatch).status).toBe('dispatched');
+    });
+
+    it('never clears an unrelated owner-less hold when the delivered item had no claim', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      // A legacy owner-less hold from another feature; the item itself is
+      // unclaimed. Releasing the empty owner would clear that unrelated hold.
+      runtime.setHold(SESSION, true, 60_000);
+      openCode.state.tail = [markerFor('run-1')];
+
+      const result = await runtime.resolveConsult(SESSION, itemId);
+      expect(result).toEqual({ status: 'dispatched', delivered: 'confirmed' });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      // The unrelated hold survived: only a claimed item's own owner slot is
+      // released, and an unclaimed item has no owner to release.
+      expect(runtime.setHold(SESSION, false, undefined, 'unrelated')).toMatchObject({ held: true });
+      expect(runtime.setHold(SESSION, false)).toMatchObject({ held: false });
+    });
+
     it('answers not-found and not-consult like the dispatch entry order', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
@@ -1568,6 +1629,28 @@ describe('message queue runtime', () => {
       await settle();
       expect(openCode.state.sent).toHaveLength(0);
       expect(runtime.sessionSnapshot(SESSION).items.map((entry) => entry.content)).toEqual(['follow up', 'plain']);
+    });
+
+    it('a lapsed reservation drops the stale system but keeps the receipt metadata (delivery identity)', async () => {
+      let clock = 0;
+      const { runtime, openCode } = createRuntime({ now: () => clock });
+      runtime.start();
+      openCode.state.statuses = {};
+      const metadata = { openchamberConsultReceipt: { runID: 'run-1' } };
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse', textPartMetadata: metadata },
+      }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1', 1_000);
+
+      clock = 2_000;
+      runtime.setHold('ses_other_lapse_identity', true, 60_000, 'other');
+      const cleared = runtime.sessionSnapshot(SESSION).items[0];
+      expect(cleared.recoverable).toBe(true);
+      expect(cleared).not.toHaveProperty('claimed');
+      // The stale synthesis must never be re-sent, but the receipt metadata is
+      // the run's delivery-correlation identity: a later Resume re-checks
+      // delivery with it before re-fanning-out the acting turn.
+      expect(cleared.consult).toEqual({ textPartMetadata: metadata });
     });
 
     it('take refuses a consult item and takeAll skips it', async () => {
@@ -1635,6 +1718,30 @@ describe('message queue runtime', () => {
       await settle();
       expect(second.openCode.state.sent).toHaveLength(0);
       expect(second.runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+
+    it('a restart keeps the restored consult item\'s receipt metadata as its delivery identity', async () => {
+      const dataDir = makeDataDir();
+      const metadata = { openchamberConsultReceipt: { runID: 'run-1' } };
+      const first = createRuntime({ dataDir });
+      first.runtime.start();
+      const { itemId } = await first.runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse', textPartMetadata: metadata },
+      }));
+      await first.runtime.claim(SESSION, itemId, 'consult:run-1', 60_000);
+      await first.runtime.flush();
+      first.runtime.stop();
+
+      const second = createRuntime({ dataDir });
+      second.runtime.start();
+      await second.runtime.load();
+      const loaded = second.runtime.sessionSnapshot(SESSION).items[0];
+      expect(loaded.recoverable).toBe(true);
+      expect(loaded).not.toHaveProperty('claimed');
+      // Holds are memory-only, so the reservation is gone; the stale synthesis
+      // is dropped, but the receipt metadata survives so a Resume can check
+      // whether the pre-restart dispatch already landed.
+      expect(loaded.consult).toEqual({ textPartMetadata: metadata });
     });
 
     it('a fresh owner re-claims a lapsed head consult item and dispatches it as today', async () => {

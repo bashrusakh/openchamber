@@ -113,6 +113,29 @@ describe('queued message chips consult affordance', () => {
     expect(findResumeButton()).toBeUndefined();
   });
 
+  test('only the head recoverable consult offers Resume, never a later one', async () => {
+    const head = { ...recoverableConsultMessage, id: 'consult-head', content: 'head consult', text: 'head consult' };
+    const second = { ...recoverableConsultMessage, id: 'consult-second', content: 'second consult', text: 'second consult' };
+    await renderChips([head, second], {
+      onResumeConsult: () => undefined,
+    });
+
+    // The server only claims the queue head, so exactly one Resume exists and
+    // it belongs to the head row.
+    const resumeButtons = [...host.querySelectorAll('button')].filter((button) => (button.textContent ?? '').includes('Resume consultation'));
+    expect(resumeButtons).toHaveLength(1);
+    const row = resumeButtons[0].closest('div');
+    expect(row?.textContent).toContain('head consult');
+    expect(row?.textContent).not.toContain('second consult');
+  });
+
+  test('a recoverable consult behind a normal head renders no Resume', async () => {
+    await renderChips([normalMessage, recoverableConsultMessage], {
+      onResumeConsult: () => undefined,
+    });
+    expect(findResumeButton()).toBeUndefined();
+  });
+
   const buttonLabels = (): string[] => (
     [...host.querySelectorAll('button')].map((button) => button.textContent ?? '')
   );

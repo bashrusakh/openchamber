@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { ConsultDispatchOutcome, MessageQueueTarget, QueuedContextPart, QueuedMessage } from '@/stores/messageQueueStore';
+import type { ConsultDispatchOutcome, ConsultResolveOutcome, MessageQueueTarget, QueuedContextPart, QueuedMessage } from '@/stores/messageQueueStore';
 import type { AttachedFile } from '@/stores/types/sessionTypes';
 import type { ConsultRunFinish, ConsultRunPhase, ConsultRunStartInput } from '@/stores/useConsultStore';
 import { createContextPart } from '@/lib/messages/contextParts';
@@ -154,6 +154,12 @@ type HarnessState = {
   /** When set, the next dispatch request waits on this gate. */
   dispatchConsultGate: { promise: Promise<ConsultDispatchOutcome> } | null;
   dispatchConsultFailure: Error | null;
+  /** When set, `resolveConsultItem` answers this exact structured outcome. */
+  resolveConsultOutcome: ConsultResolveOutcome | null;
+  /** When set, `resolveConsultItem` throws (the resume must fail open). */
+  resolveConsultFailure: Error | null;
+  /** Every `resolveConsultItem` call in order. */
+  resolveConsultCalls: Array<{ sessionId: string; messageId: string }>;
   prevalidations: Array<{ parentSessionId: string; directory: string }>;
   prevalidationRefusal: Error | null;
   /** When set, verifyCapability answers this refusal. */
@@ -161,6 +167,8 @@ type HarnessState = {
   capabilityChecks: number;
   /** One-shot: the next runs.finish throws (exercises the outer catch). */
   finishFailureOnce: Error | null;
+  /** One-shot: the next runs.setPhase throws (exercises the resume outer catch). */
+  setPhaseFailureOnce: Error | null;
   /** Every `runs.updateAdvisor` call in order (F5 live advisor rows). */
   advisorUpdates: Array<{ runId: string; index: number; status?: string; durationMs?: number; reason?: string }>;
   status: 'idle' | 'busy' | 'retry';
@@ -220,11 +228,15 @@ const createHarness = (): Harness => {
     dispatchConsultOutcome: null,
     dispatchConsultGate: null,
     dispatchConsultFailure: null,
+    resolveConsultOutcome: null,
+    resolveConsultFailure: null,
+    resolveConsultCalls: [],
     prevalidations: [],
     prevalidationRefusal: null,
     capabilityRefusal: null,
     capabilityChecks: 0,
     finishFailureOnce: null,
+    setPhaseFailureOnce: null,
     advisorUpdates: [],
     status: 'idle',
     statusFailure: null,
@@ -313,6 +325,12 @@ const createHarness = (): Harness => {
         state.queueItems = state.queueItems.filter((entry) => entry.id !== messageId);
         return { status: 'dispatched', item };
       },
+      resolveConsultItem: async (target, messageId) => {
+        state.events.push(`queue:resolve-consult:${messageId}`);
+        state.resolveConsultCalls.push({ sessionId: target.sessionId, messageId });
+        if (state.resolveConsultFailure) throw state.resolveConsultFailure;
+        return state.resolveConsultOutcome ?? { status: 'unresolved', recoverable: true };
+      },
       getQueueForTarget: (target) => {
         state.events.push(`queue:read:${target.sessionId}`);
         return [...state.queueItems];
@@ -339,6 +357,11 @@ const createHarness = (): Harness => {
         state.runs.set(input.parentSessionId, { runId: input.runId, phase: 'waiting-admission' });
       },
       setPhase: (parentSessionId, runId, phase) => {
+        if (state.setPhaseFailureOnce) {
+          const failure = state.setPhaseFailureOnce;
+          state.setPhaseFailureOnce = null;
+          throw failure;
+        }
         const current = state.runs.get(parentSessionId);
         if (!current || current.runId !== runId) return;
         current.phase = phase;
@@ -1895,5 +1918,91 @@ describe('resume of a stranded consult item', () => {
     expect(errorOf(result)).toContain('not a consult item');
     expect(harness.state.claims).toBe(0);
     expect(harness.state.holds).toEqual([]);
+  });
+
+  test('resolve confirms delivery: no claim, hold, fan-out, or dispatch, and a neutral delivered result', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'dispatched', delivered: 'confirmed' };
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    // The delivery-first resolve is the only queue call: a landed turn is
+    // never claimed, fanned out, or dispatched a second time.
+    expect(harness.state.resolveConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-stranded' }]);
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.startInputs).toHaveLength(0);
+    expect(harness.state.payloadCalls).toHaveLength(0);
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+    // Delivery is decided before the capability read: nothing is left to
+    // verify when the acting turn already landed.
+    expect(harness.state.capabilityChecks).toBe(0);
+    expect(harness.state.heartbeatActive).toBe(false);
+    // No run record is started or finished: there is nothing to consult.
+    expect(harness.state.runs.size).toBe(0);
+    // The server owns the exactly-once removal and its broadcast; the resume
+    // leaves the projection untouched.
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-stranded']);
+    // A delivered result the caller can read as neutral, not as a failure.
+    expect(result).toEqual({
+      status: 'delivered',
+      runId: 'run-1',
+      resumedResolvedDelivered: true,
+      queueItemRestored: false,
+    });
+  });
+
+  test('an unresolved resolve falls through to the normal resume: claim, fan-out, dispatch', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'unresolved', recoverable: true };
+    const pending = harness.resume(resumeTarget(), item, resumeOptions());
+    await harness.flush();
+    expect(harness.state.startInputs).toHaveLength(1);
+    harness.lastConsultation().resolve(consultationResult());
+    const outcome = await pending;
+
+    expect(harness.state.resolveConsultCalls).toHaveLength(1);
+    expect(harness.state.events).toContain('queue:claim:q-stranded:consult:run-1');
+    expect(harness.state.dispatchConsultCalls).toBe(1);
+    expect(outcome.status).toBe('dispatched');
+  });
+
+  test('a resolve failure fails open to the claim route', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    harness.state.resolveConsultFailure = new Error('resolve request failed');
+    const pending = harness.resume(resumeTarget(), item, resumeOptions());
+    await harness.flush();
+    expect(harness.state.startInputs).toHaveLength(1);
+    harness.lastConsultation().resolve(consultationResult());
+    const outcome = await pending;
+
+    expect(harness.state.resolveConsultCalls).toHaveLength(1);
+    expect(harness.state.claims).toBe(1);
+    expect(outcome.status).toBe('dispatched');
+  });
+
+  test('an unexpected throw after the hold finishes the run terminal and releases the hold', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    // The run store blows up on the resume's first phase write, after the hold
+    // was acquired: the outer safety must still finish the run and release the
+    // hold, with no heartbeat left running.
+    harness.state.setPhaseFailureOnce = new Error('run store exploded');
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(errorOf(result)).toContain('run store exploded');
+    expect(harness.state.runs.get('parent')?.phase).toBe('failed');
+    expect(harness.state.holds).toEqual([true, false]);
+    expect(harness.state.heartbeatActive).toBe(false);
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.startInputs).toHaveLength(0);
   });
 });

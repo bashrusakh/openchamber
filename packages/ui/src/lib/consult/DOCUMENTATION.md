@@ -85,10 +85,12 @@ hold, return the message to the composer) applies.
   persisted with the parent session and is visible in its API/export/share
   surface. The ordinary chat UI does not render it as message content.
 - The receipt is persisted as bounded text-part metadata on the acting user
-  message and rides the session's data the same way. An attachment-only
-  consult message carries no receipt: OpenCode's file parts have no metadata
-  field, so the metadata is only ever attached to a text part (the server
-  bound is documented in the message-queue module).
+  message and rides the session's data the same way. OpenCode's file parts
+  have no metadata field, so the metadata always rides a text part: the first
+  text part that carries no metadata of its own, otherwise a synthetic
+  `[consult receipt]` carrier inserted before the file parts, so an
+  attachment-only consult carries its receipt too (the server bound is
+  documented in the message-queue module).
 - Advisor identities are not part of the synthesis text or the receipt's
   blocks; provenance stays in the run store and the receipt's advisor rows.
 
@@ -230,8 +232,8 @@ message exactly as the composer queue captures it (`content`, `text`,
 (provider/model/agent/variant), the exact advisor selections, the mode, and the
 per-advisor `timeoutMs`. It returns `{ runId, result, cancel }` synchronously.
 
-`result` settles with one of five states; only `dispatched` means the acting
-turn was sent:
+`result` settles with one of six states; only `dispatched` means the acting
+turn was sent by this submission:
 
 - `dispatched` — receipt + consultation result;
 - `cancelled` — cancelled before dispatch;
@@ -243,7 +245,12 @@ turn was sent:
   restore the composer and must not re-send, and should tell the user the
   consultation did not happen. `queueItemRestored` is `false`. The composer
   branch implements this as `consultCaptureDisposition` (keep the capture
-  cleared) plus the localized delivered-raw toast.
+  cleared) plus the localized delivered-raw toast;
+- `delivered` — a resume's delivery-first resolve found the turn already
+  landed (`resumedResolvedDelivered: true`): a previous run sent it and the
+  server removed the item exactly once. Nothing was claimed, fanned out, or
+  dispatched, and the caller shows a neutral already-delivered state, never a
+  failure or a composer restore.
 
 `queueItemRestored` on `refused`/`failed` is `true` only for the
 enqueue-rejection and unattributable-append edges (a copy of the message is
@@ -350,7 +357,15 @@ restore the composer and duplicate the send.
 chip's Resume affordance: `resumeConsultItem(target, item, runOptions)` claims
 the existing item (never enqueueing, never sending raw) and re-runs the
 consultation through the same claim → fan-out → payload → dispatch route as a
-new submission, with fresh advisor options from the caller.
+new submission, with fresh advisor options from the caller. The chip offers
+Resume only on the queue head, the only item the server will claim. Because
+the server keeps the item's receipt metadata through a lapse and a restart,
+the resume checks delivery first: a `dispatched` answer from the resolve route
+means a previous run already delivered the turn, so the resume reports the
+neutral `delivered` result — no claim, no fan-out, no dispatch, no composer
+restore — instead of running a duplicate consultation; every other answer
+falls through to the normal resume, and a resolve failure fails open to the
+claim route, which re-checks the reservation server-side.
 
 **Reconnect resolution (#3743).** On every queue hydration the store scans
 dangling consult items (`claimed` or `recoverable`) and posts one outcome
@@ -514,11 +529,6 @@ Known gaps left for later work packages:
 
 Accepted v1 limitations:
 
-- An attachments-only consult message dispatches without a receipt: the carrier
-  is the acting user message's primary text part, and
-  `lib/opencode/client.ts` attaches `textPartMetadata` only when that text is
-  non-empty, so a consult with attachments and no text delivers the turn with
-  no receipt.
 - VS Code has no server-owned message queue, so the runtime gate refuses before
   any protocol read: `resolveConsultMechanismCapability` and
   `resolveConsultLiveCapability` both report `unsupported-runtime`, and the

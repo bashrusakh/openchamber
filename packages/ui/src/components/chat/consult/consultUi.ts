@@ -309,7 +309,7 @@ export const isDeliveredRawSubmission = (
  */
 type ConsultCaptureSettlement =
   | { status: 'cancelled' }
-  | { status: 'refused' | 'delivered-raw'; queueItemRestored: boolean }
+  | { status: 'refused' | 'delivered-raw' | 'delivered'; queueItemRestored: boolean }
   | { status: 'failed'; queueItemRestored: boolean; uncertain?: boolean };
 
 /**
@@ -317,15 +317,17 @@ type ConsultCaptureSettlement =
  * submission that did not dispatch. A cancelled run always restores. A
  * `delivered-raw` run never does: the message may already have been sent
  * without the consult, so restoring the capture could send it a second time.
- * A `failed` run with `uncertain: true` (an in-flight send, an indeterminate
- * dispatch failure, a transport error) is the same hazard and keeps the
- * capture cleared. A refusal or definite failure restores only when the
- * submission did not put the queue item back itself (`queueItemRestored`
- * false).
+ * A `delivered` run is the same: the resume's delivery check confirmed the
+ * turn already landed, so there is nothing to restore. A `failed` run with
+ * `uncertain: true` (an in-flight send, an indeterminate dispatch failure, a
+ * transport error) is the same hazard and keeps the capture cleared. A
+ * refusal or definite failure restores only when the submission did not put
+ * the queue item back itself (`queueItemRestored` false).
  */
 export const consultCaptureDisposition = (result: ConsultCaptureSettlement): 'keep' | 'restore' => {
   if (result.status === 'cancelled') return 'restore';
   if (isDeliveredRawSubmission(result.status)) return 'keep';
+  if (result.status === 'delivered') return 'keep';
   if (result.status === 'failed' && result.uncertain) return 'keep';
   return result.queueItemRestored ? 'keep' : 'restore';
 };

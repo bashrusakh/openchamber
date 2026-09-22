@@ -29,13 +29,15 @@ import { getQueuedMessagePreview } from '@/lib/messages/queuedMessagePreview';
 interface QueuedMessageChipProps {
     message: QueuedMessage;
     target: MessageQueueTarget;
+    /** True only for the first item: the server claims only the queue head. */
+    isHead: boolean;
     onEdit: (message: QueuedMessage) => void;
     onSend: (message: QueuedMessage) => void;
     /** Offered only for a stranded (recoverable) consult item; re-claims and resumes it. */
     onResumeConsult?: (message: QueuedMessage) => void;
 }
 
-const QueuedMessageChip = memo(({ message, target, onEdit, onSend, onResumeConsult }: QueuedMessageChipProps) => {
+const QueuedMessageChip = memo(({ message, target, isHead, onEdit, onSend, onResumeConsult }: QueuedMessageChipProps) => {
     const { t } = useI18n();
     const removeFromQueue = useMessageQueueStore((state) => state.removeFromQueue);
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: message.id });
@@ -49,8 +51,12 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend, onResumeConsu
     const isConsult = message.kind === 'consult';
     // A consult item whose claim lapsed (the submitting client died) is still
     // safe to re-claim: the server kept it unclaimed and never delivers it
-    // raw. Resume re-claims it and runs the consultation fresh.
-    const isRecoverableConsult = isConsult && message.recoverable === true && onResumeConsult !== undefined;
+    // raw. Resume re-claims it and runs the consultation fresh — but only the
+    // queue head is claimable, so the affordance exists only there.
+    const isRecoverableConsult = isConsult
+        && message.recoverable === true
+        && isHead
+        && onResumeConsult !== undefined;
 
     return (
         <div
@@ -232,11 +238,12 @@ export const QueuedMessageChips = memo(({ target, hidden = false, onEditMessage,
                             className="px-3 pb-3 flex flex-col gap-1.5 max-h-[10.5rem] overflow-y-auto overscroll-contain"
                             style={availableMaxHeight === undefined ? undefined : { maxHeight: Math.max(72, availableMaxHeight - 48) }}
                         >
-                            {queuedMessages.map((message) => (
+                            {queuedMessages.map((message, index) => (
                                 <QueuedMessageChip
                                     key={message.id}
                                     message={message}
                                     target={target}
+                                    isHead={index === 0}
                                     onEdit={handleEdit}
                                     onSend={handleSend}
                                     onResumeConsult={onResumeConsult}

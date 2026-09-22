@@ -1772,6 +1772,11 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         if (!target) return;
         void resumeConsultItem(target, message, runOptions).then((result) => {
             if (result.status === 'dispatched') return;
+            // The delivery-first check found the turn already landed: there is
+            // nothing to resume and nothing to report. The server's own
+            // removal broadcast drops the chip; a failure toast would be
+            // wrong.
+            if (result.status === 'delivered') return;
             // A resumed run the composer captured nothing for: the capture
             // rules still decide — failed-uncertain keeps any leftover
             // cleared state, everything else restores like the normal path.
