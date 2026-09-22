@@ -16,6 +16,7 @@ import React from 'react';
 import { SessionGoalButton, SessionGoalObjectiveCounter } from '@/components/chat/SessionGoalButton';
 import { ComposerDictation } from '@/components/dictation/ComposerDictation';
 import { Icon } from '@/components/icon/Icon';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { GuestAttachItem } from '@/hooks/useGuestSurfaces';
 import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -64,6 +65,7 @@ export interface ComposerFooterProps {
     onOpenAttachSheet: () => void;
     onToggleExpandedInput: () => void;
     onTogglePermissionAutoAccept: () => void;
+    onCompact: () => void;
     onPrimaryAction: () => void;
     onQueueMessage: () => void;
     onAbort: () => void;
@@ -111,6 +113,7 @@ export function ComposerFooter(props: ComposerFooterProps) {
         onOpenAttachSheet,
         onToggleExpandedInput,
         onTogglePermissionAutoAccept,
+        onCompact,
         onPrimaryAction,
         onQueueMessage,
         onAbort,
@@ -123,6 +126,7 @@ export function ComposerFooter(props: ComposerFooterProps) {
         modelSessionId,
         btwSelection,
     } = props;
+    const compactLabel = t('chat.commandAutocomplete.command.compactDescription');
 
     return (
         <div
@@ -235,6 +239,27 @@ export function ComposerFooter(props: ComposerFooterProps) {
                             isExpandedInput={isExpandedInput}
                             onToggle={onToggleExpandedInput}
                         /> : null}
+                        {!isBtw && currentSessionId ? (
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <button
+                                        type="button"
+                                        className={cn(
+                                            footerIconButtonClass,
+                                            'rounded-md text-foreground hover:bg-[var(--interactive-hover)]/40',
+                                        )}
+                                        onMouseDown={(event) => event.preventDefault()}
+                                        onClick={onCompact}
+                                        aria-label={compactLabel}
+                                    >
+                                        <Icon name="scissors" className={cn(iconSizeClass)} aria-hidden="true" />
+                                    </button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" sideOffset={8}>
+                                    {compactLabel}
+                                </TooltipContent>
+                            </Tooltip>
+                        ) : null}
                         <PermissionAutoAcceptButton
                             footerIconButtonClass={footerIconButtonClass}
                             iconSizeClass={iconSizeClass}
