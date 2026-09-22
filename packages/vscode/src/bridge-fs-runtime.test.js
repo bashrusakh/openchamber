@@ -177,6 +177,7 @@ describe('bridge fs exec git read cache', () => {
 
   it('returns existing entries when Gitignore execution times out and aborts its waiter', async () => {
     let aborted = false;
+    let cleanupConfirmed = false;
     const result = await handleFsBridgeMessage(
       { id: 'gitignore-timeout', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
       {
@@ -187,8 +188,13 @@ describe('bridge fs exec git read cache', () => {
         runGitRead: async (_cwd, _task, options) => {
           options?.signal?.addEventListener('abort', () => {
             aborted = true;
+            cleanupConfirmed = true;
           });
-          return new Promise(() => {});
+          return new Promise((resolve) => {
+            options?.signal?.addEventListener('abort', () => {
+              resolve({ stdout: '', stderr: 'Git process was cancelled', exitCode: 1 });
+            }, { once: true });
+          });
         },
       },
     );
@@ -198,5 +204,36 @@ describe('bridge fs exec git read cache', () => {
       { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
     ]);
     expect(aborted).toBe(true);
+    expect(cleanupConfirmed).toBe(true);
+  });
+
+  it('propagates blocked Gitignore cleanup instead of returning an unfiltered fallback', async () => {
+    const result = handleFsBridgeMessage(
+      { id: 'gitignore-cleanup-blocked', type: 'api:fs:list', payload: { path: '/repo', respectGitignore: true } },
+      {
+        ...deps,
+        listDirectoryEntries: async () => [
+          { name: 'visible.ts', path: '/repo/visible.ts', isDirectory: false },
+        ],
+        execGit: async (_args, _cwd, options) => new Promise((resolve) => {
+          options?.signal?.addEventListener('abort', () => {
+            resolve({
+              stdout: '',
+              stderr: 'taskkill failed',
+              exitCode: 1,
+              code: 'ERR_PROCESS_TREE_TERMINATION',
+              cleanupBlocked: true,
+              descendantsTerminated: false,
+            });
+          }, { once: true });
+        }),
+      },
+    );
+
+    await expect(result).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+    });
   });
 });

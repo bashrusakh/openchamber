@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { createGitExecutionService } from './execution-service.js';
 import { getRangeDiff } from './service.js';
 
 const temporaryRoots = [];
@@ -60,5 +61,46 @@ setInterval(() => {}, 1_000);
     controller.abort(new Error('cancelled by test'));
 
     await expect(pending).rejects.toThrow();
+  });
+
+  it('keeps a cancelled status source leased until expansion cleanup settles once', async () => {
+    let expansionStarted = false;
+    let finishExpansionCleanup;
+    let cleanupCount = 0;
+    const execution = createGitExecutionService({
+      raw: {
+        getStatus: (_directory, options = {}) => new Promise((_resolve, reject) => {
+          expansionStarted = true;
+          options.signal?.addEventListener('abort', () => {
+            finishExpansionCleanup = () => {
+              if (cleanupCount > 0) return;
+              cleanupCount += 1;
+              reject(Object.assign(new Error('The untracked expansion was aborted'), { code: 'ABORT_ERR' }));
+            };
+          }, { once: true });
+        }),
+      },
+      resolver: {
+        resolve: async () => ({
+          isRepository: true,
+          commonId: 'common',
+          worktreeId: 'worktree',
+        }),
+      },
+    });
+    const controller = new AbortController();
+    const pending = execution.getStatus('/repo', { signal: controller.signal, mode: 'light' });
+
+    await vi.waitFor(() => expect(expansionStarted).toBe(true));
+    controller.abort('status expansion cancelled');
+
+    await expect(pending).rejects.toMatchObject({ code: 'GIT_EXECUTION_CANCELLED' });
+    expect(execution.coordinator.getStats()).toMatchObject({ active: 1, statusInFlight: 1 });
+    finishExpansionCleanup?.();
+    await vi.waitFor(() => expect(execution.coordinator.getStats()).toMatchObject({
+      active: 0,
+      statusInFlight: 0,
+    }));
+    expect(cleanupCount).toBe(1);
   });
 });

@@ -2,6 +2,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import {
+  copyGitProcessMetadata,
   GitExecutionCancelledError,
   GitExecutionOverloadedError,
   GitExecutionQueueTimeoutError,
@@ -155,6 +156,13 @@ const cancellationError = (signal, message) => new GitExecutionCancelledError(
   message,
   { reason: signal?.reason },
 );
+
+const copyCancellationMetadata = (target, source) => {
+  const code = target.code;
+  copyGitProcessMetadata(target, source);
+  target.code = code;
+  return target;
+};
 
 const canonicalizeMissingPath = async (destination, platform = process.platform) => {
   // Clone reservations happen before the destination exists. Resolve the
@@ -377,6 +385,34 @@ export class GitExecutionCoordinator {
     method(value);
   }
 
+  cancellationForEntry(entry, message) {
+    if (!entry.cancellationError) {
+      entry.cancellationError = cancellationError(entry.signal, message);
+    }
+    return entry.cancellationError;
+  }
+
+  completeTask(entry, failed, value) {
+    if (entry.taskSettled) {
+      return;
+    }
+    entry.taskSettled = true;
+
+    let outcome = value;
+    if (failed && entry.signal?.aborted && value?.code === 'ABORT_ERR') {
+      outcome = this.cancellationForEntry(entry, 'Git execution was cancelled');
+    }
+    if (entry.cancellationError) {
+      copyCancellationMetadata(entry.cancellationError, value);
+    }
+    if (hasUnconfirmedProcessCleanup(value) || hasUnconfirmedProcessCleanup(outcome)) {
+      entry.cleanupBlocked = true;
+    }
+    if (!entry.settled) {
+      this.settleEntry(entry, failed ? entry.reject : entry.resolve, outcome);
+    }
+  }
+
   removePendingEntry(entry) {
     const index = this.pending.indexOf(entry);
     if (index !== -1) {
@@ -447,12 +483,10 @@ export class GitExecutionCoordinator {
       .then(() => entry.task(lease))
       .then(
         (value) => {
-          if (hasUnconfirmedProcessCleanup(value)) entry.cleanupBlocked = true;
-          this.settleEntry(entry, entry.resolve, value);
+          this.completeTask(entry, false, value);
         },
         (error) => {
-          if (hasUnconfirmedProcessCleanup(error)) entry.cleanupBlocked = true;
-          this.settleEntry(entry, entry.reject, error);
+          this.completeTask(entry, true, error);
         },
       )
       .finally(() => {
@@ -497,8 +531,10 @@ export class GitExecutionCoordinator {
       resolve: null,
       reject: null,
       settled: false,
+      taskSettled: false,
       started: false,
       cancelled: false,
+      cancellationError: null,
       timer: undefined,
     };
     return entry;
@@ -530,7 +566,13 @@ export class GitExecutionCoordinator {
       entry.reject = reject;
       const onAbort = () => {
         if (entry.started) {
-          this.settleEntry(entry, reject, cancellationError(entry.signal, 'Git execution was cancelled'));
+          if (!entry.settled) {
+            this.settleEntry(
+              entry,
+              reject,
+              this.cancellationForEntry(entry, 'Git execution was cancelled'),
+            );
+          }
           return;
         }
         this.removePendingEntry(entry);
@@ -843,12 +885,10 @@ export class GitExecutionCoordinator {
       .then(() => entry.task(lease))
       .then(
         (value) => {
-          if (hasUnconfirmedProcessCleanup(value)) entry.cleanupBlocked = true;
-          this.settleEntry(entry, entry.resolve, value);
+          this.completeTask(entry, false, value);
         },
         (error) => {
-          if (hasUnconfirmedProcessCleanup(error)) entry.cleanupBlocked = true;
-          this.settleEntry(entry, entry.reject, error);
+          this.completeTask(entry, true, error);
         },
       )
       .finally(() => {
@@ -917,8 +957,10 @@ export class GitExecutionCoordinator {
       resolve: null,
       reject: null,
       settled: false,
+      taskSettled: false,
       started: false,
       cancelled: false,
+      cancellationError: null,
       timer: undefined,
     };
     destinationState.pending += 1;
@@ -928,9 +970,8 @@ export class GitExecutionCoordinator {
       entry.reject = reject;
       const onAbort = () => {
         if (entry.started) {
-          // The started task owns process termination and cleanup. Let its
-          // close lifecycle settle the clone so the reservation is not
-          // released before the destination cleanup completes.
+          // The owned clone task must settle after process-tree cleanup so the
+          // route does not remove its destination or release its reservation early.
           return;
         }
         this.removePendingClone(entry);

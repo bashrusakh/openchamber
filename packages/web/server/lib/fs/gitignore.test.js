@@ -177,6 +177,44 @@ describe('web Gitignore reader', () => {
     }
   });
 
+  it('propagates a Windows taskkill failure after caller cancellation', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = createChild();
+      child.pid = 1237;
+      let taskkill;
+      const spawn = vi.fn((command) => {
+        if (command === 'taskkill') {
+          taskkill = new EventEmitter();
+          return taskkill;
+        }
+        return child;
+      });
+      const reader = createGitIgnoreReader({
+        spawn,
+        resolveGitBinaryForSpawn: () => 'git',
+        platform: 'win32',
+        timeoutMs: 0,
+      });
+      const controller = new AbortController();
+      const pending = reader.getIgnoredNames('/repo', ['dist'], { signal: controller.signal });
+
+      controller.abort('caller cancelled');
+      await Promise.resolve();
+      expect(taskkill).toBeTruthy();
+      taskkill.emit('error', new Error('taskkill unavailable'));
+      child.emit('close', null);
+
+      await expect(pending).rejects.toMatchObject({
+        code: 'ERR_PROCESS_TREE_TERMINATION',
+        cleanupBlocked: true,
+        descendantsTerminated: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves permission failures instead of treating them as no matches', async () => {
     const child = createChild();
     const spawn = vi.fn(() => {

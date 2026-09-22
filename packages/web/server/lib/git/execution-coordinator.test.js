@@ -99,6 +99,32 @@ describe('GitExecutionCoordinator', () => {
     expect(coordinator.getStats()).toMatchObject({ contexts: 0, worktrees: 0 });
   });
 
+  it('settles an admitted read promptly while retaining its lease until cancellation cleanup completes', async () => {
+    const coordinator = createGitExecutionCoordinator({ globalConcurrency: 1 });
+    const controller = new AbortController();
+    let finishCleanup;
+    const pending = coordinator.run({
+      context: context(),
+      kind: GIT_OPERATION_KIND.READ,
+      signal: controller.signal,
+    }, () => new Promise((resolve) => {
+      controller.signal.addEventListener('abort', () => {
+        finishCleanup = () => resolve('cleaned');
+      }, { once: true });
+    }));
+    await waitFor(() => coordinator.getStats().active === 1);
+
+    controller.abort('read cancelled');
+
+    await expect(pending).rejects.toMatchObject({
+      code: GIT_EXECUTION_ERROR_CODES.CANCELLED,
+    });
+    expect(coordinator.getStats()).toMatchObject({ active: 1, pending: 0 });
+    finishCleanup?.();
+    await waitFor(() => coordinator.getStats().active === 0);
+    expect(coordinator.getStats()).toMatchObject({ active: 0, pending: 0 });
+  });
+
   it('coalesces full and light status work in the safe direction', async () => {
     const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
     let release;
@@ -124,6 +150,8 @@ describe('GitExecutionCoordinator', () => {
     const secondController = new AbortController();
     let sourceSignal;
     let releaseSource;
+    let cleanupCount = 0;
+    let sourceReleased = false;
     let sourceAbortCount = 0;
     const source = coordinator.runStatus({
       context: context(),
@@ -132,7 +160,16 @@ describe('GitExecutionCoordinator', () => {
     }, (_statusMode, signal) => {
       sourceSignal = signal;
       signal?.addEventListener('abort', () => { sourceAbortCount += 1; }, { once: true });
-      return new Promise((resolve) => { releaseSource = resolve; });
+      return new Promise((resolve) => {
+        signal?.addEventListener('abort', () => {
+          releaseSource = () => {
+            if (sourceReleased) return;
+            sourceReleased = true;
+            cleanupCount += 1;
+            resolve({ files: [] });
+          };
+        }, { once: true });
+      });
     });
     const shared = coordinator.runStatus({
       context: context(),
@@ -153,8 +190,12 @@ describe('GitExecutionCoordinator', () => {
       expect(sourceSignal.aborted).toBe(true);
       expect(sourceAbortCount).toBe(1);
       expect(coordinator.getStats()).toMatchObject({ active: 1, statusInFlight: 1 });
+      releaseSource?.();
+      await waitFor(() => coordinator.getStats().active === 0
+        && coordinator.getStats().statusInFlight === 0);
+      expect(cleanupCount).toBe(1);
     } finally {
-      releaseSource?.({ files: [] });
+      releaseSource?.();
       await Promise.allSettled([source, shared]);
     }
 
