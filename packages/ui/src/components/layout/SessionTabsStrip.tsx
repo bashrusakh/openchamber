@@ -43,15 +43,24 @@ import { useIsSessionAiRenamePending } from '@/sync/use-session-ai-rename';
 
 const restrictToXAxis: Modifier = ({ transform }) => ({ ...transform, y: 0 });
 
-// Fallbacks used until the strip has measured itself. A tab is `w-44` (11rem)
-// and the row gap is `gap-1.5`, so both track the UI font scale.
-const DEFAULT_ITEM_WIDTH_PX = 176;
+// Equal-width tabs share the row: they grow together up to the ceiling and
+// shrink together down to the floor, left-aligned. The floor matches the slot's
+// `min-w-[4.75rem]`, the ceiling its `max-w-[11rem]`, and the gap is `gap-1.5`;
+// all three are rem-based so they track the UI font scale.
+const TAB_FLOOR_REM = 4.75;
+const DEFAULT_TAB_FLOOR_PX = 76;
 const DEFAULT_GAP_PX = 6;
-/** The active tab may shrink to this before the strip falls back to the title. */
-const MIN_ACTIVE_TAB_WIDTH_PX = 96;
 /** Trigger fallback until the strip measures the real button: padding, icon,
  *  gap, and the fixed-min-width count span, so ~50px for one or two digits. */
 const DEFAULT_TRIGGER_WIDTH_PX = 50;
+
+/** The rem-based tab floor in px, so the fit decision follows the UI font scale. */
+const readTabFloorWidthPx = (): number => {
+  const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+  return Number.isFinite(rootFontSize) && rootFontSize > 0
+    ? rootFontSize * TAB_FLOOR_REM
+    : DEFAULT_TAB_FLOOR_PX;
+};
 
 type SessionTab = { id: string; session: Session };
 
@@ -64,8 +73,8 @@ type StripMetrics = {
   triggerWidth: number;
   /** Measured width of the tab row (less than outerWidth once a trigger shows). */
   rowWidth: number;
-  /** Measured width of one full-width tab, tracking the UI font scale. */
-  itemWidth: number;
+  /** Floor width of one tab in px, tracking the UI font scale. */
+  floorWidth: number;
   /** Computed gap between tabs. */
   gap: number;
 };
@@ -74,6 +83,33 @@ type StripLayout =
   | { mode: 'all' }
   | { mode: 'title' }
   | { mode: 'window'; count: number };
+
+const sameLayout = (a: StripLayout, b: StripLayout): boolean => {
+  if (a.mode !== b.mode) return false;
+  if (a.mode === 'window' && b.mode === 'window') return a.count === b.count;
+  return true;
+};
+
+/**
+ * The fallback decision, and the only layout choice JS makes:
+ * - every slot fits at the floor -> render them all;
+ * - otherwise a contiguous window centered on the active tab, with the rest
+ *   behind the overflow trigger and its panel;
+ * - not even the trigger and one floor-width tab fit -> the title fallback.
+ */
+const deriveLayout = (metrics: StripMetrics, slots: number, tabCount: number): StripLayout => {
+  if (slots <= 0 || tabCount <= 0 || metrics.outerWidth <= 0) return { mode: 'all' };
+  if (metrics.outerWidth < metrics.triggerWidth + metrics.outerGap + metrics.floorWidth) {
+    return { mode: 'title' };
+  }
+  const floorSetWidth = slots * metrics.floorWidth + (slots - 1) * metrics.gap;
+  if (floorSetWidth <= metrics.outerWidth) return { mode: 'all' };
+  const rowWidth = metrics.rowWidth > 0
+    ? metrics.rowWidth
+    : metrics.outerWidth - metrics.triggerWidth - metrics.outerGap;
+  const fit = Math.floor((rowWidth + metrics.gap) / (metrics.floorWidth + metrics.gap));
+  return { mode: 'window', count: Math.max(1, Math.min(tabCount, fit)) };
+};
 
 type StripWindow = {
   visibleTabs: SessionTab[];
@@ -122,22 +158,23 @@ const contextComponents: SessionTabMenuComponents = {
  * `renderMenu` — backs both the "..." dropdown and the right-click context
  * menu, which opens under the cursor without changing the active tab. The
  * dropdown's anchor overlay stays mounted through the close animation so the
- * popup never flashes detached. While the active tab is renaming, the
- * overlay is suppressed entirely — only the rename controls show.
+ * popup never flashes detached. A container query hides the overlay once the
+ * slot is too narrow to show it without covering the title, leaving the
+ * right-click menu and middle-click close as the reachable controls at the
+ * floor. While the active tab is renaming, the overlay is suppressed entirely —
+ * only the rename controls show.
  */
 const SessionTabItem: React.FC<{
   tab: SessionTab;
   isActive: boolean;
   suppressControls: boolean;
-  /** Allows the active tab to shrink when it is the only one that fits. */
-  canShrink?: boolean;
   onSelect: (tab: SessionTab) => void;
   onClose: (id: string) => void;
   renderMenu: (args: SessionTabMenuArgs) => React.ReactNode;
   closeOtherTabs: (id: string) => void;
   onMenuOpenChangeComplete?: (open: boolean) => void;
   children?: React.ReactNode;
-}> = ({ tab, isActive, suppressControls, canShrink = false, onSelect, onClose, renderMenu, closeOtherTabs, onMenuOpenChangeComplete, children }) => {
+}> = ({ tab, isActive, suppressControls, onSelect, onClose, renderMenu, closeOtherTabs, onMenuOpenChangeComplete, children }) => {
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = React.useState(false);
   // Keeps the overlay (the dropdown's anchor) mounted through the close animation.
@@ -174,8 +211,7 @@ const SessionTabItem: React.FC<{
       style={{ transform: DndCSS.Translate.toString(transform), transition }}
       data-session-tab-slot=""
       className={cn(
-        'session-tab-slot flex h-7 w-44 touch-none',
-        canShrink ? 'min-w-0 shrink' : 'shrink-0',
+        'session-tab-slot flex h-7 flex-1 basis-0 touch-none min-w-[4.75rem] max-w-[11rem]',
         isDragging && 'z-10 opacity-60',
       )}
       data-active={isActive ? 'true' : 'false'}
@@ -224,7 +260,11 @@ const SessionTabItem: React.FC<{
                   )}
                 >
                   <div className={cn(
-                    'flex min-w-0 flex-1 items-center',
+                    // `session-tab-content` is the hook the narrow container
+                    // query uses to neutralize the hover padding below the
+                    // threshold where the controls it reserves room for are
+                    // hidden; see `index.css`.
+                    'session-tab-content flex min-w-0 flex-1 items-center',
                     !suppressControls && 'group-hover/session-tab:pr-10',
                     overlayVisible && 'pr-10',
                   )}
@@ -260,7 +300,7 @@ const SessionTabItem: React.FC<{
                       onClick={(event) => event.stopPropagation()}
                       onPointerDown={(event) => event.stopPropagation()}
                       className={cn(
-                        'absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5',
+                        'session-tab-controls absolute right-1 top-1/2 hidden -translate-y-1/2 items-center gap-0.5',
                         'opacity-0 transition-opacity duration-150',
                         'group-hover/session-tab:flex group-hover/session-tab:opacity-100',
                         overlayVisible && 'flex opacity-100',
@@ -385,12 +425,21 @@ const SessionTabOverflowRow: React.FC<{
  * was archived/deleted) stay in the store but do not render, so a partial
  * session list never destroys the working set.
  *
- * Horizontal room is finite, so the strip measures itself and renders only the
- * tabs that fully fit. The active tab always stays visible and the rest of the
- * room is filled with a contiguous window of the store order; tabs outside the
- * window move behind the overflow trigger and its panel, so every tab stays
- * reachable. When not even the trigger and a minimum active tab fit, the strip
- * falls back to the plain session title.
+ * Horizontal room is finite, so tabs are equal-width flex items that grow and
+ * shrink together, left-aligned, with any spare room left to the right of the
+ * last tab. Flex reflow itself is instant: a resize re-lays out the tabs in a
+ * single frame. A slot that enters the visible window — a new tab, or one
+ * revealed when the strip grows — animates in from collapsed with
+ * `session-tab-enter`, so growing the strip shows the newly visible tabs
+ * stepping in; a tab that leaves the layout is unmounted without an exit
+ * animation. That enter animation and its `prefers-reduced-motion` opt-out live
+ * on the slot class in `index.css`. JS only picks the fallback: while every tab
+ * fits at the floor
+ * they all render; past the floor the active tab stays visible inside a
+ * contiguous window of the store order and the rest move behind the overflow
+ * trigger and its panel, so every tab stays reachable. When not even the
+ * trigger and one floor-width tab fit, the strip falls back to the plain
+ * session title.
  */
 export const SessionTabsStrip: React.FC<{
   /** Menu items for one tab's session, supplied by the header. */
@@ -460,14 +509,17 @@ export const SessionTabsStrip: React.FC<{
     }
   }, [reorderTabs]);
 
-  // The strip measures itself and renders only the tabs that fully fit. The row
-  // is `flex-1 min-w-0 overflow-hidden`, so its width never depends on how many
-  // tabs render — measurement cannot feed back into layout.
+  // The strip measures itself and picks a fallback. The row is
+  // `flex-1 min-w-0 overflow-hidden`, so its width never depends on how many
+  // tabs render — measurement cannot feed back into layout. Raw measurements
+  // live in a ref; only the derived `{mode, count}` is state, so a resize that
+  // does not change the fallback causes no re-render.
   const outerRef = React.useRef<HTMLDivElement | null>(null);
   const rowRef = React.useRef<HTMLDivElement | null>(null);
-  const measureItemRef = React.useRef<HTMLDivElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   const frameRef = React.useRef<number | null>(null);
+  const metricsRef = React.useRef<StripMetrics | null>(null);
+  const slotCountsRef = React.useRef({ slots: 0, tabCount: 0 });
   const overflowRowRefs = React.useRef(new Map<string, HTMLButtonElement>());
   // Set by a panel row close so the effect below can move focus after React
   // removes the row, instead of leaving focus on the document.
@@ -476,7 +528,7 @@ export const SessionTabsStrip: React.FC<{
   // True while keyboard focus sits on a control inside the overflow panel or on
   // its trigger, so a collapse that unmounts them can still hand focus onward.
   const overflowFocusRef = React.useRef(false);
-  const [metrics, setMetrics] = React.useState<StripMetrics | null>(null);
+  const [layout, setLayout] = React.useState<StripLayout>({ mode: 'all' });
   const [overflowOpen, setOverflowOpen] = React.useState(false);
 
   const measure = React.useCallback(() => {
@@ -489,48 +541,30 @@ export const SessionTabsStrip: React.FC<{
     const measuredTriggerWidth = triggerRef.current?.getBoundingClientRect().width ?? 0;
 
     const row = rowRef.current;
+    const previous = metricsRef.current;
     let rowWidth = 0;
-    let gap = DEFAULT_GAP_PX;
-    let itemWidth: number | null = null;
+    let gap = previous?.gap ?? DEFAULT_GAP_PX;
     if (row) {
       rowWidth = row.getBoundingClientRect().width;
       const gapValue = Number.parseFloat(getComputedStyle(row).columnGap);
       if (Number.isFinite(gapValue)) gap = gapValue;
-      for (const slot of row.querySelectorAll<HTMLElement>('[data-session-tab-slot]')) {
-        // The active tab may shrink inside a tight window, so a full-width
-        // sibling is the honest measurement; the probe covers a window that
-        // holds only the active tab.
-        if (slot.getAttribute('data-active') === 'true') continue;
-        const width = slot.getBoundingClientRect().width;
-        if (width > 0) {
-          itemWidth = width;
-          break;
-        }
-      }
-    }
-    if (itemWidth === null) {
-      const probeWidth = measureItemRef.current?.getBoundingClientRect().width;
-      if (probeWidth && probeWidth > 0) itemWidth = probeWidth;
     }
 
-    setMetrics((previous) => {
-      const nextItemWidth = itemWidth ?? previous?.itemWidth ?? DEFAULT_ITEM_WIDTH_PX;
-      const nextTriggerWidth = measuredTriggerWidth > 0
+    const nextMetrics: StripMetrics = {
+      outerWidth,
+      outerGap,
+      triggerWidth: measuredTriggerWidth > 0
         ? measuredTriggerWidth
-        : previous?.triggerWidth ?? DEFAULT_TRIGGER_WIDTH_PX;
-      if (
-        previous
-        && previous.outerWidth === outerWidth
-        && previous.outerGap === outerGap
-        && previous.triggerWidth === nextTriggerWidth
-        && previous.rowWidth === rowWidth
-        && previous.itemWidth === nextItemWidth
-        && previous.gap === gap
-      ) {
-        return previous;
-      }
-      return { outerWidth, outerGap, triggerWidth: nextTriggerWidth, rowWidth, itemWidth: nextItemWidth, gap };
-    });
+        : previous?.triggerWidth ?? DEFAULT_TRIGGER_WIDTH_PX,
+      rowWidth,
+      floorWidth: readTabFloorWidthPx(),
+      gap,
+    };
+    metricsRef.current = nextMetrics;
+
+    const { slots, tabCount } = slotCountsRef.current;
+    const nextLayout = deriveLayout(nextMetrics, slots, tabCount);
+    setLayout((current) => (sameLayout(current, nextLayout) ? current : nextLayout));
   }, []);
 
   // Coalesce observer bursts into one measurement per frame.
@@ -546,19 +580,9 @@ export const SessionTabsStrip: React.FC<{
   // the tabs; it becomes a real tab once the first message creates the session.
   const showDraftPill = !currentSessionId || !tabs.some((tab) => tab.id === currentSessionId);
 
-  const layout = React.useMemo<StripLayout>(() => {
-    const total = tabs.length;
-    if (!metrics || metrics.outerWidth <= 0 || total === 0) return { mode: 'all' };
-    if (metrics.outerWidth < metrics.triggerWidth + metrics.outerGap + MIN_ACTIVE_TAB_WIDTH_PX) return { mode: 'title' };
-    const slots = total + (showDraftPill ? 1 : 0);
-    const allWidth = slots * metrics.itemWidth + (slots - 1) * metrics.gap;
-    if (allWidth <= metrics.outerWidth) return { mode: 'all' };
-    const rowWidth = metrics.rowWidth > 0
-      ? metrics.rowWidth
-      : metrics.outerWidth - metrics.triggerWidth - metrics.outerGap;
-    const fit = Math.floor((rowWidth + metrics.gap) / (metrics.itemWidth + metrics.gap));
-    return { mode: 'window', count: Math.max(1, Math.min(total, fit)) };
-  }, [metrics, showDraftPill, tabs.length]);
+  // What `measure` needs from this render: the draft pill is a slot too, but the
+  // window count only ever holds tabs.
+  slotCountsRef.current = { slots: tabs.length + (showDraftPill ? 1 : 0), tabCount: tabs.length };
 
   const activeIndex = tabs.findIndex((tab) => tab.id === currentSessionId);
 
@@ -605,7 +629,6 @@ export const SessionTabsStrip: React.FC<{
     const observer = new globalThis.ResizeObserver(scheduleMeasure);
     observer.observe(outer);
     if (rowRef.current) observer.observe(rowRef.current);
-    if (measureItemRef.current) observer.observe(measureItemRef.current);
     if (triggerRef.current) observer.observe(triggerRef.current);
     return () => observer.disconnect();
   }, [layout.mode, scheduleMeasure, showDraftPill, tabs.length]);
@@ -755,7 +778,6 @@ export const SessionTabsStrip: React.FC<{
                     tab={tab}
                     isActive={tab.id === currentSessionId}
                     suppressControls={tab.id === currentSessionId && suppressActiveTabControls}
-                    canShrink={visibleTabs.length === 1}
                     onSelect={handleSelect}
                     onClose={handleClose}
                     renderMenu={renderMenu}
@@ -767,19 +789,13 @@ export const SessionTabsStrip: React.FC<{
                 ))}
               </SortableContext>
             </DndContext>
-            {/* Off-flow probe: a full-width tab measurement for windows that
-                hold only the shrinkable active tab. */}
-            <div ref={measureItemRef} aria-hidden className="pointer-events-none invisible absolute left-0 top-0 h-7 w-44" />
             {draftVisible ? (
               <div
                 role="tab"
                 aria-selected
                 data-session-tab-slot=""
                 data-active="true"
-                className={cn(
-                  'session-tab-slot flex h-7 w-44 items-center rounded-md bg-interactive-selection px-2',
-                  visibleTabs.length === 0 ? 'min-w-0 shrink' : 'shrink-0',
-                )}
+                className="session-tab-slot flex h-7 flex-1 basis-0 items-center rounded-md bg-interactive-selection px-2 min-w-[4.75rem] max-w-[11rem]"
               >
                 <div className="min-w-0 flex-1">{children}</div>
               </div>

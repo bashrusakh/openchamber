@@ -1965,10 +1965,53 @@ html.desktop-runtime .markdown-content [data-openchamber-file-link="true"] {
 }
 
 /* Header session tabs: thin separators between inactive neighbours, hidden
-   around the active or hovered tab (mirrors the titlebar tab language). */
+   around the active or hovered tab (mirrors the titlebar tab language). The
+   slot is also the query container for its own trailing controls. */
+
+/* A slot that enters the visible window — a new tab, or one revealed when the
+   strip grows — starts collapsed and grows to its flex size. With
+   `flex: 1 1 0` the used width is `clamp(share, min-width, max-width)`, so
+   animating the clamps expands this slot and reflows its siblings; the
+   transition on the static values animated nothing. The implicit 100% keyframe
+   uses the slot's own floor and ceiling, so these keyframes stay in sync with
+   the classes. Flex reflow itself is instant, and a removed tab is not kept
+   mounted, so it leaves without an exit animation. */
+@keyframes session-tab-enter {
+  from {
+    min-width: 0.1px;
+    max-width: 0.1px;
+  }
+}
+
 .session-tab-slot {
   position: relative;
+  container-type: inline-size;
+  container-name: session-tab;
+  animation: session-tab-enter 160ms ease-out;
 }
+
+/* The hover controls (`…` + close) would cover most of a floor-width tab, so
+   hide them once the slot is narrow. Right-click, middle-click, and selection
+   stay available at the floor. The hover padding reserves room for those
+   controls, so at the same threshold it is neutralized too; otherwise hovering
+   a floor-width tab would squeeze the title for controls that never appear.
+   This rule is unlayered, so it wins over the layered Tailwind `pr-10`
+   utility without `!important`. */
+@container session-tab (max-width: 7.5rem) {
+  .session-tab-slot .session-tab-controls {
+    display: none;
+  }
+  .session-tab-slot .session-tab-content {
+    padding-right: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-tab-slot {
+    animation: none;
+  }
+}
+
 .session-tab-slot:not(:first-child):not([data-active='true'])::before {
   content: '';
   position: absolute;
