@@ -1,12 +1,49 @@
 // What a space looks like from the inside. Every place builds its container from these
 // facts, and everything written on top of `exec` relies on them.
 
+import { SpaceError } from './errors.js';
 import { requireSpaceId } from './labels.js';
 
 export const SPACE_USER = '1000:1000';
 export const SPACE_HOME = '/home/space';
 
 export const spaceWorkPath = (spaceId) => `/spaces/${requireSpaceId(spaceId)}`;
+
+// The project's folder inside a space is named after the project directory on the host, restricted
+// to characters that need no quoting anywhere. A leading dot is refused, so the name never collides
+// with the history side repository below, and `node_modules` is refused because the OpenCode plugin
+// link lives at `/spaces/<id>/node_modules`.
+const PROJECT_FOLDER_UNSAFE = /[^A-Za-z0-9._-]+/g;
+const PROJECT_FOLDER_MAX_LENGTH = 64;
+const PROJECT_FOLDER_FALLBACK = 'project';
+
+/** The folder name of a project inside a space, derived from the base name of its directory on the host. */
+export function projectFolderName(projectDirectory) {
+  const base = String(projectDirectory ?? '').split(/[\\/]+/).filter(Boolean).pop() ?? '';
+  const name = base.replace(PROJECT_FOLDER_UNSAFE, '-').replace(/^[.-]+/, '').slice(0, PROJECT_FOLDER_MAX_LENGTH);
+  if (!/[A-Za-z0-9]/.test(name) || name.toLowerCase() === 'node_modules') {
+    return PROJECT_FOLDER_FALLBACK;
+  }
+  return name;
+}
+
+/** Where the project's code lives inside a space: a plain non-bare repository. */
+export const spaceProjectPath = (spaceId, projectDirectory) => `${spaceWorkPath(spaceId)}/${projectFolderName(projectDirectory)}`;
+
+/** A project path of this space, one folder deep with a name the rule above could have made, or a refusal. */
+export function requireSpaceProjectPath(spaceId, value) {
+  const text = String(value ?? '');
+  const prefix = `${spaceWorkPath(spaceId)}/`;
+  const name = text.slice(prefix.length);
+  if (!text.startsWith(prefix) || name === '' || projectFolderName(name) !== name) {
+    throw new SpaceError('invalid_space_path', `A project path in space ${spaceId} is ${prefix}<folder>, the spacePath that code in returned`);
+  }
+  return text;
+}
+
+// The side repository that the history travels through. It starts with a dot, which no project
+// folder name can, and it exists only while the history is on its way.
+export const spaceHistoryPath = (spaceId) => `${spaceWorkPath(spaceId)}/.openchamber-history.git`;
 
 // The tools volume: a plain npm project, mounted read-only.
 export const TOOLS_MOUNT_PATH = '/opt/openchamber-tools';
@@ -57,6 +94,10 @@ export const IMAGE_CHOWN = '/bin/chown';
 export const IMAGE_CURL = '/usr/bin/curl';
 export const IMAGE_NODE = '/usr/local/bin/node';
 const IMAGE_SLEEP = '/bin/sleep';
+// Code in: the receiving side of a push runs as `timeout -s KILL <seconds> git receive-pack <path>`.
+// The image's git is 2.39.5, and it has no `pkill`.
+export const IMAGE_GIT = '/usr/bin/git';
+export const IMAGE_TIMEOUT = '/usr/bin/timeout';
 
 /** First line of every fixed script the host runs inside: its commands come from the image only. */
 export const IMAGE_ONLY_PATH = `PATH=${IMAGE_PATH};`;

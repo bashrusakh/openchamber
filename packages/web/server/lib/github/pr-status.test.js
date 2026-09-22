@@ -1,29 +1,10 @@
-import { afterEach, beforeEach, describe, expect, mock, setSystemTime, test } from 'bun:test';
-import { fileURLToPath } from 'node:url';
+import { afterEach, beforeEach, describe, expect, mock, test, vi } from 'bun:test';
+
+import { findBranchPrCandidates, invalidateRepoPullsCache, isHistoricalPrOfCheckout } from './pr-status.js';
 
 const listMock = mock(async () => ({ data: [] }));
 
 const isAncestorMock = mock(async () => false);
-
-const gitModulePath = fileURLToPath(new URL('../git/index.js', import.meta.url));
-const repoModulePath = fileURLToPath(new URL('./repo/index.js', import.meta.url));
-const rateLimitModulePath = fileURLToPath(new URL('./rate-limit.js', import.meta.url));
-
-mock.module(gitModulePath, () => ({
-  getRemotes: async () => [],
-  getTrackingBranch: async () => null,
-  isAncestorOfHead: isAncestorMock,
-}));
-
-mock.module(repoModulePath, () => ({
-  resolveGitHubRepoFromDirectory: async () => null,
-}));
-
-mock.module(rateLimitModulePath, () => ({
-  noteIfGitHubRateLimit: () => {},
-}));
-
-const { findBranchPrCandidates, invalidateRepoPullsCache, isHistoricalPrOfCheckout } = await import('./pr-status.js');
 
 const openPr = {
   number: 15,
@@ -71,7 +52,7 @@ describe('findBranchPrCandidates', () => {
   });
 
   afterEach(() => {
-    setSystemTime();
+    vi.useRealTimers();
   });
 
   test('an open PR wins and no history lookup is spent', async () => {
@@ -164,7 +145,8 @@ describe('findBranchPrCandidates', () => {
 
     // Past the "no history" expiry, but far short of the found-record one. The
     // shared open list is re-fetched; the history answer is not re-queried.
-    setSystemTime(new Date(startedAt + 30 * 60 * 1000));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(startedAt + 30 * 60 * 1000));
     const { historical } = await call({ force: false });
 
     expect(historical?.number).toBe(12);
@@ -179,7 +161,8 @@ describe('findBranchPrCandidates', () => {
     await call();
     const callsAfterFirst = listMock.mock.calls.length;
 
-    setSystemTime(new Date(startedAt + 30 * 60 * 1000));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(startedAt + 30 * 60 * 1000));
     await call({ force: false });
 
     expect(listMock.mock.calls.some((entry) => entry[0]?.state === 'all')).toBe(true);
@@ -195,18 +178,18 @@ describe('isHistoricalPrOfCheckout', () => {
   test('a merged PR whose head commit is in the checkout history belongs to it', async () => {
     isAncestorMock.mockImplementation(async () => true);
     const pr = { ...mergedPr, head: { ...mergedPr.head, sha: 'abc1234' } };
-    expect(await isHistoricalPrOfCheckout('/repo', pr)).toBe(true);
+    expect(await isHistoricalPrOfCheckout('/repo', pr, { isAncestor: isAncestorMock })).toBe(true);
     expect(isAncestorMock).toHaveBeenCalledWith('/repo', 'abc1234');
   });
 
   test('a reused branch name without the merged commits does not inherit the PR', async () => {
     isAncestorMock.mockImplementation(async () => false);
     const pr = { ...mergedPr, head: { ...mergedPr.head, sha: 'abc1234' } };
-    expect(await isHistoricalPrOfCheckout('/repo', pr)).toBe(false);
+    expect(await isHistoricalPrOfCheckout('/repo', pr, { isAncestor: isAncestorMock })).toBe(false);
   });
 
   test('a PR without a head sha is never attributed', async () => {
-    expect(await isHistoricalPrOfCheckout('/repo', mergedPr)).toBe(false);
+    expect(await isHistoricalPrOfCheckout('/repo', mergedPr, { isAncestor: isAncestorMock })).toBe(false);
     expect(isAncestorMock).not.toHaveBeenCalled();
   });
 });

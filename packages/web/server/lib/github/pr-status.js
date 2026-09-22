@@ -547,13 +547,14 @@ const isTerminalPr = (pr) => Boolean(pr) && (pr.state === 'closed' || Boolean(pr
 // fresh worktree called `feature` cut from the default branch would inherit
 // the merged PR of last month's `feature`. The PR only belongs to this checkout
 // when the commit it was merged or closed at is part of the checkout's history.
-const isHistoricalPrOfCheckout = async (directory, pr) => {
+// `isAncestor` is the git check, replaceable so the tests need no git repository.
+const isHistoricalPrOfCheckout = async (directory, pr, { isAncestor = isAncestorOfHead } = {}) => {
   const headSha = normalizeText(pr?.head?.sha);
   if (!headSha) {
     return false;
   }
   try {
-    return await isAncestorOfHead(directory, headSha);
+    return await isAncestor(directory, headSha);
   } catch {
     return false;
   }

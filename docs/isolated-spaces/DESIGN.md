@@ -90,7 +90,7 @@ An internal Docker network alone still lets a space reach services that listen o
 
 ### The place contract
 
-Seven operations. Everything else is written once on top of them.
+Eight operations. Everything else is written once on top of them.
 
 | Operation | Meaning |
 |---|---|
@@ -98,6 +98,7 @@ Seven operations. Everything else is written once on top of them.
 | create | Internal network, gatekeeper, space, all labelled |
 | list | Find our spaces by label |
 | exec | Run a command inside the space or the gatekeeper |
+| exec argv | The argv that runs a command in the space with its input and output attached, for a caller that starts the process itself, such as git pushing code in over `ext::`. Checked like `exec` before it is handed out |
 | connect | Give the host a channel to the server inside the space |
 | stop, start, remove | |
 | verify | Re-inspect a created container against the requested hardening |
@@ -136,7 +137,7 @@ The host always drives. Exact command sequences, timings, and the hostile-contai
 - Out: snapshot everything in the space. Fetch into a throwaway quarantine repository first, under a size cap and a timeout that the host enforces itself, because git has neither. Then promote the result into `refs/openchamber/spaces/<id>/result` with object checks, no tags, no submodule recursion, and an empty refmap. A killed fetch leaves its partial pack in the throwaway repository, and the process left inside the space needs its own clean-up.
 - The host builds the patch from the two fetched trees. The space never supplies patch text. Apply with a plain dry run followed by a plain apply, both with binary support. The three-way mode fails on a working tree with unstaged edits.
 - What gets applied is what the host fetched, whatever the screen in the space showed.
-- The project's existing worktree setup commands run in the space after code arrives.
+- The project's existing worktree setup commands run in the space after code arrives; stage 5 runs them.
 - First release limits, each with a warning at creation: submodules stay empty, Git LFS files arrive as pointers.
 
 ### Gatekeeper

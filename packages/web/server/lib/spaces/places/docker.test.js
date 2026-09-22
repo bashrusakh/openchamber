@@ -810,6 +810,29 @@ describe('docker place: exec, stop, start, verify', () => {
     await expect(makePlace(createFakeDocker()).start(ID)).rejects.toMatchObject({ code: 'space_not_found' });
   });
 
+  it('hands out the argv of the space container, for git to start, and changes nothing', async () => {
+    const fake = createFakeDocker({ resources: spaceResources() });
+    expect(await makePlace(fake).execArgv(ID)).toEqual(['/usr/bin/docker', 'exec', '--interactive', '--user', '1000:1000', CONTAINER]);
+    expect(changes(fake)).toEqual([]);
+  });
+
+  it('hands out no argv for a stopped space, and says so plainly', async () => {
+    const fake = createFakeDocker({ resources: spaceResources({ running: false }) });
+    await expect(makePlace(fake).execArgv(ID)).rejects.toMatchObject({ code: 'space_not_running', message: expect.stringMatching(/is stopped/) });
+  });
+
+  // The argv goes to git, which starts docker itself, so the ownership check has to come first here.
+  it('hands out no argv for a stranger\'s container, a space of another installation, a missing space, or one in the middle of a move', async () => {
+    const stranger = hardenedContainerEntry({ name: CONTAINER, labels: {}, network: NETWORK, volumes: [] });
+    await expect(makePlace(createFakeDocker({ resources: [{ kind: 'container', name: CONTAINER, entry: stranger }] })).execArgv(ID)).rejects.toMatchObject({ code: 'space_not_ours' });
+    await expect(makePlace(createFakeDocker({ resources: spaceResources({ owner: 'install-b' }) })).execArgv(ID)).rejects.toMatchObject({ code: 'space_not_ours' });
+    await expect(makePlace(createFakeDocker()).execArgv(ID)).rejects.toMatchObject({ code: 'space_not_found' });
+    const aside = spaceResources({ running: false }).map((resource) => (resource.name === CONTAINER
+      ? { ...resource, name: `${CONTAINER}-old`, entry: { ...resource.entry, Name: `/${CONTAINER}-old` } }
+      : resource));
+    await expect(makePlace(createFakeDocker({ resources: aside })).execArgv(ID)).rejects.toMatchObject({ code: 'space_move_unfinished' });
+  });
+
   it('stops the space, starts the same container again, and waits for its server', async () => {
     const fake = createFakeDocker({ resources: [toolsResource(), ...spaceResources()] });
     const place = makePlace(fake);

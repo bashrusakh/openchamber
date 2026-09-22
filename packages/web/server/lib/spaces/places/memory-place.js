@@ -11,6 +11,16 @@ import { ROLE_GATEKEEPER, ROLE_SPACE, requireSpaceId } from '../labels.js';
 
 const TARGETS = [ROLE_SPACE, ROLE_GATEKEEPER];
 
+// What `execArgv` hands out: a one-line Node program that answers for one container, the way
+// `exec` below does. The container's hostname is its first argument and the command follows.
+// One line, because the argv may go into a git `ext::` URL, which cannot carry a newline.
+const CONTAINER_PROGRAM = [
+  'const [hostname, ...command] = process.argv.slice(1);',
+  'const line = command.join(" ");',
+  'if (line === "cat /etc/hostname") process.stdout.write(hostname + "\\n");',
+  'else process.exitCode = 127;',
+].join(' ');
+
 export function createMemoryPlace({ id = 'memory' } = {}) {
   const spaces = new Map();
   // Every container of every space that was ever made here, by `<space id>:<role>`.
@@ -65,6 +75,14 @@ export function createMemoryPlace({ id = 'memory' } = {}) {
         return { code: options.target === ROLE_GATEKEEPER ? 1 : 0, stdout: '', stderr: '' };
       }
       return { code: 127, stdout: '', stderr: 'not found' };
+    },
+    // Added in stage 3a. The space container only, and refused like `exec` when it is gone.
+    execArgv: async (spaceId) => {
+      const { hostname } = requireContainer(spaceId);
+      if (requireSpace(spaceId).state !== 'running') {
+        throw new SpaceError('space_not_running', `Space ${spaceId} is stopped`);
+      }
+      return [process.execPath, '-e', CONTAINER_PROGRAM, hostname];
     },
     stop: async (spaceId) => { requireSpace(spaceId).state = 'exited'; },
     start: async (spaceId) => { requireSpace(spaceId).state = 'running'; },

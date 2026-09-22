@@ -4,6 +4,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createSpaceId, hashProjectDirectory } from '../labels.js';
+import { runCommand } from '../run-command.js';
 import { REQUIRED_PLACE_METHODS } from './registry.js';
 
 const CREATE_TIMEOUT_MS = 25 * 60_000;
@@ -88,9 +89,37 @@ export function runPlaceContractSuite(title, { enabled = true, setup }) {
       }
     });
 
+    // Added in stage 3a. Code travels into a space by `git push` over `ext::`, and git starts that
+    // process itself, so a place hands out the argv that reaches the space. It must reach the very
+    // container `exec` reaches, and never the gatekeeper. It goes into a git URL, which cannot carry
+    // an empty argument or a control character. The user is not checked here: a Docker space already
+    // runs as uid 1000 by default, so no check through the argv could fail. Each place proves its
+    // own user flag with an exact-argv test, as docker.test.js does.
+    it('hands out an argv that runs a command in the space container', async () => {
+      const argv = await place.execArgv(spec.id);
+      expect(argv.length).toBeGreaterThan(0);
+      for (const argument of argv) {
+        expect(argument).toEqual(expect.any(String));
+        expect(argument).not.toBe('');
+        expect(argument).not.toMatch(/[\x00-\x1f\x7f]/);
+      }
+      const [file, ...args] = argv;
+      const run = (command) => runCommand(file, [...args, ...command], { timeoutMs: 60_000 });
+      const hostname = await run(['cat', '/etc/hostname']);
+      expect(hostname).toMatchObject({ code: 0 });
+      expect(hostname.stdout).toBe((await place.exec(spec.id, ['cat', '/etc/hostname'])).stdout);
+      expect(hostname.stdout).not.toBe((await place.exec(spec.id, ['cat', '/etc/hostname'], { target: 'gatekeeper' })).stdout);
+    });
+
     it('stops the space and lists it as exited', async () => {
       await place.stop(spec.id);
       expect(await listed()).toMatchObject({ state: 'exited' });
+    });
+
+    // Added in stage 3a. git starts the argv itself, and a stopped container answers it only with
+    // the runtime's own words, so a place refuses a stopped space here with a code of its own.
+    it('hands out no argv for a stopped space', async () => {
+      await expect(place.execArgv(spec.id)).rejects.toMatchObject({ code: 'space_not_running' });
     });
 
     it('starts the space again', async () => {
@@ -112,6 +141,12 @@ export function runPlaceContractSuite(title, { enabled = true, setup }) {
     it('removes the gatekeeper with the space', async () => {
       await expect(place.exec(spec.id, ['cat', '/etc/hostname'], { target: 'gatekeeper' })).rejects.toThrow();
       await expect(place.exec(spec.id, ['cat', '/etc/hostname'])).rejects.toThrow();
+    });
+
+    // Added in stage 3a. The argv comes after the same ownership check as `exec`, so a space that
+    // is gone gets none. A place that built it from the id alone would still hand one out here.
+    it('hands out no argv for a space that is gone', async () => {
+      await expect(place.execArgv(spec.id)).rejects.toThrow();
     });
 
     it('treats removing a missing space as done', async () => {

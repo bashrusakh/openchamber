@@ -411,6 +411,21 @@ export function createDockerPlace({ runCommand, dockerPath, owner, toolsSource, 
   };
 
   /**
+   * The argv that runs a command in the space with its stdin and stdout attached, for a caller that
+   * must start the process itself: git starts it for a push over `ext::`. Only the space, never the
+   * gatekeeper. The same ownership check as `exec` runs first, so a missing container or one this
+   * installation did not create is refused, and so is a stopped one. The argv carries no secret.
+   */
+  const execArgv = async (spaceId) => {
+    const entry = await requireSpaceContainer(spaceId);
+    // A stopped container would only answer git with the daemon's own words.
+    if (entry.State?.Running !== true) {
+      throw new SpaceError('space_not_running', `Space ${spaceId} is stopped. Start it, then try again.`);
+    }
+    return [dockerPath, 'exec', '--interactive', '--user', SPACE_USER, spaceResourceName(spaceId, ROLE_SPACE)];
+  };
+
+  /**
    * The space stops first and its gatekeeper after it, so a space is never running while its
    * way out is not under the host's control. A stop of the gatekeeper that fails leaves the
    * space stopped, which is the safe side of this order.
@@ -568,5 +583,5 @@ export function createDockerPlace({ runCommand, dockerPath, owner, toolsSource, 
     return starting.get(spaceId);
   };
 
-  return { id: DOCKER_PLACE_ID, check, create, list, exec, stop, start, remove, verify };
+  return { id: DOCKER_PLACE_ID, check, create, list, exec, execArgv, stop, start, remove, verify };
 }
