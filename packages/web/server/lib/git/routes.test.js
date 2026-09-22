@@ -5,6 +5,9 @@ const gitLibraries = {
   unstageFiles: vi.fn(),
   isGitRepository: vi.fn(),
   getStatus: vi.fn(),
+  getRangeDiff: vi.fn(),
+  getRangeFiles: vi.fn(),
+  getCommitDiff: vi.fn(),
   getWorktrees: vi.fn(),
   observeWorktreeTopology: vi.fn(),
   subscribeWorktreeTopologyChanges: vi.fn(),
@@ -19,6 +22,9 @@ vi.mock('./index.js', () => ({
   unstageFiles: gitLibraries.unstageFiles,
   isGitRepository: gitLibraries.isGitRepository,
   getStatus: gitLibraries.getStatus,
+  getRangeDiff: gitLibraries.getRangeDiff,
+  getRangeFiles: gitLibraries.getRangeFiles,
+  getCommitDiff: gitLibraries.getCommitDiff,
   getWorktrees: gitLibraries.getWorktrees,
   observeWorktreeTopology: gitLibraries.observeWorktreeTopology,
   subscribeWorktreeTopologyChanges: gitLibraries.subscribeWorktreeTopologyChanges,
@@ -81,6 +87,9 @@ describe('git routes index mutations', () => {
     gitLibraries.unstageFiles.mockReset();
     gitLibraries.isGitRepository.mockReset();
     gitLibraries.getStatus.mockReset();
+    gitLibraries.getRangeDiff.mockReset();
+    gitLibraries.getRangeFiles.mockReset();
+    gitLibraries.getCommitDiff.mockReset();
     gitLibraries.resolvePrimaryWorktreeRoot.mockReset();
     gitLibraries.resolveWorktreeTopLevel.mockReset();
   });
@@ -212,6 +221,57 @@ describe('git diff routes', () => {
   });
 });
 
+describe('git collection routes', () => {
+  beforeEach(() => {
+    gitLibraries.isGitRepository.mockReset();
+    gitLibraries.getStatus.mockReset();
+    gitLibraries.getRangeDiff.mockReset();
+    gitLibraries.getRangeFiles.mockReset();
+    gitLibraries.getCommitDiff.mockReset();
+    gitLibraries.observeWorktreeTopology.mockReset();
+    gitLibraries.observeWorktreeTopology.mockResolvedValue(undefined);
+  });
+
+  it.each([
+    ['status', '/api/git/status', { directory: '/repo' }, 'getStatus'],
+    ['range', '/api/git/range-diff', { directory: '/repo', base: 'main', head: 'feature' }, 'getRangeDiff'],
+    ['commit', '/api/git/commit-diff', { directory: '/repo', hash: 'a'.repeat(40) }, 'getCommitDiff'],
+  ])('passes a request signal through the %s route', async (_label, routePath, query, operation) => {
+    if (operation === 'getStatus') {
+      gitLibraries.isGitRepository.mockResolvedValue(true);
+      gitLibraries.getStatus.mockResolvedValue({ current: 'main' });
+    } else if (operation === 'getRangeDiff') {
+      gitLibraries.getRangeDiff.mockResolvedValue('patch');
+    } else {
+      gitLibraries.getCommitDiff.mockResolvedValue('patch');
+    }
+
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    await getRoute('GET', routePath)({ query }, createMockResponse());
+
+    expect(gitLibraries[operation]).toHaveBeenCalledWith(
+      '/repo',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it('passes cancellation through range file collection too', async () => {
+    gitLibraries.getRangeFiles.mockResolvedValue([]);
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+
+    await getRoute('GET', '/api/git/range-files')(
+      { query: { directory: '/repo', base: 'main', head: 'feature' } },
+      createMockResponse(),
+    );
+
+    expect(gitLibraries.getRangeFiles).toHaveBeenCalledWith('/repo', expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }));
+  });
+});
+
 describe('git worktree topology routes', () => {
   beforeEach(() => {
     gitLibraries.isGitRepository.mockReset();
@@ -334,7 +394,10 @@ describe('git routes status discovery', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.body).toMatchObject({ isGitRepository: false });
-    expect(gitLibraries.getStatus).toHaveBeenCalledWith('/opened/project', { mode: undefined });
+    expect(gitLibraries.getStatus).toHaveBeenCalledWith('/opened/project', {
+      mode: undefined,
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it('does not soften a permission error that mentions a non-repository', async () => {
@@ -424,8 +487,13 @@ describe('git routes status discovery', () => {
     );
 
     expect(response.statusCode).toBe(200);
-    expect(gitLibraries.isGitRepository).toHaveBeenCalledWith('/opened/git-project');
-    expect(gitLibraries.getStatus).toHaveBeenCalledWith('/opened/git-project', { mode: undefined });
+    expect(gitLibraries.isGitRepository).toHaveBeenCalledWith('/opened/git-project', {
+      signal: expect.any(AbortSignal),
+    });
+    expect(gitLibraries.getStatus).toHaveBeenCalledWith('/opened/git-project', {
+      mode: undefined,
+      signal: expect.any(AbortSignal),
+    });
     expect(response.body).toMatchObject({ current: 'main' });
   });
 });

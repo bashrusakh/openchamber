@@ -563,8 +563,11 @@ const createRepositoryGitContext = async (directory, gitOptions = {}) => {
  * persisted data by repository need this so two directories in the same
  * repository do not address different records.
  */
-export async function getRepositoryRoot(directory) {
-  const { repoRoot } = await createRepositoryGitContext(directory);
+export async function getRepositoryRoot(directory, { signal = undefined } = {}) {
+  const { repoRoot } = await createRepositoryGitContext(
+    directory,
+    signal ? { ownedProcessTree: true, signal } : {},
+  );
   return repoRoot;
 }
 
@@ -5922,8 +5925,11 @@ export async function renameBranch(directory, oldName, newName) {
   }
 }
 
-export async function getRemotes(directory) {
-  const { git } = await createRepositoryGitContext(directory);
+export async function getRemotes(directory, { signal = undefined } = {}) {
+  const { git } = await createRepositoryGitContext(
+    directory,
+    signal ? { ownedProcessTree: true, signal } : {},
+  );
 
   try {
     const remotes = await git.getRemotes(true);

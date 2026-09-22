@@ -23,7 +23,12 @@ mock.module('./gitService', () => ({
 }));
 
 const { spawnOwnedProcess } = await import('./owned-process');
-const { createGitProcessRuntime, stopGitProcesses } = await import('./bridge-git-process-runtime');
+const {
+  createGitProcessRuntime,
+  execGit,
+  resetGitProcesses,
+  stopGitProcesses,
+} = await import('./bridge-git-process-runtime');
 
 describe('VS Code Git process runtime executable selection', () => {
   const originalSshAuthSock = process.env.SSH_AUTH_SOCK;
@@ -275,6 +280,13 @@ describe('VS Code Git process runtime executable selection', () => {
     } finally {
       Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
     }
+  });
+
+  it('reactivates the owning runtime after deactivation', async () => {
+    await stopGitProcesses();
+    await resetGitProcesses();
+
+    await expect(execGit(['rev-parse'], '/repo')).resolves.toMatchObject({ exitCode: 0 });
   });
 
 });

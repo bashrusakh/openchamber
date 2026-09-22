@@ -139,7 +139,10 @@ export function isGenerating(repoRoot, sourceKeyValue) {
 export async function getRepositoryRootFor(directory, rawSource, deps = {}) {
   const source = parseSource(rawSource);
   const resolveRepositoryRoot = deps.getRepositoryRoot || getRepositoryRoot;
-  return { repoRoot: await resolveRepositoryRoot(directory), sourceKey: sourceKey(source) };
+  const repoRoot = deps.signal
+    ? await resolveRepositoryRoot(directory, { signal: deps.signal })
+    : await resolveRepositoryRoot(directory);
+  return { repoRoot, sourceKey: sourceKey(source) };
 }
 
 /**
@@ -238,7 +241,9 @@ const serializeHunks = (files) => files.flatMap((file) => file.hunks.map((hunk) 
 export async function getWalkthrough({ directory, source: rawSource, model: explicitModel, language: rawLanguage }, deps = {}) {
   const source = parseSource(rawSource);
   const resolveRepositoryRoot = deps.getRepositoryRoot || getRepositoryRoot;
-  const repoRoot = await resolveRepositoryRoot(directory);
+  const repoRoot = deps.signal
+    ? await resolveRepositoryRoot(directory, { signal: deps.signal })
+    : await resolveRepositoryRoot(directory);
   const key = sourceKey(source);
   const language = normalizeLanguage(rawLanguage);
 
@@ -247,7 +252,7 @@ export async function getWalkthrough({ directory, source: rawSource, model: expl
   // endpoints the client called in parallel, which meant every panel open ran
   // the whole git pipeline twice.
   const [built, model] = await Promise.all([
-    loadCurrentDiff(directory, source, deps),
+    loadCurrentDiff(directory, source, deps, deps.signal),
     resolveModel(directory, explicitModel, deps.describeSmallModel).catch(() => null),
   ]);
   const { files } = built;

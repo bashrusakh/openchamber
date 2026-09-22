@@ -1,19 +1,4 @@
-const createRequestAbortSignal = (req, res) => {
-  const controller = new AbortController();
-  const abort = () => {
-    if (!res?.writableEnded) controller.abort();
-  };
-  req?.once?.('aborted', abort);
-  res?.once?.('close', abort);
-  if (req?.aborted) controller.abort();
-  return {
-    signal: controller.signal,
-    cleanup: () => {
-      req?.off?.('aborted', abort);
-      res?.off?.('close', abort);
-    },
-  };
-};
+import { createRequestAbortSignal } from '../request-abort.js';
 
 export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
   let gitLibraries = null;
@@ -267,6 +252,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
   app.get('/api/git/status', async (req, res) => {
     const { getStatus, isGitRepository, observeWorktreeTopology } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
 
     try {
       const directory = resolveDirectoryQuery(req.query.directory);
@@ -274,7 +260,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         return res.status(400).json({ error: 'directory parameter is required' });
       }
 
-      const isRepo = await isGitRepository(directory);
+      const isRepo = await isGitRepository(directory, { signal: requestAbort.signal });
       if (!isRepo) {
         return res.json(nonRepoStatusPayload());
       }
@@ -285,7 +271,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       void observeWorktreeTopology(directory);
 
       const mode = req.query.mode === 'light' ? 'light' : undefined;
-      const status = await getStatus(directory, { mode });
+      const status = await getStatus(directory, { mode, signal: requestAbort.signal });
       res.json(status);
     } catch (error) {
       // Non-repo / GitError must not abort callers that enumerate projects or
@@ -296,6 +282,8 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       }
       console.error('Failed to get git status:', error);
       res.status(500).json({ error: error.message || 'Failed to get git status' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
@@ -461,6 +449,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
   app.get('/api/git/range-diff', async (req, res) => {
     const { getRangeDiff } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = req.query.directory;
       if (!directory || typeof directory !== 'string') {
@@ -482,12 +471,15 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         includeWorkingTree: req.query.includeWorkingTree === 'true',
         path: pathParam,
         contextLines: Number.isFinite(context) ? context : 3,
+        signal: requestAbort.signal,
       });
 
       res.json({ diff });
     } catch (error) {
       console.error('Failed to get git range diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get git range diff' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
@@ -514,6 +506,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
   app.get('/api/git/range-files', async (req, res) => {
     const { getRangeFiles } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = resolveDirectoryQuery(req.query.directory);
       if (!directory) {
@@ -526,11 +519,18 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         return res.status(400).json({ error: 'base and head parameters are required' });
       }
 
-      const files = await getRangeFiles(directory, { base, head, includeWorkingTree: req.query.includeWorkingTree === 'true' });
+      const files = await getRangeFiles(directory, {
+        base,
+        head,
+        includeWorkingTree: req.query.includeWorkingTree === 'true',
+        signal: requestAbort.signal,
+      });
       res.json({ files });
     } catch (error) {
       console.error('Failed to get git range files:', error);
       res.status(500).json({ error: error.message || 'Failed to get git range files' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
@@ -1370,6 +1370,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
   app.get('/api/git/commit-diff', async (req, res) => {
     const { getCommitDiff } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = resolveDirectoryQuery(req.query.directory);
       const hash = resolveDirectoryQuery(req.query.hash);
@@ -1380,10 +1381,13 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         path: resolveDirectoryQuery(req.query.path, true) ?? undefined,
         previousPath: resolveDirectoryQuery(req.query.previousPath, true) ?? undefined,
         contextLines: Number.isFinite(context) ? context : 3,
+        signal: requestAbort.signal,
       });
       res.json({ diff });
     } catch (error) {
       res.status(500).json({ error: error.message || 'Failed to get commit diff' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 

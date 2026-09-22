@@ -382,8 +382,8 @@ export const createGitExecutionService = (dependencies = {}) => {
     })
   );
 
-  const checkIsGitRepository = async (directory) => (
-    (await resolver.resolve(directory)).isRepository
+  const checkIsGitRepository = async (directory, options = {}) => (
+    (await resolver.resolve(directory, { signal: options?.signal })).isRepository
   );
 
   const wrapped = {};
