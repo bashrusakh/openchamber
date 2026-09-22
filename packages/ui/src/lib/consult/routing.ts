@@ -118,6 +118,77 @@ export const validateConsultAdvisors = (
   return rejections.length === 0 ? { ok: true } : { ok: false, rejections };
 };
 
+/** A `{providerID, modelID}` pair as the UI store records favorites/recents/hidden. */
+export type ConsultModelRef = {
+  providerID: string;
+  modelID: string;
+};
+
+/**
+ * The config store's provider shape: `models` is an ordered array and the
+ * store's provider order is the catalog order the model picker renders.
+ */
+export type ConsultModelProvider = {
+  id: string;
+  models: readonly { id: string }[];
+};
+
+/** The UI store's model lists, as the picker reads them. */
+export type ConsultModelLists = {
+  favoriteModels: readonly ConsultModelRef[];
+  recentModels: readonly ConsultModelRef[];
+  hiddenModels: readonly ConsultModelRef[];
+};
+
+const consultModelKey = (providerID: string, modelID: string): string =>
+  `${providerID}\u0000${modelID}`;
+
+/**
+ * The default advisors for a resumed consultation: the first `count` usable
+ * models in the same order the model picker's sections show them.
+ *
+ * Favorites come first, then recents, then the remaining provider catalog.
+ * Hidden models, references that no longer resolve, and duplicates are skipped
+ * everywhere, so equal inputs always give the same pair. The picker's list
+ * resolution and hidden rule are mirrored here for callers that cannot use
+ * the `useModelLists` hook.
+ *
+ * A caller that needs a minimum number of advisors must refuse the run when
+ * fewer come back instead of starting a degraded consultation.
+ */
+export const pickDefaultAdvisorModels = (
+  providers: readonly ConsultModelProvider[],
+  lists: ConsultModelLists,
+  count = 2,
+): ConsultModelRef[] => {
+  const picks: ConsultModelRef[] = [];
+  const picked = new Set<string>();
+  const isHidden = (ref: ConsultModelRef): boolean =>
+    lists.hiddenModels.some((item) => item.providerID === ref.providerID && item.modelID === ref.modelID);
+  const resolve = (ref: ConsultModelRef): ConsultModelRef | null => {
+    const provider = providers.find((candidate) => candidate.id === ref.providerID);
+    const model = provider?.models.find((candidate) => candidate.id === ref.modelID);
+    return model ? { providerID: ref.providerID, modelID: ref.modelID } : null;
+  };
+  const consider = (ref: ConsultModelRef | null): void => {
+    if (!ref || picks.length >= count) return;
+    if (isHidden(ref)) return;
+    const key = consultModelKey(ref.providerID, ref.modelID);
+    if (picked.has(key)) return;
+    picked.add(key);
+    picks.push(ref);
+  };
+
+  for (const ref of lists.favoriteModels) consider(resolve(ref));
+  for (const ref of lists.recentModels) consider(resolve(ref));
+  for (const provider of providers) {
+    for (const model of provider.models) {
+      consider({ providerID: provider.id, modelID: model.id });
+    }
+  }
+  return picks;
+};
+
 /**
  * Where the advisor forks branch off the parent transcript.
  *

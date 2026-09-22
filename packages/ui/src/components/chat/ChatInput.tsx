@@ -8,7 +8,7 @@ import { useAutoReviewStore } from '@/stores/useAutoReviewStore';
 import { isConsultRunActive, useConsultRun, useConsultStore } from '@/stores/useConsultStore';
 import type { ConsultSubmissionHandle, ResumeConsultRunOptions } from '@/lib/consult/submission';
 import { resumeConsultItem } from '@/lib/consult/submission';
-import type { ConsultAdvisorSelection } from '@/lib/consult/routing';
+import { pickDefaultAdvisorModels, type ConsultAdvisorSelection } from '@/lib/consult/routing';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
 import { prepareLocalAttachments, useInputStore, type SyntheticContextPart } from '@/sync/input-store';
@@ -577,7 +577,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const getModelMetadata = useConfigStore((state) => state.getModelMetadata);
     // Subscribe to both sources read by getModelMetadata so async metadata and provider updates are observed.
     useConfigStore((state) => state.modelsMetadata);
-    const providers = useConfigStore((state) => state.providers);
+    useConfigStore((state) => state.providers);
     const currentModelMetadata = currentProviderId && currentModelId
         ? getModelMetadata(currentProviderId, currentModelId)
         : undefined;
@@ -1735,9 +1735,10 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
      * (issue #3743): re-claims the existing item and runs the consultation
      * fresh through the same claim → fan-out → dispatch route. The per-run
      * options come fresh from the same dialog defaults the normal submit
-     * uses; the advisors are picked from the same model catalog the dialog's
-     * picker lists (recent + favorites first), never reusing stale
-     * selections — the stranded item never reached a fan-out.
+     * uses; the advisors are the default pair in model-picker order
+     * (favorites, then recents, then the catalog) until persisted defaults
+     * exist (deferred — see plans/consult-models/todo.md D6/WP4.1), never
+     * reusing stale selections — the stranded item never reached a fan-out.
      */
     const handleResumeConsult = React.useCallback((message: QueuedMessage) => {
         if (consultUnavailableReason !== null) {
@@ -1745,18 +1746,19 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             return;
         }
         if (!consultAdvisorAgent) return;
-        const catalog = useConfigStore.getState().providers;
-        const picks: ConsultAdvisorSelection[] = [];
-        for (const provider of catalog) {
-            const models = Array.isArray(provider.models) ? provider.models : [];
-            for (const model of models) {
-                picks.push({ providerID: provider.id, modelID: model.id, agent: consultAdvisorAgent });
-                if (picks.length >= CONSULT_ADVISOR_MIN) break;
-            }
-            if (picks.length >= CONSULT_ADVISOR_MIN) break;
-        }
+        const picks: ConsultAdvisorSelection[] = pickDefaultAdvisorModels(
+            useConfigStore.getState().providers,
+            {
+                favoriteModels: useUIStore.getState().favoriteModels,
+                recentModels: useUIStore.getState().recentModels,
+                hiddenModels: useUIStore.getState().hiddenModels,
+            },
+            CONSULT_ADVISOR_MIN,
+        ).map(({ providerID, modelID }) => ({ providerID, modelID, agent: consultAdvisorAgent }));
+        // A consultation needs the full minimum: refuse instead of starting a
+        // degraded one-advisor run when the runtime offers fewer usable models.
         if (picks.length < CONSULT_ADVISOR_MIN) {
-            toast.error(t('chat.consult.dialog.noAdvisorAgent'));
+            toast.error(t('chat.consult.toast.refused'));
             return;
         }
         const runOptions: ResumeConsultRunOptions = {
@@ -1775,7 +1777,15 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
             // cleared state, everything else restores like the normal path.
             toast.error(t('chat.consult.toast.failed'), { description: result.status === 'failed' || result.status === 'refused' ? result.error : undefined });
         });
-    }, [consultUnavailableReason, consultAdvisorAgent, parentMessageQueueTarget, t]);
+    }, [
+        consultUnavailableReason,
+        consultAdvisorAgent,
+        currentDirectory,
+        currentSessionDirectoryForSync,
+        currentSessionId,
+        parentMessageQueueTarget,
+        t,
+    ]);
 
     const handleOpenAgentPanel = React.useCallback(() => {
         setMobileControlsPanel('agent');

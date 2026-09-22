@@ -2,9 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import type { Agent, Message, Provider } from '@opencode-ai/sdk/v2';
 import {
   ConsultForkPointError,
+  pickDefaultAdvisorModels,
   resolveConsultForkPoint,
   validateConsultAdvisors,
   type ConsultAdvisorSelection,
+  type ConsultModelLists,
+  type ConsultModelProvider,
+  type ConsultModelRef,
   type ConsultModelSurface,
 } from './routing';
 
@@ -158,5 +162,92 @@ describe('validateConsultAdvisors', () => {
       { index: 0, code: 'agent-not-primary', message: 'Agent "explore" is not a primary agent' },
       { index: 1, code: 'provider-unknown', message: 'Provider "openai" is not available' },
     ]);
+  });
+});
+
+const catalogProvider = (id: string, modelIDs: readonly string[]): ConsultModelProvider => ({
+  id,
+  models: modelIDs.map((modelID) => ({ id: modelID })),
+});
+
+const modelRef = (providerID: string, modelID: string): ConsultModelRef => ({ providerID, modelID });
+
+const modelLists = (overrides?: Partial<ConsultModelLists>): ConsultModelLists => ({
+  favoriteModels: [],
+  recentModels: [],
+  hiddenModels: [],
+  ...overrides,
+});
+
+const catalog = (): ConsultModelProvider[] => [
+  catalogProvider('anthropic', ['claude', 'haiku']),
+  catalogProvider('openai', ['gpt', 'o3']),
+];
+
+describe('pickDefaultAdvisorModels', () => {
+  test('favorites win, in favorite order', () => {
+    expect(pickDefaultAdvisorModels(catalog(), modelLists({
+      favoriteModels: [modelRef('openai', 'gpt'), modelRef('anthropic', 'claude')],
+    }))).toEqual([modelRef('openai', 'gpt'), modelRef('anthropic', 'claude')]);
+  });
+
+  test('recents fill the pair after favorites, never repeating one', () => {
+    expect(pickDefaultAdvisorModels(catalog(), modelLists({
+      favoriteModels: [modelRef('anthropic', 'claude')],
+      recentModels: [modelRef('anthropic', 'claude'), modelRef('anthropic', 'haiku'), modelRef('openai', 'gpt')],
+    }))).toEqual([modelRef('anthropic', 'claude'), modelRef('anthropic', 'haiku')]);
+  });
+
+  test('hidden models are excluded from favorites, recents and the catalog', () => {
+    expect(pickDefaultAdvisorModels(catalog(), modelLists({
+      favoriteModels: [modelRef('anthropic', 'claude')],
+      recentModels: [modelRef('openai', 'o3')],
+      hiddenModels: [modelRef('anthropic', 'claude'), modelRef('openai', 'o3')],
+    }))).toEqual([modelRef('anthropic', 'haiku'), modelRef('openai', 'gpt')]);
+    expect(pickDefaultAdvisorModels(catalog(), modelLists({
+      hiddenModels: [modelRef('anthropic', 'claude')],
+    }))).toEqual([modelRef('anthropic', 'haiku'), modelRef('openai', 'gpt')]);
+  });
+
+  test('the catalog fills the pair when the lists have nothing usable, capped at count', () => {
+    expect(pickDefaultAdvisorModels(catalog(), modelLists()))
+      .toEqual([modelRef('anthropic', 'claude'), modelRef('anthropic', 'haiku')]);
+    expect(pickDefaultAdvisorModels(catalog(), modelLists(), 1)).toEqual([modelRef('anthropic', 'claude')]);
+  });
+
+  test('a favorite that is also a recent, or listed twice, is picked once', () => {
+    expect(pickDefaultAdvisorModels(catalog(), modelLists({
+      favoriteModels: [modelRef('openai', 'gpt')],
+      recentModels: [modelRef('openai', 'gpt'), modelRef('openai', 'o3')],
+    }))).toEqual([modelRef('openai', 'gpt'), modelRef('openai', 'o3')]);
+    expect(pickDefaultAdvisorModels(catalog(), modelLists({
+      favoriteModels: [modelRef('openai', 'gpt'), modelRef('openai', 'gpt')],
+    }))).toEqual([modelRef('openai', 'gpt'), modelRef('anthropic', 'claude')]);
+  });
+
+  test('returns fewer than count when that is all that is usable, including none', () => {
+    expect(pickDefaultAdvisorModels([catalogProvider('anthropic', ['claude'])], modelLists()))
+      .toEqual([modelRef('anthropic', 'claude')]);
+    expect(pickDefaultAdvisorModels([], modelLists())).toEqual([]);
+  });
+
+  test('references that no longer resolve are skipped', () => {
+    expect(pickDefaultAdvisorModels(catalog(), modelLists({
+      favoriteModels: [modelRef('ghost', 'phantom'), modelRef('anthropic', 'missing')],
+      recentModels: [modelRef('openai', 'gpt')],
+    }))).toEqual([modelRef('openai', 'gpt'), modelRef('anthropic', 'claude')]);
+  });
+
+  test('equal inputs always give the same pair', () => {
+    const first = pickDefaultAdvisorModels(catalog(), modelLists({
+      favoriteModels: [modelRef('anthropic', 'claude')],
+      recentModels: [modelRef('openai', 'gpt')],
+    }));
+    const second = pickDefaultAdvisorModels(catalog(), modelLists({
+      favoriteModels: [modelRef('anthropic', 'claude')],
+      recentModels: [modelRef('openai', 'gpt')],
+    }));
+    expect(first).toEqual([modelRef('anthropic', 'claude'), modelRef('openai', 'gpt')]);
+    expect(second).toEqual(first);
   });
 });
