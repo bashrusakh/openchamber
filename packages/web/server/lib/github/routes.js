@@ -1,3 +1,5 @@
+import { createRequestAbortSignal } from '../request-abort.js';
+
 const PR_STATUS_CACHE_TTL_MS = 90_000;
 const PR_STATUS_CACHE_MAX_ENTRIES = 200;
 // Upper bound for resolving a single PR status. resolveGitHubPrStatus makes many
@@ -116,24 +118,6 @@ function withTimeout(promise, timeoutMs, label, onTimeout = undefined) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function createRequestAbortSignal(req, res) {
-  const controller = new AbortController();
-  const abort = () => {
-    if (!res?.writableEnded) controller.abort();
-  };
-  req?.once?.('aborted', abort);
-  res?.once?.('close', abort);
-  if (req?.aborted) controller.abort();
-  return {
-    signal: controller.signal,
-    abort: () => controller.abort(),
-    cleanup: () => {
-      req?.off?.('aborted', abort);
-      res?.off?.('close', abort);
-    },
-  };
-}
-
 function getRequestedRepo(req) {
   const owner = typeof req.query?.owner === 'string' ? req.query.owner.trim() : '';
   const repo = typeof req.query?.repo === 'string' ? req.query.repo.trim() : '';
@@ -169,22 +153,29 @@ function setPrStatusCache(key, data, fetchedAt) {
   prStatusCache.set(key, { data, fetchedAt });
 }
 
-export function registerGitHubRoutes(app) {
+export function registerGitHubRoutes(app, dependencies = {}) {
   let githubLibraries = null;
-  const getGitHubLibraries = async () => {
+  const getGitHubLibraries = dependencies.getGitHubLibraries || (async () => {
     if (!githubLibraries) {
       githubLibraries = await import('./index.js');
     }
     return githubLibraries;
-  };
+  });
+  const loadPrStatus = dependencies.resolveGitHubPrStatus
+    ? async () => ({ resolveGitHubPrStatus: dependencies.resolveGitHubPrStatus })
+    : async () => import('./pr-status.js');
 
-  const getGitHubUserSummary = async (octokit) => {
-    const me = await octokit.rest.users.getAuthenticated();
+  const getGitHubUserSummary = async (octokit, { signal = undefined } = {}) => {
+    const me = signal
+      ? await octokit.rest.users.getAuthenticated({ signal })
+      : await octokit.rest.users.getAuthenticated();
 
     let email = typeof me.data.email === 'string' ? me.data.email : null;
     if (!email) {
       try {
-        const emails = await octokit.rest.users.listEmailsForAuthenticatedUser({ per_page: 100 });
+        const emailOptions = { per_page: 100 };
+        if (signal) emailOptions.signal = signal;
+        const emails = await octokit.rest.users.listEmailsForAuthenticatedUser(emailOptions);
         const list = Array.isArray(emails?.data) ? emails.data : [];
         const primaryVerified = list.find((e) => e && e.primary && e.verified && typeof e.email === 'string');
         const anyVerified = list.find((e) => e && e.verified && typeof e.email === 'string');
@@ -565,10 +556,10 @@ export function registerGitHubRoutes(app) {
         return res.json({ connected: false });
       }
 
-      const { resolveGitHubPrStatus } = await import('./pr-status.js');
+      const { resolveGitHubPrStatus } = await loadPrStatus();
       const requestAbort = createRequestAbortSignal(req, res);
-      let resolvedStatus;
       try {
+        let resolvedStatus;
         resolvedStatus = await withTimeout(
           resolveGitHubPrStatus({
             octokit,
@@ -582,24 +573,26 @@ export function registerGitHubRoutes(app) {
           'resolveGitHubPrStatus',
           requestAbort.abort,
         );
-      } finally {
-        requestAbort.cleanup();
-      }
-      const searchRepo = resolvedStatus.repo;
-      const first = resolvedStatus.pr;
-      if (!searchRepo) {
-        return res.json({ connected: true, repo: null, branch, pr: null, checks: null, canMerge: false, defaultBranch: null, resolvedRemoteName: null });
-      }
-      if (!first) {
-        return res.json({ connected: true, repo: searchRepo, branch, pr: null, checks: null, canMerge: false, defaultBranch: resolvedStatus.defaultBranch ?? null, resolvedRemoteName: resolvedStatus.resolvedRemoteName ?? null });
-      }
+        const searchRepo = resolvedStatus.repo;
+        const first = resolvedStatus.pr;
+        if (!searchRepo) {
+          return res.json({ connected: true, repo: null, branch, pr: null, checks: null, canMerge: false, defaultBranch: null, resolvedRemoteName: null });
+        }
+        if (!first) {
+          return res.json({ connected: true, repo: searchRepo, branch, pr: null, checks: null, canMerge: false, defaultBranch: resolvedStatus.defaultBranch ?? null, resolvedRemoteName: resolvedStatus.resolvedRemoteName ?? null });
+        }
 
-      // Enrich with mergeability fields
-      const prFull = await octokit.rest.pulls.get({ owner: searchRepo.owner, repo: searchRepo.repo, pull_number: first.number });
-      const prData = prFull?.data;
-      if (!prData) {
-        return res.json({ connected: true, repo: searchRepo, branch, pr: null, checks: null, canMerge: false });
-      }
+        // Enrich with mergeability fields
+        const prFull = await octokit.rest.pulls.get({
+        owner: searchRepo.owner,
+        repo: searchRepo.repo,
+        pull_number: first.number,
+        signal: requestAbort.signal,
+        });
+        const prData = prFull?.data;
+        if (!prData) {
+          return res.json({ connected: true, repo: searchRepo, branch, pr: null, checks: null, canMerge: false });
+        }
 
       const isMerged = Boolean(prData.merged || prData.merged_at);
       const prState = isMerged ? 'merged' : (prData.state === 'closed' ? 'closed' : 'open');
@@ -618,12 +611,14 @@ export function registerGitHubRoutes(app) {
             repo: searchRepo.repo,
             ref: sha,
             per_page: 100,
+            signal: requestAbort.signal,
           });
           const checkRuns = dedupeCheckRuns(Array.isArray(runs?.data?.check_runs) ? runs.data.check_runs : []);
           if (checkRuns.length > 0) {
             checks = summarizeCheckRuns(checkRuns);
           }
-        } catch {
+        } catch (error) {
+          if (requestAbort.signal.aborted) throw error;
           // ignore and fall back
         }
 
@@ -633,10 +628,12 @@ export function registerGitHubRoutes(app) {
               owner: searchRepo.owner,
               repo: searchRepo.repo,
               ref: sha,
+              signal: requestAbort.signal,
             });
             const statuses = Array.isArray(combined?.data?.statuses) ? combined.data.statuses : [];
             checks = summarizeCombinedStatuses(statuses);
-          } catch {
+          } catch (error) {
+            if (requestAbort.signal.aborted) throw error;
             checks = null;
           }
         }
@@ -652,10 +649,11 @@ export function registerGitHubRoutes(app) {
           let username = auth?.user?.login;
           if (!username) {
             if (!resolvedAuthLoginPromise) {
-              resolvedAuthLoginPromise = octokit.rest.users.getAuthenticated()
+              resolvedAuthLoginPromise = octokit.rest.users.getAuthenticated({ signal: requestAbort.signal })
                 .then((resp) => resp?.data?.login || null)
-                .catch(() => {
+                .catch((error) => {
                   resolvedAuthLoginPromise = null;
+                  if (requestAbort.signal.aborted) throw error;
                   return null;
                 });
             }
@@ -666,11 +664,13 @@ export function registerGitHubRoutes(app) {
               owner: searchRepo.owner,
               repo: searchRepo.repo,
               username,
+              signal: requestAbort.signal,
             });
             const level = perm?.data?.permission;
             canMerge = level === 'admin' || level === 'maintain' || level === 'write';
           }
-        } catch {
+        } catch (error) {
+          if (requestAbort.signal.aborted) throw error;
           canMerge = false;
         }
       }
@@ -697,6 +697,9 @@ export function registerGitHubRoutes(app) {
         defaultBranch: resolvedStatus.defaultBranch ?? null,
         resolvedRemoteName: resolvedStatus.resolvedRemoteName ?? null,
       });
+      } finally {
+        requestAbort.cleanup();
+      }
     } catch (error) {
       if (error?.status === 401) {
         const { clearGitHubAuth } = await getGitHubLibraries();

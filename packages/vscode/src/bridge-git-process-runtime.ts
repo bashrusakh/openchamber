@@ -102,19 +102,6 @@ const buildGitEnv = async (): Promise<NodeJS.ProcessEnv> => {
   return env;
 };
 
-const activeProcesses = new Set<ReturnType<typeof spawnOwnedProcess>>();
-let shutdown: Promise<void> | null = null;
-
-export const stopGitProcesses = (): Promise<void> => {
-  if (!shutdown) shutdown = (async () => {
-    const results = await Promise.allSettled([...activeProcesses].map((process) => process.terminate()));
-    for (const result of results) {
-      if (result.status === 'rejected') console.warn('Failed to stop a Git process:', result.reason);
-    }
-  })();
-  return shutdown;
-};
-
 const getErrorCode = (error: Error): string | undefined => {
   // SAFETY: child-process failures use Node's optional errno code field.
   const code = (error as NodeJS.ErrnoException).code;
@@ -143,6 +130,27 @@ const processFailure = (error: OwnedProcessFailure): GitProcessExecutionResult =
 export const createGitProcessRuntime = ({
   resolveGitExecutable = getGitExecutablePath,
 }: GitProcessRuntimeOptions = {}) => {
+  const activeProcesses = new Set<ReturnType<typeof spawnOwnedProcess>>();
+  let shutdown: Promise<void> | null = null;
+
+  const stopGitProcesses = (): Promise<void> => {
+    if (!shutdown) shutdown = (async () => {
+      const results = await Promise.allSettled([...activeProcesses].map((process) => process.terminate()));
+      for (const result of results) {
+        if (result.status === 'rejected') console.warn('Failed to stop a Git process:', result.reason);
+      }
+    })();
+    return shutdown;
+  };
+
+  const resetGitProcesses = async (): Promise<void> => {
+    if (shutdown) await shutdown;
+    if (activeProcesses.size > 0) {
+      throw new Error('Cannot reset the Git runtime while processes are still active');
+    }
+    shutdown = null;
+  };
+
   const execGit = async (
     args: string[],
     cwd: string,
@@ -284,7 +292,11 @@ export const createGitProcessRuntime = ({
     }
   };
 
-  return Object.freeze({ execGit });
+  return Object.freeze({ execGit, stopGitProcesses, resetGitProcesses });
 };
 
-export const { execGit } = createGitProcessRuntime();
+const defaultRuntime = createGitProcessRuntime();
+
+export const execGit = defaultRuntime.execGit;
+export const stopGitProcesses = defaultRuntime.stopGitProcesses;
+export const resetGitProcesses = defaultRuntime.resetGitProcesses;

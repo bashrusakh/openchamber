@@ -1,5 +1,5 @@
 import express from 'express';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerWalkthroughRoutes } from './routes.js';
 
 // These run over real HTTP on purpose. The bug this file exists for was
@@ -21,6 +21,11 @@ describe('walkthrough routes', () => {
     async getPullRequestDiff(directory, number, sourceRepo, options) {
       lastArgs = { directory, number, sourceRepo, options };
       if (number === 99) throw Object.assign(new Error('GitHub unavailable'), { statusCode: 503 });
+      if (number === 88) {
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
+        });
+      }
       return { patch: number === 1 ? '' : 'diff --git a/a.ts b/a.ts\n' };
     },
     async getPullRequestFileContents(directory, number, sourceRepo, file) {
@@ -100,8 +105,26 @@ describe('walkthrough routes', () => {
     const response = await fetch(`${base}/api/walkthrough/pr-diff?directory=/repo&source=${encodeURIComponent(JSON.stringify(source))}`);
     expect(response.headers.get('content-type')).toContain('text/plain');
     expect(await response.text()).toBe('diff --git a/a.ts b/a.ts\n');
-    expect(lastArgs).toEqual({ directory: '/repo', number: 42, sourceRepo: source.sourceRepo, options: { allowEmpty: true } });
+    expect(lastArgs).toMatchObject({
+      directory: '/repo',
+      number: 42,
+      sourceRepo: source.sourceRepo,
+      options: { allowEmpty: true, signal: expect.any(AbortSignal) },
+    });
     expect(generateCalls).toBe(before);
+  });
+
+  it('aborts a PR collection when the request disconnects', async () => {
+    const controller = new AbortController();
+    const pending = fetch(`${base}/api/walkthrough/pr-diff?directory=/repo&source=${encodeURIComponent(JSON.stringify({ kind: 'pr', number: 88 }))}`, {
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => expect(lastArgs?.options?.signal).toBeInstanceOf(AbortSignal));
+    controller.abort();
+    await pending.catch(() => undefined);
+
+    await vi.waitFor(() => expect(lastArgs.options.signal.aborted).toBe(true));
   });
 
   it('distinguishes empty PRs, upstream failure, and invalid sources', async () => {
@@ -121,7 +144,12 @@ describe('walkthrough routes', () => {
     const ok = await request({ path: 'new.ts', previousPath: 'old.ts', status: 'R' });
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ original: 'before', modified: 'after' });
-    expect(lastArgs).toEqual({ directory: '/repo', number: 42, sourceRepo: source.sourceRepo, file: { path: 'new.ts', previousPath: 'old.ts', status: 'R' } });
+    expect(lastArgs).toMatchObject({
+      directory: '/repo',
+      number: 42,
+      sourceRepo: source.sourceRepo,
+      file: { path: 'new.ts', previousPath: 'old.ts', status: 'R', signal: expect.any(AbortSignal) },
+    });
     expect((await request({ path: 'a.ts', status: 'M', source: JSON.stringify({ kind: 'branch', baseRef: 'main', headRef: 'x' }) })).status).toBe(400);
     expect((await request({ status: 'M' })).status).toBe(400);
     const huge = await request({ path: 'huge.bin', status: 'M' });

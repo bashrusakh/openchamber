@@ -105,8 +105,9 @@ request, so a canceled PR collection does not leave an in-flight request behind.
 `GET /api/walkthrough/pr-diff` accepts `directory` and a JSON `source` restricted
 to PRs. It returns GitHub's complete published diff as text, with no model
 readiness checks or generation. Successful empty patches return 200; auth,
-GitHub and malformed-response failures remain errors. Walkthrough generation
-keeps its existing empty-diff refusal. UI comparison behavior is documented in
+GitHub and malformed-response failures remain errors. Request cancellation
+reaches the GitHub collection request. Walkthrough generation keeps its
+existing empty-diff refusal. UI comparison behavior is documented in
 `packages/ui/src/components/views/DOCUMENTATION.md`.
 
 `GET /api/walkthrough/pr-file` takes the same `directory` and PR `source` plus
