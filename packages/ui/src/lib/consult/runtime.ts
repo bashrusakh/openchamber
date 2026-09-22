@@ -103,9 +103,12 @@ const COMPLETION_READ_LIMIT = 10;
  */
 export const consultHoldOwner = (runId: string): string => `consult:${runId}`;
 
-/** Attachment reused from the acting message; mirrors `opencodeClient.sendMessage` file input. */
+/**
+ * Attachment reused from the acting message; mirrors `opencodeClient.sendMessage` file input.
+ * No composer attachment id: an OpenCode file part id must start with `prt`, and the acting
+ * server path's `toFilePart` sends no id either.
+ */
 export type ConsultAttachmentInput = {
-  id?: string;
   type: 'file';
   mime: string;
   filename?: string;

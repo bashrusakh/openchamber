@@ -990,7 +990,7 @@ describe('dispatch', () => {
       directory: '/work',
       expectedRuntimeKey: 'runtime-1',
       messageText: 'What should we do next?',
-      attachments: [{ id: 'att-1', type: 'file', mime: 'image/png', filename: 'shot.png', url: 'data:image/png;base64,cG5n' }],
+      attachments: [{ type: 'file', mime: 'image/png', filename: 'shot.png', url: 'data:image/png;base64,cG5n' }],
       advisors: [{ providerID: 'openai', modelID: 'gpt-5', agent: 'build', variant: 'high' }],
       mode: 'parallel',
       timeoutMs: 120_000,
@@ -1039,6 +1039,43 @@ describe('dispatch', () => {
       'run-1:dispatching',
       'run-1:finish:done',
     ]);
+  });
+
+  test('advisor file parts drop the composer attachment id, which OpenCode rejects', async () => {
+    const harness = createHarness();
+    const note: AttachedFile = {
+      id: '1790036758821-j7tq1ja47vr',
+      file: new File(['A'], 'note.txt', { type: 'text/plain' }),
+      dataUrl: 'data:text/plain;base64,QQ==',
+      mimeType: 'text/plain',
+      filename: 'note.txt',
+      size: 1,
+      source: 'local',
+    };
+
+    const handle = harness.submit(baseInput({
+      message: { content: 'What is in this note?', text: 'What is in this note?', attachments: [note] },
+    }));
+    await harness.flush();
+
+    // The acting/queue payload path keeps the composer attachment untouched.
+    expect(harness.state.queued[0].message.attachments).toEqual([note]);
+
+    // The advisor runtime forwards these verbatim as `client.sendMessage`'s
+    // `files`, exactly like the acting server path's `toFilePart`
+    // (packages/web/server/lib/message-queue/runtime.js): type/mime/url/filename.
+    // A composer attachment id is not an OpenCode part id (`prt...`), so
+    // forwarding one makes every advisor send fail with
+    // `400 BadRequest: Expected a string starting with "prt"`.
+    const advisorFiles = harness.state.startInputs[0].attachments;
+    expect(advisorFiles).toEqual([
+      { type: 'file', mime: 'text/plain', url: 'data:text/plain;base64,QQ==', filename: 'note.txt' },
+    ]);
+    expect(advisorFiles?.[0] && Object.prototype.hasOwnProperty.call(advisorFiles[0], 'id')).toBe(false);
+
+    harness.lastConsultation().resolve(consultationResult());
+    const result = await handle.result;
+    expect(result.status).toBe('dispatched');
   });
 
   test('a partial result dispatches with the successful advisors only', async () => {

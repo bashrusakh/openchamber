@@ -434,7 +434,6 @@ const toAdvisorAttachments = (
       mime: attachment.mimeType,
       url: attachment.dataUrl,
     };
-    if (attachment.id) input.id = attachment.id;
     if (attachment.filename) input.filename = attachment.filename;
     return input;
   });
