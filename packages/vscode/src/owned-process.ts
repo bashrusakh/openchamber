@@ -44,8 +44,7 @@ export function spawnOwnedProcess(binary: string, args: string[], options: Pick<
     });
   });
   const waitForClose = async (timeoutMs: number) => {
-    if (childClosed || child.exitCode !== null && child.exitCode !== undefined
-      || child.signalCode !== null && child.signalCode !== undefined) {
+    if (childClosed) {
       return true;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -91,20 +90,20 @@ export function spawnOwnedProcess(binary: string, args: string[], options: Pick<
       }
       if (process.platform === 'win32') {
         let taskkillError: Error | null = null;
-        if (!childClosed && child.exitCode == null && child.signalCode == null) {
-          // Keep the parent alive until Windows has enumerated its descendants.
-          try {
-            await new Promise<void>((resolve) => {
-              execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-                windowsHide: true, timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
-              }, (error) => {
-                taskkillError = error || null;
-                resolve();
-              });
+        // Root close is not evidence that a Windows descendant tree is gone.
+        // Keep taskkill independent of the root lifecycle so a child that
+        // outlives Git is still terminated and its cleanup is awaited.
+        try {
+          await new Promise<void>((resolve) => {
+            execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+              windowsHide: true, timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
+            }, (error) => {
+              taskkillError = error || null;
+              resolve();
             });
-          } catch (error) {
-            taskkillError = error instanceof Error ? error : new Error(String(error));
-          }
+          });
+        } catch (error) {
+          taskkillError = error instanceof Error ? error : new Error(String(error));
         }
         if (taskkillError) {
           const rootError = killRoot();

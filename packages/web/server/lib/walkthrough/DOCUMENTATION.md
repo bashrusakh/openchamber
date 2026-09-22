@@ -99,6 +99,8 @@ PR sources may include `sourceRepo: { owner, repo }`. This qualifies both the
 GitHub request and the cache/job key as `pr:<owner>/<repo>:<number>`. Existing
 number-only sources retain `pr:<number>` and resolve the directory's repository.
 The PR panel forwards its resolved repository when opening walkthrough.
+Generation cancellation reaches local repository resolution and the GitHub diff
+request, so a canceled PR collection does not leave an in-flight request behind.
 
 `GET /api/walkthrough/pr-diff` accepts `directory` and a JSON `source` restricted
 to PRs. It returns GitHub's complete published diff as text, with no model

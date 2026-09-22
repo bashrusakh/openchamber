@@ -26,6 +26,7 @@ mock.module('./bridge-git-process-runtime', () => ({ execGit }));
 
 const {
   getGitStatus,
+  getGitBranches,
   getGitDiff,
   getGitFileDiff,
   getGitRangeDiff,
@@ -58,7 +59,7 @@ describe('VS Code Git cleanup propagation', () => {
     expect(runtime.coordinator.getStats()).toMatchObject({ active: 1 });
   });
 
-  it('keeps the ordinary raw status fallback for a regular Git failure', async () => {
+  it('keeps the ordinary raw status fallback for a confirmed non-repository', async () => {
     result = {
       stdout: '',
       stderr: 'fatal: not a git repository',
@@ -70,6 +71,34 @@ describe('VS Code Git cleanup propagation', () => {
       current: '',
       files: [],
       isClean: true,
+    });
+  });
+
+  it('does not report unavailable Git as a clean status', async () => {
+    result = {
+      stdout: '',
+      stderr: 'spawn git ENOENT',
+      exitCode: 1,
+      code: 'ENOENT',
+    };
+
+    await expect(getGitStatus('/repo')).rejects.toMatchObject({
+      code: 'ENOENT',
+      stderr: 'spawn git ENOENT',
+    });
+  });
+
+  it('does not report unavailable Git as an empty branch list', async () => {
+    result = {
+      stdout: '',
+      stderr: 'permission denied while executing Git',
+      exitCode: 1,
+      code: 'EACCES',
+    };
+
+    await expect(getGitBranches('/repo')).rejects.toMatchObject({
+      code: 'EACCES',
+      stderr: 'permission denied while executing Git',
     });
   });
 

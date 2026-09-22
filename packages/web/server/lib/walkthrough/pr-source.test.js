@@ -19,6 +19,22 @@ describe('repository-qualified PR sources', () => {
     expect(received).toEqual(['/repo', 42, source.sourceRepo]);
   });
 
+  it('forwards cancellation to the pull request diff loader', async () => {
+    const source = parseSource({ kind: 'pr', number: 42, sourceRepo: { owner: 'upstream', repo: 'project' } });
+    const controller = new AbortController();
+    let received;
+
+    await loadSourceSections('/repo', source, {
+      signal: controller.signal,
+      getPullRequestDiff: async (...args) => {
+        received = args;
+        return { patch: 'published patch', meta: {} };
+      },
+    });
+
+    expect(received).toEqual(['/repo', 42, source.sourceRepo, { signal: controller.signal }]);
+  });
+
   it('routes commit reads through the injected Git facade with cancellation', async () => {
     const source = parseSource({ kind: 'commit', hash: 'a'.repeat(40) });
     const controller = new AbortController();

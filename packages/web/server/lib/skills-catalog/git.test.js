@@ -6,6 +6,7 @@ import {
   runGit,
   runWithGitCloneReservation,
 } from './git.js';
+import { runWithGitExecutionScope } from '../git/execution-scope.js';
 
 describe('skills catalog Git helpers', () => {
   it('passes non-interactive execution settings and identity configuration to Git', async () => {
@@ -31,6 +32,15 @@ describe('skills catalog Git helpers', () => {
       ],
       expect.objectContaining({ cwd: '/repo', timeout: 123, maxBuffer: 456 }),
     );
+  });
+
+  it('applies optional-lock suppression only inside the shared read scope', async () => {
+    const execute = vi.fn(async (_command, _args, options) => ({ stdout: options.env.GIT_OPTIONAL_LOCKS || '', stderr: '' }));
+
+    await expect(runWithGitExecutionScope(true, () => runGit(['show', 'HEAD'], {
+      execFileAsync: execute,
+    }))).resolves.toMatchObject({ stdout: '0' });
+    await expect(runGit(['clone'], { execFileAsync: execute })).resolves.toMatchObject({ stdout: '' });
   });
 
   it('uses the configured Git binary and shared safe SSH command builder', async () => {
