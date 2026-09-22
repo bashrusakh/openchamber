@@ -1465,6 +1465,33 @@ describe('message queue runtime', () => {
       expect(snapshot[0].recoverable).toBeUndefined();
     });
 
+    it('answers resumable for an unclaimed item that never reached the acting payload', async () => {
+      const { runtime, openCode, broadcasts } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse' },
+      }));
+      const readsBefore = openCode.state.messageReadCalls;
+      const before = runtime.snapshot();
+      const broadcastsBefore = broadcasts.length;
+
+      const result = await runtime.resolveConsult(SESSION, itemId);
+      // No runId means the acting payload was never merged, so no prompt for
+      // this item can have been sent: provably resumable, not merely unknown.
+      expect(result).toEqual({ status: 'resumable' });
+      // Correlation is impossible: no tail read, no marker fetch at all.
+      expect(openCode.state.messageReadCalls).toBe(readsBefore);
+      // Nothing mutated: same revision, same queue, no broadcast, no hold.
+      expect(runtime.snapshot()).toEqual(before);
+      expect(broadcasts).toHaveLength(broadcastsBefore);
+      const snapshot = runtime.sessionSnapshot(SESSION).items;
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].claimed).toBeUndefined();
+      expect(snapshot[0].recoverable).toBeUndefined();
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+    });
+
     it('stays unresolved when the marker read fails (never guesses)', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
@@ -2157,6 +2184,15 @@ describe('message queue routes', () => {
       params: { sessionId: SESSION, itemId: notConsult.itemId },
     });
     expect(refused.body).toEqual({ status: 'not-consult' });
+
+    // An unclaimed item that never reached the acting payload is provably
+    // resumable: the route serves the new status as a 200 structured outcome.
+    const neverPayload = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+    const resumable = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/resolve-consult', {
+      params: { sessionId: SESSION, itemId: neverPayload.itemId },
+    });
+    expect(resumable.status).toBeNull();
+    expect(resumable.body).toEqual({ status: 'resumable' });
 
     // An invalid session id is an unexpected error at the route layer
     // (requireSessionId throws a bare TypeError), wrapped like the others' 400.

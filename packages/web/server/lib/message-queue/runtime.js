@@ -1458,8 +1458,11 @@ export function createMessageQueueRuntime({
    *
    * Outcomes, all evidence-based and all fail-closed:
    * - `not-found` / `not-consult` / `sending`: nothing is mutated.
-   * - No receipt runId in the item metadata: correlation is impossible, so the
-   *   indeterminate state must stay — `{ status: 'unresolved' }` untouched.
+   * - No receipt runId in the item metadata: the acting payload was never
+   *   merged onto this item, so no prompt for it can have been sent. Unclaimed
+   *   → `{ status: 'resumable' }`: provably never dispatched, nothing mutated,
+   *   the client may resume it. Claimed → `{ status: 'unresolved' }`: the
+   *   owner is mid-flow and decides; nothing is mutated either way.
    * - Marker found in a deeper tail (200): the dispatch landed — remove the
    *   item exactly once, release the claimed owner's hold (a non-empty owner
    *   only: an unclaimed or owner-less item has no own slot, and the shared
@@ -1484,9 +1487,13 @@ export function createMessageQueueRuntime({
     if (sending.has(sessionId)) return { status: 'sending' };
 
     // The receipt runId is the only non-heuristic correlation between the item
-    // and a prompt that may have landed; without it nothing can be decided.
+    // and a prompt that may have landed. The product flow merges the acting
+    // payload's metadata immediately before dispatch, so a missing runId means
+    // the item never reached that stage: with no claim either, nothing was
+    // ever sent for it and a resume is provably safe. A claimed item is its
+    // owner's live flow; leave the decision there.
     const runId = readConsultReceiptRunId(item);
-    if (!runId) return { status: 'unresolved' };
+    if (!runId) return item.claimed ? { status: 'unresolved' } : { status: 'resumable' };
 
     // The claim identity this decision is based on, so the post-read re-check
     // can tell a concurrent claim, re-claim, or release from "unchanged".

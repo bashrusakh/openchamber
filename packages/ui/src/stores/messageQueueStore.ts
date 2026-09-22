@@ -278,11 +278,13 @@ const serverConsultDispatchResponseSchema = z.discriminatedUnion('status', [
  * and never sends. Every control-flow case answers 200 with one of these
  * bodies; non-2xx is reserved for malformed/unexpected failures. `dispatched`
  * proves the prompt landed (the item was removed and the projection updated by
- * broadcast); `unresolved` keeps the item queued (`recoverable` offers Resume);
- * `sending` means a delivery is still in flight.
+ * broadcast); `resumable` proves it never reached the acting payload, so a
+ * resume cannot duplicate it; `unresolved` keeps the item queued (`recoverable`
+ * offers Resume); `sending` means a delivery is still in flight.
  */
 const serverConsultResolveResponseSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('dispatched'), delivered: z.literal('confirmed') }),
+  z.object({ status: z.literal('resumable') }),
   z.object({ status: z.literal('unresolved'), recoverable: z.literal(true).optional() }),
   z.object({ status: z.literal('not-found') }),
   z.object({ status: z.literal('not-consult') }),
@@ -303,9 +305,13 @@ export type ConsultDispatchOutcome =
  * The store-facing resolve outcome: exactly the server's structured body. The
  * removal after `dispatched` arrives through the server's own broadcast, so no
  * local projection change happens here — removal stays exactly-once.
+ * `resumable` proves the item never reached the acting payload, so a resume
+ * cannot duplicate a send; `unresolved` means the previous delivery is still
+ * undecided and a resume must not proceed.
  */
 export type ConsultResolveOutcome =
   | { status: 'dispatched'; delivered?: 'confirmed' }
+  | { status: 'resumable' }
   | { status: 'unresolved'; recoverable?: true }
   | { status: 'not-found' }
   | { status: 'not-consult' }

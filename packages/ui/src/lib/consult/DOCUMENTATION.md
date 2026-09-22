@@ -162,15 +162,19 @@ acting turn.
    failed read-back request fails closed instead of sending unverified.
 6. A `forkSession` rejection is ambiguous: the server may have created the
    clone before the response was lost. The run never tries to recover, hide,
-   mark, or delete such a clone. This is an intentional architectural
-   boundary, not an accepted limitation: reconciliation without guessing is
-   impossible. The SDK fork contract (`SessionForkData`) carries only
-   `messageID` — no idempotency key and no client-supplied metadata; a clone
-   carries no `parentID` and copies the parent's title and metadata
-   wholesale; the sessions list has no created-after filter (only a
-   `time.updated` cursor); and the consult marker is written only after
-   `forkSession` resolves, so in exactly the lost-response case it cannot
-   exist yet. Every remaining correlation signal (timing, title, transcript
+   mark, or delete such a clone: the failure path never mutates a session it
+   did not receive. This is an intentional architectural boundary, not an
+   accepted limitation: reconciliation without guessing is impossible. The
+   SDK fork contract (`SessionForkData`) carries only `messageID` — no
+   idempotency key and no client-supplied metadata; a clone carries no
+   `parentID` and copies the parent's title and metadata wholesale; the v2
+   sessions list query (`SessionListData`) does carry a `start` filter (the
+   `time.updated` cursor), but a time window alone cannot identify a lost
+   fork: parallel sibling forks and ordinary user sessions can be created in
+   the same window, so `start` narrows the list rather than identifying a
+   session; and the consult marker is written only after `forkSession`
+   resolves, so in exactly the lost-response case it cannot exist yet. Every
+   remaining correlation signal (timing, title, transcript
    prefix) is shared with legitimate user sessions and with parallel sibling
    forks, so "a session id that appeared after a listing" is not positive
    identification, and mutating the wrong session is worse than leaving the
@@ -360,12 +364,18 @@ consultation through the same claim → fan-out → payload → dispatch route a
 new submission, with fresh advisor options from the caller. The chip offers
 Resume only on the queue head, the only item the server will claim. Because
 the server keeps the item's receipt metadata through a lapse and a restart,
-the resume checks delivery first: a `dispatched` answer from the resolve route
-means a previous run already delivered the turn, so the resume reports the
-neutral `delivered` result — no claim, no fan-out, no dispatch, no composer
-restore — instead of running a duplicate consultation; every other answer
-falls through to the normal resume, and a resolve failure fails open to the
-claim route, which re-checks the reservation server-side.
+the resume checks delivery first and proceeds only on a decided answer: a
+`dispatched` answer from the resolve route means a previous run already
+delivered the turn, so the resume reports the neutral `delivered` result — no
+claim, no fan-out, no dispatch, no composer restore — instead of running a
+duplicate consultation; `resumable` means the server proved the item never
+reached an acting payload, and it is the only state that may claim, fan out,
+and dispatch. Every other answer refuses without claiming: `unresolved` (the
+tail read failed, or a payload-bearing item has no marker), `sending`,
+`not-found`, `not-consult`, and any resolve transport failure. The item stays
+queued so a later Resume can resolve it, and a later `dispatched` still
+resolves it as delivered exactly once. Uncertain delivery is never treated as
+safe to resume.
 
 **Reconnect resolution (#3743).** On every queue hydration the store scans
 dangling consult items (`claimed` or `recoverable`) and posts one outcome

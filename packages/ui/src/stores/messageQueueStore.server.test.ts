@@ -609,6 +609,7 @@ describe("server-owned message queue", () => {
     test("parses every structured outcome", async () => {
       const outcomes = [
         { status: "dispatched", delivered: "confirmed" },
+        { status: "resumable" },
         { status: "unresolved" },
         { status: "unresolved", recoverable: true },
         { status: "not-found" },

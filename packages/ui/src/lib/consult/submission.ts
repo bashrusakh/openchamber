@@ -133,6 +133,9 @@ const DELIVERED_RAW_MESSAGE =
   'The queued consult message left the queue before this consultation could dispatch it.';
 const AUTO_REVIEW_ACTIVE_MESSAGE =
   'A consultation cannot start while the automatic review loop is running for this session.';
+/** The resume's delivery check could not prove whether the previous turn landed. */
+const RESUME_UNCONFIRMED_DELIVERY_MESSAGE =
+  "The previous consultation's delivery could not be confirmed; retry later or remove the queued consultation.";
 
 /**
  * The default refusal for an unverified live capability. The reason decides
@@ -231,8 +234,9 @@ export type ConsultSubmissionResult =
     consultation?: ConsultationResult;
     /**
      * The dispatch outcome is unconfirmed (an in-flight send, an
-     * indeterminate failure, or a transport error): the composer must not
-     * restore the capture because the message may already be on its way.
+     * indeterminate failure, a transport error, or a resume whose delivery
+     * check could not decide): the composer must not restore the capture
+     * because the message may already be on its way.
      */
     uncertain?: boolean;
   }
@@ -1303,14 +1307,18 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
    *
    * Delivery-first: the server keeps the item's receipt metadata
    * (`textPartMetadata`) through a claim lapse and a restart, so a stranded
-   * item still carries its run's delivery marker. Before any claim or
+   * item can still carry its run's delivery marker. Before any claim or
    * prevalidation the resume asks the server's never-sending resolve route
-   * whether the turn already landed: `dispatched` means the acting turn was
-   * delivered and the item was removed exactly once, so the resume reports
-   * the neutral `delivered` result instead of running a duplicate
-   * consultation. Every other outcome falls through to the normal resume, and
-   * a resolve failure fails open to the claim route, which re-checks the
-   * reservation server-side.
+   * whether the turn already landed, and proceeds only on a decided answer:
+   * `dispatched` means the acting turn was delivered and the item was removed
+   * exactly once, so the resume reports the neutral `delivered` result instead
+   * of running a duplicate consultation; `resumable` means the item never
+   * reached the acting payload, so nothing was ever dispatched for it and the
+   * normal resume proceeds. Every other outcome (`unresolved`, `sending`,
+   * `not-found`, `not-consult`) and any resolve transport failure refuses
+   * without claiming, fanning out, or dispatching — the previous turn may have
+   * landed — finishing the run terminal with `uncertain: true` and leaving the
+   * item exactly as it is so a later Resume can re-check.
    *
    * The body carries the same outer safety as `submitConsultMessage`: an
    * unexpected throw finishes the run terminal and releases any hold this
@@ -1357,19 +1365,44 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       terminal: false,
     };
 
+    /**
+     * The previous delivery cannot be ruled out: nothing is claimed, fanned
+     * out, or dispatched, and the item stays queued exactly as it was so a
+     * later Resume can re-check. `uncertain: true` keeps the composer from
+     * restoring a payload that may already have been sent.
+     */
+    const refuseUnconfirmedResume = (): ConsultSubmissionResult => {
+      deps.runs.finish(input.parentSessionId, runId, { phase: 'failed', error: RESUME_UNCONFIRMED_DELIVERY_MESSAGE });
+      return {
+        status: 'failed',
+        runId,
+        error: RESUME_UNCONFIRMED_DELIVERY_MESSAGE,
+        queueItemRestored: false,
+        uncertain: true,
+      };
+    };
+
     try {
       // Delivery-first (the doc comment above): the resolve route only reads,
       // so it runs before the capability read, the item checks, prevalidation,
       // and the claim. A landed turn is reported as delivered and nothing else
       // happens — no claim, no fan-out, no dispatch, no composer restore.
+      // Strict gate: only a confirmed delivery (`dispatched`) or a proof that
+      // nothing was ever dispatched (`resumable`) may proceed. Every other
+      // answer — and a resolve transport failure — refuses, because the
+      // previous acting turn may have landed and a resume could send the
+      // message twice.
+      let resolution: ConsultResolveOutcome;
       try {
-        const resolution = await deps.queue.resolveConsultItem(target, item.id);
-        if (resolution.status === 'dispatched') {
-          return { status: 'delivered', runId, resumedResolvedDelivered: true, queueItemRestored: false };
-        }
+        resolution = await deps.queue.resolveConsultItem(target, item.id);
       } catch {
-        // Fail open: the claim route re-checks the reservation server-side,
-        // so a resolve transport failure never blocks a legitimate resume.
+        return refuseUnconfirmedResume();
+      }
+      if (resolution.status === 'dispatched') {
+        return { status: 'delivered', runId, resumedResolvedDelivered: true, queueItemRestored: false };
+      }
+      if (resolution.status !== 'resumable') {
+        return refuseUnconfirmedResume();
       }
 
       const capability = await (async (): Promise<{ available: true } | { available: false; reason: string; message?: string }> => {

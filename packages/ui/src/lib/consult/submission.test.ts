@@ -156,7 +156,7 @@ type HarnessState = {
   dispatchConsultFailure: Error | null;
   /** When set, `resolveConsultItem` answers this exact structured outcome. */
   resolveConsultOutcome: ConsultResolveOutcome | null;
-  /** When set, `resolveConsultItem` throws (the resume must fail open). */
+  /** When set, `resolveConsultItem` throws (the resume must refuse without resuming). */
   resolveConsultFailure: Error | null;
   /** Every `resolveConsultItem` call in order. */
   resolveConsultCalls: Array<{ sessionId: string; messageId: string }>;
@@ -826,6 +826,7 @@ describe('queue admission', () => {
     const target = createMessageQueueTarget('parent', '/work', 'runtime-1');
     if (!target) throw new Error('target fixture failed');
     harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     harness.state.knowledgeText = 'Pinned project knowledge';
     const pending = harness.resume(
       target,
@@ -1795,6 +1796,7 @@ describe('resume of a stranded consult item', () => {
     const harness = createHarness();
     const item = strandedItem();
     harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     // The consultation settles as soon as the fan-out starts (resume is one
     // awaited flow, so the gate must resolve mid-await).
     harness.state.consultations = [];
@@ -1839,6 +1841,7 @@ describe('resume of a stranded consult item', () => {
     harness.state.capabilityRefusal = { available: false, reason: 'protocol-missing' };
     const item = strandedItem();
     harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     const result = await harness.resume(resumeTarget(), item, resumeOptions());
 
     expect(result.status).toBe('refused');
@@ -1855,6 +1858,7 @@ describe('resume of a stranded consult item', () => {
     const harness = createHarness();
     const item = strandedItem({ claimed: { owner: 'consult:other-run', claimedAt: 1 } });
     harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     const result = await harness.resume(resumeTarget(), item, resumeOptions());
 
     expect(result.status).toBe('failed');
@@ -1868,6 +1872,7 @@ describe('resume of a stranded consult item', () => {
   test('an item that vanished from the queue refuses with nothing to resume', async () => {
     const harness = createHarness();
     const item = strandedItem({ id: 'q-gone' });
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     const result = await harness.resume(resumeTarget(), item, resumeOptions());
 
     expect(result.status).toBe('failed');
@@ -1881,6 +1886,7 @@ describe('resume of a stranded consult item', () => {
     const harness = createHarness();
     const item = strandedItem();
     harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     harness.state.claimFailure = new Error('claim request failed');
     const result = await harness.resume(resumeTarget(), item, resumeOptions());
 
@@ -1896,6 +1902,7 @@ describe('resume of a stranded consult item', () => {
     const harness = createHarness();
     const item = strandedItem();
     harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     harness.state.runtimeKey = 'runtime-2';
     const result = await harness.resume(resumeTarget(), item, resumeOptions());
 
@@ -1912,6 +1919,7 @@ describe('resume of a stranded consult item', () => {
     const harness = createHarness();
     const item = strandedItem({ kind: undefined });
     harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     const result = await harness.resume(resumeTarget(), item, resumeOptions());
 
     expect(result.status).toBe('failed');
@@ -1953,11 +1961,35 @@ describe('resume of a stranded consult item', () => {
     });
   });
 
-  test('an unresolved resolve falls through to the normal resume: claim, fan-out, dispatch', async () => {
+  test('an unresolved resolve refuses without resuming: no claim, no fan-out, no dispatch', async () => {
     const harness = createHarness();
     const item = strandedItem();
     harness.state.queueItems.push(item);
     harness.state.resolveConsultOutcome = { status: 'unresolved', recoverable: true };
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    // The previous delivery is undecided: resuming could send it twice, so
+    // the strict gate refuses before the claim.
+    expect(harness.state.resolveConsultCalls).toHaveLength(1);
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.startInputs).toHaveLength(0);
+    expect(harness.state.payloadCalls).toHaveLength(0);
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+    expect(harness.state.heartbeatActive).toBe(false);
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(result.error).toContain('could not be confirmed');
+    // The item stays exactly as it was, so a later Resume can re-check.
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-stranded']);
+  });
+
+  test('a resumable resolve proves nothing was dispatched and resumes through claim, fan-out, dispatch', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     const pending = harness.resume(resumeTarget(), item, resumeOptions());
     await harness.flush();
     expect(harness.state.startInputs).toHaveLength(1);
@@ -1970,26 +2002,83 @@ describe('resume of a stranded consult item', () => {
     expect(outcome.status).toBe('dispatched');
   });
 
-  test('a resolve failure fails open to the claim route', async () => {
+  test('a resolve transport failure never resumes: no claim, no fan-out, no dispatch', async () => {
     const harness = createHarness();
     const item = strandedItem();
     harness.state.queueItems.push(item);
     harness.state.resolveConsultFailure = new Error('resolve request failed');
-    const pending = harness.resume(resumeTarget(), item, resumeOptions());
-    await harness.flush();
-    expect(harness.state.startInputs).toHaveLength(1);
-    harness.lastConsultation().resolve(consultationResult());
-    const outcome = await pending;
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    // A resolve that could not be read proves nothing: the previous acting
+    // turn may have landed, so nothing may be claimed, fanned out, or sent.
+    expect(harness.state.resolveConsultCalls).toHaveLength(1);
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.startInputs).toHaveLength(0);
+    expect(harness.state.payloadCalls).toHaveLength(0);
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(result.error).toContain('could not be confirmed');
+    // The item stays exactly as it was, so a later Resume can re-check.
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-stranded']);
+  });
+
+  test('a sending resolve refuses without resuming: the in-flight dispatch owns the item', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'sending' };
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
 
     expect(harness.state.resolveConsultCalls).toHaveLength(1);
-    expect(harness.state.claims).toBe(1);
-    expect(outcome.status).toBe('dispatched');
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.startInputs).toHaveLength(0);
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(result.error).toContain('could not be confirmed');
+  });
+
+  test('an unresolved resolve refuses now and a later resolve can still confirm delivery', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'unresolved' };
+
+    const first = await harness.resume(resumeTarget(), item, resumeOptions());
+    expect(first.status).toBe('failed');
+    if (first.status !== 'failed') throw new Error('expected a failure');
+    expect(first.uncertain).toBe(true);
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.startInputs).toHaveLength(0);
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+
+    // The item is still queued and unclaimed: a later Resume re-checks and the
+    // marker is now found, so it reports delivered without any dispatch.
+    harness.state.resolveConsultOutcome = { status: 'dispatched', delivered: 'confirmed' };
+    const second = await harness.resume(resumeTarget(), item, resumeOptions());
+    expect(second).toEqual({
+      status: 'delivered',
+      runId: 'run-2',
+      resumedResolvedDelivered: true,
+      queueItemRestored: false,
+    });
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.startInputs).toHaveLength(0);
+    expect(harness.state.payloadCalls).toHaveLength(0);
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+    expect(harness.state.holds).toEqual([]);
   });
 
   test('an unexpected throw after the hold finishes the run terminal and releases the hold', async () => {
     const harness = createHarness();
     const item = strandedItem();
     harness.state.queueItems.push(item);
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
     // The run store blows up on the resume's first phase write, after the hold
     // was acquired: the outer safety must still finish the run and release the
     // hold, with no heartbeat left running.
