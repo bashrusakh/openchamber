@@ -1,4 +1,5 @@
 import type { Part } from '@opencode-ai/sdk/v2';
+import { CONSULT_RECEIPT_CARRIER_TEXT, CONSULT_RECEIPT_METADATA_KEY } from '@/lib/consult/synthesis';
 import { readContextPart } from '@/lib/messages/contextParts';
 
 type PartWithText = Part & { text?: string; content?: string; value?: string };
@@ -30,6 +31,23 @@ export const isEmptyTextPart = (part: Part): boolean => {
 
 type PartWithSynthetic = Part & { synthetic?: boolean };
 
+/**
+ * The consult receipt carrier is a transport-only synthetic text part: the
+ * send paths insert it only so the receipt metadata has a text part to ride
+ * on. Its text is never user content, so it never renders — with or without
+ * sibling parts. Requiring the receipt key keeps any other synthetic text
+ * part (including real user text that happens to read the same) visible.
+ */
+const isConsultReceiptCarrier = (part: Part): boolean => {
+    if (part.type !== 'text' || part.synthetic !== true) {
+        return false;
+    }
+    if (part.text !== CONSULT_RECEIPT_CARRIER_TEXT) {
+        return false;
+    }
+    return part.metadata?.[CONSULT_RECEIPT_METADATA_KEY] !== undefined;
+};
+
 interface VisibleFilterOptions {
     includeReasoning?: boolean;
 }
@@ -53,6 +71,10 @@ export const filterVisibleParts = (parts: Part[], options: VisibleFilterOptions 
             if (text.includes('<system-reminder>')) {
                 return false;
             }
+        }
+
+        if (isConsultReceiptCarrier(part)) {
+            return false;
         }
 
         // User-attached context (inline comments, terminal selections, and

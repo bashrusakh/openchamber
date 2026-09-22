@@ -249,8 +249,8 @@ turn was sent by this submission:
 - `delivered` — a resume's delivery-first resolve found the turn already
   landed (`resumedResolvedDelivered: true`): a previous run sent it and the
   server removed the item exactly once. Nothing was claimed, fanned out, or
-  dispatched, and the caller shows a neutral already-delivered state, never a
-  failure or a composer restore.
+  dispatched; the caller returns without restoring the composer or reporting
+  anything, and the server's removal broadcast drops the queued chip.
 
 `queueItemRestored` on `refused`/`failed` is `true` only for the
 enqueue-rejection and unattributable-append edges (a copy of the message is

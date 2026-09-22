@@ -38,6 +38,17 @@ import type {
 export const CONSULT_RECEIPT_METADATA_KEY = 'openchamberConsultReceipt';
 
 /**
+ * Model-facing text of the synthetic text part that carries the receipt when
+ * the send has no text part of its own (an attachment- or context-only
+ * consult). It is transport only: `components/chat/message/partUtils.ts`
+ * never renders a part with this text plus receipt metadata. The server
+ * runtime builds the same carrier from a separate package, so keep this
+ * byte-identical to `CONSULT_RECEIPT_CARRIER_TEXT` in
+ * `packages/web/server/lib/message-queue/runtime.js`.
+ */
+export const CONSULT_RECEIPT_CARRIER_TEXT = '[consult receipt]';
+
+/**
  * Free-text bound for a receipt reason. A provider error message has no
  * inherent limit, and the receipt is persisted with the message, so a runaway
  * error must not turn into unbounded part metadata.

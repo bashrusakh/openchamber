@@ -220,7 +220,9 @@ Why: only navigation tools use the compact static path; all other tools need obs
   `lib/consult/synthesis.ts`). `UserTextPart` renders
   `components/chat/consult/ConsultReceiptBlock.tsx` below the text; the
   component parses the metadata and renders nothing when it is absent or
-  malformed, and never writes metadata back.
+  malformed, and never writes metadata back. When the send has no text part
+  of its own, the metadata rides a synthetic `[consult receipt]` carrier;
+  `partUtils.ts` treats that carrier as transport-only and never renders it.
 - User-attached context (inline code comments, terminal selections, browser
   annotations, PR comments/checks): `UserContextPart.tsx`. `UserTextPart`
   routes to it when the part's metadata carries an `openchamberContext`

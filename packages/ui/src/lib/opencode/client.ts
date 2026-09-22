@@ -17,6 +17,7 @@ import type {
   PermissionRuleset,
 } from "@opencode-ai/sdk/v2";
 import { isAmbiguousTransportFailure, markAmbiguousTransportFailure } from "@/lib/relay/transport-error";
+import { CONSULT_RECEIPT_CARRIER_TEXT } from "@/lib/consult/synthesis";
 import { FilesystemError, parseFilesystemErrorReason } from "@/lib/api/files-errors";
 import type { PermissionRequest } from "@/types/permission";
 import type { QuestionRequest } from "@/types/question";
@@ -49,14 +50,6 @@ import {
 const DEFAULT_BASE_URL = import.meta.env.VITE_OPENCODE_URL || "/api";
 const CONFIG_CACHE_TTL_MS = 10_000;
 const OPENCODE_HEALTH_TIMEOUT_MS = 4_000;
-
-// Duplicated literal (the server runtime and this browser bundle are separate
-// packages): only a text part can carry part metadata, so an attachment-only
-// send that must carry metadata gets one synthetic text part with this marker
-// as the receipt carrier. Keep it byte-identical to
-// CONSULT_RECEIPT_CARRIER_TEXT in
-// packages/web/server/lib/message-queue/runtime.js.
-const CONSULT_RECEIPT_CARRIER_TEXT = '[consult receipt]';
 
 /**
  * Render an SDK error payload into a short string for Error messages.
