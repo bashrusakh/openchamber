@@ -156,6 +156,7 @@ import {
     toServerFileUrl,
 } from './composer/attachments/filePaths';
 import { buildComposerContext, buildOutgoingMessage } from './composer/submit/buildOutgoingMessage';
+import { executeCompactAction } from './composer/submit/compactAction';
 import {
     buildCommandVariables,
     canRunCommand,
@@ -1646,14 +1647,15 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         // composer state exactly where they are.
         if (commandPlan?.kind === 'action' && currentSessionId) {
             const actionName = commandPlan.command.name;
-            if (!isCompactAction) {
+            const consumeTypedCommand = () => {
                 setMessage('');
                 confirmedMentionsRef.current.clear();
                 persistDraftImmediately(chatDraftIdentity, '');
                 messageHistory.reset();
                 if (!isBtwActive) setExpandedInput(false);
                 if (isMobile) composerRef.current?.blur();
-            }
+            };
+            if (actionName !== 'compact') consumeTypedCommand();
             try {
                 if (actionName === 'undo') {
                     await useSessionUIStore.getState().handleSlashUndo(currentSessionId);
@@ -1666,9 +1668,17 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 } else if (actionName === 'handoff-review') {
                     setReviewDialogOpen(true);
                 } else if (actionName === 'compact') {
-                    await sessionActions.waitForConnectionOrThrow();
-                    const compactDirectory = useSessionUIStore.getState().getDirectoryForSession(currentSessionId) || currentDirectory || undefined;
-                    await opencodeClient.summarizeSession(currentSessionId, providerIdToSend, modelIdToSend, compactDirectory);
+                    await executeCompactAction({
+                        buttonTriggered: isCompactAction,
+                        sessionId: currentSessionId,
+                        providerId: providerIdToSend,
+                        modelId: modelIdToSend,
+                        currentDirectory,
+                        getSessionDirectory: (sessionId) => useSessionUIStore.getState().getDirectoryForSession(sessionId),
+                        consumeTypedCommand,
+                        waitForConnectionOrThrow: sessionActions.waitForConnectionOrThrow,
+                        summarizeSession: opencodeClient.summarizeSession.bind(opencodeClient),
+                    });
                 }
             } catch (error) {
                 if (!isCompactAction) restoreComposerText();
