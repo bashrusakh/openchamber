@@ -853,6 +853,65 @@ describe('Git execution service', () => {
     ]);
   });
 
+  it('classifies path and ancestry diffs as coordinated read operations', async () => {
+    const calls = [];
+    const controller = new AbortController();
+    const raw = {
+      getPathDiff: async (directory, options) => {
+        calls.push({
+          type: 'path-diff',
+          directory,
+          options,
+          env: getGitExecutionEnv(),
+        });
+        return { diff: 'patch', submodule: null };
+      },
+      isAncestorOfHead: async (directory, sha, options) => {
+        calls.push({
+          type: 'ancestor',
+          directory,
+          sha,
+          options,
+          env: getGitExecutionEnv(),
+        });
+        return true;
+      },
+    };
+    const service = createGitExecutionService({
+      raw,
+      resolver: { resolve: async (directory) => contextFor(directory) },
+      coordinator: {
+        run: async (options, task) => {
+          calls.push({ type: 'admission', label: options.label, kind: options.kind });
+          return task({ active: true });
+        },
+      },
+    });
+
+    await expect(service.getPathDiff('/repo', { path: 'file.ts', signal: controller.signal }))
+      .resolves.toEqual({ diff: 'patch', submodule: null });
+    await expect(service.isAncestorOfHead('/repo', 'a'.repeat(40), { signal: controller.signal }))
+      .resolves.toBe(true);
+
+    expect(calls).toEqual([
+      { type: 'admission', label: 'getPathDiff', kind: GIT_OPERATION_KIND.READ },
+      {
+        type: 'path-diff',
+        directory: '/repo',
+        options: { path: 'file.ts', signal: controller.signal },
+        env: { GIT_OPTIONAL_LOCKS: '0' },
+      },
+      { type: 'admission', label: 'isAncestorOfHead', kind: GIT_OPERATION_KIND.READ },
+      {
+        type: 'ancestor',
+        directory: '/repo',
+        sha: 'a'.repeat(40),
+        options: { signal: controller.signal },
+        env: { GIT_OPTIONAL_LOCKS: '0' },
+      },
+    ]);
+  });
+
   it('admits the integrate flow to network capacity before any fetch', async () => {
     const admissions = [];
     const plan = {

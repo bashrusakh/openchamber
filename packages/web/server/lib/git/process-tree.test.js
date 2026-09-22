@@ -307,4 +307,13 @@ describe('Git process-tree ownership', () => {
     expect(withProcessTreeOwnership({ cwd: '/repo' }, 'linux')).toEqual({ cwd: '/repo', detached: true });
     expect(withProcessTreeOwnership({ cwd: 'C:\\repo' }, 'win32')).toEqual({ cwd: 'C:\\repo', detached: false });
   });
+
+  it('preserves binary stdout for owned Git reads', async () => {
+    const result = await execFileProcessTree({
+      command: process.execPath,
+      args: ['-e', "process.stdout.write(Buffer.from([0, 255, 17]))"],
+      encoding: 'buffer',
+    });
+    expect(result.stdout).toEqual(Buffer.from([0, 255, 17]));
+  });
 });

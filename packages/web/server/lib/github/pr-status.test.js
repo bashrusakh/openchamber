@@ -182,6 +182,18 @@ describe('isHistoricalPrOfCheckout', () => {
     expect(isAncestorMock).toHaveBeenCalledWith('/repo', 'abc1234');
   });
 
+  test('passes request cancellation to the coordinated ancestry read', async () => {
+    const controller = new AbortController();
+    isAncestorMock.mockImplementation(async () => true);
+    const pr = { ...mergedPr, head: { ...mergedPr.head, sha: 'abc1234' } };
+
+    await expect(isHistoricalPrOfCheckout('/repo', pr, {
+      isAncestor: isAncestorMock,
+      signal: controller.signal,
+    })).resolves.toBe(true);
+    expect(isAncestorMock).toHaveBeenCalledWith('/repo', 'abc1234', { signal: controller.signal });
+  });
+
   test('a reused branch name without the merged commits does not inherit the PR', async () => {
     isAncestorMock.mockImplementation(async () => false);
     const pr = { ...mergedPr, head: { ...mergedPr.head, sha: 'abc1234' } };

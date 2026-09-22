@@ -3,6 +3,16 @@ import { execFile, spawn, type SpawnOptions } from 'node:child_process';
 type ProcessExit = { code: number | null; signal: NodeJS.Signals | null; error: Error | null };
 const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000;
 const WINDOWS_TERMINATION_TIMEOUT_MS = 1_000;
+const POSIX_TERMINATION_GRACE_MS = 1_000;
+const POSIX_GROUP_POLL_MS = 10;
+
+type ProcessKill = (pid: number, signal?: NodeJS.Signals | number) => void;
+type OwnedProcessDependencies = {
+  platform?: NodeJS.Platform;
+  processKill?: ProcessKill;
+  terminationTimeoutMs?: number;
+  terminationGraceMs?: number;
+};
 
 const terminationFailure = (
   pid: number,
@@ -25,14 +35,52 @@ const terminationFailure = (
   },
 );
 
+const confirmProcessGroupGone = (
+  pid: number,
+  timeoutMs: number,
+  processKill: ProcessKill,
+) => new Promise<boolean>((resolve) => {
+  const startedAt = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const finish = (confirmed: boolean) => {
+    if (timer) clearTimeout(timer);
+    resolve(confirmed);
+  };
+  const check = () => {
+    try {
+      processKill(-pid, 0);
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ESRCH') {
+        finish(true);
+        return;
+      }
+    }
+    if (Date.now() - startedAt >= timeoutMs) {
+      finish(false);
+      return;
+    }
+    timer = setTimeout(check, POSIX_GROUP_POLL_MS);
+  };
+  check();
+});
+
 // Each background command gets its own POSIX group. Never signal the extension
 // host's group, which can also contain unrelated extensions and editor work.
-export function spawnOwnedProcess(binary: string, args: string[], options: Pick<SpawnOptions, 'cwd' | 'env'>) {
+export function spawnOwnedProcess(
+  binary: string,
+  args: string[],
+  options: Pick<SpawnOptions, 'cwd' | 'env'>,
+  dependencies: OwnedProcessDependencies = {},
+) {
+  const platform = dependencies.platform || process.platform;
+  const processKill: ProcessKill = dependencies.processKill || ((pid, signal) => process.kill(pid, signal));
+  const terminationTimeoutMs = dependencies.terminationTimeoutMs ?? WINDOWS_TERMINATION_TIMEOUT_MS;
+  const terminationGraceMs = dependencies.terminationGraceMs ?? POSIX_TERMINATION_GRACE_MS;
   const child = spawn(binary, args, {
     ...options,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
-    detached: process.platform !== 'win32',
+    detached: platform !== 'win32',
   });
   let spawnError: Error | null = null;
   let childClosed = false;
@@ -59,7 +107,7 @@ export function spawnOwnedProcess(binary: string, args: string[], options: Pick<
   };
   const signalGroup = (signal: NodeJS.Signals) => {
     if (!child.pid) return;
-    try { process.kill(-child.pid, signal); }
+    try { processKill(-child.pid, signal); }
     catch (error) {
       if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error;
     }
@@ -88,7 +136,7 @@ export function spawnOwnedProcess(binary: string, args: string[], options: Pick<
         await closed;
         return;
       }
-      if (process.platform === 'win32') {
+      if (platform === 'win32') {
         let taskkillError: Error | null = null;
         // Root close is not evidence that a Windows descendant tree is gone.
         // Keep taskkill independent of the root lifecycle so a child that
@@ -111,12 +159,37 @@ export function spawnOwnedProcess(binary: string, args: string[], options: Pick<
           throw terminationFailure(child.pid, taskkillError, rootError, rootClosed);
         }
       } else {
-        signalGroup('SIGTERM');
-        await waitForClose(1000);
-        // A parent can exit while a tool ignores SIGTERM or holds its pipes.
-        signalGroup('SIGKILL');
+        try {
+          signalGroup('SIGTERM');
+          await waitForClose(terminationGraceMs);
+          // A parent can exit while a tool ignores SIGTERM or holds its pipes.
+          signalGroup('SIGKILL');
+          const rootClosed = await waitForClose(terminationTimeoutMs);
+          const groupGone = rootClosed && child.pid
+            ? await confirmProcessGroupGone(child.pid, terminationTimeoutMs, processKill)
+            : false;
+          if (rootClosed && groupGone) return;
+          throw terminationFailure(
+            child.pid,
+            new Error(`POSIX process group for PID ${child.pid} did not close after SIGKILL`),
+            null,
+            rootClosed,
+            `Failed to terminate the POSIX process tree for PID ${child.pid}; descendant termination was not confirmed`,
+          );
+        } catch (error) {
+          if (error instanceof Error && 'code' in error && error.code === 'ERR_PROCESS_TREE_TERMINATION') throw error;
+          const rootError = killRoot();
+          const rootClosed = await waitForClose(terminationTimeoutMs);
+          throw terminationFailure(
+            child.pid,
+            error,
+            rootError,
+            rootClosed,
+            `Failed to terminate the POSIX process tree for PID ${child.pid}; descendant termination was not confirmed`,
+          );
+        }
       }
-      if (!await waitForClose(WINDOWS_TERMINATION_TIMEOUT_MS)) {
+      if (!await waitForClose(terminationTimeoutMs)) {
         throw terminationFailure(
           child.pid,
           new Error('Owned process did not close after termination'),

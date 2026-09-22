@@ -102,10 +102,11 @@ function summarizeCombinedStatuses(statuses) {
   return { state, total, ...counts, inProgress: counts.pending, queued: 0 };
 }
 
-function withTimeout(promise, timeoutMs, label) {
+function withTimeout(promise, timeoutMs, label, onTimeout = undefined) {
   let timer;
   const timeout = new Promise((_resolve, reject) => {
     timer = setTimeout(() => {
+      onTimeout?.();
       const error = new Error(`${label} timed out after ${timeoutMs}ms`);
       error.code = 'ETIMEDOUT';
       reject(error);
@@ -113,6 +114,24 @@ function withTimeout(promise, timeoutMs, label) {
     if (typeof timer.unref === 'function') timer.unref();
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function createRequestAbortSignal(req, res) {
+  const controller = new AbortController();
+  const abort = () => {
+    if (!res?.writableEnded) controller.abort();
+  };
+  req?.once?.('aborted', abort);
+  res?.once?.('close', abort);
+  if (req?.aborted) controller.abort();
+  return {
+    signal: controller.signal,
+    abort: () => controller.abort(),
+    cleanup: () => {
+      req?.off?.('aborted', abort);
+      res?.off?.('close', abort);
+    },
+  };
 }
 
 function getRequestedRepo(req) {
@@ -547,17 +566,25 @@ export function registerGitHubRoutes(app) {
       }
 
       const { resolveGitHubPrStatus } = await import('./pr-status.js');
-      const resolvedStatus = await withTimeout(
-        resolveGitHubPrStatus({
-          octokit,
-          directory,
-          branch,
-          remoteName: remote,
-          force,
-        }),
-        PR_STATUS_RESOLVE_TIMEOUT_MS,
-        'resolveGitHubPrStatus',
-      );
+      const requestAbort = createRequestAbortSignal(req, res);
+      let resolvedStatus;
+      try {
+        resolvedStatus = await withTimeout(
+          resolveGitHubPrStatus({
+            octokit,
+            directory,
+            branch,
+            remoteName: remote,
+            force,
+            signal: requestAbort.signal,
+          }),
+          PR_STATUS_RESOLVE_TIMEOUT_MS,
+          'resolveGitHubPrStatus',
+          requestAbort.abort,
+        );
+      } finally {
+        requestAbort.cleanup();
+      }
       const searchRepo = resolvedStatus.repo;
       const first = resolvedStatus.pr;
       if (!searchRepo) {

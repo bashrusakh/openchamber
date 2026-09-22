@@ -500,6 +500,17 @@ describe('GitExecutionCoordinator', () => {
     expect(coordinator.getStats()).toMatchObject({ active: 0, clonePending: 0, cloneDestinations: 0 });
   });
 
+  it('evicts an idle Windows worktree when invalidated through a casing alias', async () => {
+    const coordinator = createGitExecutionCoordinator({ platform: 'win32' });
+    await expect(coordinator.run({
+      context: context('C:\\Work\\Repo'),
+      kind: GIT_OPERATION_KIND.READ,
+    }, () => 'read')).resolves.toBe('read');
+
+    expect(coordinator.invalidateWorktrees('common', ['c:\\work\\repo'])).toBe(1);
+    expect(coordinator.getStats()).toMatchObject({ contexts: 0, worktrees: 0 });
+  });
+
   it('holds the execution lease until POSIX process cleanup closes', async () => {
     const coordinator = createGitExecutionCoordinator();
     const child = new EventEmitter();

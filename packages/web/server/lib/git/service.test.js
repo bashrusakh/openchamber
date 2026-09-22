@@ -535,6 +535,23 @@ describe('symlink diffs', () => {
   });
 });
 
+describe.runIf(canRunGit())('image file diffs', () => {
+  it('reads committed image bytes through the owned Git process path', async () => {
+    const { tmpDir, git } = await createTempRepo();
+    const originalBytes = Buffer.from([0, 255, 17]);
+    const modifiedBytes = Buffer.from([3, 128, 42]);
+    fs.writeFileSync(path.join(tmpDir, 'image.png'), originalBytes);
+    await git.add('image.png');
+    await git.commit('add image');
+    fs.writeFileSync(path.join(tmpDir, 'image.png'), modifiedBytes);
+
+    const result = await getFileDiff(tmpDir, { path: 'image.png' });
+    expect(result.original).toBe(`data:image/png;base64,${originalBytes.toString('base64')}`);
+    expect(result.modified).toBe(`data:image/png;base64,${modifiedBytes.toString('base64')}`);
+    expect(result.isBinary).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Status paths that are not plain files (#3586)
 // ---------------------------------------------------------------------------

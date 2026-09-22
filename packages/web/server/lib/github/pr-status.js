@@ -548,14 +548,17 @@ const isTerminalPr = (pr) => Boolean(pr) && (pr.state === 'closed' || Boolean(pr
 // the merged PR of last month's `feature`. The PR only belongs to this checkout
 // when the commit it was merged or closed at is part of the checkout's history.
 // `isAncestor` is the git check, replaceable so the tests need no git repository.
-const isHistoricalPrOfCheckout = async (directory, pr, { isAncestor = isAncestorOfHead } = {}) => {
+const isHistoricalPrOfCheckout = async (directory, pr, { isAncestor = isAncestorOfHead, signal = undefined } = {}) => {
   const headSha = normalizeText(pr?.head?.sha);
   if (!headSha) {
     return false;
   }
   try {
-    return await isAncestor(directory, headSha);
-  } catch {
+    return signal
+      ? await isAncestor(directory, headSha, { signal })
+      : await isAncestor(directory, headSha);
+  } catch (error) {
+    if (signal?.aborted) throw error;
     return false;
   }
 };
@@ -652,7 +655,7 @@ const findBranchPrCandidates = async ({ octokit, target, branch, sourceCandidate
 // Exported for focused unit tests of open-versus-historical branch matching.
 export { findBranchPrCandidates };
 
-export async function resolveGitHubPrStatus({ octokit, directory, branch, remoteName, force = false }) {
+export async function resolveGitHubPrStatus({ octokit, directory, branch, remoteName, force = false, signal = undefined }) {
   // A deleted worktree can still have a session in the sidebar that keeps
   // requesting its PR status. Bail before touching git or GitHub for a
   // directory that no longer exists — otherwise every poll spends a git call
@@ -665,8 +668,14 @@ export async function resolveGitHubPrStatus({ octokit, directory, branch, remote
   const normalizedRemoteName = normalizeText(remoteName) || 'origin';
 
   const [tracking, remotes] = await Promise.all([
-    getTrackingBranch(directory).catch(() => null),
-    getRemotes(directory).catch(() => []),
+    getTrackingBranch(directory, signal ? { signal } : undefined).catch((error) => {
+      if (signal?.aborted) throw error;
+      return null;
+    }),
+    getRemotes(directory, signal ? { signal } : undefined).catch((error) => {
+      if (signal?.aborted) throw error;
+      return [];
+    }),
   ]);
 
   const trackingRemoteName = parseTrackingRemoteName(tracking);
@@ -784,7 +793,7 @@ export async function resolveGitHubPrStatus({ octokit, directory, branch, remote
     }
   }
 
-  if (historicalMatch && await isHistoricalPrOfCheckout(directory, historicalMatch.pr)) {
+  if (historicalMatch && await isHistoricalPrOfCheckout(directory, historicalMatch.pr, { signal })) {
     return historicalMatch;
   }
 

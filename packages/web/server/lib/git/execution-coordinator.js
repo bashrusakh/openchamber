@@ -315,11 +315,12 @@ export class GitExecutionCoordinator {
     }
     let removed = 0;
     for (const worktreeId of worktreeIds) {
-      const state = contextState.worktrees.get(canonicalIdentity(worktreeId, this.platform));
+      const canonicalWorktreeId = canonicalIdentity(worktreeId, this.platform);
+      const state = contextState.worktrees.get(canonicalWorktreeId);
       if (!state || state.active.size > 0 || state.pending > 0) {
         continue;
       }
-      contextState.worktrees.delete(worktreeId);
+      contextState.worktrees.delete(canonicalWorktreeId);
       removed += 1;
     }
     if (contextState.worktrees.size === 0 && contextState.active.size === 0 && contextState.pending === 0) {
