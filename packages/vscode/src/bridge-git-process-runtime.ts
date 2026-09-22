@@ -132,6 +132,7 @@ export const createGitProcessRuntime = ({
 }: GitProcessRuntimeOptions = {}) => {
   const activeProcesses = new Set<ReturnType<typeof spawnOwnedProcess>>();
   let shutdown: Promise<void> | null = null;
+  let cleanupBlocked = false;
 
   const stopGitProcesses = (): Promise<void> => {
     if (!shutdown) shutdown = (async () => {
@@ -145,7 +146,7 @@ export const createGitProcessRuntime = ({
 
   const resetGitProcesses = async (): Promise<void> => {
     if (shutdown) await shutdown;
-    if (activeProcesses.size > 0) {
+    if (cleanupBlocked || activeProcesses.size > 0) {
       throw new Error('Cannot reset the Git runtime while processes are still active');
     }
     shutdown = null;
@@ -166,7 +167,17 @@ export const createGitProcessRuntime = ({
     } catch (error) {
       return processFailure(error instanceof Error ? error : new Error(String(error)));
     }
-    if (shutdown) return { stdout: '', stderr: 'Git runtime is shutting down', exitCode: 1 };
+    if (shutdown || cleanupBlocked) {
+      const result: GitProcessExecutionResult = {
+        stdout: '',
+        stderr: cleanupBlocked
+          ? 'Git runtime cleanup is not confirmed'
+          : 'Git runtime is shutting down',
+        exitCode: 1,
+      };
+      if (cleanupBlocked) result.cleanupBlocked = true;
+      return result;
+    }
     if (options.signal?.aborted) {
       return processFailure(options.signal.reason || new Error('Git process was cancelled'));
     }
@@ -185,7 +196,9 @@ export const createGitProcessRuntime = ({
     const forgetAfterCleanup = () => {
       const cleanup = process.termination;
       if (cleanup) {
-        void cleanup.then(forgetProcess, forgetProcess);
+        void cleanup.then(forgetProcess, () => {
+          cleanupBlocked = true;
+        });
         return;
       }
       forgetProcess();
@@ -194,6 +207,9 @@ export const createGitProcessRuntime = ({
     // started, retain the registry entry until taskkill/process-group cleanup
     // settles so deactivation cannot release ownership early.
     void process.closed.then(forgetAfterCleanup);
+    void process.failedTermination.then(() => {
+      cleanupBlocked = true;
+    });
     let stdout = '';
     let stderr = '';
     let timedOut = false;

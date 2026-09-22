@@ -1257,12 +1257,25 @@ const ignoreOwnedGitFailure = (fallback) => (error) => {
   return fallback;
 };
 
-const resolveGitCommitFilePath = async (repoRoot, hash, candidates) => {
+const findCommitReadFailure = (results, signal) => (
+  results.find((result) => isProcessTreeCleanupBlocked(result))
+  || (signal?.aborted ? results.find((result) => !result.success) : undefined)
+);
+
+const resolveGitCommitFilePath = async (repoRoot, hash, candidates, signal = undefined) => {
   for (const candidate of candidates) {
     const [originalTreeResult, modifiedTreeResult] = await Promise.all([
-      runGitCommand(repoRoot, ['ls-tree', '--name-only', `${hash}^`, '--', candidate]),
-      runGitCommand(repoRoot, ['ls-tree', '--name-only', hash, '--', candidate]),
+      runGitCommand(repoRoot, ['ls-tree', '--name-only', `${hash}^`, '--', candidate], { signal }),
+      runGitCommand(repoRoot, ['ls-tree', '--name-only', hash, '--', candidate], { signal }),
     ]);
+
+    const cleanupFailure = findCommitReadFailure(
+      [originalTreeResult, modifiedTreeResult],
+      signal,
+    );
+    if (cleanupFailure) {
+      throw createGitProcessError(cleanupFailure, 'Git commit file path lookup was cancelled');
+    }
 
     if ((originalTreeResult.success && originalTreeResult.stdout.trim()) || (modifiedTreeResult.success && modifiedTreeResult.stdout.trim())) {
       return candidate;
@@ -5838,13 +5851,21 @@ export async function getCommitDiff(
   ]);
 }
 
-export async function getCommitFiles(directory, commitHash) {
-  const { git } = await createRepositoryGitContext(directory, { ownedProcessTree: true });
+export async function getCommitFiles(directory, commitHash, { signal = undefined } = {}) {
+  const { git } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: true,
+    signal,
+  });
   const hash = await resolveCommitHash(git, commitHash);
-  const [numstat, nameStatus] = await Promise.all([
+  const reads = await Promise.allSettled([
     git.raw([...commitShowArgs(hash), '--numstat', '-z', '--']),
     git.raw([...commitShowArgs(hash), '--name-status', '-z', '--']),
   ]);
+  const rejected = reads.find((result) => (
+    result.status === 'rejected' && isProcessTreeCleanupBlocked(result.reason)
+  )) || reads.find((result) => result.status === 'rejected');
+  if (rejected) throw rejected.reason;
+  const [numstat, nameStatus] = reads.map((result) => result.value);
   const stats = new Map();
   const tokens = numstat.split('\0');
   for (let index = 0; index < tokens.length; index += 1) {
@@ -6209,7 +6230,7 @@ export async function getConflictDetails(directory) {
   }
 }
 
-export async function getCommitFileDiff(directory, hash, filePath, isBinary) {
+export async function getCommitFileDiff(directory, hash, filePath, isBinary, { signal = undefined } = {}) {
   if (!directory || !hash || !filePath) {
     throw new Error('directory, hash, and path are required for getCommitFileDiff');
   }
@@ -6218,7 +6239,10 @@ export async function getCommitFileDiff(directory, hash, filePath, isBinary) {
     return { original: '', modified: '', isBinary: true };
   }
 
-  const { directoryPath, repoRoot } = await createRepositoryGitContext(directory);
+  const { directoryPath, repoRoot } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: true,
+    signal,
+  });
   const candidates = Array.from(new Set([
     toGitPath(path.relative(repoRoot, path.resolve(repoRoot, filePath))),
     toGitPath(path.relative(repoRoot, path.resolve(directoryPath, filePath))),
@@ -6229,9 +6253,17 @@ export async function getCommitFileDiff(directory, hash, filePath, isBinary) {
 
   for (const candidate of candidates) {
     const [candidateOriginalResult, candidateModifiedResult] = await Promise.all([
-      runGitCommand(repoRoot, ['show', `${hash}^:${candidate}`]),
-      runGitCommand(repoRoot, ['show', `${hash}:${candidate}`]),
+      runGitCommand(repoRoot, ['show', `${hash}^:${candidate}`], { signal }),
+      runGitCommand(repoRoot, ['show', `${hash}:${candidate}`], { signal }),
     ]);
+
+    const cleanupFailure = findCommitReadFailure(
+      [candidateOriginalResult, candidateModifiedResult],
+      signal,
+    );
+    if (cleanupFailure) {
+      throw createGitProcessError(cleanupFailure, 'Git commit file read was cancelled');
+    }
 
     if (candidateOriginalResult.success || candidateModifiedResult.success) {
       originalResult = candidateOriginalResult;
@@ -6241,11 +6273,15 @@ export async function getCommitFileDiff(directory, hash, filePath, isBinary) {
   }
 
   if (!originalResult || !modifiedResult) {
-    const resolvedPath = await resolveGitCommitFilePath(repoRoot, hash, candidates);
+    const resolvedPath = await resolveGitCommitFilePath(repoRoot, hash, candidates, signal);
     [originalResult, modifiedResult] = await Promise.all([
-      runGitCommand(repoRoot, ['show', `${hash}^:${resolvedPath}`]),
-      runGitCommand(repoRoot, ['show', `${hash}:${resolvedPath}`]),
+      runGitCommand(repoRoot, ['show', `${hash}^:${resolvedPath}`], { signal }),
+      runGitCommand(repoRoot, ['show', `${hash}:${resolvedPath}`], { signal }),
     ]);
+    const cleanupFailure = findCommitReadFailure([originalResult, modifiedResult], signal);
+    if (cleanupFailure) {
+      throw createGitProcessError(cleanupFailure, 'Git commit file read was cancelled');
+    }
   }
 
   const original = originalResult.success ? originalResult.stdout : '';

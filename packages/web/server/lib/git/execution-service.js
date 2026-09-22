@@ -327,6 +327,7 @@ export const createGitExecutionService = (dependencies = {}) => {
       lease: options.lease,
       signal: options.signal,
       queueTimeoutMs: options.queueTimeoutMs,
+      waitForCleanup: options.waitForCleanup === true,
     }, () => runWithGitExecutionScope(
       kind === GIT_OPERATION_KIND.READ,
       () => raw[name](
@@ -387,6 +388,17 @@ export const createGitExecutionService = (dependencies = {}) => {
   );
 
   const wrapped = {};
+  const committedReadExecutionOptions = (options) => {
+    const executionOptions = {};
+    if (options?.signal) {
+      executionOptions.signal = options.signal;
+      executionOptions.waitForCleanup = true;
+    }
+    if (Number.isFinite(options?.queueTimeoutMs)) {
+      executionOptions.queueTimeoutMs = options.queueTimeoutMs;
+    }
+    return executionOptions;
+  };
   for (const name of Object.keys(operationKinds)) {
     if (name === 'isGitRepository' || name === 'getStatus') {
       continue;
@@ -423,8 +435,30 @@ export const createGitExecutionService = (dependencies = {}) => {
   );
 
   wrapped.getCommitDiff = (directory, options = {}) => {
-    const executionOptions = options?.signal ? { signal: options.signal } : {};
-    return runOperation('getCommitDiff', directory, [directory, options], executionOptions);
+    return runOperation(
+      'getCommitDiff',
+      directory,
+      [directory, options],
+      committedReadExecutionOptions(options),
+    );
+  };
+
+  wrapped.getCommitFiles = (directory, commitHash, options = {}) => {
+    return runOperation(
+      'getCommitFiles',
+      directory,
+      [directory, commitHash, options],
+      committedReadExecutionOptions(options),
+    );
+  };
+
+  wrapped.getCommitFileDiff = (directory, hash, filePath, isBinary, options = {}) => {
+    return runOperation(
+      'getCommitFileDiff',
+      directory,
+      [directory, hash, filePath, isBinary, options],
+      committedReadExecutionOptions(options),
+    );
   };
 
   wrapped.getTrackingBranch = (directory, options = {}) => {

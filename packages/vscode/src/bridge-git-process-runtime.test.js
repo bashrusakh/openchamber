@@ -253,7 +253,8 @@ describe('VS Code Git process runtime executable selection', () => {
       });
 
       const controller = new AbortController();
-      const pending = createGitProcessRuntime().execGit(['status'], '/repo', { signal: controller.signal });
+      const runtime = createGitProcessRuntime();
+      const pending = runtime.execGit(['status'], '/repo', { signal: controller.signal });
       for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
         await Promise.resolve();
       }
@@ -261,7 +262,7 @@ describe('VS Code Git process runtime executable selection', () => {
       childProcess.emit('close', null);
       await Promise.resolve();
 
-      const stopping = stopGitProcesses();
+      const stopping = runtime.stopGitProcesses();
       let stopSettled = false;
       void stopping.then(() => { stopSettled = true; });
       await Promise.resolve();
@@ -277,7 +278,60 @@ describe('VS Code Git process runtime executable selection', () => {
         descendantsTerminated: false,
       });
       expect(childProcess.kill).toHaveBeenCalledTimes(1);
+      await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
+      await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({
+        exitCode: 1,
+        cleanupBlocked: true,
+      });
     } finally {
+      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+    }
+  });
+
+  it('retains a POSIX process lease when group termination fails', async () => {
+    const originalKill = process.kill;
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'linux' });
+    Object.defineProperty(process, 'kill', {
+      configurable: true,
+      value: (pid, signal) => {
+        if (pid === -2237) {
+          throw Object.assign(new Error('process-group signal failed'), { code: 'EPERM' });
+        }
+        return originalKill.call(process, pid, signal);
+      },
+    });
+    try {
+      const childProcess = new EventEmitter();
+      childProcess.stdout = new EventEmitter();
+      childProcess.stderr = new EventEmitter();
+      childProcess.pid = 2237;
+      childProcess.kill = mock();
+      spawn.mockImplementationOnce(() => childProcess);
+
+      const runtime = createGitProcessRuntime();
+      const controller = new AbortController();
+      const pending = runtime.execGit(['status'], '/repo', { signal: controller.signal });
+      for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      controller.abort();
+      childProcess.emit('close', null);
+
+      await expect(pending).resolves.toMatchObject({
+        exitCode: 1,
+        cleanupBlocked: true,
+        descendantsTerminated: false,
+      });
+      await runtime.stopGitProcesses();
+      await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
+      await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({
+        exitCode: 1,
+        cleanupBlocked: true,
+      });
+      expect(childProcess.kill).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(process, 'kill', { configurable: true, value: originalKill });
       Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
     }
   });
