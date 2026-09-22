@@ -3,6 +3,7 @@ import { plugin } from 'bun';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Window } from 'happy-dom';
+import type { HTMLDivElement as HappyDomHTMLDivElement } from 'happy-dom';
 import type { Session } from '@opencode-ai/sdk/v2';
 import type { WorktreeMetadata } from '@/types/worktree';
 import type { RuntimeAPIs } from '@/lib/api/types';
@@ -66,9 +67,9 @@ const capturedSessionRows: CapturedSessionRow[] = [];
 // captures every row `buildSessionSidebarRowModel` produced while the real
 // collection, ownership index, location resolver, and Recent projection run.
 mock.module('../projects/SessionProjectScroller', () => ({
-  SessionProjectScroller: (props: { model: { rowModel: { rows: Array<{ kind: string }> } } }) => {
+  SessionProjectScroller: (props: { model: { rowModel: { rows: Array<CapturedSessionRow & { kind: string }> } } }) => {
     for (const row of props.model.rowModel.rows) {
-      if (row.kind === 'session') capturedSessionRows.push(row as unknown as CapturedSessionRow);
+      if (row.kind === 'session') capturedSessionRows.push(row);
     }
     return null;
   },
@@ -133,7 +134,7 @@ type CollectionActions = CollectionProps['actions'];
 // structural stand-in whose members are exactly what the projection reads:
 // childStores for the group-status hook, and no-op loaders/sdk that must never
 // be reached because the seeded global cache is authoritative.
-const syncRuntime = (childStores: ChildStoreManager): unknown => ({
+const syncRuntime = (childStores: ChildStoreManager) => ({
   childStores,
   messageLoader: {
     prefetch: async () => undefined,
@@ -241,7 +242,10 @@ describe('Recent session worktree resolve (SessionProjectCollection)', () => {
     }
     const container = domWindow.document.createElement('div');
     domWindow.document.body.append(container);
-    const root = createRoot(container as unknown as Parameters<typeof createRoot>[0]);
+    // SAFETY: happy-dom's DOM types are structurally distinct from the lib DOM
+    // types createRoot's Container accepts, so the attached happy-dom element
+    // is bridged to React's container type with an intersection assertion.
+    const root = createRoot(container as HappyDomHTMLDivElement & Parameters<typeof createRoot>[0]);
     const childStores = new ChildStoreManager();
     const originalStatusState = useGlobalSessionStatusStore.getState();
     const originalProjectsState = useProjectsStore.getState();
@@ -350,7 +354,10 @@ describe('Recent session worktree resolve (SessionProjectCollection)', () => {
     }
     const container = domWindow.document.createElement('div');
     domWindow.document.body.append(container);
-    const root = createRoot(container as unknown as Parameters<typeof createRoot>[0]);
+    // SAFETY: happy-dom's DOM types are structurally distinct from the lib DOM
+    // types createRoot's Container accepts, so the attached happy-dom element
+    // is bridged to React's container type with an intersection assertion.
+    const root = createRoot(container as HappyDomHTMLDivElement & Parameters<typeof createRoot>[0]);
     const childStores = new ChildStoreManager();
     const originalPrEntries = useGitHubPrStatusStore.getState().entries;
 
@@ -408,12 +415,12 @@ describe('Recent session worktree resolve (SessionProjectCollection)', () => {
     );
 
     try {
-      const visibleNode: { session: Session; worktree: WorktreeMetadata | null; children: SessionNode[] } = {
+      const visibleNode: SessionNode = {
         session: worktreeSession('visible-feature', '/tmp/wt-feature'),
         worktree: worktreeMeta('/tmp/wt-feature', 'feature-1'),
         children: [],
       };
-      const filteredNode: { session: Session; worktree: WorktreeMetadata | null; children: SessionNode[] } = {
+      const filteredNode: SessionNode = {
         session: worktreeSession('filtered-redundant', '/tmp/wt-redundant'),
         worktree: worktreeMeta('/tmp/wt-redundant', 'App'),
         children: [],
@@ -463,6 +470,9 @@ describe('Recent session worktree resolve (SessionProjectCollection)', () => {
         </>);
       });
 
+      // SAFETY: the `[data-session-row]` selector only matches the row's own
+      // dataset marker, which SessionNodeItem renders on the row's host
+      // <div> — an HTMLElement — so the narrowing is safe.
       const rowsById = new Map(
         Array.from(document.querySelectorAll('[data-session-row]')).map((element) => [
           element.getAttribute('data-session-row'),
