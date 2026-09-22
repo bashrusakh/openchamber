@@ -110,6 +110,13 @@ export interface QueuedMessage {
     consult?: ConsultPayload;
     /** The live reservation on a consult item, as the server projects it. */
     claimed?: { owner: string; claimedAt: number } | null;
+    /**
+     * The server marks a consult item `recoverable` when its reservation
+     * lapsed (a dead client's hold or claim expired): the item stays queued
+     * unclaimed and a fresh owner may re-claim it to resume the consult.
+     * Only consult items ever carry it.
+     */
+    recoverable?: true;
 }
 
 /**
@@ -215,6 +222,7 @@ const serverItemSchema = z.object({
         owner: z.string(),
         claimedAt: z.number(),
     }).nullable().optional(),
+    recoverable: z.literal(true).optional(),
 });
 
 const serverSessionSchema = z.object({
@@ -264,6 +272,23 @@ const serverConsultDispatchResponseSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('send-failed'), delivered: z.enum(['no', 'unknown']) }),
 ]);
 
+/**
+ * The resolve route (`POST .../items/:id/resolve-consult`) is the
+ * reconnect-time outcome check for a stranded consult item: it NEVER prompts
+ * and never sends. Every control-flow case answers 200 with one of these
+ * bodies; non-2xx is reserved for malformed/unexpected failures. `dispatched`
+ * proves the prompt landed (the item was removed and the projection updated by
+ * broadcast); `unresolved` keeps the item queued (`recoverable` offers Resume);
+ * `sending` means a delivery is still in flight.
+ */
+const serverConsultResolveResponseSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('dispatched'), delivered: z.literal('confirmed') }),
+  z.object({ status: z.literal('unresolved'), recoverable: z.literal(true).optional() }),
+  z.object({ status: z.literal('not-found') }),
+  z.object({ status: z.literal('not-consult') }),
+  z.object({ status: z.literal('sending') }),
+]);
+
 /** The store-facing dispatch outcome: the server body with the item projected. */
 export type ConsultDispatchOutcome =
   | { status: 'dispatched'; item?: QueuedMessage; delivery?: 'confirmed-after-failure' }
@@ -273,6 +298,18 @@ export type ConsultDispatchOutcome =
   | { status: 'not-consult' }
   | { status: 'sending' }
   | { status: 'send-failed'; delivered: 'no' | 'unknown' };
+
+/**
+ * The store-facing resolve outcome: exactly the server's structured body. The
+ * removal after `dispatched` arrives through the server's own broadcast, so no
+ * local projection change happens here — removal stays exactly-once.
+ */
+export type ConsultResolveOutcome =
+  | { status: 'dispatched'; delivered?: 'confirmed' }
+  | { status: 'unresolved'; recoverable?: true }
+  | { status: 'not-found' }
+  | { status: 'not-consult' }
+  | { status: 'sending' };
 
 /** Error body of a refused consult route: `{ error: 'cannot claim ...: <reason>' }`. */
 const serverConsultErrorSchema = z.object({ error: z.string() });
@@ -342,6 +379,7 @@ const toQueuedMessage = (item: ServerQueueItem): QueuedMessage => {
     if (item.kind) message.kind = item.kind;
     if (item.consult) message.consult = item.consult;
     if (item.claimed) message.claimed = item.claimed;
+    if (item.recoverable) message.recoverable = true;
     return message;
 };
 
@@ -430,6 +468,13 @@ const legacyMigrations = new Map<string, LegacyQueueMigration>();
 const appliedRevisions = new Map<string, number>();
 /** A full snapshot also owns sessions it omits, including previously unseen keys. */
 const snapshotRevisions = new Map<string, number>();
+/**
+ * Consult resolve checks already in flight, keyed `${runtimeKey}:${sessionId}:${itemId}`.
+ * Reconnects hydrate repeatedly and would otherwise re-post the same resolve
+ * while one is still unanswered; the guard collapses them. It clears once the
+ * outcome lands so a later reconnect re-checks the item.
+ */
+const consultResolveInFlight = new Set<string>();
 let hydrationGeneration = 0;
 
 interface MessageQueueState {
@@ -496,6 +541,13 @@ interface MessageQueueActions {
      * reserved for malformed/unexpected failures and throws.
      */
     dispatchConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string) => Promise<ConsultDispatchOutcome>;
+    /**
+     * Server-owned queue: reconnect-time outcome check for a dangling consult
+     * item (claimed or recoverable). An outcome check, never a send — the
+     * server route never prompts. Throws only on non-2xx (malformed/unexpected
+     * failures); every control-flow case is a structured outcome.
+     */
+    resolveConsultItem: (target: MessageQueueTarget, messageId: string) => Promise<ConsultResolveOutcome>;
     resetForRuntimeSwitch: (previousRuntimeKey: string | null | undefined) => void;
 }
 
@@ -623,6 +675,35 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                     } catch (error) {
                         console.warn('[queue] server update failed:', error);
                         await refreshSession(target);
+                    }
+                };
+
+                /**
+                 * Reconnect-time consult reconciliation: one resolve check per
+                 * dangling item per reconnect, in-flight-guarded, failures
+                 * swallowed so hydration can never break. Outcomes stay
+                 * user-invisible by themselves — the server's own broadcast
+                 * removes a delivered item's projection, `unresolved` keeps the
+                 * chip (with Resume when `recoverable`), and
+                 * not-found/not-consult mean nothing is stranded here anymore.
+                 */
+                const resolveDanglingConsultItems = (runtimeKey: string) => {
+                    for (const [key, queue] of Object.entries(get().queuedMessages)) {
+                        const target = parseMessageQueueKey(key);
+                        if (!target || target.runtimeKey !== runtimeKey) continue;
+                        for (const message of queue) {
+                            if (message.kind !== 'consult') continue;
+                            if (!message.claimed && !message.recoverable) continue;
+                            const guard = `${runtimeKey}:${target.sessionId}:${message.id}`;
+                            if (consultResolveInFlight.has(guard)) continue;
+                            consultResolveInFlight.add(guard);
+                            const clear = () => { consultResolveInFlight.delete(guard); };
+                            void get().resolveConsultItem(target, message.id)
+                                .then(clear, (error) => {
+                                    console.warn('[queue] consult resolve check failed:', error);
+                                    clear();
+                                });
+                        }
                     }
                 };
 
@@ -918,6 +999,10 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                                     }
                                     return { queuedMessages, sendingIds };
                                 });
+                                // Fresh authoritative projection is in place:
+                                // reconcile any consult item stranded by an
+                                // ambiguous dispatch while this client was away.
+                                resolveDanglingConsultItems(runtimeKey);
                             } while (resyncRequested && isCurrent());
                         })();
                         const run = { runtimeKey, promise };
@@ -990,6 +1075,18 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                             : { status: 'dispatched' };
                         if (result.delivery) outcome.delivery = result.delivery;
                         return outcome;
+                    },
+
+                    resolveConsultItem: async (target, messageId) => {
+                        if (!isServerOwnedMessageQueue()) return { status: 'not-found' };
+                        // An outcome check with no body: the server route never
+                        // prompts and never sends.
+                        const response = await runtimeFetch(
+                            `${sessionPath(target.sessionId)}/items/${encodeURIComponent(messageId)}/resolve-consult`,
+                            jsonInit('POST'),
+                        );
+                        if (!response.ok) throw consultReasonError(response.status, await response.json().then((raw) => serverConsultErrorSchema.safeParse(raw)).then((parsed) => parsed.success ? parsed.data : null).catch(() => null));
+                        return serverConsultResolveResponseSchema.parse(await response.json());
                     },
 
                     resetForRuntimeSwitch: (previousRuntimeKey) => {

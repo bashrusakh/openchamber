@@ -127,6 +127,31 @@ describe('stale advisor fork GC', () => {
     expect(state.deleted).toEqual([]);
   });
 
+  test('never deletes a consult-looking session that carries no marker', async () => {
+    // A lost forkSession response leaves an unmarked clone that copies the
+    // parent's title and metadata wholesale — so it looks consult-like by
+    // title and is old by the clock, but has no valid marker. The marker (or
+    // its kind) is the only identification the GC accepts; without it the
+    // session is a user-visible session and must never be a deletion
+    // candidate, no matter how consult-like its surface looks.
+    const { deps, state } = createDeps();
+    const consultLooking = {
+      ...normalSession('What should we do next? — consult', NOW - 2 * CONSULT_GC_THRESHOLD_MS),
+      title: 'consult: anthropic/claude (advisor 1)',
+    };
+    const kindMissing = {
+      ...normalSession('kind-missing', NOW - 2 * CONSULT_GC_THRESHOLD_MS),
+      metadata: { openchamber: { originalSessionID: 'parent', consultRunID: 'run-dead' } },
+    };
+    state.sessions = [consultLooking, kindMissing];
+
+    const result = await sweepStaleAdvisorForks(deps);
+
+    expect(result).toEqual({ deletedIds: [], failedIds: [] });
+    expect(state.deleted).toEqual([]);
+    expect(state.released).toEqual([]);
+  });
+
   test('collects a partial marker carrying the kind and the run id without the parent id', async () => {
     // The notification server suppresses on the same two fields, so the GC
     // must collect exactly the sessions that are hidden/silenced there.

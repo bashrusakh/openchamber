@@ -20,7 +20,8 @@ mock.module("@/lib/runtime-fetch", () => ({
   },
 }))
 const desktop = await import("@/lib/desktop")
-mock.module("@/lib/desktop", () => ({ ...desktop, isVSCodeRuntime: () => false }))
+let vscodeRuntime = false
+mock.module("@/lib/desktop", () => ({ ...desktop, isVSCodeRuntime: () => vscodeRuntime }))
 mock.module("@/lib/runtime-switch", () => ({ getRuntimeKey: () => activeRuntimeKey }))
 mock.module("@/lib/persistence", () => ({ updateDesktopSettings: async () => undefined }))
 
@@ -45,6 +46,7 @@ type ServerReply = {
   status?: string
   delivery?: string
   delivered?: string
+  recoverable?: boolean
 }
 
 const json = (value: ServerReply, status = 200) => new Response(JSON.stringify(value), { status })
@@ -98,6 +100,7 @@ const attachment: AttachedFile = {
 beforeEach(() => {
   useMessageQueueStore.getState().resetForRuntimeSwitch(activeRuntimeKey)
   activeRuntimeKey = "runtime-a"
+  vscodeRuntime = false
   useInputHistoryStore.setState({ globalBuckets: {}, sessionBuckets: {} })
   calls = []
   respond = () => json({ revision: 1, session: session([]) })
@@ -552,6 +555,22 @@ describe("server-owned message queue", () => {
     }
   })
 
+  test("hydrate projects the consult item's recoverable marker onto the queued message", async () => {
+    respond = () => json({
+      revision: 5,
+      sessions: [session([serverItem("consult-1", "stuck consult", { kind: "consult", recoverable: true })])],
+    })
+    await useMessageQueueStore.getState().hydrate()
+    // A lapsed consult item carries the marker into the projection.
+    expect(useMessageQueueStore.getState().queuedMessages[key]?.[0])
+      .toMatchObject({ id: "consult-1", kind: "consult", recoverable: true })
+
+    // A normal item never does: the same projection path drops it.
+    respond = () => json({ revision: 6, sessions: [session([serverItem("normal-1", "a normal message")])] })
+    await useMessageQueueStore.getState().hydrate()
+    expect(useMessageQueueStore.getState().queuedMessages[key]?.[0]?.recoverable).toBeUndefined()
+  })
+
   test("addToQueue resolves with the authoritative server item, not the optimistic id", async () => {
     respond = () => json({ revision: 5, session: session([serverItem("srv-9", "authoritative")]), item: serverItem("srv-9", "authoritative") })
     const queued = await useMessageQueueStore.getState().addToQueue(target, {
@@ -577,5 +596,125 @@ describe("server-owned message queue", () => {
   test("dispatchConsultItem throws on non-2xx (malformed or unexpected failures)", async () => {
     respond = () => new Response(JSON.stringify({ error: "consult dispatch failed: boom" }), { status: 500 })
     await expect(useMessageQueueStore.getState().dispatchConsultItem(target, "q1", "consult:run-1")).rejects.toThrow("boom")
+  })
+
+  describe("resolveConsultItem", () => {
+    test("posts to the resolve-consult route without a body and projects the outcome", async () => {
+      respond = () => json({ status: "unresolved", recoverable: true })
+      const outcome = await useMessageQueueStore.getState().resolveConsultItem(target, "q1")
+      expect(calls).toEqual([{ method: "POST", path: "/api/message-queue/sessions/session-1/items/q1/resolve-consult", body: undefined }])
+      expect(outcome).toEqual({ status: "unresolved", recoverable: true })
+    })
+
+    test("parses every structured outcome", async () => {
+      const outcomes = [
+        { status: "dispatched", delivered: "confirmed" },
+        { status: "unresolved" },
+        { status: "unresolved", recoverable: true },
+        { status: "not-found" },
+        { status: "not-consult" },
+        { status: "sending" },
+      ]
+      for (const outcome of outcomes) {
+        respond = () => json(outcome)
+        const parsed = await useMessageQueueStore.getState().resolveConsultItem(target, "q1")
+        expect(parsed).toEqual(outcome)
+      }
+    })
+
+    test("throws the server reason on a non-2xx refusal", async () => {
+      respond = () => new Response(JSON.stringify({ error: "consult resolve failed: boom" }), { status: 500 })
+      await expect(useMessageQueueStore.getState().resolveConsultItem(target, "q1")).rejects.toThrow("boom")
+    })
+
+    test("never fetches outside a server-owned runtime", async () => {
+      vscodeRuntime = true
+      const outcome = await useMessageQueueStore.getState().resolveConsultItem(target, "q1")
+      expect(outcome).toEqual({ status: "not-found" })
+      expect(calls).toHaveLength(0)
+    })
+  })
+
+  describe("hydrate consult reconciliation", () => {
+    const consultTarget = createMessageQueueTarget("consult-session", "/repo", "runtime-a")!
+    const consultKey = getMessageQueueKey(consultTarget)
+    const danglingItem = serverItem("consult-1", "stuck", { kind: "consult", claimed: { owner: "consult:run-1", claimedAt: 5 } })
+    const consultSession = (items: ServerItem[]) => ({ ...session(items), sessionId: "consult-session" })
+
+    /** The hydrate snapshot lists one dangling consult item; the resolve route answers `outcome`. */
+    const hydrateWithConsult = (outcome: ServerReply) => {
+      respond = (call) => (call.path.endsWith("/resolve-consult")
+        ? json(outcome)
+        : json({ revision: 3, sessions: [consultSession([danglingItem])] }))
+      return useMessageQueueStore.getState().hydrate()
+    }
+
+    beforeEach(() => {
+      useMessageQueueStore.getState().forgetQueue(consultTarget)
+      useMessageQueueStore.setState({ queuedMessages: {}, quarantinedLegacyMessages: {}, sendingIds: {} })
+    })
+
+    test("hydration resolves a dangling consult item exactly once", async () => {
+      await hydrateWithConsult({ status: "dispatched", delivered: "confirmed" })
+      expect(calls.filter((call) => call.path.endsWith("/resolve-consult"))).toEqual([
+        { method: "POST", path: "/api/message-queue/sessions/consult-session/items/consult-1/resolve-consult", body: undefined },
+      ])
+    })
+
+    test("the in-flight guard collapses concurrent hydrations into one resolve", async () => {
+      const deferred = deferredResponse()
+      respond = (call) => (call.path.endsWith("/resolve-consult")
+        ? deferred.promise
+        : json({ revision: 3, sessions: [consultSession([danglingItem])] }))
+      const bootstrap = useMessageQueueStore.getState().hydrate()
+      const reconnect = useMessageQueueStore.getState().resync()
+      await Promise.all([bootstrap, reconnect])
+      deferred.resolve(json({ status: "unresolved" }))
+      await Promise.resolve()
+      expect(calls.filter((call) => call.path.endsWith("/resolve-consult"))).toHaveLength(1)
+    })
+
+    test("the guard clears after the outcome so a later reconnect resolves again", async () => {
+      await hydrateWithConsult({ status: "unresolved" })
+      expect(calls.filter((call) => call.path.endsWith("/resolve-consult"))).toHaveLength(1)
+
+      await useMessageQueueStore.getState().hydrate()
+      expect(calls.filter((call) => call.path.endsWith("/resolve-consult"))).toHaveLength(2)
+    })
+
+    test("a failed resolve is swallowed and never breaks hydration", async () => {
+      respond = (call) => (call.path.endsWith("/resolve-consult")
+        ? new Response(null, { status: 503 })
+        : json({ revision: 3, sessions: [consultSession([danglingItem])] }))
+      await useMessageQueueStore.getState().hydrate()
+      expect(useMessageQueueStore.getState().queuedMessages[consultKey]?.map((m) => m.id)).toEqual(["consult-1"])
+    })
+
+    test("only claimed or recoverable consult items are resolved", async () => {
+      const snapshotItems = [
+        serverItem("consult-c", "claimed", { kind: "consult", claimed: { owner: "o", claimedAt: 1 } }),
+        serverItem("consult-r", "recoverable", { kind: "consult", recoverable: true }),
+        serverItem("consult-p", "plain", { kind: "consult" }),
+        serverItem("normal-1", "normal"),
+      ]
+      respond = (call) => (call.path.endsWith("/resolve-consult")
+        ? json({ status: "unresolved" })
+        : json({ revision: 3, sessions: [consultSession(snapshotItems)] }))
+      await useMessageQueueStore.getState().hydrate()
+      expect(calls.filter((call) => call.path.endsWith("/resolve-consult")).map((call) => call.path.split("/").at(-2))).toEqual(["consult-c", "consult-r"])
+    })
+
+    test("a stale runtime's snapshot never resolves across runtimes", async () => {
+      const staleTarget = createMessageQueueTarget("consult-session", "/repo", "runtime-old")!
+      const staleKey = getMessageQueueKey(staleTarget)
+      useMessageQueueStore.setState({
+        queuedMessages: {
+          [staleKey]: [{ id: "consult-1", content: "stuck", text: "stuck", createdAt: 1, kind: "consult", claimed: { owner: "o", claimedAt: 1 } }],
+        },
+      })
+      respond = () => json({ revision: 3, sessions: [] })
+      await useMessageQueueStore.getState().hydrate()
+      expect(calls.filter((call) => call.path.endsWith("/resolve-consult"))).toHaveLength(0)
+    })
   })
 })

@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMessageQueueRuntime, parseQueuedItemInput, registerMessageQueueRoutes } from './runtime.js';
+import { CONSULT_RECEIPT_CARRIER_TEXT, createMessageQueueRuntime, parseQueuedItemInput, registerMessageQueueRoutes } from './runtime.js';
 
 const SESSION = 'ses_queue_test_1';
 const DIRECTORY = '/repo';
@@ -1062,7 +1062,36 @@ describe('message queue runtime', () => {
       expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
     });
 
-    it('an attachment-only consult dispatches with metadata on no part', async () => {
+    it('an attachment-only consult carries its receipt on one synthetic text part before the files', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const attachment = { id: 'a1', filename: 'shot.png', mimeType: 'image/png', size: 3, source: 'local', dataUrl: 'data:image/png;base64,AAA=' };
+      const metadata = { openchamberConsultReceipt: { runID: 'run-1' } };
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        content: '',
+        text: '',
+        attachments: [attachment],
+        consult: { system: 'be terse', textPartMetadata: metadata },
+      }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+
+      expect(result.status).toBe('dispatched');
+      expect(openCode.state.sent).toHaveLength(1);
+      const parts = openCode.state.sent[0].body.parts;
+      // Exactly one synthetic carrier text part, before the file parts, so the
+      // receipt lands even though OpenCode's file parts have no metadata field.
+      expect(parts).toEqual([
+        { type: 'text', text: CONSULT_RECEIPT_CARRIER_TEXT, synthetic: true, metadata },
+        { type: 'file', mime: 'image/png', filename: 'shot.png', url: attachment.dataUrl },
+      ]);
+      const carriers = parts.filter((part) => part.type === 'text');
+      expect(carriers).toHaveLength(1);
+      expect(carriers[0].metadata).toEqual(metadata);
+    });
+
+    it('an attachment-only consult: the tail marker is now findable by runId', async () => {
       const { runtime, openCode } = createRuntime();
       runtime.start();
       openCode.state.statuses = {};
@@ -1071,6 +1100,33 @@ describe('message queue runtime', () => {
         content: '',
         text: '',
         attachments: [attachment],
+        consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+      }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // Ambiguous failure, but the receipt ride-along now gives the acting
+      // turn a text-part marker the tail read can match by runId: the send
+      // landed and the existing outcome mapping resolves it as delivered.
+      openCode.state.messageReadTails = [[{
+        info: { id: 'msg-marker', role: 'user' },
+        parts: [{ type: 'text', text: CONSULT_RECEIPT_CARRIER_TEXT, synthetic: true, metadata: { openchamberConsultReceipt: { runID: 'run-1' } } }],
+      }]];
+      openCode.state.failPromptOnce = true;
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toMatchObject({ status: 'dispatched', delivery: 'confirmed-after-failure' });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+    });
+
+    it('a consult with context parts rides the metadata on the first existing text part without an extra part', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const metadata = { openchamberConsultReceipt: { runID: 'run-1' } };
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        content: '',
+        text: '',
+        attachments: [{ id: 'a1', filename: 'shot.png', mimeType: 'image/png', size: 3, source: 'local', dataUrl: 'data:image/png;base64,AAA=' }],
+        context: [{ kind: 'context', text: 'the diff', metadata: { openchamberContext: { kind: 'chat-quote', quote: 'q', text: 'why?' } } }],
+        consult: { system: 'be terse', textPartMetadata: metadata },
       }));
       await runtime.claim(SESSION, itemId, 'consult:run-1');
       const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
@@ -1078,9 +1134,13 @@ describe('message queue runtime', () => {
       expect(result.status).toBe('dispatched');
       expect(openCode.state.sent).toHaveLength(1);
       const parts = openCode.state.sent[0].body.parts;
-      expect(parts).toEqual([{ type: 'file', mime: 'image/png', filename: 'shot.png', url: attachment.dataUrl }]);
-      // A file part has no metadata field: the receipt is deliberately absent.
-      expect(parts.some((part) => 'metadata' in part)).toBe(false);
+      // No extra carrier part: the receipt rides the first text part, which
+      // here is the context part (the user text is empty). As today, the
+      // assignment replaces that part's own metadata.
+      expect(parts).toEqual([
+        { type: 'file', mime: 'image/png', filename: 'shot.png', url: 'data:image/png;base64,AAA=' },
+        { type: 'text', text: 'the diff', synthetic: true, metadata },
+      ]);
     });
 
     it('answers not-found and not-consult as structured outcomes', async () => {
@@ -1307,6 +1367,175 @@ describe('message queue runtime', () => {
     });
   });
 
+  describe('resolveConsult reconciliation', () => {
+    const consultItem = (overrides = {}) => item({
+      kind: 'consult',
+      consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+      ...overrides,
+    });
+    const markerFor = (runId) => ({
+      info: { id: 'msg-marker', role: 'user' },
+      parts: [{ type: 'text', text: 'the consult', metadata: { openchamberConsultReceipt: { runID: runId } } }],
+    });
+
+    it('resolves as delivered when the marker is in the tail: removes once, releases the claimed owner, never prompts', async () => {
+      const { runtime, openCode, broadcasts } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // A bystander owner keeps its hold: only the claimed owner's slot may go.
+      runtime.setHold(SESSION, true, 60_000, 'consult:bystander');
+      openCode.state.tail = [markerFor('run-1')];
+
+      const result = await runtime.resolveConsult(SESSION, itemId);
+      expect(result).toEqual({ status: 'dispatched', delivered: 'confirmed' });
+      // No prompt and no command was ever sent: resolution reads, never sends.
+      expect(openCode.state.sent).toHaveLength(0);
+      expect(openCode.fetchImpl.mock.calls.some(([, init]) => (init?.method ?? 'GET') === 'POST')).toBe(false);
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      expect(broadcasts.at(-1).properties.session.items).toEqual([]);
+
+      // Removed exactly once: a second resolve finds nothing.
+      expect(await runtime.resolveConsult(SESSION, itemId)).toEqual({ status: 'not-found' });
+
+      // The claimed owner's hold is gone; the bystander's is not. Releasing
+      // the bystander empties the map, so held:false proves run-1 left first.
+      expect(runtime.setHold(SESSION, false, undefined, 'consult:bystander')).toMatchObject({ held: false });
+    });
+
+    it('marks an unclaimed item recoverable when the tail has no marker', async () => {
+      const { runtime, openCode, emit } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      openCode.state.tail = [];
+
+      const result = await runtime.resolveConsult(SESSION, itemId);
+      expect(result).toEqual({ status: 'unresolved', recoverable: true });
+      const snapshot = runtime.sessionSnapshot(SESSION).items;
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].recoverable).toBe(true);
+      expect(snapshot[0].claimed).toBeUndefined();
+
+      // Still a consult item: the generic tick never delivers it.
+      emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+      await settle();
+      expect(openCode.state.sent).toHaveLength(0);
+    });
+
+    it('leaves a still-claimed item with a live hold untouched', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.tail = [];
+
+      const result = await runtime.resolveConsult(SESSION, itemId);
+      expect(result).toEqual({ status: 'unresolved' });
+      const snapshot = runtime.sessionSnapshot(SESSION).items;
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      expect(snapshot[0].recoverable).toBeUndefined();
+      // The owning client may still be mid-flight: its lease survives.
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+    });
+
+    it('stays unresolved without mutation when the item carries no receipt runId', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        consult: { system: 'be terse' },
+      }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      const readsBefore = openCode.state.messageReadCalls;
+
+      const result = await runtime.resolveConsult(SESSION, itemId);
+      expect(result).toEqual({ status: 'unresolved' });
+      // Correlation is impossible: no tail read, no marker fetch at all.
+      expect(openCode.state.messageReadCalls).toBe(readsBefore);
+      const snapshot = runtime.sessionSnapshot(SESSION).items;
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      expect(snapshot[0].recoverable).toBeUndefined();
+    });
+
+    it('stays unresolved when the marker read fails (never guesses)', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      openCode.state.failMessageReads = true;
+
+      const result = await runtime.resolveConsult(SESSION, itemId);
+      expect(result).toEqual({ status: 'unresolved' });
+      const snapshot = runtime.sessionSnapshot(SESSION).items;
+      expect(snapshot).toHaveLength(1);
+      // An unreadable tail is not evidence of non-delivery: no recoverable mark.
+      expect(snapshot[0].recoverable).toBeUndefined();
+    });
+
+    it('finds a marker older than the dispatch tail with the deeper resolve limit', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // The marker sits 30 messages behind newer ones: a 20-message window
+      // would miss it; the resolve read must ask for the deeper tail.
+      const fillers = Array.from({ length: 30 }, (_, index) => ({
+        info: { id: `msg-later-${index}`, role: 'user' },
+        parts: [{ type: 'text', text: `later ${index}` }],
+      }));
+      openCode.state.tail = [markerFor('run-1'), ...fillers];
+      let observedLimit = null;
+      openCode.fetchImpl.mockImplementationOnce(async (url) => {
+        observedLimit = new URL(url).searchParams.get('limit');
+        // Honor the requested limit the way the real tail read does.
+        const limit = Number(observedLimit ?? '0') || openCode.state.tail.length;
+        return Response.json(openCode.state.tail.slice(-limit));
+      });
+
+      const result = await runtime.resolveConsult(SESSION, itemId);
+      expect(observedLimit).toBe('200');
+      expect(result).toEqual({ status: 'dispatched', delivered: 'confirmed' });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+    });
+
+    it('answers sending while a dispatch is in flight and touches nothing', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      let releasePrompt;
+      openCode.fetchImpl.mockImplementationOnce(async () => Response.json({}))
+        .mockImplementationOnce(async () => Response.json([]))
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          releasePrompt = () => resolve(new Response(null, { status: 204 }));
+        }));
+      const pending = runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      await settle(5);
+      expect(await runtime.resolveConsult(SESSION, itemId)).toEqual({ status: 'sending' });
+      const snapshot = runtime.sessionSnapshot(SESSION).items;
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      releasePrompt();
+      expect((await pending).status).toBe('dispatched');
+    });
+
+    it('answers not-found and not-consult like the dispatch entry order', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      expect(await runtime.resolveConsult(SESSION, 'missing')).toEqual({ status: 'not-found' });
+      const normal = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+      expect(await runtime.resolveConsult(SESSION, normal.itemId)).toEqual({ status: 'not-consult' });
+    });
+  });
+
   describe('expiry sweep and restart revert', () => {
     const consultItem = (overrides = {}) => item({ kind: 'consult', consult: { system: 'be terse' }, ...overrides });
 
@@ -1328,6 +1557,9 @@ describe('message queue runtime', () => {
       expect(cleared.kind).toBe('consult');
       expect(cleared).not.toHaveProperty('claimed');
       expect(cleared).not.toHaveProperty('consult');
+      // The lapsed reservation marks the item recoverable: a client may resume
+      // (re-claim) it or the user may remove it; it is never raw-sent.
+      expect(cleared.recoverable).toBe(true);
       expect(cleared.content).toBe('follow up');
 
       // The stale consult item still blocks the queue: the tick sends nothing,
@@ -1377,6 +1609,136 @@ describe('message queue runtime', () => {
       await settle();
       expect(second.openCode.state.sent).toHaveLength(0);
       expect(second.runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+
+    it('a restart restores a previously-claimed consult item recoverable and never tick-delivers it', async () => {
+      const dataDir = makeDataDir();
+      const first = createRuntime({ dataDir });
+      first.runtime.start();
+      const { itemId } = await first.runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await first.runtime.claim(SESSION, itemId, 'consult:run-1', 60_000);
+      await first.runtime.flush();
+      first.runtime.stop();
+
+      const second = createRuntime({ dataDir });
+      second.runtime.start();
+      await second.runtime.load();
+      const loaded = second.runtime.sessionSnapshot(SESSION).items[0];
+      expect(loaded.kind).toBe('consult');
+      expect(loaded).not.toHaveProperty('claimed');
+      expect(loaded).not.toHaveProperty('consult');
+      // A reservation cannot survive the restart: the restored item is
+      // recoverable, exactly like a lapsed one.
+      expect(loaded.recoverable).toBe(true);
+
+      second.connect();
+      await settle();
+      expect(second.openCode.state.sent).toHaveLength(0);
+      expect(second.runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+
+    it('a fresh owner re-claims a lapsed head consult item and dispatches it as today', async () => {
+      let clock = 0;
+      const { runtime, openCode } = createRuntime({ now: () => clock });
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1', 1_000);
+      clock = 2_000;
+      // The sweep marks the item recoverable.
+      expect(runtime.sessionSnapshot(SESSION).items[0].recoverable).toBe(true);
+
+      // A fresh owner claims the recoverable head item; the payload route and
+      // the dispatch route work exactly as for a first claim.
+      const result = await runtime.claim(SESSION, itemId, 'consult:run-2', 60_000);
+      expect(result.claimed).toBe(true);
+      expect(result.item.claimed).toMatchObject({ owner: 'consult:run-2' });
+      // The re-claim cleared the recovery marker (no flag on the claimed item).
+      expect(result.item).not.toHaveProperty('recoverable');
+      await runtime.setConsultPayload(SESSION, itemId, 'consult:run-2', { system: 'resumed' });
+      const dispatched = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-2');
+      expect(dispatched.status).toBe('dispatched');
+      expect(openCode.state.sent).toHaveLength(1);
+      expect(openCode.state.sent[0].body.system).toBe('resumed');
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+    });
+
+    it('a live or successfully dispatched claim never leaves the item recoverable', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1', 60_000);
+      // While the hold is live the item is a normal reservation, not a recovery.
+      expect(runtime.sessionSnapshot(SESSION).items[0]).not.toHaveProperty('recoverable');
+      // A successful dispatch removes the item entirely; had it stayed, it must
+      // not be marked recoverable by the release path.
+      const dispatched = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(dispatched.status).toBe('dispatched');
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      expect(openCode.state.sent).toHaveLength(1);
+    });
+
+    it('re-claim refusals stay unchanged: claimed-by-other, not-head, busy, sending', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.enqueue(SESSION, DIRECTORY, consultItem({ content: 'second consult', text: 'second consult' }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1', 60_000);
+      // claimed-by-other (re-claim still requires an unclaimed item or its owner).
+      await expect(runtime.claim(SESSION, itemId, 'consult:run-2', 60_000)).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('already-claimed'),
+      });
+      // not-head: the second consult item sits behind the claimed head.
+      const second = runtime.sessionSnapshot(SESSION).items[1].id;
+      await expect(runtime.claim(SESSION, second, 'consult:run-2', 60_000)).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('not-head'),
+      });
+      // sending: a dispatch in flight refuses a claim, whatever the item's state.
+      let release;
+      openCode.fetchImpl.mockImplementationOnce(async () => Response.json({}))
+        .mockImplementationOnce(async () => Response.json([]))
+        .mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(new Response(null, { status: 204 })); }));
+      const pending = runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      await settle(5);
+      await expect(runtime.claim(SESSION, itemId, 'consult:run-2', 60_000)).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('sending'),
+      });
+      release();
+      expect((await pending).status).toBe('dispatched');
+      // busy (not-idle): after the dispatch the second consult item is the head;
+      // a busy session refuses its claim.
+      openCode.state.statuses = { [SESSION]: { type: 'busy' } };
+      await expect(runtime.claim(SESSION, second, 'consult:run-2', 60_000)).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining('not-idle'),
+      });
+    });
+
+    it('snapshot projection includes recoverable only for consult items', async () => {
+      let clock = 0;
+      const { runtime } = createRuntime({ now: () => clock });
+      runtime.start();
+      // A consult item can only be claimed at the head, so it goes first.
+      await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+      await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'after', text: 'after' }));
+      // A normal item never carries the field.
+      expect(runtime.sessionSnapshot(SESSION).items[1]).not.toHaveProperty('recoverable');
+      expect(runtime.sessionSnapshot(SESSION).items[2]).not.toHaveProperty('recoverable');
+      // The head consult item starts clean while its claim holds.
+      await runtime.claim(SESSION, runtime.sessionSnapshot(SESSION).items[0].id, 'consult:run-1', 1_000);
+      expect(runtime.sessionSnapshot(SESSION).items[0]).not.toHaveProperty('recoverable');
+      // After the hold lapses only the lapsed consult item carries recoverable.
+      clock = 2_000;
+      runtime.setHold('ses_other_projection', true, 60_000, 'other');
+      expect(runtime.sessionSnapshot(SESSION).items[0].recoverable).toBe(true);
+      expect(runtime.sessionSnapshot(SESSION).items[1]).not.toHaveProperty('recoverable');
+      expect(runtime.sessionSnapshot(SESSION).items[2]).not.toHaveProperty('recoverable');
     });
 
     it('an explicit remove deletes a consult item and lets normal items flow', async () => {
@@ -1663,5 +2025,38 @@ describe('message queue routes', () => {
       body: { owner: 'consult:run-1' },
     });
     expect(missing.body).toEqual({ status: 'not-found' });
+  });
+
+  it('serves the resolve-consult route with the structured outcome and wraps errors', async () => {
+    const { runtime, openCode, app } = await routeSetup();
+    openCode.state.statuses = {};
+    const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+      consult: { system: 'be terse', textPartMetadata: { openchamberConsultReceipt: { runID: 'run-1' } } },
+    }));
+    openCode.state.tail = [{
+      info: { id: 'msg-marker', role: 'user' },
+      parts: [{ type: 'text', text: 'the consult', metadata: { openchamberConsultReceipt: { runID: 'run-1' } } }],
+    }];
+
+    const resolved = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/resolve-consult', {
+      params: { sessionId: SESSION, itemId },
+    });
+    expect(resolved.status).toBeNull();
+    expect(resolved.body).toEqual({ status: 'dispatched', delivered: 'confirmed' });
+    expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+
+    const notConsult = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+    const refused = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/resolve-consult', {
+      params: { sessionId: SESSION, itemId: notConsult.itemId },
+    });
+    expect(refused.body).toEqual({ status: 'not-consult' });
+
+    // An invalid session id is an unexpected error at the route layer
+    // (requireSessionId throws a bare TypeError), wrapped like the others' 400.
+    const failed = await app.call('POST', '/api/message-queue/sessions/:sessionId/items/:itemId/resolve-consult', {
+      params: { sessionId: 'bad id!', itemId },
+    });
+    expect(failed.status).toBe(400);
+    expect(failed.body?.error).toContain('sessionId is invalid');
   });
 });

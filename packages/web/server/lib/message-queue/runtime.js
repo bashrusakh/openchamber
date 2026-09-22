@@ -26,6 +26,13 @@ const CONTENT_CHAR_LIMIT = 200_000;
 const CONSULT_SYSTEM_CHAR_LIMIT = 24_000;
 const CONSULT_TEXT_PART_METADATA_CHAR_LIMIT = 8_000;
 
+// Only a text part can carry part metadata (OpenCode's file parts have no
+// metadata field), so an attachment-only consult prompt gets one synthetic
+// text part as the receipt carrier. The text becomes part of the
+// model-visible transcript: keep it minimal, neutral, and honest.
+// Mirrored in the UI's sendMessage (packages/ui/src/lib/opencode/client.ts).
+export const CONSULT_RECEIPT_CARRIER_TEXT = '[consult receipt]';
+
 // Idle events arrive in bursts around a turn boundary; a short quiet window
 // coalesces them before the tick verifies idleness against OpenCode.
 const DISPATCH_QUIET_MS = 500;
@@ -202,6 +209,9 @@ const parseStoredItem = (value) => {
   }
 };
 
+/** Only consult items carry the recoverable marker; normal items never do. */
+const isConsultItem = (item) => item.kind === CONSULT_ITEM_KIND;
+
 const toPublicAttachment = ({ dataUrl: _dataUrl, ...attachment }) => attachment;
 
 // What clients see: everything except the payloads — attachment data URLs
@@ -215,6 +225,9 @@ const toPublicItem = (item) => {
   if (item.kind) publicItem.kind = item.kind;
   if (item.consult) publicItem.consult = item.consult;
   if (item.claimed) publicItem.claimed = item.claimed;
+  // Recovery marker: only a consult item that lost its reservation (a lapsed
+  // hold or a restart) exposes it, so clients can offer re-claim or removal.
+  if (isConsultItem(item) && item.recoverable) publicItem.recoverable = true;
   publicItem.attachments = item.attachments.map(toPublicAttachment);
   // Older persisted items have no UI summary. Prefer their attached comment
   // before falling back to the model-facing context text.
@@ -362,10 +375,14 @@ export function createMessageQueueRuntime({
             // Holds are memory-only, so no persisted consult reservation can
             // survive a restart: a restored consult item comes back unclaimed,
             // but it stays a consult item (kind kept, stale claimed/consult
-            // payload dropped) and is therefore never tick-delivered.
+            // payload dropped) and is therefore never tick-delivered. A
+            // restored one is recoverable: its reservation is gone, so a
+            // client may re-claim it (the claim route accepts an unclaimed
+            // head consult) or the user may remove it.
             for (const item of entry.items) {
               delete item.claimed;
               delete item.consult;
+              if (isConsultItem(item)) item.recoverable = true;
             }
             queues.set(sessionId, entry);
           }
@@ -585,9 +602,25 @@ export function createMessageQueueRuntime({
     if (item.agentMention) parts.push({ type: 'agent', name: item.agentMention });
     if (textPartMetadata !== undefined) {
       // Only a text part can carry metadata: OpenCode's file parts have no
-      // metadata field, so an attachment-only message carries no receipt.
-      const carrier = parts.find((part) => part.type === 'text');
-      if (carrier) carrier.metadata = textPartMetadata;
+      // metadata field. Prefer the first existing text part (user text, or a
+      // context/command part that got there first); when the prompt has no
+      // text part at all — the attachment-only case — insert one synthetic
+      // carrier part before the files so the receipt (for consults) still
+      // lands and the tail correlation by runId stays possible.
+      let carrier = parts.find((part) => part.type === 'text');
+      if (!carrier) {
+        carrier = {
+          type: 'text',
+          text: CONSULT_RECEIPT_CARRIER_TEXT,
+          synthetic: true,
+          metadata: textPartMetadata,
+        };
+        const firstFile = parts.findIndex((part) => part.type === 'file');
+        if (firstFile === -1) parts.push(carrier);
+        else parts.splice(firstFile, 0, carrier);
+      } else {
+        carrier.metadata = textPartMetadata;
+      }
     }
     const { providerID, modelID, agent, variant } = item.sendConfig;
     const body = { model: { providerID, modelID } };
@@ -654,7 +687,9 @@ export function createMessageQueueRuntime({
    * payload, but keep `kind: 'consult'`: the user's consult intent survives a
    * lapsed reservation, so the item is still never handed to a raw send — the
    * generic dispatcher skips it and only an explicit remove/clear deletes it.
-   * An item that was never claimed keeps waiting for its flow to claim it.
+   * The cleared item is marked `recoverable`: it lost its owner, so a client
+   * may re-claim it through the claim route or the user may remove it. An item
+   * that was never claimed keeps waiting for its flow to claim it.
    * Runs inside the expiry sweep, so the tick and every hold mutation both see
    * the cleared claims immediately.
    */
@@ -663,13 +698,14 @@ export function createMessageQueueRuntime({
     if (!queue) return false;
     let changed = false;
     for (const item of queue.items) {
-      if (item.kind !== CONSULT_ITEM_KIND || !item.claimed) continue;
+      if (!isConsultItem(item) || !item.claimed) continue;
       // The stored owner is the hold-map key as-is; the empty string is the
       // legacy owner-less slot, which counts while its hold is live.
       const owner = asNonEmptyString(item.claimed.owner);
       if (liveHoldOwners(sessionId)?.has(owner)) continue;
       delete item.claimed;
       delete item.consult;
+      item.recoverable = true;
       changed = true;
     }
     return changed;
@@ -1080,7 +1116,8 @@ export function createMessageQueueRuntime({
    * owner's hold is (re)started, which is what keeps the generic dispatcher
    * away and what the expiry sweep later reads. Only the queue head can be
    * claimed, and only while the session is idle — the same gate the tick
-   * applies before it sends.
+   * applies before it sends. A lapsed/reservation-lost item (recoverable) is
+   * claimable again by a fresh owner; that re-claim clears the marker.
    */
   const claim = async (sessionIdInput, itemId, ownerInput, ttlMs = HOLD_DEFAULT_TTL_MS) => {
     const sessionId = requireSessionId(sessionIdInput);
@@ -1120,6 +1157,10 @@ export function createMessageQueueRuntime({
     // omitting the owner, matching the hold map's own normalization.
     setHold(sessionId, true, ttlMs, owner || undefined);
     item.claimed = { owner, claimedAt: now() };
+    // A re-claim of a recoverable item is a resume: the reservation is live
+    // again, so the recovery marker goes. The hold was set first (setHold
+    // sweeps lapsed owners), so the sweep cannot re-mark it recoverable.
+    if (item.recoverable) delete item.recoverable;
     commit(sessionId);
     return { claimed: true, item };
   };
@@ -1188,10 +1229,10 @@ export function createMessageQueueRuntime({
    * found), false (the read succeeded and no marker is present), or null
    * (the read failed — never guess).
    */
-  const hasConsultDeliveryMarker = async (sessionId, directory, runId) => {
+  const hasConsultDeliveryMarker = async (sessionId, directory, runId, limit = CONSULT_DELIVERY_TAIL_LIMIT) => {
     const messages = asList(await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message`, {
       directory,
-      query: { limit: String(CONSULT_DELIVERY_TAIL_LIMIT) },
+      query: { limit: String(limit) },
     }).catch(() => null));
     if (!messages) return null;
     for (const entry of messages) {
@@ -1370,6 +1411,81 @@ export function createMessageQueueRuntime({
     }
   };
 
+  /**
+   * Deeper tail for reconnect-time resolution: a client that died after an
+   * ambiguous dispatch can reconnect much later, by which time the marker may
+   * have fallen out of the dispatch's 20-message window while newer turns
+   * streamed in behind it.
+   */
+  const CONSULT_RESOLVE_TAIL_LIMIT = 200;
+
+  /**
+   * Reconnect-time reconciliation for a consult item stranded by an ambiguous
+   * dispatch (the client died between send and confirmation and nobody
+   * re-checked the tail). This is an outcome check, not a send: it never
+   * prompts, and it never touches a live claim.
+   *
+   * Entry order mirrors dispatchConsult's inspect but WITHOUT the owner gate —
+   * the claiming client may be gone, which is the whole point — and stops at
+   * an in-flight send, which may still be the one that lands the marker.
+   *
+   * Outcomes, all evidence-based and all fail-closed:
+   * - `not-found` / `not-consult` / `sending`: nothing is mutated.
+   * - No receipt runId in the item metadata: correlation is impossible, so the
+   *   indeterminate state must stay — `{ status: 'unresolved' }` untouched.
+   * - Marker found in a deeper tail (200): the dispatch landed — remove the
+   *   item exactly once, release the claimed owner's hold (the lapsed/expired
+   *   owner included; nothing to release without a claim), commit, broadcast.
+   * - Marker absent and the item is unclaimed: the reservation is gone and
+   *   there is no evidence of delivery — mark `recoverable` and answer
+   *   `{ status: 'unresolved', recoverable: true }`; the item keeps blocking
+   *   the head and clients may Resume or remove it.
+   * - Marker absent but the item is still claimed: the owning client may still
+   *   be mid-flight — `{ status: 'unresolved' }`, its lease is untouched.
+   * - Marker read failed: never guess — `{ status: 'unresolved' }`.
+   */
+  const resolveConsult = async (sessionIdInput, itemIdInput) => {
+    const sessionId = requireSessionId(sessionIdInput);
+    await load();
+
+    const queue = queues.get(sessionId);
+    const item = queue ? queue.items.find((entry) => entry.id === itemIdInput) : null;
+    if (!item) return { status: 'not-found' };
+    if (item.kind !== CONSULT_ITEM_KIND) return { status: 'not-consult' };
+    if (sending.has(sessionId)) return { status: 'sending' };
+
+    // The receipt runId is the only non-heuristic correlation between the item
+    // and a prompt that may have landed; without it nothing can be decided.
+    const runId = readConsultReceiptRunId(item);
+    if (!runId) return { status: 'unresolved' };
+
+    const found = await hasConsultDeliveryMarker(sessionId, queue.directory, runId, CONSULT_RESOLVE_TAIL_LIMIT);
+    if (found === null) return { status: 'unresolved' };
+    if (found) {
+      // Delivered: remove exactly once (the filter drops nothing else), then
+      // release the claim owner's hold. The owner may have lapsed or expired
+      // since the claim — releasing by the stored owner is still the correct
+      // slot, and a missing hold is a harmless no-op.
+      const after = queues.get(sessionId);
+      if (after) setQueueItems(sessionId, after.directory, after.items.filter((entry) => entry.id !== item.id));
+      const claimedOwner = asNonEmptyString(item.claimed?.owner);
+      setHold(sessionId, false, undefined, claimedOwner || undefined);
+      commit(sessionId);
+      console.log(`[message-queue] resolved stranded consult message in ${sessionId} as delivered`);
+      return { status: 'dispatched', delivered: 'confirmed' };
+    }
+    if (!item.claimed) {
+      // The reservation is gone (lapse or restart) and the tail shows no
+      // marker: no evidence of delivery. Surface the recovery hint and leave
+      // the item exactly as it was — a consult item still blocking the head.
+      item.recoverable = true;
+      commit(sessionId);
+      return { status: 'unresolved', recoverable: true };
+    }
+    // Still claimed with a live hold: the owning client may still be mid-flight.
+    return { status: 'unresolved' };
+  };
+
   // --- events --------------------------------------------------------------
 
   const processPayload = (value) => {
@@ -1449,6 +1565,7 @@ export function createMessageQueueRuntime({
     claim,
     setConsultPayload,
     dispatchConsult,
+    resolveConsult,
     hasActiveConsultReservation,
     processPayload,
     start,
@@ -1548,6 +1665,17 @@ export function registerMessageQueueRoutes(app, runtime) {
       res.json(await runtime.dispatchConsult(req.params.sessionId, req.params.itemId, req.body?.owner));
     } catch (error) {
       respondError(res, error, 'Failed to dispatch consult message');
+    }
+  });
+
+  app.post('/api/message-queue/sessions/:sessionId/items/:itemId/resolve-consult', async (req, res) => {
+    try {
+      await runtime.load();
+      // Same structured-outcome contract as dispatch-consult: reconnect-time
+      // reconciliation never sends and never errors on control-flow cases.
+      res.json(await runtime.resolveConsult(req.params.sessionId, req.params.itemId));
+    } catch (error) {
+      respondError(res, error, 'Failed to resolve consult message');
     }
   });
 

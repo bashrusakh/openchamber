@@ -384,6 +384,19 @@ describe('advisor input parity (REQ-4)', () => {
     expect(result.status).toBe('ok');
     expect('additionalParts' in harness.state.sent[0]).toBe(false);
   });
+
+  test('a session-knowledge prefix part rides the advisor send like any synthetic part', async () => {
+    const harness = createHarness();
+    const additionalParts = [
+      { text: 'Pinned project knowledge', synthetic: true, systemContext: 'session-knowledge' as const },
+      { text: 'the quoted fragment', synthetic: true },
+    ];
+    const handle = harness.runtime.startConsultation(baseInput({ additionalParts }));
+    const result = await handle.result;
+
+    expect(result.status).toBe('ok');
+    expect(harness.state.sent[0].additionalParts).toEqual(additionalParts);
+  });
 });
 
 describe('startConsultation fork lifecycle', () => {
@@ -1205,6 +1218,30 @@ describe('ambiguous fork failure', () => {
     // ambiguous sibling contributes no hide, marker, or delete.
     expect(harness.state.metadataPatches.map((patch) => patch.id)).toEqual(['fork-2']);
     expect(harness.state.deleted).toEqual([{ id: 'fork-2', directory: '/work', expectedRuntimeKey: 'runtime-1' }]);
+    expect(harness.state.pendingHidden.size).toBe(0);
+  });
+
+  test('the failure path is strictly non-mutating: it never even looks for the lost clone', async () => {
+    // Safety property for the intentional no-reconciliation boundary: a
+    // rejected forkSession is never followed by a session listing, a delete,
+    // a metadata patch, or a pending-hide registration. The runtime has no
+    // session-listing dependency at all, so any candidate correlation
+    // (timing, title, transcript prefix) could only ever point at a user's
+    // session or a sibling fork — the failure path must have zero
+    // interactions with the mutation-capable deps.
+    const harness = createHarness();
+    harness.state.forkFailures.set(1, new Error('fork response lost'));
+
+    const handle = harness.runtime.startConsultation(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('degraded');
+    expect(result.advisors[0]?.status).toBe('failed');
+    expect(harness.state.calls.filter((call) => call.startsWith('delete:'))).toEqual([]);
+    expect(harness.state.calls.filter((call) => call.startsWith('patch:'))).toEqual([]);
+    expect(harness.state.calls.filter((call) => call.startsWith('register:'))).toEqual([]);
+    expect(harness.state.metadataPatches).toEqual([]);
+    expect(harness.state.deleted).toEqual([]);
     expect(harness.state.pendingHidden.size).toBe(0);
   });
 });

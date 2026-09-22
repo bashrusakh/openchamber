@@ -3477,6 +3477,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.toast.failed': 'Консультація не вдалася',
   'chat.consult.toast.refused': 'Консультація не почалася: деякі радники недоступні',
   'chat.consult.toast.deliveredRaw': 'Повідомлення більше не очікує та не було проконсультовано. Можливо, його вже надіслано, тож перевірте сесію.',
+  'chat.consult.queue.resume': 'Відновити консультацію',
   'chat.consult.rejection.providerUnknown': 'Радник {index}: постачальник «{provider}» недоступний',
   'chat.consult.rejection.modelUnknown': 'Радник {index}: модель «{model}» недоступна',
   'chat.consult.rejection.variantUnknown': 'Радник {index}: варіант «{variant}» недоступний для «{model}»',

@@ -3477,6 +3477,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.toast.failed': 'La consulta falló',
   'chat.consult.toast.refused': 'La consulta no se inició: algunos asesores no están disponibles',
   'chat.consult.toast.deliveredRaw': 'El mensaje ya no está en espera y no se consultó. Puede que ya se haya enviado, así que revisa la sesión.',
+  'chat.consult.queue.resume': 'Reanudar la consulta',
   'chat.consult.rejection.providerUnknown': 'Asesor {index}: el proveedor «{provider}» no está disponible',
   'chat.consult.rejection.modelUnknown': 'Asesor {index}: el modelo «{model}» no está disponible',
   'chat.consult.rejection.variantUnknown': 'Asesor {index}: la variante «{variant}» no está disponible para «{model}»',

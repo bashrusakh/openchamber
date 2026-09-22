@@ -18,6 +18,7 @@ import {
   type ConsultSubmissionResult,
   type SubmitConsultMessageInput,
 } from './submission';
+import { createMessageQueueTarget } from '@/stores/messageQueueStore';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -166,6 +167,10 @@ type HarnessState = {
   statusFailure: Error | null;
   autoReviewRunning: boolean;
   runtimeKey: string;
+  /** What `fetchSessionKnowledge` answers: text, a rejection, or empty. */
+  knowledgeText: string | null;
+  knowledgeRejection: Error | null;
+  knowledgeCalls: Array<{ directory: string; sessionId: string }>;
   startInputs: StartConsultationInput[];
   consultations: Array<Deferred<ConsultationResult>>;
   runtimeCancels: string[];
@@ -181,6 +186,7 @@ type Harness = {
   deps: ConsultSubmissionDeps;
   state: HarnessState;
   submit: (input: SubmitConsultMessageInput) => ReturnType<ReturnType<typeof createConsultSubmission>['submitConsultMessage']>;
+  resume: ReturnType<typeof createConsultSubmission>['resumeConsultItem'];
   flush: (times?: number) => Promise<void>;
   tickHeartbeat: () => Promise<void>;
   lastConsultation: () => Deferred<ConsultationResult>;
@@ -224,6 +230,9 @@ const createHarness = (): Harness => {
     statusFailure: null,
     autoReviewRunning: false,
     runtimeKey: 'runtime-1',
+    knowledgeText: null,
+    knowledgeRejection: null,
+    knowledgeCalls: [],
     startInputs: [],
     consultations: [],
     runtimeCancels: [],
@@ -388,6 +397,11 @@ const createHarness = (): Harness => {
       if (state.statusFailure) throw state.statusFailure;
       return state.status;
     },
+    fetchSessionKnowledge: async (directory, sessionId) => {
+      state.knowledgeCalls.push({ directory, sessionId });
+      if (state.knowledgeRejection) throw state.knowledgeRejection;
+      return { text: state.knowledgeText ?? '' };
+    },
     isAutoReviewRunning: () => state.autoReviewRunning,
     verifyCapability: async () => {
       state.capabilityChecks += 1;
@@ -427,6 +441,7 @@ const createHarness = (): Harness => {
     deps,
     state,
     submit: (input) => submission.submitConsultMessage(input),
+    resume: (target, item, options) => submission.resumeConsultItem(target, item, options),
     flush,
     tickHeartbeat: async () => {
       for (const beat of [...state.heartbeats]) beat();
@@ -711,6 +726,102 @@ describe('queue admission', () => {
     harness.lastConsultation().resolve(consultationResult());
     const result = await handle.result;
     expect(result.status).toBe('dispatched');
+  });
+
+  test('advisors receive the standing session knowledge as a synthetic prefix part (advisor parity)', async () => {
+    const harness = createHarness();
+    harness.state.knowledgeText = 'Pinned project knowledge';
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+
+    // Resolved once per run against the parent session.
+    expect(harness.state.knowledgeCalls).toEqual([{ directory: '/work', sessionId: 'parent' }]);
+    // Same order as a UI send: the knowledge block reads as background before
+    // the message's own captured context.
+    const advisorInput = harness.state.startInputs[0];
+    const context = contextPart();
+    if (context.kind !== 'context') throw new Error('fixture must be a context part');
+    expect(advisorInput.additionalParts).toEqual([
+      { text: 'Pinned project knowledge', synthetic: true, systemContext: 'session-knowledge' },
+      { text: context.text, synthetic: true, metadata: context.metadata },
+    ]);
+
+    harness.lastConsultation().resolve(consultationResult());
+    const result = await handle.result;
+    expect(result.status).toBe('dispatched');
+  });
+
+  test('empty knowledge leaves the advisor parts byte-identical to today', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+
+    expect(harness.state.knowledgeCalls).toHaveLength(1);
+    const advisorInput = harness.state.startInputs[0];
+    const context = contextPart();
+    if (context.kind !== 'context') throw new Error('fixture must be a context part');
+    expect(advisorInput.additionalParts).toEqual([
+      { text: context.text, synthetic: true, metadata: context.metadata },
+    ]);
+
+    harness.lastConsultation().resolve(consultationResult());
+    const result = await handle.result;
+    expect(result.status).toBe('dispatched');
+  });
+
+  test('a failing knowledge fetch never fails the consult: advisors are sent without it', async () => {
+    const harness = createHarness();
+    harness.state.knowledgeRejection = new Error('knowledge endpoint down');
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+
+    expect(harness.state.startInputs).toHaveLength(1);
+    const context = contextPart();
+    if (context.kind !== 'context') throw new Error('fixture must be a context part');
+    expect(harness.state.startInputs[0].additionalParts).toEqual([
+      { text: context.text, synthetic: true, metadata: context.metadata },
+    ]);
+
+    harness.lastConsultation().resolve(consultationResult());
+    const result = await handle.result;
+    expect(result.status).toBe('dispatched');
+  });
+
+  test('resume parity: the resumed fan-out carries the knowledge prefix too', async () => {
+    const harness = createHarness();
+    const item: QueuedMessage = {
+      id: 'q-stranded',
+      content: 'What should we do next? @build',
+      text: 'What should we do next?',
+      agentMention: 'build',
+      createdAt: 500,
+      kind: 'consult' as const,
+      recoverable: true as const,
+      context: [contextPart()],
+      sendConfig: { providerID: 'anthropic', modelID: 'claude-sonnet', agent: 'build', variant: 'high' },
+    };
+    const target = createMessageQueueTarget('parent', '/work', 'runtime-1');
+    if (!target) throw new Error('target fixture failed');
+    harness.state.queueItems.push(item);
+    harness.state.knowledgeText = 'Pinned project knowledge';
+    const pending = harness.resume(
+      target,
+      item,
+      { advisors: [{ providerID: 'openai', modelID: 'gpt-5', agent: 'build', variant: 'high' }], mode: 'parallel', timeoutMs: 120_000 },
+    );
+    await harness.flush();
+    expect(harness.state.startInputs).toHaveLength(1);
+    harness.lastConsultation().resolve(consultationResult());
+    const result = await pending;
+
+    expect(result.status).toBe('dispatched');
+    expect(harness.state.knowledgeCalls).toEqual([{ directory: '/work', sessionId: 'parent' }]);
+    const context = contextPart();
+    if (context.kind !== 'context') throw new Error('fixture must be a context part');
+    expect(harness.state.startInputs[0].additionalParts).toEqual([
+      { text: 'Pinned project knowledge', synthetic: true, systemContext: 'session-knowledge' },
+      { text: context.text, synthetic: true, metadata: context.metadata },
+    ]);
   });
 
   test('the authoritative id returned by addToQueue flows into the claim', async () => {
@@ -1626,5 +1737,163 @@ describe('cancellation and failures', () => {
 
     const result = await handle.result;
     expect(result.runId).toBe(handle.runId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resume (issue #3743): re-claiming a stranded (recoverable) consult item
+// ---------------------------------------------------------------------------
+
+describe('resume of a stranded consult item', () => {
+  const resumeTarget = (): MessageQueueTarget =>
+    createMessageQueueTarget('parent', '/work', 'runtime-1') ?? (() => { throw new Error('target fixture failed'); })();
+
+  const strandedItem = (overrides?: Partial<QueuedMessage>): QueuedMessage => ({
+    id: 'q-stranded',
+    content: 'What should we do next? @build',
+    text: 'What should we do next?',
+    agentMention: 'build',
+    createdAt: 500,
+    kind: 'consult',
+    recoverable: true,
+    attachments: [attachment()],
+    context: [contextPart()],
+    sendConfig: { providerID: 'anthropic', modelID: 'claude-sonnet', agent: 'build', variant: 'high' },
+    ...overrides,
+  });
+
+  const resumeOptions = () => ({
+    advisors: [{ providerID: 'openai', modelID: 'gpt-5', agent: 'build', variant: 'high' }],
+    mode: 'parallel' as const,
+    timeoutMs: 120_000,
+  });
+
+  test('claims the existing item and runs the fan-out from its own content, never enqueueing', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    // The consultation settles as soon as the fan-out starts (resume is one
+    // awaited flow, so the gate must resolve mid-await).
+    harness.state.consultations = [];
+    const pending = harness.resume(resumeTarget(), item, resumeOptions()).then((outcome) => {
+      return { outcome, startInputs: harness.state.startInputs };
+    });
+    await harness.flush();
+    expect(harness.state.startInputs).toHaveLength(1);
+    harness.lastConsultation().resolve(consultationResult());
+    const result = (await pending).outcome;
+
+    // The claim targeted the stranded item with the fresh run's owner.
+    expect(harness.state.events).toContain('queue:claim:q-stranded:consult:run-1');
+    // Resume never enqueues: the item is the only consult input the queue saw.
+    expect(harness.state.queued).toEqual([]);
+    // The fresh fan-out reads the item's own content, not the composer's.
+    expect(harness.state.startInputs).toHaveLength(1);
+    expect(harness.state.startInputs[0]).toMatchObject({
+      parentSessionId: 'parent',
+      directory: '/work',
+      expectedRuntimeKey: 'runtime-1',
+      messageText: 'What should we do next?',
+      runId: 'run-1',
+      mode: 'parallel',
+      timeoutMs: 120_000,
+    });
+    // Advisors receive the item's attachments in the advisor input shape.
+    expect(harness.state.startInputs[0].attachments).toEqual([
+      { type: 'file', mime: 'image/png', url: 'data:image/png;base64,cG5n', filename: 'shot.png' },
+    ]);
+    // Dispatch happens through the consult route and settles dispatched.
+    expect(harness.state.dispatchConsultCalls).toBe(1);
+    expect(result.status).toBe('dispatched');
+    expect(result).toMatchObject({ runId: 'run-1' });
+    // The receipt is fresh: the payload merge rides the new run's owner.
+    expect(harness.state.payloadCalls).toHaveLength(1);
+    expect(harness.state.events).toContain('queue:payload:q-stranded');
+  });
+
+  test('capability refusal happens before anything is claimed or held', async () => {
+    const harness = createHarness();
+    harness.state.capabilityRefusal = { available: false, reason: 'protocol-missing' };
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    expect(result.status).toBe('refused');
+    if (result.status !== 'refused') throw new Error('expected a refusal');
+    expect(result.code).toBe('capability-unavailable');
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.startInputs).toHaveLength(0);
+    // The stranded item is untouched: the user can still remove it manually.
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-stranded']);
+  });
+
+  test('an item claimed by another owner is refused without touching it', async () => {
+    const harness = createHarness();
+    const item = strandedItem({ claimed: { owner: 'consult:other-run', claimedAt: 1 } });
+    harness.state.queueItems.push(item);
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    expect(result.status).toBe('failed');
+    expect(errorOf(result)).toContain('reserved by another owner');
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.startInputs).toHaveLength(0);
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-stranded']);
+  });
+
+  test('an item that vanished from the queue refuses with nothing to resume', async () => {
+    const harness = createHarness();
+    const item = strandedItem({ id: 'q-gone' });
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    expect(result.status).toBe('failed');
+    expect(errorOf(result)).toContain('no longer in the queue');
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.holds).toEqual([]);
+    expect(harness.state.startInputs).toHaveLength(0);
+  });
+
+  test('a claim lost mid-flow fails without dispatching', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    harness.state.claimFailure = new Error('claim request failed');
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    expect(result.status).toBe('failed');
+    expect(errorOf(result)).toContain('claim request failed');
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+    expect(harness.state.startInputs).toHaveLength(0);
+    // The hold was acquired before the claim, so the failed claim releases it.
+    expect(harness.state.holds).toEqual([true, false]);
+  });
+
+  test('a runtime switch during resume stops without touching the item', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    harness.state.runtimeKey = 'runtime-2';
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    expect(result.status).toBe('failed');
+    expect(errorOf(result)).toContain('runtime changed');
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+    // The stranded item stays exactly as it was.
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-stranded']);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('a normal (non-consult) item is refused', async () => {
+    const harness = createHarness();
+    const item = strandedItem({ kind: undefined });
+    harness.state.queueItems.push(item);
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    expect(result.status).toBe('failed');
+    expect(errorOf(result)).toContain('not a consult item');
+    expect(harness.state.claims).toBe(0);
+    expect(harness.state.holds).toEqual([]);
   });
 });

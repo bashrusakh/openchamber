@@ -26,6 +26,13 @@ export interface OutgoingPart {
     synthetic?: boolean;
     /** Structured context (see contextParts.ts), persisted with the part. */
     metadata?: ContextPartMetadata;
+    /**
+     * Marks standing session knowledge (pinned notes/plans + memory index).
+     * Only `routeMessage`'s command-route decision reads it; the OpenCode text
+     * part itself carries no such field, so advisor sends drop it when the
+     * part is mapped onto the wire.
+     */
+    systemContext?: 'session-knowledge';
 }
 
 export interface OutgoingMessage {

@@ -6,7 +6,8 @@ import { useUIStore } from '@/stores/useUIStore';
 import { isServerOwnedMessageQueue, createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore, type MessageQueueTarget, type QueuedContextPart, type QueuedMessage } from '@/stores/messageQueueStore';
 import { useAutoReviewStore } from '@/stores/useAutoReviewStore';
 import { isConsultRunActive, useConsultRun, useConsultStore } from '@/stores/useConsultStore';
-import type { ConsultSubmissionHandle } from '@/lib/consult/submission';
+import type { ConsultSubmissionHandle, ResumeConsultRunOptions } from '@/lib/consult/submission';
+import { resumeConsultItem } from '@/lib/consult/submission';
 import type { ConsultAdvisorSelection } from '@/lib/consult/routing';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useSelectionStore } from '@/sync/selection-store';
@@ -45,7 +46,10 @@ import { useBtwPanelState } from './btw/useBtwPanelState';
 import { ConsultModelsDialog, type ConsultActingSelection } from './consult/ConsultModelsDialog';
 import { ConsultPanel } from './consult/ConsultPanel';
 import {
+    CONSULT_ADVISOR_MIN,
     consultCaptureDisposition,
+    consultUnavailableLabelKey,
+    DEFAULT_CONSULT_TIMEOUT_MS,
     formatConsultRejections,
     isDeliveredRawSubmission,
     resolveConsultAvailability,
@@ -573,7 +577,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
     const getModelMetadata = useConfigStore((state) => state.getModelMetadata);
     // Subscribe to both sources read by getModelMetadata so async metadata and provider updates are observed.
     useConfigStore((state) => state.modelsMetadata);
-    useConfigStore((state) => state.providers);
+    const providers = useConfigStore((state) => state.providers);
     const currentModelMetadata = currentProviderId && currentModelId
         ? getModelMetadata(currentProviderId, currentModelId)
         : undefined;
@@ -1725,6 +1729,53 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
         // Force-sending from the queue during a busy session counts as steer
         void handleSubmitRef.current({ queuedOnly: true, queuedMessageId: messageId, delivery: 'steer' });
     }, []);
+
+    /**
+     * Resume a stranded (recoverable) consult item from the queue chip
+     * (issue #3743): re-claims the existing item and runs the consultation
+     * fresh through the same claim → fan-out → dispatch route. The per-run
+     * options come fresh from the same dialog defaults the normal submit
+     * uses; the advisors are picked from the same model catalog the dialog's
+     * picker lists (recent + favorites first), never reusing stale
+     * selections — the stranded item never reached a fan-out.
+     */
+    const handleResumeConsult = React.useCallback((message: QueuedMessage) => {
+        if (consultUnavailableReason !== null) {
+            toast.error(t(consultUnavailableLabelKey(consultUnavailableReason)));
+            return;
+        }
+        if (!consultAdvisorAgent) return;
+        const catalog = useConfigStore.getState().providers;
+        const picks: ConsultAdvisorSelection[] = [];
+        for (const provider of catalog) {
+            const models = Array.isArray(provider.models) ? provider.models : [];
+            for (const model of models) {
+                picks.push({ providerID: provider.id, modelID: model.id, agent: consultAdvisorAgent });
+                if (picks.length >= CONSULT_ADVISOR_MIN) break;
+            }
+            if (picks.length >= CONSULT_ADVISOR_MIN) break;
+        }
+        if (picks.length < CONSULT_ADVISOR_MIN) {
+            toast.error(t('chat.consult.dialog.noAdvisorAgent'));
+            return;
+        }
+        const runOptions: ResumeConsultRunOptions = {
+            advisors: picks,
+            mode: 'parallel',
+            timeoutMs: DEFAULT_CONSULT_TIMEOUT_MS,
+        };
+        const target = parentMessageQueueTarget
+            ?? createMessageQueueTarget(currentSessionId ?? '', currentSessionDirectoryForSync ?? currentDirectory)
+            ?? null;
+        if (!target) return;
+        void resumeConsultItem(target, message, runOptions).then((result) => {
+            if (result.status === 'dispatched') return;
+            // A resumed run the composer captured nothing for: the capture
+            // rules still decide — failed-uncertain keeps any leftover
+            // cleared state, everything else restores like the normal path.
+            toast.error(t('chat.consult.toast.failed'), { description: result.status === 'failed' || result.status === 'refused' ? result.error : undefined });
+        });
+    }, [consultUnavailableReason, consultAdvisorAgent, parentMessageQueueTarget, t]);
 
     const handleOpenAgentPanel = React.useCallback(() => {
         setMobileControlsPanel('agent');
@@ -4253,6 +4304,7 @@ const ChatInputComponent: React.FC<ChatInputProps> = ({
                 hidden={newSessionDraftOpen || isBtwActive || isBtwPanelVisible || mobileCommentActive || isConsultPanelVisible}
                 onEditMessage={handleQueuedMessageEdit}
                 onSendMessage={handleQueuedMessageSend}
+                onResumeConsult={handleResumeConsult}
             />
             {currentSessionId && consultRun && !isBtwPanelVisible ? (
                 <ConsultPanel

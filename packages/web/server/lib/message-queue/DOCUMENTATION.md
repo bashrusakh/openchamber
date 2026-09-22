@@ -258,12 +258,23 @@ never be mistaken for the dispatch.
 There is no tick-side retry bookkeeping for consult dispatches — the owner
 drives retries.
 
+`resolveConsult(sessionId, itemId)` is the reconnect-time outcome check for an
+item stranded by an ambiguous dispatch (route
+`POST .../items/:itemId/resolve-consult`): it never prompts. With the receipt
+`runId` present it reads a deeper tail (200 messages vs. the dispatch's 20) —
+marker found → `dispatched delivered: 'confirmed'` with exactly-once removal
+and the claimed owner's hold released; marker absent and the item unclaimed →
+`unresolved` with `recoverable: true` (the item keeps blocking the head;
+clients may Resume or remove); no `runId`, a live claim, or a failed read →
+`unresolved` untouched.
+
 The prompt body is built exactly as `sendItem` builds it, plus a top-level
 `system` and the consult metadata attached to the primary text part the way a
 context part carries its metadata; it always takes the prompt route. The
-metadata carrier must be a text part: an attachment-only consult message
-dispatches normally but carries no receipt (OpenCode's file parts have no
-metadata field).
+metadata carrier must be a text part: when the prompt has no text part at all
+(attachment-only), one synthetic carrier text part (`CONSULT_RECEIPT_CARRIER_TEXT`,
+`[consult receipt]`) is inserted before the files so the receipt still lands and
+runId correlation stays possible; the UI mirror keeps the same rule.
 
 ### Parent-session prompt gate
 
@@ -272,7 +283,7 @@ holds at least one consult item whose claim owner still has a live hold (the
 same lazy-pruning hold read the rest of the runtime uses; items are never
 mutated). The OpenCode proxy mounts a fail-open gate on `/api` before the
 forwarding handler: a POST to `/session/<id>/prompt_async`, `/message`,
-`/prompt`, or `/command` for a reserved session is answered
+`/prompt`, `/command`, or `/shell` for a reserved session is answered
 `409 { error: 'consult-reservation', … }` and never forwarded, so another
 OpenChamber surface (or a script) cannot start a turn in a session a Consult
 Models run owns. Other methods and routes pass through untouched, and a gate
@@ -298,6 +309,18 @@ stuck consult item is removed only by an explicit user action (`remove`/
 This is the no-raw-delivery guarantee: a consult message is either dispatched
 through its own route or deleted by the user.
 
+### Recovery (`recoverable`)
+
+A consult item whose reservation is gone — the hold lapsed, or a restart
+stripped the claim (a reservation never survives a restart) — becomes
+`recoverable: true` (set in the same sweep that clears the claim, and on
+restore in `load()`). The marker is consult-only and rides snapshots,
+broadcasts, and persistence like the other item fields; it is a hint for
+clients, not a behavior switch: the item keeps blocking the head exactly as
+before and is never raw-sent. A client may resume the consult by claiming the
+recoverable head item through the existing claim route (the marker is cleared
+on the claim) or the user may remove it.
+
 ## Routes (`/api/message-queue`)
 
 Normal authenticated OpenChamber runtime routes; never on browser URL-token
@@ -316,6 +339,7 @@ allowlists.
 | `POST .../sessions/:id/items/:itemId/claim` | `{ owner?, ttlMs? }`; reserve the head consult item; `409` reasons: `not found`, `not-consult`, `not-head`, `sending`, `already-claimed`, `not-idle` |
 | `POST .../sessions/:id/items/:itemId/payload` | `{ owner?, consult }`; merge the claimed item's consult payload; `409`: `not found`/`not-consult`/`not-claiming`/`sending`, `400` on size violations |
 | `POST .../sessions/:id/items/:itemId/dispatch-consult` | `{ owner? }`; dispatch the claimed consult item on its dedicated route; always `200` with a structured outcome (`dispatched`/`busy`/`claim-lost`/`not-found`/`not-consult`/`sending`/`send-failed`), `400`/`500` only for malformed/unexpected errors |
+| `POST .../sessions/:id/items/:itemId/resolve-consult` | Reconnect-time outcome check for a stranded consult item; always `200` with a structured outcome (`dispatched` with `delivered: 'confirmed'`, `unresolved` with optional `recoverable`, `not-found`/`not-consult`/`sending`), `400`/`500` only for malformed/unexpected errors; never sends a prompt |
 
 Every mutation broadcasts `openchamber:message-queue.updated` with
 `{ revision, session }` to all connected clients (SSE and WS), so several

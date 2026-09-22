@@ -3474,6 +3474,7 @@ export const dict = {
   'chat.consult.toast.failed': 'Danışma başarısız oldu',
   'chat.consult.toast.refused': 'Danışma başlatılamadı: bazı danışmanlar kullanılamıyor',
   'chat.consult.toast.deliveredRaw': 'Mesaj artık beklemiyor ve danışma yapılmadı. Zaten gönderilmiş olabilir, bu yüzden oturumu kontrol et.',
+  'chat.consult.queue.resume': 'Danışmayı sürdür',
   'chat.consult.rejection.providerUnknown': 'Danışman {index}: "{provider}" sağlayıcısı kullanılamıyor',
   'chat.consult.rejection.modelUnknown': 'Danışman {index}: "{model}" modeli kullanılamıyor',
   'chat.consult.rejection.variantUnknown': 'Danışman {index}: "{variant}" varyantı "{model}" için kullanılamıyor',

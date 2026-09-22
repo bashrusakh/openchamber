@@ -473,6 +473,65 @@ describe('opencodeClient sendMessage part-metadata pass-through', () => {
     delete hintedRest.parts;
     expect(hintedRest).toEqual(plainRest);
   });
+
+  test('an attachment-only send with metadata inserts one synthetic carrier part before the files', async () => {
+    const metadata: TextPartMetadataFixture = {
+      openchamberConsultReceipt: { runID: 'run-1', degraded: false },
+    };
+    await opencodeClient.sendMessage({
+      id: 'ses_1',
+      providerID: 'anthropic',
+      modelID: 'claude-sonnet',
+      text: '',
+      messageId: 'msg_att_only',
+      files: [{ type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'data:text/plain,hello' }],
+      textPartMetadata: metadata,
+    });
+
+    const body = promptAsyncBody(0);
+    expect(body.parts).toEqual([
+      { type: 'text', text: '[consult receipt]', synthetic: true, metadata },
+      { type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'data:text/plain,hello' },
+    ]);
+  });
+
+  test('an attachment-only send without metadata keeps the old file-only shape', async () => {
+    await opencodeClient.sendMessage({
+      id: 'ses_1',
+      providerID: 'anthropic',
+      modelID: 'claude-sonnet',
+      text: '',
+      messageId: 'msg_att_only_plain',
+      files: [{ type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'data:text/plain,hello' }],
+    });
+
+    const body = promptAsyncBody(0);
+    expect(body.parts).toEqual([
+      { type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'data:text/plain,hello' },
+    ]);
+  });
+
+  test('a send with a preface text but no primary text rides the metadata on the preface part', async () => {
+    const metadata: TextPartMetadataFixture = {
+      openchamberConsultReceipt: { runID: 'run-1', degraded: false },
+    };
+    await opencodeClient.sendMessage({
+      id: 'ses_1',
+      providerID: 'anthropic',
+      modelID: 'claude-sonnet',
+      text: '',
+      prefaceText: 'context first',
+      messageId: 'msg_preface',
+      files: [{ type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'data:text/plain,hello' }],
+      textPartMetadata: metadata,
+    });
+
+    const body = promptAsyncBody(0);
+    expect(body.parts).toEqual([
+      { type: 'text', text: 'context first', synthetic: true, metadata },
+      { type: 'file', mime: 'text/plain', filename: 'notes.txt', url: 'data:text/plain,hello' },
+    ]);
+  });
 });
 
 describe('opencodeClient updateSession permission forwarding', () => {

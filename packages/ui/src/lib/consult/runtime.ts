@@ -66,9 +66,10 @@ import {
  *
  * Invariants:
  * - one acting agent: advisors never touch the parent session or the UI
- *   stores, and advisor sessions never receive session knowledge (the send
- *   bypasses `useSessionUIStore.sendMessage`/`routeMessage`, which is what
- *   resolves pending session knowledge);
+ *   stores (the send bypasses `useSessionUIStore.sendMessage`/`routeMessage`);
+ *   the standing session knowledge the advisors receive rides the caller's
+ *   `additionalParts` (the submission resolves it once per run) and is never
+ *   recorded delivered by the advisor flow;
  * - one turn per advisor: no follow-up sends, no recursive consultation;
  * - read-only: wildcard deny-all `session.update({permission})` removes the
  *   tool schema (Phase 0 A3/A4/A9);

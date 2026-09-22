@@ -3476,6 +3476,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.toast.failed': '相談に失敗しました',
   'chat.consult.toast.refused': '相談は開始されませんでした：一部のアドバイザーが利用できません',
   'chat.consult.toast.deliveredRaw': 'メッセージはもう待機しておらず、相談は行われませんでした。すでに送信されている可能性があるため、セッションを確認してください。',
+  'chat.consult.queue.resume': '相談を再開',
   'chat.consult.rejection.providerUnknown': 'アドバイザー {index}：プロバイダー「{provider}」は利用できません',
   'chat.consult.rejection.modelUnknown': 'アドバイザー {index}：モデル「{model}」は利用できません',
   'chat.consult.rejection.variantUnknown': 'アドバイザー {index}：バリアント「{variant}」は「{model}」では利用できません',

@@ -276,15 +276,17 @@ const sanitizeSessionListPayload = (payload) => {
 /**
  * The OpenCode routes that start a turn in a session. A client that bypasses
  * the message queue (another OpenChamber surface, a script, the OpenCode TUI)
- * must not start one while a Consult Models run holds the session.
+ * must not start one while a Consult Models run holds the session. `shell`
+ * counts too: `POST /session/:id/shell` starts a turn (the composer's
+ * shell-mode send).
  */
-const CONSULT_RESERVATION_ROUTE_PATTERN = /^\/session\/([^/]+)\/(?:prompt_async|message|prompt|command)$/;
+const CONSULT_RESERVATION_ROUTE_PATTERN = /^\/session\/([^/]+)\/(?:prompt_async|message|prompt|command|shell)$/;
 
 /**
  * The consult reservation gate: mounted on `/api` before the proxy, it
  * rejects turn-starting POSTs for a session an active consult reservation
- * holds. Fails open — a gate failure must never break the proxy — and only
- * ever handles the exact prompt/command routes.
+ * holds (prompt/command/message/shell routes). Fails open — a gate failure
+ * must never break the proxy.
  */
 export const createConsultReservationGate = (deps = {}) => {
   const hasActiveConsultReservation = deps.hasActiveConsultReservation ?? (() => false);

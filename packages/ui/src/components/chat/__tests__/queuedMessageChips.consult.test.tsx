@@ -65,11 +65,62 @@ describe('queued message chips consult affordance', () => {
     createdAt: 2,
   };
 
+  const recoverableConsultMessage: QueuedMessage = {
+    ...consultMessage,
+    id: 'consult-recoverable-1',
+    recoverable: true,
+  };
+
+  const findResumeButton = (): HTMLButtonElement | undefined => (
+    // Like Edit/Send, the Resume chip button is labeled by its visible text.
+    [...host.querySelectorAll('button')].find((button) => (button.textContent ?? '').includes('Resume consultation'))
+  );
+
+  test('a recoverable consult chip offers Resume and calls onResumeConsult with the item', async () => {
+    const resumeCalls: QueuedMessage[] = [];
+    await renderChips([recoverableConsultMessage], {
+      onResumeConsult: (message) => { resumeCalls.push(message); },
+    });
+
+    const resumeButton = findResumeButton();
+    expect(resumeButton?.textContent).toContain('Resume consultation');
+    expect(resumeButton?.getAttribute('type')).toBe('button');
+    expect(buttonLabels().some((label) => label.includes('edit'))).toBe(false);
+    expect(buttonLabels().some((label) => label.includes('send'))).toBe(false);
+
+    await act(async () => {
+      resumeButton?.click();
+    });
+    expect(resumeCalls).toEqual([recoverableConsultMessage]);
+  });
+
+  test('a non-recoverable consult chip renders no Resume', async () => {
+    await renderChips([consultMessage], {
+      onResumeConsult: () => undefined,
+    });
+    expect(findResumeButton()).toBeUndefined();
+  });
+
+  test('a normal chip renders no Resume even when the handler is provided', async () => {
+    await renderChips([normalMessage], {
+      onResumeConsult: () => undefined,
+    });
+    expect(findResumeButton()).toBeUndefined();
+  });
+
+  test('a recoverable consult chip renders no Resume without a handler', async () => {
+    await renderChips([recoverableConsultMessage]);
+    expect(findResumeButton()).toBeUndefined();
+  });
+
   const buttonLabels = (): string[] => (
     [...host.querySelectorAll('button')].map((button) => button.textContent ?? '')
   );
 
-  const renderChips = async (messages: QueuedMessage[]) => {
+  const renderChips = async (
+    messages: QueuedMessage[],
+    handlers: { onResumeConsult?: (message: QueuedMessage) => void } = {},
+  ) => {
     const { QueuedMessageChips } = await import('../QueuedMessageChips');
     const { I18nProvider } = await import('@/lib/i18n/context');
     const { createMessageQueueTarget, getMessageQueueKey, useMessageQueueStore } = await import('@/stores/messageQueueStore');
@@ -90,6 +141,7 @@ describe('queued message chips consult affordance', () => {
             target={target}
             onEditMessage={() => undefined}
             onSendMessage={() => undefined}
+            onResumeConsult={handlers.onResumeConsult}
           />
         </I18nProvider>,
       );

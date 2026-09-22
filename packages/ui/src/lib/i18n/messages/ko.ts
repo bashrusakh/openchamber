@@ -3476,6 +3476,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.toast.failed': '자문에 실패했습니다',
   'chat.consult.toast.refused': '자문이 시작되지 않았습니다: 일부 어드바이저를 사용할 수 없습니다',
   'chat.consult.toast.deliveredRaw': '메시지는 더 이상 대기하지 않으며 자문이 진행되지 않았습니다. 이미 전송되었을 수 있으니 세션을 확인하세요.',
+  'chat.consult.queue.resume': '자문 재개',
   'chat.consult.rejection.providerUnknown': '어드바이저 {index}: 공급자 "{provider}"을(를) 사용할 수 없습니다',
   'chat.consult.rejection.modelUnknown': '어드바이저 {index}: 모델 "{model}"을(를) 사용할 수 없습니다',
   'chat.consult.rejection.variantUnknown': '어드바이저 {index}: "{model}"에 대해 변형 "{variant}"을(를) 사용할 수 없습니다',

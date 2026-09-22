@@ -284,6 +284,19 @@ describe('createConsultReservationGate (WP-3)', () => {
     }
   });
 
+  it('covers the shell route like other turn-starting routes', () => {
+    const gate = createConsultReservationGate({ hasActiveConsultReservation: (id) => id === 'ses_reserved' });
+    const blocked = runGate(gate, { method: 'POST', path: '/session/ses_reserved/shell' });
+    expect(blocked.status).toBe(409);
+    expect(blocked.body).toEqual({
+      error: 'consult-reservation',
+      message: 'A Consult Models run holds this session; wait for it to finish before sending.',
+    });
+    expect(blocked.next).toBe(false);
+    expect(runGate(gate, { method: 'GET', path: '/session/ses_reserved/shell' }).next).toBe(true);
+    expect(runGate(gate, { method: 'POST', path: '/session/ses_open/shell' }).next).toBe(true);
+  });
+
   it('decodes the session id before asking the runtime', () => {
     const seen = [];
     const gate = createConsultReservationGate({

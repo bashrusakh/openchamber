@@ -3477,6 +3477,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.toast.failed': '咨询失败',
   'chat.consult.toast.refused': '咨询未启动：部分顾问不可用',
   'chat.consult.toast.deliveredRaw': '消息已不再等待，未经咨询。可能已经发送，请检查会话。',
+  'chat.consult.queue.resume': '恢复咨询',
   'chat.consult.rejection.providerUnknown': '顾问 {index}：提供方“{provider}”不可用',
   'chat.consult.rejection.modelUnknown': '顾问 {index}：模型“{model}”不可用',
   'chat.consult.rejection.variantUnknown': '顾问 {index}：模型“{model}”不支持变体“{variant}”',

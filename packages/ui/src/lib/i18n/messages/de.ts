@@ -3474,6 +3474,7 @@ export const dict = {
   'chat.consult.toast.failed': 'Die Befragung ist fehlgeschlagen',
   'chat.consult.toast.refused': 'Die Befragung wurde nicht gestartet: Einige Berater sind nicht verfügbar',
   'chat.consult.toast.deliveredRaw': 'Die Nachricht wartet nicht mehr und wurde nicht befragt. Sie wurde möglicherweise bereits gesendet – prüfe die Sitzung.',
+  'chat.consult.queue.resume': 'Konsultation fortsetzen',
   'chat.consult.rejection.providerUnknown': 'Berater {index}: Anbieter „{provider}“ ist nicht verfügbar',
   'chat.consult.rejection.modelUnknown': 'Berater {index}: Modell „{model}“ ist nicht verfügbar',
   'chat.consult.rejection.variantUnknown': 'Berater {index}: Variante „{variant}“ ist für „{model}“ nicht verfügbar',

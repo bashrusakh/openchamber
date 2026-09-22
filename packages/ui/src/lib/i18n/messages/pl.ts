@@ -3493,6 +3493,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.toast.failed': 'Konsultacja nie powiodła się',
   'chat.consult.toast.refused': 'Konsultacja nie została rozpoczęta: niektórzy doradcy są niedostępni',
   'chat.consult.toast.deliveredRaw': 'Wiadomość nie czeka już w kolejce i nie została skonsultowana. Mogła już zostać wysłana, więc sprawdź sesję.',
+  'chat.consult.queue.resume': 'Wznów konsultację',
   'chat.consult.rejection.providerUnknown': 'Doradca {index}: dostawca „{provider}” jest niedostępny',
   'chat.consult.rejection.modelUnknown': 'Doradca {index}: model „{model}” jest niedostępny',
   'chat.consult.rejection.variantUnknown': 'Doradca {index}: wariant „{variant}” jest niedostępny dla „{model}”',

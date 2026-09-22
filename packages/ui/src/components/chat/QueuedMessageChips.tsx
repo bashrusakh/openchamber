@@ -31,9 +31,11 @@ interface QueuedMessageChipProps {
     target: MessageQueueTarget;
     onEdit: (message: QueuedMessage) => void;
     onSend: (message: QueuedMessage) => void;
+    /** Offered only for a stranded (recoverable) consult item; re-claims and resumes it. */
+    onResumeConsult?: (message: QueuedMessage) => void;
 }
 
-const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessageChipProps) => {
+const QueuedMessageChip = memo(({ message, target, onEdit, onSend, onResumeConsult }: QueuedMessageChipProps) => {
     const { t } = useI18n();
     const removeFromQueue = useMessageQueueStore((state) => state.removeFromQueue);
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: message.id });
@@ -45,6 +47,10 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessa
     // Edit (take) and Send (raw delivery) cannot work for it, so the chip
     // offers the consult badge and keeps manual removal one click away.
     const isConsult = message.kind === 'consult';
+    // A consult item whose claim lapsed (the submitting client died) is still
+    // safe to re-claim: the server kept it unclaimed and never delivers it
+    // raw. Resume re-claims it and runs the consultation fresh.
+    const isRecoverableConsult = isConsult && message.recoverable === true && onResumeConsult !== undefined;
 
     return (
         <div
@@ -96,6 +102,17 @@ const QueuedMessageChip = memo(({ message, target, onEdit, onSend }: QueuedMessa
                     </Button>
                 </>
             )}
+            {isRecoverableConsult && (
+                <Button
+                    type="button"
+                    variant="secondary"
+                    size="xs"
+                    onClick={() => onResumeConsult(message)}
+                >
+                    <Icon name="team" className="h-3 w-3" aria-hidden="true" />
+                    {t('chat.consult.queue.resume')}
+                </Button>
+            )}
             <button
                 type="button"
                 onClick={() => removeFromQueue(target, message.id)}
@@ -116,11 +133,13 @@ interface QueuedMessageChipsProps {
     /** The message was taken from the queue in full; the composer restores it. */
     onEditMessage: (message: QueuedMessage) => void;
     onSendMessage: (messageId: string) => void;
+    /** Re-claims a stranded (recoverable) consult item; absent hides the affordance. */
+    onResumeConsult?: (message: QueuedMessage) => void;
 }
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
 
-export const QueuedMessageChips = memo(({ target, hidden = false, onEditMessage, onSendMessage }: QueuedMessageChipsProps) => {
+export const QueuedMessageChips = memo(({ target, hidden = false, onEditMessage, onSendMessage, onResumeConsult }: QueuedMessageChipsProps) => {
     const { t } = useI18n();
     // One shared preference, so the list stays open (or closed) across
     // session switches instead of resetting with the queue key.
@@ -220,6 +239,7 @@ export const QueuedMessageChips = memo(({ target, hidden = false, onEditMessage,
                                     target={target}
                                     onEdit={handleEdit}
                                     onSend={handleSend}
+                                    onResumeConsult={onResumeConsult}
                                 />
                             ))}
                         </div>

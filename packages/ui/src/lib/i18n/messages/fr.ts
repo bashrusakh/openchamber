@@ -3474,6 +3474,7 @@ export const dict = {
   'chat.consult.toast.failed': 'La consultation a échoué',
   'chat.consult.toast.refused': "La consultation n'a pas démarré : certains conseillers ne sont pas disponibles",
   'chat.consult.toast.deliveredRaw': "Le message n'est plus en attente et n'a pas été consulté. Il a peut-être déjà été envoyé ; vérifiez la session.",
+  'chat.consult.queue.resume': 'Reprendre la consultation',
   'chat.consult.rejection.providerUnknown': "Conseiller {index} : le fournisseur « {provider} » n'est pas disponible",
   'chat.consult.rejection.modelUnknown': "Conseiller {index} : le modèle « {model} » n'est pas disponible",
   'chat.consult.rejection.variantUnknown': "Conseiller {index} : la variante « {variant} » n'est pas disponible pour « {model} »",

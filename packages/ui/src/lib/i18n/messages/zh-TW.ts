@@ -3476,6 +3476,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.consult.toast.failed': '諮詢失敗',
   'chat.consult.toast.refused': '諮詢未啟動：部分顧問無法使用',
   'chat.consult.toast.deliveredRaw': '訊息已不再等待，未經諮詢。可能已經送出，請檢查工作階段。',
+  'chat.consult.queue.resume': '恢復諮詢',
   'chat.consult.rejection.providerUnknown': '顧問 {index}：供應商「{provider}」無法使用',
   'chat.consult.rejection.modelUnknown': '顧問 {index}：模型「{model}」無法使用',
   'chat.consult.rejection.variantUnknown': '顧問 {index}：模型「{model}」不支援變體「{variant}」',

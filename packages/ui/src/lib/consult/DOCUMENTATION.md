@@ -160,31 +160,48 @@ acting turn.
    failed read-back request fails closed instead of sending unverified.
 6. A `forkSession` rejection is ambiguous: the server may have created the
    clone before the response was lost. The run never tries to recover, hide,
-   mark, or delete such a clone. The only available signal — "the session id
-   appeared after a listing" — is not positive identification (it could be the
-   user's session, another client's session, or another run's fork), and
-   mutating the wrong session is worse than leaving the clone; the advisor is
-   reported failed with the fork error instead. Accepted bound (v1): a fork
-   whose creation response is lost may remain as a visible, unmarked session
-   that the user can delete manually. The marker-based GC never collects it,
-   so nothing else touches it either.
+   mark, or delete such a clone. This is an intentional architectural
+   boundary, not an accepted limitation: reconciliation without guessing is
+   impossible. The SDK fork contract (`SessionForkData`) carries only
+   `messageID` — no idempotency key and no client-supplied metadata; a clone
+   carries no `parentID` and copies the parent's title and metadata
+   wholesale; the sessions list has no created-after filter (only a
+   `time.updated` cursor); and the consult marker is written only after
+   `forkSession` resolves, so in exactly the lost-response case it cannot
+   exist yet. Every remaining correlation signal (timing, title, transcript
+   prefix) is shared with legitimate user sessions and with parallel sibling
+   forks, so "a session id that appeared after a listing" is not positive
+   identification, and mutating the wrong session is worse than leaving the
+   clone; the advisor is reported failed with the fork error instead.
+   Intentional bound (v1): a fork whose creation response is lost may remain
+   as a visible, unmarked session that the user can delete manually. The GC
+   already deletes MARKED orphans (a session whose marker lost its `kind` or
+   `consultRunID` is never a deletion candidate), so an unmarked clone is
+   invisible to the sweep and stays visible until manual deletion. A future
+   fix requires an upstream fork contract change: an idempotency key or
+   client-supplied metadata on fork creation.
 7. The advisor prompt is sent headlessly through `opencodeClient.sendMessage`
    with the exact provider, model, variant, and agent, the parent message text,
-   its attachments, the same captured context parts the acting turn receives
-   (instructions as synthetic parts, context parts with their metadata, and
-   synthetic parts — `queuedContextToParts(takenItem.context)` computed by the
-   submission), and `CONSULT_ADVISOR_SYSTEM_PROMPT` as `system`. The send
-   bypasses `useSessionUIStore.sendMessage` and `routeMessage`, so no session
-   knowledge is resolved for advisor sessions and the parent's composer,
-   selection stores, and queue state are never touched.
+    its attachments, the same captured context parts the acting turn receives
+    (instructions as synthetic parts, context parts with their metadata, and
+    synthetic parts — `queuedContextToParts(takenItem.context)` computed by the
+    submission, behind the standing-knowledge prefix part), and
+    `CONSULT_ADVISOR_SYSTEM_PROMPT` as `system`. The send bypasses
+    `useSessionUIStore.sendMessage` and `routeMessage`, so the parent's
+    composer, selection stores, and queue state are never touched.
 
    Advisor-vs-acting input differences, recorded explicitly:
 
    - context parts and attachments: identical to the acting turn (REQ-4);
-   - standing session knowledge: the acting turn appends the server-resolved
-     pending knowledge (`sessionKnowledgeRuntime.resolvePendingForSession`);
-     advisors do not see it. This is an **open difference to be decided**, not
-     a silent bound;
+   - standing session knowledge: the submission resolves the parent's pending
+     knowledge once per run (the `fetchSessionKnowledge` submission dep) and
+     prepends it to the advisors' parts as one synthetic
+     `systemContext: 'session-knowledge'` part, before the captured context —
+     the same prefix a UI send prepends, so advisors see the same standing
+     context the acting turn sees. This is read-only parity: the advisor flow
+     never records delivery (`recordDelivered` stays with the acting
+     dispatch, which resolves the pending knowledge again server-side);
+     a failed fetch is fail-open — advisors are sent without the block;
    - command/skill expansion: unreachable for consult — slash-command composer
      input is refused before a consult starts, so advisors never need the
      command-route template expansion the acting dispatch may perform.
@@ -327,6 +344,20 @@ that queue until a live run resolves it through its own dispatch route or the
 user removes it manually. The submission detects the item leaving the queue
 without this run (`delivered-raw`) instead of reporting a cancel that would
 restore the composer and duplicate the send.
+
+**Resume (#3743).** A stranded consult item the server marked `recoverable`
+(reservation lapsed with the submitting client) is re-claimable from the queue
+chip's Resume affordance: `resumeConsultItem(target, item, runOptions)` claims
+the existing item (never enqueueing, never sending raw) and re-runs the
+consultation through the same claim → fan-out → payload → dispatch route as a
+new submission, with fresh advisor options from the caller.
+
+**Reconnect resolution (#3743).** On every queue hydration the store scans
+dangling consult items (`claimed` or `recoverable`) and posts one outcome
+check per item to the server's never-prompting resolve route, guarded
+in-flight per item; `dispatched` removes the chip through the server's own
+broadcast, `unresolved` keeps it (Resume when `recoverable`), and a failed
+check is swallowed so hydration never breaks.
 
 **VS Code.** `setServerHold` is a no-op where the queue is not server-owned,
 and the local `useQueuedMessageAutoSend` hook can deliver the item before the
