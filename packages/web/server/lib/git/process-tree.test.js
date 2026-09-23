@@ -49,9 +49,11 @@ describe('Git process-tree ownership', () => {
     expect(descendantIsAlive()).toBe(false);
   });
 
-  it('waits for Windows taskkill and the owned root to close', async () => {
+  it('preserves normal Windows taskkill cleanup while the owned root is live', async () => {
     const child = new EventEmitter();
     child.pid = 1234;
+    child.exitCode = null;
+    child.signalCode = null;
     child.kill = vi.fn();
     const taskkill = new EventEmitter();
     const spawn = vi.fn(() => taskkill);
@@ -79,6 +81,29 @@ describe('Git process-tree ownership', () => {
     child.emit('close', 137, null);
     await termination;
     expect(settled).toBe(true);
+  });
+
+  it('does not target an already-closed Windows PID that may have been reused', async () => {
+    const child = new EventEmitter();
+    child.pid = 1234;
+    child.exitCode = 0;
+    child.signalCode = null;
+    child.kill = vi.fn();
+    const spawn = vi.fn();
+
+    await expect(killProcessTree(child, {
+      spawn,
+      platform: 'win32',
+      terminationTimeoutMs: 5,
+    })).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+      rootClosed: true,
+      cleanupReconciliation: undefined,
+    });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(child.kill).not.toHaveBeenCalled();
   });
 
   it('waits for an owned POSIX child to close before resolving', async () => {
