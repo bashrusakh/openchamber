@@ -112,7 +112,7 @@ describe('VS Code Git process runtime executable selection', () => {
     expect(childProcess.kill).toHaveBeenCalledTimes(1);
   });
 
-  it('runs Windows tree cleanup even after the root has already closed', async () => {
+  it('does not taskkill a Windows PID after its owned root has closed', async () => {
     const originalPlatform = process.platform;
     Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
     try {
@@ -124,18 +124,16 @@ describe('VS Code Git process runtime executable selection', () => {
       childProcess.signalCode = null;
       childProcess.kill = mock();
       spawn.mockImplementationOnce(() => childProcess);
-      execFile.mockImplementationOnce((_command, _args, _options, callback) => callback(null));
 
       const owned = spawnOwnedProcess('git', ['status'], { cwd: '/repo', env: process.env });
       childProcess.emit('close', 0);
 
-      await expect(owned.terminate()).resolves.toBeUndefined();
-      expect(execFile).toHaveBeenCalledWith(
-        'taskkill',
-        ['/PID', '1233', '/T', '/F'],
-        expect.objectContaining({ timeout: 5_000, windowsHide: true }),
-        expect.any(Function),
-      );
+      await expect(owned.terminate()).rejects.toMatchObject({
+        code: 'ERR_PROCESS_TREE_TERMINATION',
+        cleanupBlocked: true,
+        rootClosed: true,
+      });
+      expect(execFile).not.toHaveBeenCalled();
     } finally {
       Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
     }
@@ -235,7 +233,7 @@ describe('VS Code Git process runtime executable selection', () => {
     }
   });
 
-  it('retains deactivation ownership until late Windows tree confirmation', async () => {
+  it('does not target a reused Windows PID and keeps the runtime blocked', async () => {
     const originalPlatform = process.platform;
     Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
     try {
@@ -248,15 +246,10 @@ describe('VS Code Git process runtime executable selection', () => {
       childProcess.kill = mock();
       spawn.mockImplementationOnce(() => childProcess);
       let finishTaskkill;
-      let finishConfirmation;
       let taskkillCalls = 0;
       execFile.mockImplementation((_command, _args, _options, callback) => {
         taskkillCalls += 1;
-        if (taskkillCalls === 1) {
-          finishTaskkill = () => callback(new Error('taskkill failed during deactivation'));
-        } else {
-          finishConfirmation = () => callback(null);
-        }
+        finishTaskkill = () => callback(new Error('taskkill failed during deactivation'));
       });
 
       const controller = new AbortController();
@@ -283,29 +276,23 @@ describe('VS Code Git process runtime executable selection', () => {
         stderr: expect.stringMatching(/Failed to terminate.*descendant termination was not confirmed/),
         cleanupBlocked: true,
         descendantsTerminated: false,
-       });
-       expect(childProcess.kill).toHaveBeenCalledTimes(1);
-       await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
-       const blockedSpawnCount = spawnCalls.length;
-       await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({
-         exitCode: 1,
-         cleanupBlocked: true,
-       });
-       expect(spawnCalls).toHaveLength(blockedSpawnCount);
-       for (let attempt = 0; attempt < 5 && !finishConfirmation; attempt += 1) {
-         await Promise.resolve();
-       }
-       expect(taskkillCalls).toBe(2);
-       finishConfirmation();
-       await expect(result.cleanupReconciliation?.promise).resolves.toBe(true);
-       await expect(runtime.resetGitProcesses()).resolves.toBeUndefined();
-       await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({ exitCode: 0 });
-     } finally {
-       Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
-     }
-   });
+      });
+      expect(result.cleanupReconciliation).toBeUndefined();
+      expect(childProcess.kill).toHaveBeenCalledTimes(1);
+      await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
+      const blockedSpawnCount = spawnCalls.length;
+      await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({
+        exitCode: 1,
+        cleanupBlocked: true,
+      });
+      expect(spawnCalls).toHaveLength(blockedSpawnCount);
+      expect(taskkillCalls).toBe(1);
+    } finally {
+      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+    }
+  });
 
-  it('retains ownership when taskkill succeeds but the Windows root closes late', async () => {
+  it('reactivates after the original Windows tree cleanup confirms root close', async () => {
     const originalPlatform = process.platform;
     Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
     try {
@@ -318,14 +305,9 @@ describe('VS Code Git process runtime executable selection', () => {
       childProcess.kill = mock();
       spawn.mockImplementationOnce(() => childProcess);
       let taskkillCalls = 0;
-      let finishConfirmation;
       execFile.mockImplementation((_command, _args, _options, callback) => {
         taskkillCalls += 1;
-        if (taskkillCalls === 1) {
-          callback(null);
-        } else {
-          finishConfirmation = () => callback(null);
-        }
+        callback(null);
       });
 
       const controller = new AbortController();
@@ -351,60 +333,10 @@ describe('VS Code Git process runtime executable selection', () => {
       });
 
       childProcess.emit('close', null);
-      for (let attempt = 0; attempt < 5 && !finishConfirmation; attempt += 1) {
-        await Promise.resolve();
-      }
-      expect(taskkillCalls).toBe(2);
-      finishConfirmation();
       await expect(result.cleanupReconciliation.promise).resolves.toBe(true);
+      expect(taskkillCalls).toBe(1);
       await expect(runtime.resetGitProcesses()).resolves.toBeUndefined();
       await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({ exitCode: 0 });
-    } finally {
-      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
-    }
-  });
-
-  it('retains ownership when late Windows tree confirmation fails', async () => {
-    const originalPlatform = process.platform;
-    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
-    try {
-      const childProcess = new EventEmitter();
-      childProcess.stdout = new EventEmitter();
-      childProcess.stderr = new EventEmitter();
-      childProcess.pid = 1237;
-      childProcess.exitCode = null;
-      childProcess.signalCode = null;
-      childProcess.kill = mock();
-      spawn.mockImplementationOnce(() => childProcess);
-      let taskkillCalls = 0;
-      execFile.mockImplementation((_command, _args, _options, callback) => {
-        taskkillCalls += 1;
-        callback(new Error(taskkillCalls === 1 ? 'taskkill failed' : 'descendant confirmation failed'));
-      });
-
-      const controller = new AbortController();
-      const runtime = createGitProcessRuntime();
-      const pending = runtime.execGit(['status'], '/repo', { signal: controller.signal });
-      for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
-        await Promise.resolve();
-      }
-      controller.abort();
-      childProcess.emit('close', null);
-
-      const result = await pending;
-      await Promise.resolve();
-      expect(result.cleanupReconciliation).toBeDefined();
-      expect(taskkillCalls).toBe(2);
-      expect(childProcess.kill).toHaveBeenCalledTimes(1);
-      await expect(runtime.stopGitProcesses()).resolves.toBeUndefined();
-      expect(childProcess.kill).toHaveBeenCalledTimes(1);
-      await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
-      const blockedSpawnCount = spawnCalls.length;
-      await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({
-        exitCode: 1,
-        cleanupBlocked: true,
-      });
-      expect(spawnCalls).toHaveLength(blockedSpawnCount);
     } finally {
       Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
     }
