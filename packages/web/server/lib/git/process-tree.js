@@ -23,22 +23,27 @@ const killRoot = (child) => {
 const WINDOWS_TERMINATION_TIMEOUT_MS = 5_000;
 const POSIX_TERMINATION_POLL_MS = 10;
 
+const hasChildClosed = (child) => child?.exitCode !== null && child.exitCode !== undefined
+  || child?.signalCode !== null && child.signalCode !== undefined;
+
 const observeChildClose = (child) => {
-  if (!child?.pid || child.exitCode !== null && child.exitCode !== undefined
-    || child.signalCode !== null && child.signalCode !== undefined) {
+  if (!child?.pid || hasChildClosed(child)) {
     return {
       promise: Promise.resolve(true),
       cancel: () => {},
+      isClosed: () => true,
     };
   }
   if (!child.once) {
     return {
       promise: Promise.resolve(false),
       cancel: () => {},
+      isClosed: () => false,
     };
   }
 
   let settled = false;
+  let closed = false;
   let resolveClose;
   const promise = new Promise((resolve) => {
     resolveClose = resolve;
@@ -46,6 +51,7 @@ const observeChildClose = (child) => {
   const onClose = () => {
     if (settled) return;
     settled = true;
+    closed = true;
     child.removeListener?.('close', onClose);
     resolveClose(true);
   };
@@ -59,6 +65,7 @@ const observeChildClose = (child) => {
       child.removeListener?.('close', onClose);
       resolveClose(false);
     },
+    isClosed: () => closed,
   };
 };
 
@@ -139,8 +146,9 @@ const processTreeTerminationError = (
 );
 
 const failWindowsTermination = async (child, pid, cause, timeoutMs, observation = observeChildClose(child)) => {
-  const rootError = killRoot(child);
-  const rootClosed = await confirmObservation(observation, timeoutMs, true);
+  const rootWasClosed = observation.isClosed();
+  const rootError = rootWasClosed ? null : killRoot(child);
+  const rootClosed = rootWasClosed || await confirmObservation(observation, timeoutMs, true);
   throw processTreeTerminationError(
     pid,
     cause,
@@ -216,6 +224,19 @@ export const killProcessTree = (
 
   if (platform === 'win32') {
     const observation = observeChildClose(child);
+    // taskkill only identifies a process by PID. Once the owned root has
+    // closed, that PID can belong to an unrelated process, and the root close
+    // is not proof that its descendants were terminated. Keep cleanup blocked
+    // so the owning lease is retained rather than retrying against that PID.
+    if (observation.isClosed()) {
+      return Promise.reject(processTreeTerminationError(
+        child.pid,
+        new Error('Owned Windows process closed before tree termination could start'),
+        null,
+        true,
+        'win32',
+      ));
+    }
     let taskkill;
     try {
       taskkill = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
