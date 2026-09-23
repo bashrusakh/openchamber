@@ -3,6 +3,7 @@ import { resolveByteRange } from './byte-range.js';
 import nodeFsPromises from 'node:fs/promises';
 import nodePath from 'node:path';
 import { createGitIgnoreReader } from './gitignore.js';
+import { canRespondToRequest, createRequestAbortSignal } from '../request-abort.js';
 import {
   isProcessTreeCleanupBlocked,
   killProcessTree,
@@ -94,28 +95,6 @@ const createGitCheckIgnoreTimeoutMs = () => {
   const raw = Number(process.env.OPENCHAMBER_GIT_CHECK_IGNORE_TIMEOUT_MS);
   if (Number.isFinite(raw) && raw >= 0) return raw;
   return 2500;
-};
-
-const createRequestAbortSignal = (req, res) => {
-  const controller = new AbortController();
-  const abort = () => {
-    if (!res?.writableEnded) {
-      controller.abort();
-    }
-  };
-  req?.once?.('aborted', abort);
-  res?.once?.('close', abort);
-  if (req?.aborted) {
-    controller.abort();
-  }
-
-  return {
-    signal: controller.signal,
-    cleanup: () => {
-      req?.off?.('aborted', abort);
-      res?.off?.('close', abort);
-    },
-  };
 };
 
 const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs, platform }) => new Promise((resolve, reject) => {
@@ -907,15 +886,19 @@ export const registerFsRoutes = (app, dependencies) => {
   });
 
   app.post('/api/fs/clone', async (req, res) => {
+    const requestAbort = createRequestAbortSignal(req, res);
+    const respond = (send) => (
+      canRespondToRequest(res, requestAbort) ? send() : undefined
+    );
     try {
       const { remoteUrl, destinationPath, gitIdentityId } = req.body ?? {};
       const remote = typeof remoteUrl === 'string' ? remoteUrl.trim() : '';
       const destination = typeof destinationPath === 'string' ? destinationPath.trim() : '';
       if (!remote) {
-        return res.status(400).json({ error: 'Repository URL is required' });
+        return respond(() => res.status(400).json({ error: 'Repository URL is required' }));
       }
       if (!destination) {
-        return res.status(400).json({ error: 'Destination path is required' });
+        return respond(() => res.status(400).json({ error: 'Destination path is required' }));
       }
 
       let resolvedDestination = path.resolve(normalizeDirectoryPath(destination));
@@ -926,7 +909,7 @@ export const registerFsRoutes = (app, dependencies) => {
       if (cloneIntoDestinationDirectory) {
         const inferredName = deriveCloneDirectoryName(remote);
         if (!inferredName) {
-          return res.status(400).json({ error: 'Could not infer repository directory name from URL' });
+          return respond(() => res.status(400).json({ error: 'Could not infer repository directory name from URL' }));
         }
         parentPath = resolvedDestination;
         directoryName = inferredName;
@@ -937,7 +920,7 @@ export const registerFsRoutes = (app, dependencies) => {
           if (stat.isDirectory()) {
             const inferredName = deriveCloneDirectoryName(remote);
             if (!inferredName) {
-              return res.status(400).json({ error: 'Could not infer repository directory name from URL' });
+              return respond(() => res.status(400).json({ error: 'Could not infer repository directory name from URL' }));
             }
             parentPath = resolvedDestination;
             directoryName = inferredName;
@@ -950,7 +933,7 @@ export const registerFsRoutes = (app, dependencies) => {
         }
       }
       if (!directoryName || directoryName === '.' || directoryName === '..') {
-        return res.status(400).json({ error: 'Destination path must include a directory name' });
+        return respond(() => res.status(400).json({ error: 'Destination path must include a directory name' }));
       }
 
       const identity = await resolveCloneGitIdentityDependency(gitIdentityId);
@@ -961,14 +944,13 @@ export const registerFsRoutes = (app, dependencies) => {
         gitArgs.unshift('-c');
       }
 
-      const requestAbort = createRequestAbortSignal(req, res);
       let destinationOwned = false;
       const executeClone = async (lease) => {
         try {
           await fsPromises.mkdir(parentPath, { recursive: true });
           try {
             await fsPromises.access(resolvedDestination);
-            return res.status(409).json({ error: 'Destination path already exists' });
+            return respond(() => res.status(409).json({ error: 'Destination path already exists' }));
           } catch (error) {
             if (!error || error.code !== 'ENOENT') {
               throw error;
@@ -980,7 +962,7 @@ export const registerFsRoutes = (app, dependencies) => {
             destinationOwned = true;
           } catch (error) {
             if (error?.code === 'EEXIST') {
-              return res.status(409).json({ error: 'Destination path already exists' });
+              return respond(() => res.status(409).json({ error: 'Destination path already exists' }));
             }
             throw error;
           }
@@ -1025,11 +1007,13 @@ export const registerFsRoutes = (app, dependencies) => {
                 await setLocalIdentity(resolvedDestination, identity);
               }
             } catch (error) {
-              console.warn('Failed to apply git identity after clone:', error);
+              if (canRespondToRequest(res, requestAbort)) {
+                console.warn('Failed to apply git identity after clone:', error);
+              }
             }
           }
 
-          return res.json({ success: true, path: resolvedDestination, output });
+          return respond(() => res.json({ success: true, path: resolvedDestination, output }));
         } catch (error) {
           try {
             if (destinationOwned) {
@@ -1044,24 +1028,23 @@ export const registerFsRoutes = (app, dependencies) => {
         }
       };
 
-      try {
-        if (gitExecutionService?.coordinator?.runClone) {
-          await gitExecutionService.coordinator.runClone({
-            destination: resolvedDestination,
-            label: 'fs/clone',
-            signal: requestAbort.signal,
-            queueTimeoutMs: commandTimeoutMs,
-          }, executeClone);
-        } else {
-          await executeClone({ releaseNetwork: () => {} });
-        }
-      } finally {
-        requestAbort.cleanup();
+      if (gitExecutionService?.coordinator?.runClone) {
+        await gitExecutionService.coordinator.runClone({
+          destination: resolvedDestination,
+          label: 'fs/clone',
+          signal: requestAbort.signal,
+          queueTimeoutMs: commandTimeoutMs,
+        }, executeClone);
+      } else {
+        await executeClone({ releaseNetwork: () => {} });
       }
       return undefined;
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return undefined;
       console.error('Failed to clone repository:', error);
       return res.status(500).json({ error: error.message || 'Failed to clone repository' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 

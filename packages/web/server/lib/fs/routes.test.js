@@ -455,7 +455,8 @@ describe('fs clone', () => {
     expect(alias.res.body).toEqual({ error: 'Destination path already exists' });
   });
 
-  it('cancels the Git process and removes a partial destination', async () => {
+  it('cancels the Git process, cleans its destination, and does not respond after client abort', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const removed = [];
     const fsPromises = createCloneFs({ onClone: (_event, targetPath) => removed.push(targetPath) });
     const deferred = createDeferredCloneSpawn();
@@ -470,33 +471,37 @@ describe('fs clone', () => {
       gitExecutionService: { coordinator },
       resolveCloneGitIdentity: async () => null,
     });
-    const request = beginClone(handler, cloneBody());
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const child = deferred.pending[0].child;
+    try {
+      const request = beginClone(handler, cloneBody());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const child = deferred.pending[0].child;
 
-    request.req.emit('aborted');
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(fsPromises.rm).not.toHaveBeenCalled();
-    expect(request.res.body).toBeNull();
-    expect(coordinator.getStats()).toMatchObject({
-      active: 1,
-      activeNetwork: 1,
-      clonePending: 0,
-      cloneDestinations: 1,
-    });
-    deferred.close(0, 137);
-    await request.promise;
+      request.req.emit('aborted');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fsPromises.rm).not.toHaveBeenCalled();
+      expect(request.res.body).toBeNull();
+      expect(coordinator.getStats()).toMatchObject({
+        active: 1,
+        activeNetwork: 1,
+        clonePending: 0,
+        cloneDestinations: 1,
+      });
+      deferred.close(0, 137);
+      await request.promise;
 
-    expect(request.res.statusCode).toBe(500);
-    expect(request.res.body).toEqual({ error: 'Git clone was cancelled' });
-    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
-    expect(removed).toEqual(['/tmp/repository']);
-    expect(coordinator.getStats()).toMatchObject({
-      active: 0,
-      activeNetwork: 0,
-      clonePending: 0,
-      cloneDestinations: 0,
-    });
+      expect(request.res.body).toBeNull();
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(removed).toEqual(['/tmp/repository']);
+      expect(coordinator.getStats()).toMatchObject({
+        active: 0,
+        activeNetwork: 0,
+        clonePending: 0,
+        cloneDestinations: 0,
+      });
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('waits for Windows taskkill to finish before cleaning up a cancelled clone', async () => {
@@ -580,8 +585,8 @@ describe('fs clone', () => {
       await vi.advanceTimersByTimeAsync(5_000);
       await request.promise;
 
-      expect(request.res.statusCode).toBe(500);
-      expect(request.res.body).toMatchObject({ error: expect.stringMatching(/descendant termination was not confirmed/) });
+      expect(request.res.body).toBeNull();
+      expect(errorSpy).not.toHaveBeenCalled();
       expect(fsPromises.rm).not.toHaveBeenCalled();
       expect(coordinator.getStats()).toMatchObject({
         active: 1,
@@ -597,6 +602,7 @@ describe('fs clone', () => {
 
   it('cancels clone descendants before removing the destination', { skip: process.platform === 'win32' }, async () => {
     const parent = await mkdtemp(path.join(tmpdir(), 'openchamber-clone-tree-'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const marker = path.join(parent, 'descendant.pid');
     const script = [
       "const fs = require('node:fs');",
@@ -619,7 +625,8 @@ describe('fs clone', () => {
       request.req.emit('aborted');
       await request.promise;
 
-      expect(request.res.body).toEqual({ error: 'Git clone was cancelled' });
+      expect(request.res.body).toBeNull();
+      expect(errorSpy).not.toHaveBeenCalled();
       for (let attempt = 0; attempt < 100; attempt += 1) {
         try {
           process.kill(descendantPid, 0);
@@ -631,6 +638,7 @@ describe('fs clone', () => {
       expect(() => process.kill(descendantPid, 0)).toThrow();
       await expect(nativeFs.stat(path.join(parent, 'repository'))).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
+      errorSpy.mockRestore();
       await rm(parent, { recursive: true, force: true });
     }
   });
@@ -2071,6 +2079,7 @@ describe('fs stat directory error handling', () => {
       await copyFile(new URL('./byte-range.js', import.meta.url), path.join(directory, 'fs/byte-range.js'));
       await copyFile(new URL('./gitignore.js', import.meta.url), path.join(directory, 'fs/gitignore.js'));
       await copyFile(new URL('../path-realpath-cache.js', import.meta.url), path.join(directory, 'path-realpath-cache.js'));
+      await copyFile(new URL('../request-abort.js', import.meta.url), path.join(directory, 'request-abort.js'));
       // The gitignore filter and its execution-scope/coordinator chain are
       // local modules; the packaged desktop ships them beside the routes file.
       await copyFile(new URL('../git/execution-scope.js', import.meta.url), path.join(directory, 'git/execution-scope.js'));

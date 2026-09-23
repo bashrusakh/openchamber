@@ -67,55 +67,14 @@ const observeProcessGroupGone = (pid: number, processKill: ProcessKill) => {
   return { promise, cancel: () => finish(false) };
 };
 
-const observeWindowsTreeCleanup = (pid: number, closed: Promise<ProcessExit>) => {
-  let settled = false;
-  let started = false;
-  let failed = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let resolveCleanup: (confirmed: boolean) => void = () => undefined;
-  const promise = new Promise<boolean>((resolve) => { resolveCleanup = resolve; });
-  const finish = (confirmed: boolean) => {
-    if (settled || failed) return;
-    settled = true;
-    if (timer) clearTimeout(timer);
-    resolveCleanup(confirmed);
-  };
-  const confirm = () => {
-    if (settled || started) return;
-    started = true;
-    try {
-      // A closed root does not prove that a Windows descendant is gone. A
-      // late tree termination attempt is the only confirmation available to
-      // this owner once the original taskkill request has failed.
-      execFile('taskkill', ['/PID', String(pid), '/T', '/F'], {
-        windowsHide: true,
-        timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
-      }, (error) => {
-        if (error) {
-          failed = true;
-          if (timer) clearTimeout(timer);
-          return;
-        }
-        finish(true);
-      });
-      timer = setTimeout(() => {
-        if (settled || failed) return;
-        failed = true;
-      }, WINDOWS_TASKKILL_TIMEOUT_MS);
-      timer.unref?.();
-    } catch {
-      failed = true;
-    }
-  };
-  void closed.then(confirm);
-  return {
-    promise,
-    retire: () => {
-      failed = true;
-      if (timer) clearTimeout(timer);
-    },
-  };
-};
+// A successful taskkill is bound to the still-owned root. If its close arrives
+// after the bounded wait, that original close promise can safely reconcile the
+// retained runtime state. Do not issue a new PID-only taskkill after close:
+// Windows may have reused the PID for an unrelated process by then.
+const observeWindowsOwnedTreeClose = (closed: Promise<ProcessExit>): CleanupReconciliation => ({
+  promise: closed.then(() => true),
+  retire: () => undefined,
+});
 
 // Each background command gets its own POSIX group. Never signal the extension
 // host's group, which can also contain unrelated extensions and editor work.
@@ -190,10 +149,17 @@ export function spawnOwnedProcess(
         return;
       }
       if (platform === 'win32') {
+        if (childClosed) {
+          throw terminationFailure(
+            child.pid,
+            new Error('Owned Windows process closed before tree termination could start'),
+            null,
+            true,
+          );
+        }
         let taskkillError: Error | null = null;
-        // Root close is not evidence that a Windows descendant tree is gone.
-        // Keep taskkill independent of the root lifecycle so a child that
-        // outlives Git is still terminated and its cleanup is awaited.
+        // Start taskkill only while this root is still owned. A later retry by
+        // PID could terminate an unrelated process after PID reuse.
         try {
           await new Promise<void>((resolve) => {
             execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
@@ -215,7 +181,6 @@ export function spawnOwnedProcess(
             rootError,
             rootClosed,
             undefined,
-            observeWindowsTreeCleanup(child.pid, closed),
           );
         }
       } else {
@@ -266,7 +231,7 @@ export function spawnOwnedProcess(
       }
       if (!await waitForClose(terminationTimeoutMs)) {
         const cleanupReconciliation = platform === 'win32'
-          ? observeWindowsTreeCleanup(child.pid, closed)
+          ? observeWindowsOwnedTreeClose(closed)
           : undefined;
         throw terminationFailure(
           child.pid,
