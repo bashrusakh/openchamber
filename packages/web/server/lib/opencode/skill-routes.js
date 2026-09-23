@@ -351,6 +351,7 @@ export const registerSkillRoutes = (app, dependencies) => {
   });
 
   app.get('/api/config/skills/catalog/source', async (req, res) => {
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const { directory, error } = await resolveSkillsDirectory(req);
       if (error) {
@@ -404,16 +405,19 @@ export const registerSkillRoutes = (app, dependencies) => {
 
       const scanResult = await scanWithCache(
         cacheKey,
-        () => scanSkillsRepository({
-         source: src.source,
-         subpath: src.defaultSubpath,
-         defaultSubpath: src.defaultSubpath,
+        ({ signal }) => scanSkillsRepository({
+          source: src.source,
+          subpath: src.defaultSubpath,
+          defaultSubpath: src.defaultSubpath,
           identity: resolveGitIdentity(src.gitIdentityId),
           resolveGitBinaryForSpawn,
           gitExecutionService,
+          signal,
         }),
-        { refresh },
+        { refresh, signal: requestAbort.signal },
       );
+
+      if (requestAbort.signal.aborted) return;
 
       if (!scanResult.ok) {
         return res.status(500).json({ ok: false, error: scanResult.error });
@@ -433,11 +437,14 @@ export const registerSkillRoutes = (app, dependencies) => {
 
       return res.json({ ok: true, items });
     } catch (error) {
+      if (requestAbort.signal.aborted) return;
       console.error('Failed to load catalog source:', error);
       return res.status(500).json({
         ok: false,
         error: { kind: 'unknown', message: error.message || 'Failed to load catalog source' },
       });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 

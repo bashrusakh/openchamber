@@ -153,7 +153,9 @@ after the last waiter leaves, and it keeps the queue and in-flight entries
 until the process closes. A discovery timeout follows the same cleanup path.
 Status requests use the same source lifecycle. The source aborts only after
 the last waiter leaves, and `statusInFlight` remains occupied until the source
-task closes. A source queued after a mutation is not reused before that
+task closes. The lower-level serial status refresh uses a separate source
+signal too, so one follower disconnect cannot abort the other followers sharing
+its follow-up read. A source queued after a mutation is not reused before that
 mutation runs.
 `execution-errors.js` contains the structured overload, cancellation, timeout,
 and re-entrancy errors returned by the coordinator.

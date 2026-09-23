@@ -5,6 +5,7 @@ import { findBranchPrCandidates, invalidateRepoPullsCache, isHistoricalPrOfCheck
 const listMock = mock(async () => ({ data: [] }));
 
 const isAncestorMock = mock(async () => false);
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const openPr = {
   number: 15,
@@ -78,6 +79,31 @@ describe('findBranchPrCandidates', () => {
 
     expect(open?.number).toBe(15);
     expect(historical).toBeNull();
+  });
+
+  test('coalesces concurrent signaled polling while letting one waiter cancel independently', async () => {
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    let release;
+    listMock.mockImplementation(async (options) => {
+      expect(options.state).toBe('open');
+      return new Promise((resolve) => { release = () => resolve({ data: [openPr] }); });
+    });
+
+    const first = call({ signal: firstController.signal });
+    await flush();
+    expect(listMock.mock.calls).toHaveLength(1);
+    const second = call({ signal: secondController.signal });
+    await flush();
+    expect(listMock.mock.calls).toHaveLength(1);
+
+    expect(listMock.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal);
+    firstController.abort('first PR poll disconnected');
+    await expect(first).rejects.toBe('first PR poll disconnected');
+
+    release();
+    await expect(second).resolves.toMatchObject({ open: { number: 15 }, historical: null });
+    expect(listMock).toHaveBeenCalledTimes(1);
   });
 
   test('returns the branch history when no open PR exists', async () => {
