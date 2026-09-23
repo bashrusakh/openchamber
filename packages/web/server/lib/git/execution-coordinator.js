@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import {
   copyGitProcessMetadata,
+  getGitProcessCleanupReconciliation,
   GitExecutionCancelledError,
   GitExecutionOverloadedError,
   GitExecutionQueueTimeoutError,
@@ -113,6 +114,8 @@ const hasUnconfirmedProcessCleanup = (value) => (
   || value?.error?.cleanupBlocked === true
   || (value?.code === 'ERR_PROCESS_TREE_TERMINATION' && value?.descendantsTerminated === false)
 );
+
+const cleanupReconciliationOf = (value) => getGitProcessCleanupReconciliation(value);
 
 const operationTargetsSameWorktree = (left, right) => (
   Boolean(left.targetWorktree) && Boolean(right.targetWorktree)
@@ -408,10 +411,35 @@ export class GitExecutionCoordinator {
     }
     if (hasUnconfirmedProcessCleanup(value) || hasUnconfirmedProcessCleanup(outcome)) {
       entry.cleanupBlocked = true;
+      entry.cleanupReconciliation = cleanupReconciliationOf(outcome) || cleanupReconciliationOf(value);
     }
     if (!entry.settled) {
       this.settleEntry(entry, failed ? entry.reject : entry.resolve, outcome);
     }
+  }
+
+  watchCleanup(entry, onComplete) {
+    if (entry.cleanupWatched || !entry.cleanupReconciliation) return;
+    entry.cleanupWatched = true;
+    void Promise.resolve(entry.cleanupReconciliation.promise).then(onComplete);
+  }
+
+  releaseEntry(entry) {
+    if (entry.released) return;
+    entry.released = true;
+    const lease = entry.lease;
+    if (lease) lease.active = false;
+    this.activeEntries.delete(entry);
+    entry.contextState.active.delete(entry);
+    entry.contextState.activeReads = Math.max(0, entry.contextState.activeReads - (isRead(entry.kind) ? 1 : 0));
+    entry.contextState.activeNetwork = Math.max(0, entry.contextState.activeNetwork - (entry.network ? 1 : 0));
+    entry.worktreeState.active.delete(entry);
+    this.activeNetwork = Math.max(0, this.activeNetwork - (entry.network ? 1 : 0));
+    this.releaseMutationGeneration(entry);
+    entry.contextState.lastUsed = nowValue(this.now);
+    entry.worktreeState.lastUsed = nowValue(this.now);
+    this.cleanupIdleState(entry.contextState, entry.worktreeState);
+    this.drain();
   }
 
   removePendingEntry(entry) {
@@ -491,19 +519,11 @@ export class GitExecutionCoordinator {
         },
       )
       .finally(() => {
-        if (entry.cleanupBlocked) return;
-        lease.active = false;
-        this.activeEntries.delete(entry);
-        entry.contextState.active.delete(entry);
-        entry.contextState.activeReads = Math.max(0, entry.contextState.activeReads - (isRead(entry.kind) ? 1 : 0));
-        entry.contextState.activeNetwork = Math.max(0, entry.contextState.activeNetwork - (entry.network ? 1 : 0));
-        entry.worktreeState.active.delete(entry);
-        this.activeNetwork = Math.max(0, this.activeNetwork - (entry.network ? 1 : 0));
-        this.releaseMutationGeneration(entry);
-        entry.contextState.lastUsed = nowValue(this.now);
-        entry.worktreeState.lastUsed = nowValue(this.now);
-        this.cleanupIdleState(entry.contextState, entry.worktreeState);
-        this.drain();
+        if (entry.cleanupBlocked) {
+          this.watchCleanup(entry, () => this.releaseEntry(entry));
+          return;
+        }
+        this.releaseEntry(entry);
       });
   }
 
@@ -537,6 +557,9 @@ export class GitExecutionCoordinator {
       started: false,
       cancelled: false,
       cancellationError: null,
+      cleanupReconciliation: null,
+      cleanupWatched: false,
+      released: false,
       timer: undefined,
     };
     return entry;
@@ -791,6 +814,7 @@ export class GitExecutionCoordinator {
         sourceAbortRequested: false,
         sourceStarted: false,
         sourceCompleted: false,
+        cleanupReconciliation: null,
         promise: null,
       };
       const sourceTask = () => {
@@ -800,16 +824,29 @@ export class GitExecutionCoordinator {
           .then(() => task(mode, controller.signal))
           .then(
             (value) => {
-              if (hasUnconfirmedProcessCleanup(value)) entry.cleanupBlocked = true;
+              if (hasUnconfirmedProcessCleanup(value)) {
+                entry.cleanupBlocked = true;
+                entry.cleanupReconciliation = cleanupReconciliationOf(value);
+              }
               return value;
             },
             (error) => {
-              if (hasUnconfirmedProcessCleanup(error)) entry.cleanupBlocked = true;
+              if (hasUnconfirmedProcessCleanup(error)) {
+                entry.cleanupBlocked = true;
+                entry.cleanupReconciliation = cleanupReconciliationOf(error);
+              }
               throw error;
             },
           )
           .finally(() => {
-            if (!entry.cleanupBlocked) this.finishStatusSource(key, entry);
+            if (!entry.cleanupBlocked) {
+              this.finishStatusSource(key, entry);
+              return;
+            }
+            if (entry.cleanupReconciliation) {
+              void Promise.resolve(entry.cleanupReconciliation.promise)
+                .then(() => this.finishStatusSource(key, entry));
+            }
           });
       };
       entry.promise = this.run({
@@ -898,18 +935,28 @@ export class GitExecutionCoordinator {
         },
       )
       .finally(() => {
-        if (entry.cleanupBlocked) return;
-        lease.releaseNetwork();
-        lease.active = false;
-        cloneLeaseEntries.delete(lease);
-        this.cloneActive.delete(entry);
-        entry.destinationState.active = false;
-        entry.destinationState.pending = Math.max(0, entry.destinationState.pending - 1);
-        if (entry.destinationState.pending === 0 && !entry.destinationState.active) {
-          this.cloneDestinations.delete(entry.destinationId);
+        if (entry.cleanupBlocked) {
+          this.watchCleanup(entry, () => this.releaseClone(entry));
+          return;
         }
-        this.drain();
+        this.releaseClone(entry);
       });
+  }
+
+  releaseClone(entry) {
+    if (entry.released) return;
+    entry.released = true;
+    const lease = entry.lease;
+    lease?.releaseNetwork();
+    if (lease) lease.active = false;
+    if (lease) cloneLeaseEntries.delete(lease);
+    this.cloneActive.delete(entry);
+    entry.destinationState.active = false;
+    entry.destinationState.pending = Math.max(0, entry.destinationState.pending - 1);
+    if (entry.destinationState.pending === 0 && !entry.destinationState.active) {
+      this.cloneDestinations.delete(entry.destinationId);
+    }
+    this.drain();
   }
 
   removePendingClone(entry) {
@@ -967,6 +1014,9 @@ export class GitExecutionCoordinator {
       started: false,
       cancelled: false,
       cancellationError: null,
+      cleanupReconciliation: null,
+      cleanupWatched: false,
+      released: false,
       timer: undefined,
     };
     destinationState.pending += 1;

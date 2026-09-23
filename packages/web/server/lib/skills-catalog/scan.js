@@ -13,6 +13,7 @@ import {
 } from './git.js';
 import { parseSkillRepoSource } from './source.js';
 import { runWithGitExecutionScope } from '../git/execution-scope.js';
+import { getGitProcessCleanupReconciliation } from '../git/execution-errors.js';
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 const isStringValue = (value) => Object.prototype.toString.call(value) === '[object String]';
@@ -136,6 +137,17 @@ export async function scanSkillsRepository({
     cleaned = true;
     await safeRm(tempBase);
   };
+  const retainCleanupUntilProcessClose = (result) => {
+    cleanupBlocked = true;
+    const reconciliation = getGitProcessCleanupReconciliation(result);
+    if (reconciliation) {
+      void Promise.resolve(reconciliation.promise).then(() => {
+        cleanupBlocked = false;
+        return cleanup();
+      });
+    }
+    return cleanupBlockedResult(result);
+  };
 
   const scanRepository = async () => {
     try {
@@ -143,8 +155,7 @@ export async function scanSkillsRepository({
       const gitCheck = await assertGitAvailable(runConfiguredGit, { signal });
       if (!gitCheck.ok) {
         if (isProcessTreeCleanupBlocked(gitCheck)) {
-          cleanupBlocked = true;
-          return cleanupBlockedResult(gitCheck);
+          return retainCleanupUntilProcessClose(gitCheck);
         }
         return { ok: false, error: gitCheck.error };
       }
@@ -158,8 +169,7 @@ export async function scanSkillsRepository({
       });
       if (!cloned.ok) {
         if (cloned.cleanupBlocked) {
-          cleanupBlocked = true;
-          return cleanupBlockedResult(cloned.error);
+          return retainCleanupUntilProcessClose(cloned.error);
         }
         const msg = `${cloned.error?.stderr || ''}\n${cloned.error?.message || ''}`.trim();
         if (looksLikeAuthError(msg)) {
@@ -180,26 +190,22 @@ export async function scanSkillsRepository({
       // This avoids one `git show` per skill.
       const sparseInit = await runConfiguredGit(['-C', tempBase, 'sparse-checkout', 'init', '--no-cone'], { identity, timeoutMs: 15_000 });
       if (isProcessTreeCleanupBlocked(sparseInit)) {
-        cleanupBlocked = true;
-        return cleanupBlockedResult(sparseInit);
+        return retainCleanupUntilProcessClose(sparseInit);
       }
       if (sparseInit.ok) {
         const sparseSet = await runConfiguredGit(['-C', tempBase, 'sparse-checkout', 'set', ...patterns], { identity, timeoutMs: 30_000 });
         if (isProcessTreeCleanupBlocked(sparseSet)) {
-          cleanupBlocked = true;
-          return cleanupBlockedResult(sparseSet);
+          return retainCleanupUntilProcessClose(sparseSet);
         }
         if (sparseSet.ok) {
           const checkout = await runConfiguredGit(['-C', tempBase, 'checkout', '--force', 'HEAD'], { identity, timeoutMs: 60_000 });
           if (isProcessTreeCleanupBlocked(checkout)) {
-            cleanupBlocked = true;
-            return cleanupBlockedResult(checkout);
+            return retainCleanupUntilProcessClose(checkout);
           }
           if (checkout.ok) {
             const lsFiles = await runConfiguredGit(['-C', tempBase, 'ls-files'], { identity, timeoutMs: 15_000 });
             if (isProcessTreeCleanupBlocked(lsFiles)) {
-              cleanupBlocked = true;
-              return cleanupBlockedResult(lsFiles);
+              return retainCleanupUntilProcessClose(lsFiles);
             }
             if (lsFiles.ok) {
               skillMdPaths = lsFiles.stdout
@@ -222,8 +228,7 @@ export async function scanSkillsRepository({
         const listResult = await runConfiguredGit(listArgs, { identity, timeoutMs: 30_000 });
         if (!listResult.ok) {
           if (isProcessTreeCleanupBlocked(listResult)) {
-            cleanupBlocked = true;
-            return cleanupBlockedResult(listResult);
+            return retainCleanupUntilProcessClose(listResult);
           }
           const message = `${listResult.stderr || ''}\n${listResult.message || ''}`.trim();
           const authError = looksLikeAuthError(message);
@@ -279,8 +284,7 @@ export async function scanSkillsRepository({
             const showResult = await runConfiguredGit(['-C', tempBase, 'show', `HEAD:${skillMdPath}`], { identity, timeoutMs: 15_000 });
             if (!showResult.ok) {
               if (isProcessTreeCleanupBlocked(showResult)) {
-                cleanupBlocked = true;
-                return cleanupBlockedResult(showResult);
+                return retainCleanupUntilProcessClose(showResult);
               }
               warnings.push('Failed to read SKILL.md');
             } else {
@@ -331,7 +335,7 @@ export async function scanSkillsRepository({
       // A custom runner may surface the shared termination error directly
       // instead of returning runGit's structured result. Preserve the clone
       // until that owned process lifecycle is known to be closed.
-      if (isProcessTreeCleanupBlocked(error)) cleanupBlocked = true;
+      if (isProcessTreeCleanupBlocked(error)) retainCleanupUntilProcessClose(error);
       throw error;
     } finally {
       await cleanup();

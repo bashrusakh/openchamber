@@ -1220,16 +1220,94 @@ const parseOwnedStatus = (text) => {
   return status;
 };
 
+const parseOwnedRemotes = (text, verbose) => {
+  const remotes = new Map();
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const match = line.trim().match(/^(\S+)\s+(\S+)\s+\((fetch|push)\)$/);
+    if (!match) {
+      if (!verbose && line.trim()) remotes.set(line.trim(), { name: line.trim(), refs: {} });
+      continue;
+    }
+    const [, name, url, kind] = match;
+    const remote = remotes.get(name) || { name, refs: {} };
+    remote.refs[kind] = url;
+    remotes.set(name, remote);
+  }
+  return [...remotes.values()];
+};
+
+const parseOwnedBranches = (text) => {
+  const all = [];
+  const branches = {};
+  let current = null;
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const [head, rawRef] = line.split('\t');
+    const ref = String(rawRef || '').trim();
+    if (!ref) continue;
+    const name = ref.startsWith('refs/heads/')
+      ? ref.slice('refs/heads/'.length)
+      : ref.startsWith('refs/remotes/')
+        ? `remotes/${ref.slice('refs/remotes/'.length)}`
+        : ref;
+    all.push(name);
+    const isCurrent = String(head || '').trim() === '*';
+    if (isCurrent) current = name;
+    branches[name] = { name, current: isCurrent };
+  }
+  return { all, current, branches };
+};
+
+const parseOwnedLog = (text) => {
+  const entries = String(text || '')
+    .split('\x1e')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((record) => {
+      const lines = record.split('\n').filter((line) => line.trim().length > 0);
+      const header = lines.shift() || '';
+      const [hash, parentsRaw, author_name, author_email, date, message, refsRaw] = header.split('\x1f');
+      if (!hash) return null;
+      let filesChanged = 0;
+      let insertions = 0;
+      let deletions = 0;
+      for (const line of lines) {
+        const filesMatch = line.match(/(\d+)\s+files?\s+changed/);
+        const insertMatch = line.match(/(\d+)\s+insertions?\(\+\)/);
+        const deleteMatch = line.match(/(\d+)\s+deletions?\(-\)/);
+        if (filesMatch) filesChanged = Number(filesMatch[1]);
+        if (insertMatch) insertions = Number(insertMatch[1]);
+        if (deleteMatch) deletions = Number(deleteMatch[1]);
+      }
+      return {
+        hash,
+        date: date || '',
+        message: message || '',
+        refs: refsRaw?.trim() || '',
+        body: '',
+        author_name: author_name || '',
+        author_email: author_email || '',
+        filesChanged,
+        insertions,
+        deletions,
+        parents: parentsRaw ? parentsRaw.trim().split(' ').filter(Boolean) : [],
+      };
+    })
+    .filter(Boolean);
+  return { all: entries, latest: entries[0] || null, total: entries.length };
+};
+
 const createOwnedGit = (
   directory,
   { binary = getGitBinary(), envOverrides = undefined, stallTimeoutMs = 0, signal = undefined } = {},
 ) => {
   const environment = { ...(envOverrides || {}) };
-  const raw = async (args) => {
+  const raw = async (args, rawOptions = {}) => {
     const result = await runGitCommand(directory, args, {
       binary,
       envOverrides: environment,
-      idleTimeoutMs: stallTimeoutMs,
+      idleTimeoutMs: rawOptions.idleTimeoutMs ?? stallTimeoutMs,
+      timeoutMs: rawOptions.timeoutMs ?? 0,
       signal,
     });
     if (result.success) return result.stdout;
@@ -1249,6 +1327,45 @@ const createOwnedGit = (
       '--null',
       ...options.filter((arg) => arg !== '--null' && arg !== '-z'),
     ])),
+    getRemotes: async (verbose = false) => parseOwnedRemotes(
+      await raw(['remote', ...(verbose ? ['-v'] : [])]),
+      verbose,
+    ),
+    branch: async () => parseOwnedBranches(await raw([
+      'for-each-ref',
+      '--format=%(HEAD)\t%(refname)',
+      'refs/heads',
+      'refs/remotes',
+    ])),
+    branchLocal: async () => {
+      const result = await ownedGit.branch();
+      const local = result.all.filter((name) => !name.startsWith('remotes/'));
+      return {
+        all: local,
+        current: result.current && !result.current.startsWith('remotes/') ? result.current : null,
+        branches: Object.fromEntries(local.map((name) => [name, result.branches[name]])),
+      };
+    },
+    log: async (input = {}) => {
+      const logArgs = Array.isArray(input)
+        ? input
+        : (() => {
+            const options = input || {};
+            const args = [`--max-count=${options.maxCount || 50}`];
+            if (options.from && options.to) args.push(`${options.from}..${options.to}`);
+            else if (options.from) args.push(`${options.from}..HEAD`);
+            else if (options.to) args.push(options.to);
+            if (options.file) args.push('--', options.file);
+            return args;
+          })();
+      return parseOwnedLog(await raw([
+        'log',
+        ...logArgs,
+        '--date=iso',
+        '--pretty=format:%x1e%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D',
+        '--shortstat',
+      ]));
+    },
   };
   return ownedGit;
 };
@@ -1469,8 +1586,9 @@ const derivePrimaryWorktreeRootFromGitDir = (gitDir) => {
   return null;
 };
 
-export async function resolvePrimaryWorktreeRoot(directory) {
-  const result = await runGitCommand(directory, ['rev-parse', '--absolute-git-dir', '--git-common-dir']);
+export async function resolvePrimaryWorktreeRoot(directory, { signal = undefined } = {}) {
+  const result = await runGitCommand(directory, ['rev-parse', '--absolute-git-dir', '--git-common-dir'], { signal });
+  if (signal?.aborted || isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result, 'Git primary-root read was cancelled');
   if (!result.success) {
     return { root: directory };
   }
@@ -1496,8 +1614,9 @@ export async function resolvePrimaryWorktreeRoot(directory) {
   return { root: directory };
 }
 
-export async function resolveWorktreeTopLevel(directory) {
-  const result = await runGitCommand(directory, ['rev-parse', '--show-toplevel']);
+export async function resolveWorktreeTopLevel(directory, { signal = undefined } = {}) {
+  const result = await runGitCommand(directory, ['rev-parse', '--show-toplevel'], { signal });
+  if (signal?.aborted || isProcessTreeCleanupBlocked(result)) throw createGitProcessError(result, 'Git toplevel read was cancelled');
   if (!result.success) {
     return { root: directory };
   }
@@ -2552,6 +2671,7 @@ const UNTRACKED_DIRECTORY_EXPANSION_LIMIT = 1000;
 const GIT_STATUS_STALL_TIMEOUT_MS = 120_000;
 const GIT_UNTRACKED_LISTING_STALL_TIMEOUT_MS = 60_000;
 const GIT_PROBE_TIMEOUT_MS = 30_000;
+const GIT_NETWORK_READ_TIMEOUT_MS = 30_000;
 
 // from a streamed `ls-files` that is stopped once the bound is exceeded so a
 // huge directory is never listed in full. `paths` is complete when
@@ -3440,18 +3560,22 @@ async function isOwnRemoteCopy(git, source, branchName) {
  * Returns { base: null } when git has no authoritative record (clone, detached
  * start, reflog expired) — callers must not fall back to main/master.
  */
-export async function getBranchBase(directory, branch) {
+export async function getBranchBase(directory, branch, { signal = undefined } = {}) {
   const branchName = String(branch || '').trim();
   if (!branchName) {
     throw new Error('branch is required');
   }
 
-  const { git } = await createRepositoryGitContext(directory);
+  const { git } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: Boolean(signal),
+    signal,
+  });
 
   let reflog = '';
   try {
     reflog = await git.raw(['reflog', 'show', '--format=%gs', branchName]);
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
     return { base: null };
   }
 
@@ -3463,7 +3587,10 @@ export async function getBranchBase(directory, branch) {
   const resolves = await git
     .raw(['rev-parse', '--verify', '--quiet', source])
     .then((value) => Boolean(String(value || '').trim()))
-    .catch(() => false);
+    .catch((error) => {
+      if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
+      return false;
+    });
   if (!resolves) {
     return { base: null };
   }
@@ -3966,8 +4093,11 @@ export async function pull(directory, options = {}) {
   }
 }
 
-export async function listStashes(directory) {
-  const { git } = await createRepositoryGitContext(directory);
+export async function listStashes(directory, { signal = undefined } = {}) {
+  const { git } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: Boolean(signal),
+    signal,
+  });
   const output = await git.raw(['stash', 'list', '--format=%gd%x1f%gs%x1f%cr%x1f%H']);
   return String(output || '')
     .split('\n')
@@ -3980,8 +4110,11 @@ export async function listStashes(directory) {
     .filter((entry) => entry.ref);
 }
 
-export async function countStashFiles(directory, refs = []) {
-  const { git } = await createRepositoryGitContext(directory);
+export async function countStashFiles(directory, refs = [], { signal = undefined } = {}) {
+  const { git } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: Boolean(signal),
+    signal,
+  });
   const uniqueRefs = Array.from(new Set((Array.isArray(refs) ? refs : []).map((ref) => String(ref || '').trim()).filter(Boolean)));
   const counts = {};
   const concurrency = 4;
@@ -3989,6 +4122,7 @@ export async function countStashFiles(directory, refs = []) {
 
   const worker = async () => {
     while (cursor < uniqueRefs.length) {
+      if (signal?.aborted) throw signal.reason || new Error('Git stash file count was cancelled');
       const ref = uniqueRefs[cursor++];
       if (!ref) continue;
       try {
@@ -4419,16 +4553,19 @@ export async function commit(directory, message, options = {}) {
   });
 }
 
-export async function getBranches(directory) {
-  const { git } = await createRepositoryGitContext(directory);
+export async function getBranches(directory, { signal = undefined } = {}) {
+  const { git } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: Boolean(signal),
+    signal,
+  });
 
   try {
     const result = await git.branch();
 
     const allBranches = result.all;
     const remoteBranches = allBranches.filter(branch => branch.startsWith('remotes/'));
-    const activeRemoteBranches = await filterActiveRemoteBranches(git, remoteBranches);
-    const defaultBranches = await getRemoteDefaultBranches(git);
+    const activeRemoteBranches = await filterActiveRemoteBranches(git, remoteBranches, signal);
+    const defaultBranches = await getRemoteDefaultBranches(git, signal);
 
     const filteredAll = [
       ...allBranches.filter(branch => !branch.startsWith('remotes/')),
@@ -4453,8 +4590,11 @@ export async function getBranches(directory) {
  * it when opened, never polls, and never fetches a remote behind the user's
  * back. Unknown, remote, and upstream-less branches are omitted.
  */
-export async function getUnpushedBranchCounts(directory, branchNames) {
-  const { git } = await createRepositoryGitContext(directory);
+export async function getUnpushedBranchCounts(directory, branchNames, { signal = undefined } = {}) {
+  const { git } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: Boolean(signal),
+    signal,
+  });
   const requested = [...new Set(Array.isArray(branchNames) ? branchNames : [])]
     .filter((name) => isStringValue(name) && name.length > 0)
     .slice(0, 5);
@@ -4466,17 +4606,23 @@ export async function getUnpushedBranchCounts(directory, branchNames) {
     if (!local.has(branch)) return;
     const upstream = await git.raw(['rev-parse', '--abbrev-ref', '--symbolic-full-name', `${branch}@{upstream}`])
       .then((value) => value.trim())
-      .catch(() => '');
+      .catch((error) => {
+        if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
+        return '';
+      });
     if (!upstream) return;
     const count = await git.raw(['rev-list', '--count', `${upstream}..${branch}`])
       .then((value) => Number.parseInt(value.trim(), 10))
-      .catch(() => 0);
+      .catch((error) => {
+        if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
+        return 0;
+      });
     if (Number.isFinite(count) && count > 0) counts[branch] = count;
   }));
   return { counts };
 }
 
-async function getRemoteDefaultBranches(git) {
+async function getRemoteDefaultBranches(git, signal) {
   let defaults = {};
 
   try {
@@ -4495,7 +4641,8 @@ async function getRemoteDefaultBranches(git) {
           : [];
       })
     );
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
     defaults = {};
   }
 
@@ -4511,22 +4658,28 @@ async function getRemoteDefaultBranches(git) {
 
     for (const remote of missing) {
       try {
-        const output = await git.raw(['ls-remote', '--symref', remote.name, 'HEAD']);
+        const output = signal
+          ? await git.raw(['ls-remote', '--symref', remote.name, 'HEAD'], {
+              timeoutMs: GIT_NETWORK_READ_TIMEOUT_MS,
+            })
+          : await git.raw(['ls-remote', '--symref', remote.name, 'HEAD']);
         const match = String(output || '').match(/^ref:\s+refs\/heads\/(.+?)\s+HEAD$/m);
         if (match) defaults[remote.name] = match[1];
-      } catch {
+      } catch (error) {
+        if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
         // Unreachable or refusing: no answer is better than a guessed one.
         continue;
       }
     }
-  } catch {
+  } catch (error) {
+    if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
     // Remote list unavailable; the local symrefs are still valid.
   }
 
   return defaults;
 }
 
-async function filterActiveRemoteBranches(git, remoteBranches) {
+async function filterActiveRemoteBranches(git, remoteBranches, signal) {
   try {
     const remotes = await git.getRemotes();
     const branchesByRemote = new Map();
@@ -4540,7 +4693,11 @@ async function filterActiveRemoteBranches(git, remoteBranches) {
 
     for (const remote of remotes) {
       try {
-        const lsRemoteResult = await git.raw(['ls-remote', '--heads', remote.name]);
+        const lsRemoteResult = signal
+          ? await git.raw(['ls-remote', '--heads', remote.name], {
+              timeoutMs: GIT_NETWORK_READ_TIMEOUT_MS,
+            })
+          : await git.raw(['ls-remote', '--heads', remote.name]);
         const actualRemoteBranches = new Set();
         const lines = lsRemoteResult.trim().split('\n');
         for (const line of lines) {
@@ -4550,7 +4707,8 @@ async function filterActiveRemoteBranches(git, remoteBranches) {
           }
         }
         branchesByRemote.set(remote.name, actualRemoteBranches);
-      } catch {
+      } catch (error) {
+        if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
         unreachableRemotes.add(remote.name);
       }
     }
@@ -4583,6 +4741,7 @@ async function filterActiveRemoteBranches(git, remoteBranches) {
 
     return activeBranches;
   } catch (error) {
+    if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
     console.warn('Failed to filter active remote branches, returning all:', error.message);
     return remoteBranches;
   }
@@ -4774,19 +4933,29 @@ export async function resetToCommit(directory, hash, mode, force = false) {
   }
 }
 
-export async function getWorktrees(directory) {
+export async function getWorktrees(directory, { signal = undefined } = {}) {
   const directoryPath = normalizeDirectoryPath(directory);
   if (!directoryPath || !fs.existsSync(directoryPath)) {
     return [];
   }
   try {
-    const directoryGit = await createGit(directoryPath);
-    const repoRoot = await resolveGitRepositoryRoot(directoryPath, directoryGit);
-    const result = await runGitCommandOrThrow(
-      repoRoot,
-      ['worktree', 'list', '--porcelain'],
-      'Failed to list git worktrees'
-    );
+    const { repoRoot } = await createRepositoryGitContext(directoryPath, {
+      ownedProcessTree: Boolean(signal),
+      signal,
+    });
+    const result = signal
+      ? await runGitCommand(repoRoot, ['worktree', 'list', '--porcelain'], { signal })
+      : await runGitCommandOrThrow(
+        repoRoot,
+        ['worktree', 'list', '--porcelain'],
+        'Failed to list git worktrees',
+      );
+    if (!result.success) {
+      if (isProcessTreeCleanupBlocked(result) || signal?.aborted) {
+        throw createGitProcessError(result, 'Failed to list git worktrees');
+      }
+      throw createGitProcessError(result, 'Failed to list git worktrees');
+    }
     return parseWorktreePorcelain(result.stdout).map((entry) => ({
       head: entry.head || '',
       name: path.basename(entry.worktree || ''),
@@ -5509,7 +5678,11 @@ export async function resolveBaseRefForLog(from, checkRef) {
 }
 
 export async function getLog(directory, options = {}) {
-  const { directoryPath, directoryGit, repoRoot, git } = await createRepositoryGitContext(directory);
+  const { signal = undefined } = options;
+  const { directoryPath, directoryGit, repoRoot, git } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: Boolean(signal),
+    signal,
+  });
 
   try {
     const maxCount = options.maxCount || 50;
@@ -5582,7 +5755,8 @@ export async function getLog(directory, options = {}) {
       try {
         const out = await git.raw(['rev-parse', '--verify', ref]);
         return Boolean(out && out.trim());
-      } catch {
+      } catch (error) {
+        if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
         return false;
       }
     };
@@ -5969,6 +6143,7 @@ export async function getRemotes(directory, { signal = undefined } = {}) {
       pushUrl: remote.refs.push
     }));
   } catch (error) {
+    if (signal?.aborted || isProcessTreeCleanupBlocked(error)) throw error;
     if (isNotGitRepositoryError(error)) {
       return [];
     }

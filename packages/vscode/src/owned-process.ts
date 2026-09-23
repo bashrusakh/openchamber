@@ -7,6 +7,10 @@ const POSIX_TERMINATION_GRACE_MS = 1_000;
 const POSIX_GROUP_POLL_MS = 10;
 
 type ProcessKill = (pid: number, signal?: NodeJS.Signals | number) => void;
+type CleanupReconciliation = {
+  promise: Promise<unknown>;
+  retire: () => void;
+};
 type OwnedProcessDependencies = {
   platform?: NodeJS.Platform;
   processKill?: ProcessKill;
@@ -20,6 +24,7 @@ const terminationFailure = (
   rootError: Error | null,
   rootClosed: boolean,
   message = `Failed to terminate the Windows process tree for PID ${pid}; descendant termination was not confirmed`,
+  cleanupReconciliation?: CleanupReconciliation,
 ) => Object.assign(
   new Error(
     message,
@@ -32,19 +37,20 @@ const terminationFailure = (
     rootClosed,
     cause: cause instanceof Error ? cause : String(cause),
     rootError: rootError || undefined,
+    cleanupReconciliation,
   },
 );
 
-const confirmProcessGroupGone = (
-  pid: number,
-  timeoutMs: number,
-  processKill: ProcessKill,
-) => new Promise<boolean>((resolve) => {
-  const startedAt = Date.now();
+const observeProcessGroupGone = (pid: number, processKill: ProcessKill) => {
+  let settled = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const finish = (confirmed: boolean) => {
+  let resolveGone: (gone: boolean) => void = () => undefined;
+  const promise = new Promise<boolean>((resolve) => { resolveGone = resolve; });
+  const finish = (gone: boolean) => {
+    if (settled) return;
+    settled = true;
     if (timer) clearTimeout(timer);
-    resolve(confirmed);
+    resolveGone(gone);
   };
   const check = () => {
     try {
@@ -55,14 +61,61 @@ const confirmProcessGroupGone = (
         return;
       }
     }
-    if (Date.now() - startedAt >= timeoutMs) {
-      finish(false);
-      return;
-    }
     timer = setTimeout(check, POSIX_GROUP_POLL_MS);
   };
   check();
-});
+  return { promise, cancel: () => finish(false) };
+};
+
+const observeWindowsTreeCleanup = (pid: number, closed: Promise<ProcessExit>) => {
+  let settled = false;
+  let started = false;
+  let failed = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let resolveCleanup: (confirmed: boolean) => void = () => undefined;
+  const promise = new Promise<boolean>((resolve) => { resolveCleanup = resolve; });
+  const finish = (confirmed: boolean) => {
+    if (settled || failed) return;
+    settled = true;
+    if (timer) clearTimeout(timer);
+    resolveCleanup(confirmed);
+  };
+  const confirm = () => {
+    if (settled || started) return;
+    started = true;
+    try {
+      // A closed root does not prove that a Windows descendant is gone. A
+      // late tree termination attempt is the only confirmation available to
+      // this owner once the original taskkill request has failed.
+      execFile('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        windowsHide: true,
+        timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
+      }, (error) => {
+        if (error) {
+          failed = true;
+          if (timer) clearTimeout(timer);
+          return;
+        }
+        finish(true);
+      });
+      timer = setTimeout(() => {
+        if (settled || failed) return;
+        failed = true;
+      }, WINDOWS_TASKKILL_TIMEOUT_MS);
+      timer.unref?.();
+    } catch {
+      failed = true;
+    }
+  };
+  void closed.then(confirm);
+  return {
+    promise,
+    retire: () => {
+      failed = true;
+      if (timer) clearTimeout(timer);
+    },
+  };
+};
 
 // Each background command gets its own POSIX group. Never signal the extension
 // host's group, which can also contain unrelated extensions and editor work.
@@ -156,17 +209,31 @@ export function spawnOwnedProcess(
         if (taskkillError) {
           const rootError = killRoot();
           const rootClosed = await waitForClose(WINDOWS_TERMINATION_TIMEOUT_MS);
-          throw terminationFailure(child.pid, taskkillError, rootError, rootClosed);
+          throw terminationFailure(
+            child.pid,
+            taskkillError,
+            rootError,
+            rootClosed,
+            undefined,
+            observeWindowsTreeCleanup(child.pid, closed),
+          );
         }
       } else {
+        const groupObservation = observeProcessGroupGone(child.pid, processKill);
         try {
           signalGroup('SIGTERM');
           await waitForClose(terminationGraceMs);
           // A parent can exit while a tool ignores SIGTERM or holds its pipes.
           signalGroup('SIGKILL');
           const rootClosed = await waitForClose(terminationTimeoutMs);
-          const groupGone = rootClosed && child.pid
-            ? await confirmProcessGroupGone(child.pid, terminationTimeoutMs, processKill)
+          const groupGone = rootClosed
+            ? await Promise.race([
+                groupObservation.promise,
+                new Promise<boolean>((resolve) => {
+                  const timer = setTimeout(() => resolve(false), terminationTimeoutMs);
+                  timer.unref?.();
+                }),
+              ])
             : false;
           if (rootClosed && groupGone) return;
           throw terminationFailure(
@@ -175,6 +242,10 @@ export function spawnOwnedProcess(
             null,
             rootClosed,
             `Failed to terminate the POSIX process tree for PID ${child.pid}; descendant termination was not confirmed`,
+            {
+              promise: Promise.all([closed, groupObservation.promise]),
+              retire: () => groupObservation.cancel(),
+            },
           );
         } catch (error) {
           if (error instanceof Error && 'code' in error && error.code === 'ERR_PROCESS_TREE_TERMINATION') throw error;
@@ -186,6 +257,10 @@ export function spawnOwnedProcess(
             rootError,
             rootClosed,
             `Failed to terminate the POSIX process tree for PID ${child.pid}; descendant termination was not confirmed`,
+            {
+              promise: Promise.all([closed, groupObservation.promise]),
+              retire: () => groupObservation.cancel(),
+            },
           );
         }
       }

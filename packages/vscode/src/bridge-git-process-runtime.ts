@@ -6,7 +6,10 @@ import { promisify } from 'util';
 import { spawnOwnedProcess } from './owned-process';
 import { getGitExecutablePath } from './gitService';
 import { getGitExecutionEnv } from './git-execution-scope';
-import { copyGitProcessMetadata } from './git-execution-errors';
+import {
+  copyGitProcessMetadata,
+  getGitProcessCleanupReconciliation,
+} from './git-execution-errors';
 
 const execFileAsync = promisify(execFile);
 const gpgconfCandidates = ['gpgconf', '/opt/homebrew/bin/gpgconf', '/usr/local/bin/gpgconf'];
@@ -34,6 +37,7 @@ export type GitProcessExecutionResult = {
   cause?: Error | string | null;
   rootError?: Error;
   operationError?: Error;
+  cleanupReconciliation?: { promise: Promise<unknown>; retire: () => void };
 };
 
 const isSocketPath = async (candidate: string): Promise<boolean> => {
@@ -131,8 +135,10 @@ export const createGitProcessRuntime = ({
   resolveGitExecutable = getGitExecutablePath,
 }: GitProcessRuntimeOptions = {}) => {
   const activeProcesses = new Set<ReturnType<typeof spawnOwnedProcess>>();
+  const cleanupBlockedProcesses = new Set<ReturnType<typeof spawnOwnedProcess>>();
   let shutdown: Promise<void> | null = null;
   let cleanupBlocked = false;
+  let unreconciledCleanupBlocked = false;
 
   const stopGitProcesses = (): Promise<void> => {
     if (!shutdown) shutdown = (async () => {
@@ -146,7 +152,7 @@ export const createGitProcessRuntime = ({
 
   const resetGitProcesses = async (): Promise<void> => {
     if (shutdown) await shutdown;
-    if (cleanupBlocked || activeProcesses.size > 0) {
+    if (cleanupBlocked || activeProcesses.size > 0 || cleanupBlockedProcesses.size > 0) {
       throw new Error('Cannot reset the Git runtime while processes are still active');
     }
     shutdown = null;
@@ -193,12 +199,42 @@ export const createGitProcessRuntime = ({
       processReleased = true;
       activeProcesses.delete(process);
     };
+    let cleanupReconciliationWatched = false;
+    const reconcileCleanup = (failure: Error) => {
+      if (cleanupReconciliationWatched) return;
+      cleanupReconciliationWatched = true;
+      const reconciliation = getGitProcessCleanupReconciliation(failure);
+      if (!reconciliation) {
+        unreconciledCleanupBlocked = true;
+        cleanupBlocked = true;
+        return;
+      }
+      cleanupBlockedProcesses.add(process);
+      cleanupBlocked = true;
+      void Promise.resolve(reconciliation.promise).then(
+        (confirmed) => {
+          if (confirmed === false) {
+            unreconciledCleanupBlocked = true;
+            cleanupBlocked = true;
+            return;
+          }
+          cleanupBlockedProcesses.delete(process);
+          cleanupBlocked = unreconciledCleanupBlocked || cleanupBlockedProcesses.size > 0;
+          forgetProcess();
+        },
+        () => {
+          unreconciledCleanupBlocked = true;
+          cleanupBlocked = true;
+        },
+      );
+    };
+    let cleanupWatchStarted = false;
     const forgetAfterCleanup = () => {
+      if (cleanupWatchStarted) return;
+      cleanupWatchStarted = true;
       const cleanup = process.termination;
       if (cleanup) {
-        void cleanup.then(forgetProcess, () => {
-          cleanupBlocked = true;
-        });
+        void cleanup.then(forgetProcess, reconcileCleanup);
         return;
       }
       forgetProcess();
@@ -207,9 +243,7 @@ export const createGitProcessRuntime = ({
     // started, retain the registry entry until taskkill/process-group cleanup
     // settles so deactivation cannot release ownership early.
     void process.closed.then(forgetAfterCleanup);
-    void process.failedTermination.then(() => {
-      cleanupBlocked = true;
-    });
+    void process.failedTermination.then((failure) => reconcileCleanup(failure));
     let stdout = '';
     let stderr = '';
     let timedOut = false;

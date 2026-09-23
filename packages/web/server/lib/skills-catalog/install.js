@@ -12,6 +12,7 @@ import {
 } from './git.js';
 import { parseSkillRepoSource } from './source.js';
 import { OPENCODE_CONFIG_DIR } from '../opencode/shared.js';
+import { getGitProcessCleanupReconciliation } from '../git/execution-errors.js';
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 
@@ -265,6 +266,17 @@ export async function installSkillsFromRepository({
     cleaned = true;
     await safeRm(tempBase);
   };
+  const retainCleanupUntilProcessClose = (result) => {
+    cleanupBlocked = true;
+    const reconciliation = getGitProcessCleanupReconciliation(result);
+    if (reconciliation) {
+      void Promise.resolve(reconciliation.promise).then(() => {
+        cleanupBlocked = false;
+        return cleanup();
+      });
+    }
+    return cleanupBlockedResult(result);
+  };
 
   const installRepository = async () => {
     try {
@@ -272,8 +284,7 @@ export async function installSkillsFromRepository({
       const gitCheck = await assertGitAvailable(runConfiguredGit, { signal });
       if (!gitCheck.ok) {
         if (isProcessTreeCleanupBlocked(gitCheck)) {
-          cleanupBlocked = true;
-          return cleanupBlockedResult(gitCheck);
+          return retainCleanupUntilProcessClose(gitCheck);
         }
         return { ok: false, error: gitCheck.error };
       }
@@ -287,8 +298,7 @@ export async function installSkillsFromRepository({
       });
       if (!cloned.ok) {
         if (cloned.cleanupBlocked) {
-          cleanupBlocked = true;
-          return cleanupBlockedResult(cloned.error);
+          return retainCleanupUntilProcessClose(cloned.error);
         }
         const msg = `${cloned.error?.stderr || ''}\n${cloned.error?.message || ''}`.trim();
         if (looksLikeAuthError(msg)) {
@@ -300,14 +310,12 @@ export async function installSkillsFromRepository({
       // Selective checkout for only requested skill dirs.
       const sparseInit = await runConfiguredGit(['-C', tempBase, 'sparse-checkout', 'init', '--cone'], { identity, timeoutMs: 15_000 });
       if (isProcessTreeCleanupBlocked(sparseInit)) {
-        cleanupBlocked = true;
-        return cleanupBlockedResult(sparseInit);
+        return retainCleanupUntilProcessClose(sparseInit);
       }
       const setResult = await runConfiguredGit(['-C', tempBase, 'sparse-checkout', 'set', ...requestedDirs], { identity, timeoutMs: 30_000 });
       if (!setResult.ok) {
         if (isProcessTreeCleanupBlocked(setResult)) {
-          cleanupBlocked = true;
-          return cleanupBlockedResult(setResult);
+          return retainCleanupUntilProcessClose(setResult);
         }
         return { ok: false, error: { kind: 'unknown', message: setResult.stderr || setResult.message || 'Failed to configure sparse checkout' } };
       }
@@ -315,8 +323,7 @@ export async function installSkillsFromRepository({
       const checkoutResult = await runConfiguredGit(['-C', tempBase, 'checkout', '--force', 'HEAD'], { identity, timeoutMs: 60_000 });
       if (!checkoutResult.ok) {
         if (isProcessTreeCleanupBlocked(checkoutResult)) {
-          cleanupBlocked = true;
-          return cleanupBlockedResult(checkoutResult);
+          return retainCleanupUntilProcessClose(checkoutResult);
         }
         return { ok: false, error: { kind: 'unknown', message: checkoutResult.stderr || checkoutResult.message || 'Failed to checkout repository' } };
       }
@@ -378,7 +385,7 @@ export async function installSkillsFromRepository({
       // A custom runner may surface the shared termination error directly
       // instead of returning runGit's structured result. Preserve the clone
       // until that owned process lifecycle is known to be closed.
-      if (isProcessTreeCleanupBlocked(error)) cleanupBlocked = true;
+      if (isProcessTreeCleanupBlocked(error)) retainCleanupUntilProcessClose(error);
       throw error;
     } finally {
       await cleanup();

@@ -37,6 +37,7 @@ test('POSIX cleanup keeps the owned lease pending until the process group is gon
 });
 
 test('POSIX cleanup reports blocked descendants when group confirmation times out', async () => {
+  let groupGone = false;
   const owned = spawnOwnedProcess(
     process.execPath,
     ['-e', 'setTimeout(() => {}, 10)'],
@@ -46,15 +47,29 @@ test('POSIX cleanup reports blocked descendants when group confirmation times ou
       terminationGraceMs: 0,
       terminationTimeoutMs: 20,
       processKill: (_pid, signal) => {
-        if (signal === 0) return;
+        if (signal === 0 && groupGone) {
+          const error = Object.assign(new Error('group is gone'), { code: 'ESRCH' });
+          throw error;
+        }
       },
     },
   );
 
-  await assert.rejects(owned.terminate(), (error: Error & { code?: string; cleanupBlocked?: boolean; descendantsTerminated?: boolean }) => {
+  let failure: (Error & {
+    code?: string;
+    cleanupBlocked?: boolean;
+    descendantsTerminated?: boolean;
+    cleanupReconciliation?: { promise: Promise<unknown> };
+  }) | undefined;
+  await assert.rejects(owned.terminate(), (error: Error & { code?: string; cleanupBlocked?: boolean; descendantsTerminated?: boolean; cleanupReconciliation?: { promise: Promise<unknown> } }) => {
+    failure = error;
     assert.equal(error.code, 'ERR_PROCESS_TREE_TERMINATION');
     assert.equal(error.cleanupBlocked, true);
     assert.equal(error.descendantsTerminated, false);
+    assert.ok(error.cleanupReconciliation);
     return true;
   });
+  groupGone = true;
+  if (!failure?.cleanupReconciliation) throw new Error('Expected late cleanup reconciliation');
+  await failure.cleanupReconciliation.promise;
 });

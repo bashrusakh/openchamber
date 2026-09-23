@@ -10,6 +10,7 @@ import type {
   GitProcessExecutionResult,
 } from './bridge-git-process-runtime';
 import { runWithGitExecutionScope } from './git-execution-scope';
+import { getGitProcessCleanupReconciliation } from './git-execution-errors';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
@@ -75,6 +76,7 @@ type ProcessTerminationMetadata = {
   descendantsTerminated?: boolean;
   rootClosed?: boolean;
   pid?: number;
+  cleanupReconciliation?: { promise: Promise<unknown>; retire: () => void };
 };
 
 type GitProcessResult = GitProcessExecutionResult;
@@ -220,6 +222,8 @@ function terminationMetadata(value: Error | ProcessTerminationValue): ProcessTer
     metadata.rootClosed = value.rootClosed;
   }
   if ('pid' in value && Number.isInteger(value.pid)) metadata.pid = value.pid;
+  const reconciliation = getGitProcessCleanupReconciliation(value);
+  if (reconciliation) metadata.cleanupReconciliation = reconciliation;
   return metadata;
 }
 
@@ -231,6 +235,7 @@ type ProcessCleanupCandidate = {
   descendantsTerminated?: boolean;
   rootClosed?: boolean;
   pid?: number;
+  cleanupReconciliation?: { promise: Promise<unknown>; retire: () => void };
   error?: { kind?: string; message?: string; code?: string | number; cleanupBlocked?: boolean; descendantsTerminated?: boolean };
 };
 
@@ -476,6 +481,17 @@ export async function scanSkillsRepository(
     cleaned = true;
     await safeRm(tempBase);
   };
+  const retainCleanupUntilProcessClose = (result: ProcessCleanupCandidate) => {
+    cleanupBlocked = true;
+    const reconciliation = getGitProcessCleanupReconciliation(result);
+    if (reconciliation) {
+      void Promise.resolve(reconciliation.promise).then(() => {
+        cleanupBlocked = false;
+        return cleanup();
+      });
+    }
+    return processCleanupBlockedResult(result);
+  };
 
   try {
     return await executionRuntime.coordinator.runClone(
@@ -490,8 +506,7 @@ export async function scanSkillsRepository(
           const gitCheck = await assertGitAvailable(resolveGitExecutable, executeGit, options.signal);
           if (!gitCheck.ok) {
             if (isProcessCleanupBlocked(gitCheck)) {
-              cleanupBlocked = true;
-              return processCleanupBlockedResult(gitCheck);
+              return retainCleanupUntilProcessClose(gitCheck);
             }
             return { ok: false as const, error: gitCheck.error };
           }
@@ -505,8 +520,7 @@ export async function scanSkillsRepository(
           );
           if (!cloned.ok) {
             if (cloned.cleanupBlocked) {
-              cleanupBlocked = true;
-              return processCleanupBlockedResult(cloned.error);
+              return retainCleanupUntilProcessClose(cloned.error);
             }
             return { ok: false as const, error: cloned.error };
           }
@@ -521,26 +535,22 @@ export async function scanSkillsRepository(
 
           const sparseInit = await runGitCommand(['-C', tempBase, 'sparse-checkout', 'init', '--no-cone'], { timeoutMs: 15_000 });
           if (isProcessCleanupBlocked(sparseInit)) {
-            cleanupBlocked = true;
-            return processCleanupBlockedResult(sparseInit);
+            return retainCleanupUntilProcessClose(sparseInit);
           }
           if (sparseInit.ok) {
             const sparseSet = await runGitCommand(['-C', tempBase, 'sparse-checkout', 'set', ...patterns], { timeoutMs: 30_000 });
             if (isProcessCleanupBlocked(sparseSet)) {
-              cleanupBlocked = true;
-              return processCleanupBlockedResult(sparseSet);
+              return retainCleanupUntilProcessClose(sparseSet);
             }
             if (sparseSet.ok) {
               const checkout = await runGitCommand(['-C', tempBase, 'checkout', '--force', 'HEAD'], { timeoutMs: 60_000 });
               if (isProcessCleanupBlocked(checkout)) {
-                cleanupBlocked = true;
-                return processCleanupBlockedResult(checkout);
+                return retainCleanupUntilProcessClose(checkout);
               }
               if (checkout.ok) {
                 const lsFiles = await runGitCommand(['-C', tempBase, 'ls-files'], { timeoutMs: 15_000, readOnly: true });
                 if (isProcessCleanupBlocked(lsFiles)) {
-                  cleanupBlocked = true;
-                  return processCleanupBlockedResult(lsFiles);
+                  return retainCleanupUntilProcessClose(lsFiles);
                 }
                 if (lsFiles.ok) {
                   skillMdPaths = lsFiles.stdout
@@ -562,8 +572,7 @@ export async function scanSkillsRepository(
             const list = await runGitCommand(listArgs, { timeoutMs: 30_000, readOnly: true });
             if (!list.ok) {
               if (isProcessCleanupBlocked(list)) {
-                cleanupBlocked = true;
-                return processCleanupBlockedResult(list);
+                return retainCleanupUntilProcessClose(list);
               }
               return { ok: false as const, error: { kind: 'networkError' as const, message: list.stderr || list.message || 'Failed to list repository files' } };
             }
@@ -598,8 +607,7 @@ export async function scanSkillsRepository(
                 { timeoutMs: 15_000, readOnly: true },
               );
               if (isProcessCleanupBlocked(show)) {
-                cleanupBlocked = true;
-                return processCleanupBlockedResult(show);
+                return retainCleanupUntilProcessClose(show);
               }
               if (!show.ok) {
                 warnings.push('Failed to read SKILL.md');
@@ -780,6 +788,17 @@ export async function installSkillsFromRepository(options: {
     cleaned = true;
     await safeRm(tempBase);
   };
+  const retainCleanupUntilProcessClose = (result: ProcessCleanupCandidate) => {
+    cleanupBlocked = true;
+    const reconciliation = getGitProcessCleanupReconciliation(result);
+    if (reconciliation) {
+      void Promise.resolve(reconciliation.promise).then(() => {
+        cleanupBlocked = false;
+        return cleanup();
+      });
+    }
+    return processCleanupBlockedResult(result);
+  };
 
   try {
     return await executionRuntime.coordinator.runClone(
@@ -794,8 +813,7 @@ export async function installSkillsFromRepository(options: {
           const gitCheck = await assertGitAvailable(resolveGitExecutable, executeGit, options.signal);
           if (!gitCheck.ok) {
             if (isProcessCleanupBlocked(gitCheck)) {
-              cleanupBlocked = true;
-              return processCleanupBlockedResult(gitCheck);
+              return retainCleanupUntilProcessClose(gitCheck);
             }
             return { ok: false as const, error: gitCheck.error };
           }
@@ -809,21 +827,18 @@ export async function installSkillsFromRepository(options: {
           );
           if (!cloned.ok) {
             if (cloned.cleanupBlocked) {
-              cleanupBlocked = true;
-              return processCleanupBlockedResult(cloned.error);
+              return retainCleanupUntilProcessClose(cloned.error);
             }
             return { ok: false as const, error: cloned.error };
           }
 
           const sparseInit = await runGitCommand(['-C', tempBase, 'sparse-checkout', 'init', '--cone'], { timeoutMs: 15_000 });
           if (isProcessCleanupBlocked(sparseInit)) {
-            cleanupBlocked = true;
-            return processCleanupBlockedResult(sparseInit);
+            return retainCleanupUntilProcessClose(sparseInit);
           }
           const setResult = await runGitCommand(['-C', tempBase, 'sparse-checkout', 'set', ...requestedDirs], { timeoutMs: 30_000 });
           if (isProcessCleanupBlocked(setResult)) {
-            cleanupBlocked = true;
-            return processCleanupBlockedResult(setResult);
+            return retainCleanupUntilProcessClose(setResult);
           }
           if (!setResult.ok) {
             return { ok: false as const, error: { kind: 'unknown' as const, message: setResult.stderr || setResult.message || 'Failed to configure sparse checkout' } };
@@ -831,8 +846,7 @@ export async function installSkillsFromRepository(options: {
 
           const checkoutResult = await runGitCommand(['-C', tempBase, 'checkout', '--force', 'HEAD'], { timeoutMs: 60_000 });
           if (isProcessCleanupBlocked(checkoutResult)) {
-            cleanupBlocked = true;
-            return processCleanupBlockedResult(checkoutResult);
+            return retainCleanupUntilProcessClose(checkoutResult);
           }
           if (!checkoutResult.ok) {
             return { ok: false as const, error: { kind: 'unknown' as const, message: checkoutResult.stderr || checkoutResult.message || 'Failed to checkout repository' } };

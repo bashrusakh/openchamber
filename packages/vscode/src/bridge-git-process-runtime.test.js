@@ -235,7 +235,7 @@ describe('VS Code Git process runtime executable selection', () => {
     }
   });
 
-  it('settles deactivation after a failed Windows tree kill without releasing twice', async () => {
+  it('retains deactivation ownership until late Windows tree confirmation', async () => {
     const originalPlatform = process.platform;
     Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
     try {
@@ -248,8 +248,15 @@ describe('VS Code Git process runtime executable selection', () => {
       childProcess.kill = mock();
       spawn.mockImplementationOnce(() => childProcess);
       let finishTaskkill;
-      execFile.mockImplementationOnce((_command, _args, _options, callback) => {
-        finishTaskkill = () => callback(new Error('taskkill failed during deactivation'));
+      let finishConfirmation;
+      let taskkillCalls = 0;
+      execFile.mockImplementation((_command, _args, _options, callback) => {
+        taskkillCalls += 1;
+        if (taskkillCalls === 1) {
+          finishTaskkill = () => callback(new Error('taskkill failed during deactivation'));
+        } else {
+          finishConfirmation = () => callback(null);
+        }
       });
 
       const controller = new AbortController();
@@ -276,13 +283,69 @@ describe('VS Code Git process runtime executable selection', () => {
         stderr: expect.stringMatching(/Failed to terminate.*descendant termination was not confirmed/),
         cleanupBlocked: true,
         descendantsTerminated: false,
+       });
+       expect(childProcess.kill).toHaveBeenCalledTimes(1);
+       await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
+       const blockedSpawnCount = spawnCalls.length;
+       await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({
+         exitCode: 1,
+         cleanupBlocked: true,
+       });
+       expect(spawnCalls).toHaveLength(blockedSpawnCount);
+       for (let attempt = 0; attempt < 5 && !finishConfirmation; attempt += 1) {
+         await Promise.resolve();
+       }
+       expect(taskkillCalls).toBe(2);
+       finishConfirmation();
+       await expect(result.cleanupReconciliation?.promise).resolves.toBe(true);
+       await expect(runtime.resetGitProcesses()).resolves.toBeUndefined();
+       await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({ exitCode: 0 });
+     } finally {
+       Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+     }
+   });
+
+  it('retains ownership when late Windows tree confirmation fails', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      const childProcess = new EventEmitter();
+      childProcess.stdout = new EventEmitter();
+      childProcess.stderr = new EventEmitter();
+      childProcess.pid = 1237;
+      childProcess.exitCode = null;
+      childProcess.signalCode = null;
+      childProcess.kill = mock();
+      spawn.mockImplementationOnce(() => childProcess);
+      let taskkillCalls = 0;
+      execFile.mockImplementation((_command, _args, _options, callback) => {
+        taskkillCalls += 1;
+        callback(new Error(taskkillCalls === 1 ? 'taskkill failed' : 'descendant confirmation failed'));
       });
+
+      const controller = new AbortController();
+      const runtime = createGitProcessRuntime();
+      const pending = runtime.execGit(['status'], '/repo', { signal: controller.signal });
+      for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      controller.abort();
+      childProcess.emit('close', null);
+
+      const result = await pending;
+      await Promise.resolve();
+      expect(result.cleanupReconciliation).toBeDefined();
+      expect(taskkillCalls).toBe(2);
+      expect(childProcess.kill).toHaveBeenCalledTimes(1);
+      await expect(runtime.stopGitProcesses()).resolves.toBeUndefined();
       expect(childProcess.kill).toHaveBeenCalledTimes(1);
       await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
+      const blockedSpawnCount = spawnCalls.length;
       await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({
         exitCode: 1,
         cleanupBlocked: true,
       });
+      expect(spawnCalls).toHaveLength(blockedSpawnCount);
     } finally {
       Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
     }

@@ -13,6 +13,13 @@ const gitLibraries = {
   getCommitFileDiff: vi.fn(),
   getConflictDetails: vi.fn(),
   getWorktrees: vi.fn(),
+  getBranches: vi.fn(),
+  getRemotes: vi.fn(),
+  listStashes: vi.fn(),
+  countStashFiles: vi.fn(),
+  getLog: vi.fn(),
+  getBranchBase: vi.fn(),
+  getUnpushedBranchCounts: vi.fn(),
   observeWorktreeTopology: vi.fn(),
   subscribeWorktreeTopologyChanges: vi.fn(),
   resolvePrimaryWorktreeRoot: vi.fn(),
@@ -33,6 +40,13 @@ vi.mock('./index.js', () => ({
   getCommitFileDiff: gitLibraries.getCommitFileDiff,
   getConflictDetails: gitLibraries.getConflictDetails,
   getWorktrees: gitLibraries.getWorktrees,
+  getBranches: gitLibraries.getBranches,
+  getRemotes: gitLibraries.getRemotes,
+  listStashes: gitLibraries.listStashes,
+  countStashFiles: gitLibraries.countStashFiles,
+  getLog: gitLibraries.getLog,
+  getBranchBase: gitLibraries.getBranchBase,
+  getUnpushedBranchCounts: gitLibraries.getUnpushedBranchCounts,
   observeWorktreeTopology: gitLibraries.observeWorktreeTopology,
   subscribeWorktreeTopologyChanges: gitLibraries.subscribeWorktreeTopologyChanges,
   resolvePrimaryWorktreeRoot: gitLibraries.resolvePrimaryWorktreeRoot,
@@ -364,6 +378,59 @@ describe('git collection routes', () => {
     expect(gitLibraries.getRangeFiles).toHaveBeenCalledWith('/repo', expect.objectContaining({
       signal: expect.any(AbortSignal),
     }));
+  });
+});
+
+describe('remaining git read route cancellation', () => {
+  beforeEach(() => {
+    gitLibraries.getBranches.mockReset().mockResolvedValue({ all: [], current: null, branches: {} });
+    gitLibraries.getRemotes.mockReset().mockResolvedValue([]);
+    gitLibraries.listStashes.mockReset().mockResolvedValue([]);
+    gitLibraries.countStashFiles.mockReset().mockResolvedValue({});
+    gitLibraries.getLog.mockReset().mockResolvedValue({ all: [], latest: null, total: 0 });
+    gitLibraries.getBranchBase.mockReset().mockResolvedValue({ base: null });
+    gitLibraries.getUnpushedBranchCounts.mockReset().mockResolvedValue({ counts: {} });
+    gitLibraries.getWorktrees.mockReset().mockResolvedValue([]);
+    gitLibraries.resolvePrimaryWorktreeRoot.mockReset().mockResolvedValue({ root: '/repo' });
+    gitLibraries.resolveWorktreeTopLevel.mockReset().mockResolvedValue({ root: '/repo' });
+  });
+
+  it.each([
+    ['branches', 'GET', '/api/git/branches', { directory: '/repo' }, 'getBranches'],
+    ['remotes', 'GET', '/api/git/remotes', { directory: '/repo' }, 'getRemotes'],
+    ['stashes', 'GET', '/api/git/stashes', { directory: '/repo' }, 'listStashes'],
+    ['worktrees', 'GET', '/api/git/worktrees', { directory: '/repo' }, 'getWorktrees'],
+    ['log', 'GET', '/api/git/log', { directory: '/repo' }, 'getLog'],
+    ['branch base', 'GET', '/api/git/branch-base', { directory: '/repo', branch: 'feature' }, 'getBranchBase'],
+    ['primary root', 'GET', '/api/git/primary-root', { directory: '/repo' }, 'resolvePrimaryWorktreeRoot'],
+    ['toplevel', 'GET', '/api/git/toplevel', { directory: '/repo' }, 'resolveWorktreeTopLevel'],
+  ])('passes a request signal through the %s route', async (_label, method, routePath, query, operation) => {
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    await getRoute(method, routePath)({ query }, createMockResponse());
+    if (operation === 'getBranchBase') {
+      expect(gitLibraries[operation]).toHaveBeenCalledWith(
+        '/repo',
+        'feature',
+        { signal: expect.any(AbortSignal) },
+      );
+    } else {
+      expect(gitLibraries[operation]).toHaveBeenCalledWith('/repo', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    }
+  });
+
+  it('passes request cancellation to network-bound branch push status reads', async () => {
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    await getRoute('POST', '/api/git/branch-push-status')(
+      { query: { directory: '/repo' }, body: { branches: ['main'] } },
+      createMockResponse(),
+    );
+    expect(gitLibraries.getUnpushedBranchCounts).toHaveBeenCalledWith(
+      '/repo',
+      ['main'],
+      { signal: expect.any(AbortSignal) },
+    );
   });
 });
 

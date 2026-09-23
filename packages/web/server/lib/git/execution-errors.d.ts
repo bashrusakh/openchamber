@@ -26,6 +26,12 @@ export type GitProcessTerminationMetadata = {
   cause?: unknown;
   rootError?: Error;
   operationError?: Error;
+  cleanupReconciliation?: GitProcessCleanupReconciliation;
+};
+
+export type GitProcessCleanupReconciliation = {
+  promise: Promise<unknown>;
+  retire: () => void;
 };
 
 export type GitProcessMetadataInput = (Error & GitProcessTerminationMetadata & {
@@ -42,6 +48,7 @@ export type GitProcessResultInput = GitProcessMetadataInput & {
 };
 
 export function copyGitProcessMetadata<T>(target: T, source: GitProcessMetadataInput): T;
+export function getGitProcessCleanupReconciliation(value: GitProcessMetadataInput): GitProcessCleanupReconciliation | null;
 export function isGitProcessCleanupBlocked(value: GitProcessMetadataInput): boolean;
 export function isGitProcessCleanupBlocked<T>(value: T): boolean;
 export function createGitProcessError(result: GitProcessResultInput, fallbackMessage?: string): Error & Omit<GitProcessTerminationMetadata, 'cause'> & {

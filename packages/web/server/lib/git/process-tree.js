@@ -57,18 +57,48 @@ const observeChildClose = (child) => {
       if (settled) return;
       settled = true;
       child.removeListener?.('close', onClose);
+      resolveClose(false);
     },
   };
 };
 
-const confirmChildClose = (observation, timeoutMs) => new Promise((resolve) => {
+const observeProcessGroupGone = (pid) => {
+  let settled = false;
+  let timer;
+  let resolveGone;
+  const promise = new Promise((resolve) => {
+    resolveGone = resolve;
+  });
+  const finish = (gone) => {
+    if (settled) return;
+    settled = true;
+    if (timer) clearTimeout(timer);
+    resolveGone(gone);
+  };
+  const check = () => {
+    try {
+      process.kill(-pid, 0);
+    } catch (error) {
+      if (error?.code === 'ESRCH') {
+        finish(true);
+        return;
+      }
+    }
+    timer = setTimeout(check, POSIX_TERMINATION_POLL_MS);
+    timer?.unref?.();
+  };
+  check();
+  return { promise, cancel: () => finish(false) };
+};
+
+const confirmObservation = (observation, timeoutMs, retainOnTimeout = false) => new Promise((resolve) => {
   let settled = false;
   let timer;
   const finish = (closed) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
-    observation.cancel();
+    if (closed || !retainOnTimeout) observation.cancel();
     resolve(closed);
   };
   void observation.promise.then((closed) => finish(closed));
@@ -76,7 +106,21 @@ const confirmChildClose = (observation, timeoutMs) => new Promise((resolve) => {
   timer?.unref?.();
 });
 
-const processTreeTerminationError = (pid, cause, rootError, rootClosed, platform) => Object.assign(
+const createCleanupReconciliation = (observations) => ({
+  promise: Promise.all(observations.map((observation) => observation.promise)),
+  retire: () => {
+    for (const observation of observations) observation.cancel();
+  },
+});
+
+const processTreeTerminationError = (
+  pid,
+  cause,
+  rootError,
+  rootClosed,
+  platform,
+  cleanupReconciliation = undefined,
+) => Object.assign(
   new Error(
     `Failed to terminate the ${platform === 'win32' ? 'Windows' : 'POSIX'} process tree for PID ${pid}; `
     + 'descendant termination was not confirmed',
@@ -90,17 +134,25 @@ const processTreeTerminationError = (pid, cause, rootError, rootClosed, platform
     cause,
     rootError: rootError || undefined,
     platform,
+    cleanupReconciliation,
   },
 );
 
 const failWindowsTermination = async (child, pid, cause, timeoutMs, observation = observeChildClose(child)) => {
   const rootError = killRoot(child);
-  const rootClosed = await confirmChildClose(observation, timeoutMs);
-  throw processTreeTerminationError(pid, cause, rootError, rootClosed, 'win32');
+  const rootClosed = await confirmObservation(observation, timeoutMs, true);
+  throw processTreeTerminationError(
+    pid,
+    cause,
+    rootError,
+    rootClosed,
+    'win32',
+    rootClosed ? undefined : createCleanupReconciliation([observation]),
+  );
 };
 
 const confirmSuccessfulWindowsTermination = async (child, pid, timeoutMs, observation) => {
-  const rootClosed = await confirmChildClose(observation, timeoutMs);
+  const rootClosed = await confirmObservation(observation, timeoutMs, true);
   if (rootClosed) return;
   throw processTreeTerminationError(
     pid,
@@ -108,37 +160,13 @@ const confirmSuccessfulWindowsTermination = async (child, pid, timeoutMs, observ
     null,
     false,
     'win32',
+    createCleanupReconciliation([observation]),
   );
 };
 
-const confirmProcessGroupGone = (pid, timeoutMs) => new Promise((resolve) => {
-  const startedAt = Date.now();
-  let timer;
-  const finish = (confirmed) => {
-    if (timer) clearTimeout(timer);
-    resolve(confirmed);
-  };
-  const check = () => {
-    try {
-      process.kill(-pid, 0);
-    } catch (error) {
-      if (error?.code === 'ESRCH') {
-        finish(true);
-        return;
-      }
-    }
-    if (Date.now() - startedAt >= timeoutMs) {
-      finish(false);
-      return;
-    }
-    timer = setTimeout(check, POSIX_TERMINATION_POLL_MS);
-    timer?.unref?.();
-  };
-  check();
-});
-
 const terminatePosixProcessTree = async (child, pid, timeoutMs) => {
   const observation = observeChildClose(child);
+  const groupObservation = observeProcessGroupGone(pid);
   let signalError = null;
   try {
     process.kill(-pid, 'SIGKILL');
@@ -149,10 +177,17 @@ const terminatePosixProcessTree = async (child, pid, timeoutMs) => {
     }
   }
 
-  const rootClosed = await confirmChildClose(observation, timeoutMs);
-  const groupGone = rootClosed && await confirmProcessGroupGone(pid, timeoutMs);
+  const rootClosed = await confirmObservation(observation, timeoutMs, true);
+  const groupGone = await confirmObservation(groupObservation, timeoutMs, true);
   if (signalError && signalError.code !== 'ESRCH') {
-    throw processTreeTerminationError(pid, signalError, signalError, rootClosed, 'posix');
+    throw processTreeTerminationError(
+      pid,
+      signalError,
+      signalError,
+      rootClosed,
+      'posix',
+      rootClosed && groupGone ? undefined : createCleanupReconciliation([observation, groupObservation]),
+    );
   }
   if (!rootClosed || !groupGone) {
     throw processTreeTerminationError(
@@ -161,6 +196,7 @@ const terminatePosixProcessTree = async (child, pid, timeoutMs) => {
       signalError,
       rootClosed,
       'posix',
+      createCleanupReconciliation([observation, groupObservation]),
     );
   }
 };

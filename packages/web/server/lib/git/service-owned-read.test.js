@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createGitExecutionService } from './execution-service.js';
-import { getRangeDiff } from './service.js';
+import { getLog, getRangeDiff, getRemotes } from './service.js';
 
 const temporaryRoots = [];
 const execFileAsync = promisify(execFile);
@@ -24,6 +24,43 @@ afterEach(async () => {
 });
 
 describe('owned web Git reads', () => {
+  it('reads alternate remotes through the signal-enabled owned adapter', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'openchamber-owned-remotes-'));
+    temporaryRoots.push(directory);
+    await runGit(directory, ['init', '-b', 'main']);
+    await runGit(directory, ['remote', 'add', 'origin', 'https://github.com/acme/project.git']);
+    await runGit(directory, ['remote', 'add', 'upstream', 'git@github.com:upstream/project.git']);
+
+    await expect(getRemotes(directory, { signal: new AbortController().signal })).resolves.toEqual([
+      {
+        name: 'origin',
+        fetchUrl: 'https://github.com/acme/project.git',
+        pushUrl: 'https://github.com/acme/project.git',
+      },
+      {
+        name: 'upstream',
+        fetchUrl: 'git@github.com:upstream/project.git',
+        pushUrl: 'git@github.com:upstream/project.git',
+      },
+    ]);
+  });
+
+  it('keeps the signal-enabled log response contract', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'openchamber-owned-log-'));
+    temporaryRoots.push(directory);
+    await runGit(directory, ['init', '-b', 'main']);
+    await runGit(directory, ['config', 'user.email', 'test@example.com']);
+    await runGit(directory, ['config', 'user.name', 'Test']);
+    await fs.writeFile(path.join(directory, 'README.md'), 'log\n');
+    await runGit(directory, ['add', 'README.md']);
+    await runGit(directory, ['commit', '-m', 'owned log']);
+
+    await expect(getLog(directory, { signal: new AbortController().signal })).resolves.toMatchObject({
+      total: 1,
+      latest: { message: 'owned log' },
+    });
+  });
+
   it('cancels a range read through the owned process-tree boundary', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'openchamber-owned-read-'));
     const marker = path.join(directory, 'diff-started');
