@@ -292,23 +292,36 @@ The lifecycle:
    wait cannot let it expire.
 6. The consult item is claimed for this run's owner
    (`claimConsultItem`): the item is reserved, the generic dispatcher is kept
-   away by the claim's hold, and re-polling tolerates a busy/not-head refusal.
-   A claim failure releases the hold and fails the submission (the item stays
-   queued until the server's expiry sweep reverts it). An item that vanished
-   is `delivered-raw`.
-7. The store moves to `consulting` and `consultRuntime.startConsultation` runs
+   away by the claim's hold, and re-polling tolerates only the transient
+   refusals (not-head, not-idle, busy, and not found while the item is still
+   queued). Every other claim failure follows the existing definite path: the
+   hold is released and the submission fails, and the item stays queued until
+   the server's expiry sweep reverts it. An item that vanished is
+   `delivered-raw`.
+7. A claim refused with `attempt-recorded` (a witness appeared before or during
+   this run's claim) is a reconcile outcome at every site, not a failure to
+   clean up: the item is never removed, the composer is never restored, the run
+   ends `uncertain: true`, and the item stays queued and reserved. The
+   initial-claim site releases only its own owner-scoped hold (the live claimant
+   keeps its reservation); the dispatch-loop re-claim site keeps the
+   server-owned lease (the same semantics as its `send-failed: 'unknown'` and
+   `attempt-present` paths); the resume site refuses with the same uncertain
+   result as the strict resolve gate. A witnessed item is never resume-able, so
+   this path means "reconcile first": a retry is not automatic and the item is
+   never re-sent without a confirmed outcome.
+8. The store moves to `consulting` and `consultRuntime.startConsultation` runs
    with `runId` (the store's run id) and `expectedRuntimeKey`.
-8. The hold is re-asserted once more for the fan-out (the heartbeat keeps
+9. The hold is re-asserted once more for the fan-out (the heartbeat keeps
    beating); the owner scoping means no other feature's or run's release can
    clear it.
-9. On a non-cancelled result the store moves through `settling` and
+10. On a non-cancelled result the store moves through `settling` and
    `dispatching`; the synthesis `system` and the receipt `textPartMetadata`
    are merged onto the claimed item via `setConsultItemPayload`, and the item
    is dispatched through its own route (`dispatchConsultItem`) — the server
    verifies the claim, waits for idleness, sends the item with its payload,
    removes it, and releases this owner's hold. The submission does not release
    the hold again after a successful dispatch.
-10. `done` is recorded with the per-advisor outcomes and the degraded flag.
+11. `done` is recorded with the per-advisor outcomes and the degraded flag.
    Every terminal path releases the hold exactly once — except the successful
    dispatch, where the server already released it and the submission suppresses
    its own release. Hold operations are serialized per run: every re-assert
@@ -329,6 +342,9 @@ Branches:
 - a refusal or non-degraded failure AFTER the claim removes the consult item
   and releases the hold — the message is never re-queued for normal delivery
   (F2); `queueItemRestored` stays `false` and the caller restores the composer;
+- a claim refused with `attempt-recorded` (initial, re-claim, or resume) is
+  `uncertain: true` instead: the item is never removed and the composer is
+  never restored, because a prior delivery may have landed (see step 7);
 - an enqueue rejection fails the submission and the caller restores its
   capture; if the server accepted the item before the rejection, that queued
   copy is delivered normally later (accepted v1 bound, see "Accepted v1

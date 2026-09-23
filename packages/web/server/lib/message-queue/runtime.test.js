@@ -1250,13 +1250,83 @@ describe('message queue runtime', () => {
       expect(await pending).toEqual({ status: 'claim-lost' });
       expect(openCode.state.promptCalls).toBe(0);
       // This dispatch sent nothing, so its own witness was removed again: the
-      // item is witness-absent and unclaimed, which the resolve predicate reads
-      // as provably never dispatched (resumable) rather than unknown.
+      // item is returned to the normal recoverable state (unclaimed plus
+      // witness-absent is the server's proof that nothing was sent), which is
+      // what makes the Resume affordance appear.
       const snapshot = runtime.sessionSnapshot(SESSION).items;
       expect(snapshot).toHaveLength(1);
       expect(snapshot[0].attempted).toBeUndefined();
       expect(snapshot[0].claimed).toBeUndefined();
+      expect(snapshot[0].recoverable).toBe(true);
+      // Nothing was sent, so the resolve predicate reads resumable again and a
+      // fresh owner may claim it.
       expect(await runtime.resolveConsult(SESSION, itemId)).toEqual({ status: 'resumable' });
+      const claimed = await runtime.claim(SESSION, itemId, 'consult:run-2', 60_000);
+      expect(claimed.claimed).toBe(true);
+      expect(claimed.item.claimed).toMatchObject({ owner: 'consult:run-2' });
+      expect(claimed.item).not.toHaveProperty('recoverable');
+    });
+
+    it('a foreign send in flight during the parked witness write runs the cleanup and stamps recoverable', async () => {
+      let clock = 0;
+      let releaseWrite;
+      const writeGate = new Promise((resolve) => { releaseWrite = resolve; });
+      const { runtime, openCode, emit } = createRuntime({
+        now: () => clock,
+        persistStrictImpl: async ({ filePath, payload }) => {
+          await writeGate;
+          fs.writeFileSync(filePath, payload, 'utf8');
+        },
+      });
+      runtime.start();
+      openCode.state.statuses = {};
+      const consult = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, consult.itemId, 'consult:run-1', 1_000);
+      const normal = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+      // The normal item moves in front of the claimed consult item so the tick
+      // can deliver it once the consult hold lapses.
+      await runtime.reorder(SESSION, [normal.itemId, consult.itemId]);
+
+      const pending = runtime.dispatchConsult(SESSION, consult.itemId, 'consult:run-1');
+      await waitFor(() => runtime.sessionSnapshot(SESSION).items.find((entry) => entry.id === consult.itemId)?.attempted === true);
+
+      // The consult hold lapses (the dispatch extended it to the cap) and the
+      // tick starts the normal head's send. Its prompt is parked so `sending`
+      // stays set while the consult dispatch is still in its witness write.
+      clock = 700_000;
+      let releasePrompt;
+      openCode.state.parkNext = {
+        pathname: `/session/${SESSION}/prompt_async`,
+        promise: new Promise((resolve) => { releasePrompt = resolve; }),
+      };
+      emit({ type: 'session.status', properties: { sessionID: SESSION, status: { type: 'idle' } } });
+      await waitFor(() => openCode.state.parkedAt === `/session/${SESSION}/prompt_async`);
+      expect(runtime.sessionSnapshot(SESSION).sendingId).toBe(normal.itemId);
+
+      releaseWrite();
+      expect(await pending).toEqual({ status: 'claim-lost' });
+
+      // The cleanup ran with a foreign send in flight: the own witness is
+      // gone, and the item (unclaimed + unwitnessed) is returned to the
+      // recoverable state.
+      const cleared = runtime.sessionSnapshot(SESSION).items.find((entry) => entry.id === consult.itemId);
+      expect(cleared.attempted).toBeUndefined();
+      expect(cleared.claimed).toBeUndefined();
+      expect(cleared.recoverable).toBe(true);
+      // Resolve answers `sending` while the foreign send is still in flight
+      // (that dispatch may be the one that lands the turn), and `resumable`
+      // once it settles: the cleanup itself proved nothing was sent by us.
+      expect(await runtime.resolveConsult(SESSION, consult.itemId)).toEqual({ status: 'sending' });
+
+      // The foreign send is untouched: it still owns the in-flight slot and
+      // completes normally.
+      expect(runtime.sessionSnapshot(SESSION).sendingId).toBe(normal.itemId);
+      releasePrompt();
+      await settle();
+      expect(runtime.sessionSnapshot(SESSION).sendingId).toBeNull();
+      expect(runtime.sessionSnapshot(SESSION).items.map((entry) => entry.id)).toEqual([consult.itemId]);
+      expect(openCode.state.promptCalls).toBe(1);
+      expect(await runtime.resolveConsult(SESSION, consult.itemId)).toEqual({ status: 'resumable' });
     });
 
     it('a malformed stored witness reads as a legacy witness, never as never-sent', async () => {
@@ -1571,6 +1641,80 @@ describe('message queue runtime', () => {
       expect(result).toEqual({ status: 'send-failed', delivered: 'no' });
       expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
       expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
+    });
+
+    it('a preparation failure (routing hook throws) is a definite not-sent with no request issued', async () => {
+      const dataDir = makeDataDir();
+      const resolvePromptBody = async () => {
+        throw new Error('routing hook exploded');
+      };
+      const { runtime, openCode } = createRuntime({ dataDir, resolvePromptBody });
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      // Preparation never crossed the request boundary: definite not-sent.
+      expect(result).toEqual({ status: 'send-failed', delivered: 'no' });
+      expect(openCode.state.promptCalls).toBe(0);
+      // The witness, the item, and the reservation are unwound together.
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      expect(runtime.sessionSnapshot(SESSION).sendingId).toBeNull();
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+      // The owner hold was released: the session is free again.
+      expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
+      await runtime.flush();
+      expect(readStoredAttempt(dataDir, itemId)).toBeNull();
+    });
+
+    it('a preparation failure leaves a foreign witness untouched (ownership-gated unwind)', async () => {
+      // The live item `enqueue` hands back is the seam: the routing hook swaps
+      // in a foreign attempt record at the instant the prep failure unwinds,
+      // exercising the attemptId ownership check.
+      const foreign = { attemptId: 'att_foreign001', messageId: 'msg_foreign001', at: 9_999 };
+      let live;
+      const resolvePromptBody = async () => {
+        live.consult.attempt = { ...foreign };
+        throw new Error('routing hook exploded');
+      };
+      const { runtime, openCode } = createRuntime({ resolvePromptBody });
+      runtime.start();
+      openCode.state.statuses = {};
+      const enqueued = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      live = enqueued.item;
+      await runtime.claim(SESSION, enqueued.itemId, 'consult:run-1');
+
+      const result = await runtime.dispatchConsult(SESSION, enqueued.itemId, 'consult:run-1');
+      expect(result).toEqual({ status: 'send-failed', delivered: 'no' });
+      expect(openCode.state.promptCalls).toBe(0);
+      // The foreign record was not cleared by this dispatch's unwind (it was
+      // not ours to clear), and nothing was sent.
+      expect(live.consult.attempt).toEqual(foreign);
+      // Per the H3 contract the prep failure still unwinds its own item and
+      // hold: the item is removed from the queue and the owner hold released.
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
+    });
+
+    it('a preparation failure from the command route is a definite not-sent', async () => {
+      // `resolveSlashCommand` reads the fake's command route: a failing read
+      // (the harness's failNext hook) fails preparation before the request.
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem({
+        content: '/review src',
+        text: '/review src',
+      }));
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.failNext = /\/command$/;
+
+      const result = await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      expect(result).toEqual({ status: 'send-failed', delivered: 'no' });
+      expect(openCode.state.promptCalls).toBe(0);
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
     });
 
     it('an HTTP 500 without a marker stays unknown (a 5xx may have been accepted)', async () => {

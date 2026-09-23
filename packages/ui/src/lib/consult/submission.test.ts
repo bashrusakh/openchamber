@@ -1462,6 +1462,56 @@ describe('cancellation and failures', () => {
     expect(harness.state.holds).toEqual([true, true, false]);
   });
 
+  test('an attempt-recorded re-claim refusal after claim-lost is uncertain: the item stays queued and reserved', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    // The dispatch lost its claim, and the re-claim then hits a witness that
+    // appeared meanwhile: an attempt may already exist, so the delivery is
+    // undecided and nothing may be cleaned up or re-sent.
+    harness.state.dispatchConsultOutcome = { status: 'claim-lost' };
+    harness.state.claimFailure = new Error('cannot claim queued message: attempt-recorded');
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(result.queueItemRestored).toBe(false);
+    expect(result.error).toContain('dispatch attempt already exists');
+    // The item is NOT removed and the composer must not restore: the
+    // reservation stays server-side for a later reconcile.
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-1']);
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    // The lease stays server-owned, like the other uncertain paths.
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('an attempt-recorded initial claim is uncertain: own hold released, item stays queued', async () => {
+    const harness = createHarness();
+    // Admission passes, then a witness appeared before this run's claim (a
+    // concurrent dispatch): the server refuses with attempt-recorded.
+    const handle = harness.submit(baseInput());
+    harness.state.claimFailure = new Error('cannot claim queued message: attempt-recorded');
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(result.queueItemRestored).toBe(false);
+    expect(result.error).toContain('dispatch attempt already exists');
+    // No removal and no restore: the item stays queued for a resolve.
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-1']);
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    // This run's own hold was released exactly once (owner-scoped, so the
+    // item's live claimant keeps its own reservation).
+    expect(harness.state.holds).toEqual([true, false]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
   test('a definite send failure removes the item and restores the composer contract', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());

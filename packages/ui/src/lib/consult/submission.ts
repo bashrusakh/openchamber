@@ -136,6 +136,9 @@ const AUTO_REVIEW_ACTIVE_MESSAGE =
 /** The resume's delivery check could not prove whether the previous turn landed. */
 const RESUME_UNCONFIRMED_DELIVERY_MESSAGE =
   "The previous consultation's delivery could not be confirmed; retry later or remove the queued consultation.";
+/** A claim refused because a dispatch witness already exists: the delivery is undecided. */
+const ATTEMPT_RECORDED_MESSAGE =
+  'The server reports a dispatch attempt already exists for this consult message, so the previous delivery is undecided; the message stays reserved and is never re-sent without a confirmed reconcile.';
 
 /**
  * The default refusal for an unverified live capability. The reason decides
@@ -891,6 +894,18 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     } catch (error) {
       if (!runtimeMatches(capture, deps)) return finishRuntimeChanged();
       const message = error instanceof Error ? error.message : String(error);
+      // A witness appeared between admission and the claim: `attempt-recorded`
+      // means an attempt may already exist, so the previous delivery is
+      // undecided. Nothing is removed and the composer is never restored; the
+      // item stays server-side under its live claimant.
+      if (/attempt-recorded/.test(message)) {
+        // Releasing this run's own hold is still safe here: holds are
+        // owner-scoped, so it cannot clear the claim owner's own lease, and
+        // the item's reservation belongs to whichever client claimed it.
+        await releaseHold(capture);
+        deps.runs.finish(input.parentSessionId, capture.runId, { phase: 'failed', error: ATTEMPT_RECORDED_MESSAGE });
+        return { status: 'failed', runId: capture.runId, error: ATTEMPT_RECORDED_MESSAGE, queueItemRestored: false, uncertain: true };
+      }
       // A 'not found' refusal with the item gone from the projection means
       // the item left the queue without this submission claiming it (another
       // client removed it). Never restore the composer (a duplicate send) and
@@ -1152,6 +1167,13 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         try {
           await waitForClaim(input, target, capture, itemId);
         } catch (error) {
+          // The re-claim hit a witness that appeared meanwhile: an attempt may
+          // already exist, so the delivery is undecided. This is a reconcile
+          // outcome, not a failure to clean up: the item stays queued and
+          // reserved, nothing is removed, and the composer is never restored.
+          if (/attempt-recorded/.test(error instanceof Error ? error.message : String(error))) {
+            return settleUncertain(ATTEMPT_RECORDED_MESSAGE);
+          }
           return settleWithoutDispatch(
             capture,
             target,

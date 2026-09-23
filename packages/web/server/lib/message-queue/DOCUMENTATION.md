@@ -226,19 +226,31 @@ without a durable witness. Because the write is awaited, `dispatchConsult`
 re-inspects right after it: a removal, a lost claim, or a send that started
 during the write is never overtaken by the request.
 
-Three committed sites clear or drop the witness, and nothing else does
+The dispatch runs in two phases with different failure semantics. Preparation
+(`resolveSlashCommand`, `buildPromptBody`, the routing hook) never crosses the
+request boundary, so a preparation failure unwinds the witness (only while it
+is still this dispatch's own attemptId), removes the item, releases the owner
+hold, and answers `send-failed delivered: 'no'` — it never runs the delivery
+poll. Only a failure of `prompt_async` or after it may keep the witness and
+answer `unknown` (a 4xx or connection-refused rejection of `prompt_async` still
+classifies as proven not-accepted and clears the witness, below).
+
+Four committed sites clear or drop the witness, and nothing else does
 (`resolveConsult` only reads it):
 
 - the dispatch's proven-rejection path (a 4xx or `ECONNREFUSED`/`ENOTFOUND`/
   `EAI_AGAIN`), which also removes the item and answers
   `send-failed delivered: 'no'`;
+- the preparation-failure unwind described above (ownership-checked);
 - the post-write re-inspect, when the claim was lost (or another send took the
   session) while the witness write was awaited: this dispatch sent nothing, so
-  it deletes its own witness and commits, which unblocks the item;
+  it deletes its own witness, marks the item `recoverable` when it ends
+  unclaimed and unwitnessed, and commits — which unblocks the item and shows
+  the Resume affordance;
 - the `commitAttempt` rollback when the strict write itself rejects, which
   leaves no in-memory witness behind (the request is never issued).
 
-A foreign witness is never touched by either cleanup: the attemptId recorded on
+A foreign witness is never touched by any cleanup: the attemptId recorded on
 the item decides.
 
 Its absence is the server's only proof that a consult item was never
@@ -438,15 +450,19 @@ client may resume the consult by claiming the recoverable head item through
 the existing claim route (the marker is cleared on the claim) or the user may
 remove it.
 
-A witnessed item never carries `recoverable`: the witness means a request may
-already exist for it, so a resume could duplicate a turn the user paid for.
-Its only exits are a resolve that proves delivery (address 200 or the legacy
-marker) or manual removal; the client's safe action there is removal. A
-version-1 item restored with a legacy witness is in the same position: no
-resume, delivered only if its receipt marker is still in the transcript, and
-otherwise unknown until the user removes it. The kept receipt metadata is what
-makes a legacy check possible; a modern witness uses its own message id
-instead.
+A witnessed item never carries `recoverable` **while the witness stands**: the
+witness means a request may already exist for it, so a resume could duplicate a
+turn the user paid for. Its only exits are a resolve that proves delivery
+(address 200 or the legacy marker) or manual removal; the client's safe action
+there is removal. One dispatch-side cleanup also returns an item to
+`recoverable`: when dispatch deletes its own witness because the claim was lost
+during the awaited witness write (nothing was sent), it stamps `recoverable`
+iff the item ends unclaimed and unwitnessed, so the Resume affordance appears
+without waiting for a restart. A version-1 item restored with a legacy witness
+is in the same position as a witnessed one: no resume, delivered only if its
+receipt marker is still in the transcript, and otherwise unknown until the user
+removes it. The kept receipt metadata is what makes a legacy check possible; a
+modern witness uses its own message id instead.
 
 ## Routes (`/api/message-queue`)
 

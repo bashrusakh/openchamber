@@ -1576,6 +1576,11 @@ export function createMessageQueueRuntime({
       if (ownWitnessStored) {
         delete item.consult.attempt;
         if (Object.keys(item.consult).length === 0) delete item.consult;
+        // Unclaimed plus witness-absent is the server's proof that nothing was
+        // sent, so the item returns to the normal recoverable state a fresh
+        // owner may re-claim. A claim that is still live (another owner) keeps
+        // that owner's reservation; nothing is stamped over it.
+        if (!item.claimed && !isAttemptWitnessed(item)) item.recoverable = true;
         commit(sessionId);
       }
       return { status: claimLost ? 'claim-lost' : 'sending' };
@@ -1590,13 +1595,18 @@ export function createMessageQueueRuntime({
     // The receipt runId is this acting turn's identity in the parent
     // transcript; null means correlation is impossible (see below).
     const consultRunId = readConsultReceiptRunId(item);
+    // Phase 1 — preparation. None of this crosses the request boundary, so its
+    // failure is provably pre-request: the witness is cleared, the item is
+    // removed, and the outcome is a definite not-sent. It must never run the
+    // marker/address poll below.
+    let body;
     try {
       const fileParts = item.attachments.map(toFilePart);
       const contextParts = item.context.flatMap(toContextParts);
       const command = await resolveSlashCommand(item.text, directory);
       // A consult prompt always takes the prompt route: its system/metadata
       // extras have no command-route equivalent.
-      const { body } = await buildPromptBody(item, {
+      const built = await buildPromptBody(item, {
         sessionId,
         directory,
         fileParts,
@@ -1605,11 +1615,30 @@ export function createMessageQueueRuntime({
         system: item.consult?.system ?? '',
         textPartMetadata: item.consult?.textPartMetadata,
       });
+      body = built.body;
       // The attempt's own id: the address check below (and a later resolve)
       // can prove delivery by reading this exact message, and no other client's
       // message can be mistaken for this turn.
       body.messageID = attempt.messageId;
       await resolvePromptBody?.(body, { sessionId, directory });
+    } catch (error) {
+      sending.delete(sessionId);
+      console.warn(`[message-queue] consult preparation for ${sessionId} failed:`, error?.message ?? error);
+      // Clear the witness only while it is still this dispatch's own: a foreign
+      // writer must not lose its record to this failure.
+      if (readConsultAttempt(item)?.attemptId === attempt.attemptId) {
+        delete item.consult?.attempt;
+        if (item.consult && Object.keys(item.consult).length === 0) delete item.consult;
+      }
+      removeItem();
+      releaseOwnerHold();
+      commit(sessionId);
+      return { status: 'send-failed', delivered: 'no' };
+    }
+    // Phase 2 — the request boundary. From here a failure may mean the prompt
+    // was accepted before the response was lost, so the witness stays and the
+    // poll below decides.
+    try {
       await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/prompt_async`, { directory, method: 'POST', body });
       removeItem();
       sending.delete(sessionId);
