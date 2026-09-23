@@ -63,6 +63,49 @@ describe('createSerialRefresh', () => {
     await expect(late).resolves.toBe(2);
   });
 
+  it('cancels one coalesced follower without aborting the shared source for its peers', async () => {
+    const refresh = createSerialRefresh();
+    const firstGate = createGate();
+    const followerGate = createGate();
+    const cancelled = new AbortController();
+    const retained = new AbortController();
+    const sourceSignals = [];
+    let executions = 0;
+    const execute = async (requests, sourceSignal) => {
+      sourceSignals.push(sourceSignal);
+      executions += 1;
+      if (executions === 1) {
+        await firstGate.opened;
+        return 'first';
+      }
+      await followerGate.opened;
+      if (sourceSignal.aborted) {
+        throw sourceSignal.reason;
+      }
+      return `follower-${requests.length}`;
+    };
+
+    const first = refresh.run('repo', { signal: undefined }, execute);
+    await flush();
+    const second = refresh.run('repo', { signal: cancelled.signal }, execute);
+    const third = refresh.run('repo', { signal: retained.signal }, execute);
+
+    firstGate.release();
+    await expect(first).resolves.toBe('first');
+    await flush();
+    expect(sourceSignals[1]).toBeInstanceOf(AbortSignal);
+    expect(sourceSignals[1].aborted).toBe(false);
+
+    cancelled.abort('one follower disconnected');
+    await expect(second).rejects.toBe('one follower disconnected');
+    expect(sourceSignals[1].aborted).toBe(false);
+
+    followerGate.release();
+    await expect(third).resolves.toBe('follower-2');
+    expect(sourceSignals[1].aborted).toBe(false);
+    expect(refresh.activeKeys).toEqual([]);
+  });
+
   it('keeps keys independent and bounds how many run at once', async () => {
     const refresh = createSerialRefresh({ maxConcurrent: 2 });
     const gates = new Map();

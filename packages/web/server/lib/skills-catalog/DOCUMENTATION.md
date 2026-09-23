@@ -21,7 +21,7 @@ The following functions are exported and used by the web server:
 - `getCacheKey({ normalizedRepo, subpath, identityId })`: Generate cache key for scan results.
 - `getCachedScan(key)`: Retrieve cached scan result if not expired.
 - `setCachedScan(key, value, ttlMs)`: Store scan result with TTL (default 3 hours).
-- `scanWithCache(key, loader, { refresh })`: Run a scan loader with cache lookup, in-flight deduplication, and a global concurrency limit (2 concurrent scans); only `ok: true` results are cached.
+- `scanWithCache(key, loader, { refresh, signal })`: Run a scan loader with cache lookup, in-flight deduplication, and a global concurrency limit (2 concurrent scans); only `ok: true` results are cached. Each request can cancel its own waiter without aborting another caller's shared scan. The owner passes a separate source signal to the loader and keeps the in-flight task alive through its cleanup.
 - `clearCache()`: Clear all cached scan results.
 - Scan results persist to `skills-catalog-cache.json` in the OpenChamber data dir (debounced, atomic rename) and survive server restarts within the TTL.
 
@@ -127,7 +127,7 @@ The following functions are internal helpers used by exported functions:
 - Cache keys include `normalizedRepo`, `subpath`, and `identityId` for isolation.
 - Default TTL is 3 hours for both scan results and GitHub repository metadata.
 - Scan and GitHub metadata caches persist to JSON files in the OpenChamber data dir, so app restarts and page refreshes reuse previous results instead of re-hitting GitHub.
-- Scans run through a global concurrency limiter (2 at a time) with per-key in-flight deduplication.
+- Scans run through a global concurrency limiter (2 at a time) with per-key in-flight deduplication. Request cancellation releases only that request's waiter; the shared source is aborted only after the last waiter leaves, and an aborted source never populates the cache.
 - The refresh button passes `refresh: true` and bypasses the cache.
 
 ### Security Considerations

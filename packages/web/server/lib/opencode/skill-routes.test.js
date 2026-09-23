@@ -21,6 +21,7 @@ import {
   readSkillSupportingFile,
   writeSkillSupportingFile,
 } from './shared.js';
+import { clearCache, scanWithCache } from '../skills-catalog/cache.js';
 
 const createTempProject = () => {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-skill-routes-'));
@@ -33,6 +34,9 @@ const startSkillsApp = ({
   scanSkillsRepository = async () => ({ ok: false }),
   installSkillsFromRepository = async () => ({ ok: false }),
   overrides = {},
+  scanWithCache: scanWithCacheImpl = async (_key, loader, options) => loader({ signal: options?.signal }),
+  getCuratedSkillsSources = () => [],
+  parseSkillRepoSource = () => ({ ok: false }),
 } = {}) => {
   const app = express();
   app.use(express.json());
@@ -72,10 +76,10 @@ const startSkillsApp = ({
     deleteSkillSupportingFile,
     SKILL_SCOPE,
     SKILL_DIR,
-    getCuratedSkillsSources: () => [],
+    getCuratedSkillsSources,
     getCacheKey: () => 'k',
-    scanWithCache: async (_key, loader) => loader(),
-    parseSkillRepoSource: () => ({ ok: false }),
+    scanWithCache: scanWithCacheImpl,
+    parseSkillRepoSource,
     scanSkillsRepository,
     installSkillsFromRepository,
     fetchGitHubRepoMetas: async () => ({}),
@@ -101,6 +105,7 @@ describe('skill-routes directory soft fallback', () => {
   let appHandle = null;
 
   afterEach(async () => {
+    clearCache();
     if (appHandle) {
       await appHandle.close();
       appHandle = null;
@@ -427,5 +432,121 @@ describe('skill-routes directory soft fallback', () => {
     await stopped;
     await expect(requestOutcome).resolves.toMatchObject({ ok: false, error: { name: 'AbortError' } });
     expect(receivedSignal.aborted).toBe(true);
+  });
+
+  it('cancels one catalog source waiter without aborting the shared scan for another request', async () => {
+    projectRoot = createTempProject();
+    let receivedSignal;
+    let resolveStarted;
+    let resolveScan;
+    let cacheCalls = 0;
+    let resolveSecondCacheCall;
+    const started = new Promise((resolve) => { resolveStarted = resolve; });
+    const scanFinished = new Promise((resolve) => { resolveScan = resolve; });
+    const secondCacheCall = new Promise((resolve) => { resolveSecondCacheCall = resolve; });
+
+    appHandle = startSkillsApp({
+      projectRoot,
+      scanWithCache: (...args) => {
+        cacheCalls += 1;
+        if (cacheCalls === 2) resolveSecondCacheCall();
+        return scanWithCache(...args);
+      },
+      getCuratedSkillsSources: () => ([
+        { id: 'source', label: 'Source', source: 'owner/repository' },
+      ]),
+      parseSkillRepoSource: () => ({
+        ok: true,
+        host: 'github.com',
+        normalizedRepo: 'owner/repository',
+        effectiveSubpath: null,
+      }),
+      scanSkillsRepository: async ({ signal }) => {
+        receivedSignal = signal;
+        resolveStarted();
+        await scanFinished;
+        return {
+          ok: true,
+          items: [{ skillName: 'example', description: 'Example' }],
+        };
+      },
+    });
+
+    const firstController = new AbortController();
+    const first = fetch(`${appHandle.baseUrl}/api/config/skills/catalog/source?sourceId=source`, {
+      signal: firstController.signal,
+    }).then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error }),
+    );
+    await started;
+
+    const second = fetch(`${appHandle.baseUrl}/api/config/skills/catalog/source?sourceId=source`);
+    await secondCacheCall;
+    firstController.abort();
+    await expect(first).resolves.toMatchObject({ ok: false, error: { name: 'AbortError' } });
+    expect(receivedSignal).toBeInstanceOf(AbortSignal);
+    expect(receivedSignal.aborted).toBe(false);
+
+    resolveScan();
+    const secondResponse = await second;
+    expect(secondResponse.status).toBe(200);
+    await expect(secondResponse.json()).resolves.toMatchObject({
+      ok: true,
+      items: [{ skillName: 'example' }],
+    });
+    expect(receivedSignal.aborted).toBe(false);
+  });
+
+  it('aborts the catalog scan source after the last disconnected waiter and lets its cleanup finish', async () => {
+    projectRoot = createTempProject();
+    let receivedSignal;
+    let resolveStarted;
+    let resolveCleanup;
+    const started = new Promise((resolve) => { resolveStarted = resolve; });
+    const cleanup = new Promise((resolve) => { resolveCleanup = resolve; });
+
+    appHandle = startSkillsApp({
+      projectRoot,
+      scanWithCache,
+      getCuratedSkillsSources: () => ([
+        { id: 'source', label: 'Source', source: 'owner/repository' },
+      ]),
+      parseSkillRepoSource: () => ({
+        ok: true,
+        host: 'github.com',
+        normalizedRepo: 'owner/repository',
+        effectiveSubpath: null,
+      }),
+      scanSkillsRepository: async ({ signal }) => {
+        receivedSignal = signal;
+        resolveStarted();
+        await new Promise((resolve) => {
+          signal.addEventListener('abort', resolve, { once: true });
+        });
+        await cleanup;
+        return { ok: false, error: { kind: 'networkError', message: 'cancelled' } };
+      },
+    });
+
+    const controller = new AbortController();
+    const request = fetch(`${appHandle.baseUrl}/api/config/skills/catalog/source?sourceId=source`, {
+      signal: controller.signal,
+    }).then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error }),
+    );
+    await started;
+    const sourceAbort = new Promise((resolve) => {
+      receivedSignal.addEventListener('abort', resolve, { once: true });
+    });
+    controller.abort();
+    await expect(request).resolves.toMatchObject({ ok: false, error: { name: 'AbortError' } });
+    await sourceAbort;
+    expect(receivedSignal.aborted).toBe(true);
+
+    resolveCleanup();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    clearCache();
   });
 });

@@ -2837,10 +2837,10 @@ export async function getStatus(directory, options = {}) {
   return statusRefresh.run(
     normalizedDirectory,
     { lightMode, signal: options.signal },
-    (requests) => readStatus(
+    (requests, sourceSignal) => readStatus(
       normalizedDirectory,
       requests.every((request) => request.lightMode),
-      requests.find((request) => request.signal)?.signal,
+      sourceSignal,
     ),
   );
 }

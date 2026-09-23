@@ -2,6 +2,7 @@ import { stat } from 'node:fs/promises';
 import { getRemotes, getTrackingBranch, isAncestorOfHead } from '../git/index.js';
 import { resolveGitHubRepoFromDirectory } from './repo/index.js';
 import { noteIfGitHubRateLimit } from './rate-limit.js';
+import { createSharedRequest } from '../request-sharing.js';
 
 const directoryExists = async (dir) => {
   if (!dir) return false;
@@ -408,30 +409,37 @@ const getRepoPulls = (octokit, repo, state, { force = false, signal = undefined 
   throwIfAborted(signal);
   const key = `${normalizeText(repo.owner)}/${normalizeText(repo.repo)}::${state}`;
   const cached = repoPullsCache.get(key);
-  if (cached?.promise && !signal) {
-    return cached.promise;
+  if (cached?.shared && !cached.shared.sourceAbortRequested) {
+    return cached.shared.wait(signal);
   }
   if (!force && cached && Date.now() - cached.fetchedAt < REPO_PULLS_CACHE_TTL_MS) {
     return Promise.resolve(cached);
   }
 
-  const promise = safeListPulls(octokit, {
-    owner: repo.owner,
-    repo: repo.repo,
-    state,
-    per_page: 100,
-  }, { signal }).then((prs) => {
+  let entry;
+  const shared = createSharedRequest(async (sourceSignal) => {
+    const prs = await safeListPulls(octokit, {
+      owner: repo.owner,
+      repo: repo.repo,
+      state,
+      per_page: 100,
+    }, { signal: sourceSignal });
     // `complete` means the first page held everything, so a miss is
     // authoritative: this repo has no PR in this state for any branch.
-    const entry = { fetchedAt: Date.now(), prs, complete: prs.length < 100 };
-    repoPullsCache.set(key, entry);
-    return entry;
-  }).catch((error) => {
-    repoPullsCache.delete(key);
-    throw error;
+    const result = { fetchedAt: Date.now(), prs, complete: prs.length < 100 };
+    if (repoPullsCache.get(key) === entry) {
+      repoPullsCache.set(key, result);
+    }
+    return result;
+  }, { cancellationMessage: 'GitHub pull request lookup was cancelled' });
+  entry = { shared, promise: shared.promise };
+  repoPullsCache.set(key, entry);
+  void shared.promise.catch(() => {
+    if (repoPullsCache.get(key) === entry) {
+      repoPullsCache.delete(key);
+    }
   });
-  if (!signal) repoPullsCache.set(key, { promise });
-  return promise;
+  return shared.wait(signal);
 };
 
 const parseRepoFromApiUrl = (value) => {

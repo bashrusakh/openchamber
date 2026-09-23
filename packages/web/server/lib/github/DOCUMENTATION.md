@@ -20,8 +20,10 @@
 All GitHub read routes bind their local Git discovery and Octokit calls to the
 HTTP request lifetime. A disconnected client aborts repository, branch, issue,
 pull-request, and authenticated-user reads instead of allowing their remaining
-pagination or fork-network work to continue. Cached reads remain ordinary
-successful responses and do not start new work.
+pagination or fork-network work to continue. Shared repository pull-list
+requests keep one source call for concurrent polling while each HTTP request
+can cancel its own waiter. Cached reads remain ordinary successful responses
+and do not start new work.
 
 ## Public exports
 
