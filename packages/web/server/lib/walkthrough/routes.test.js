@@ -15,6 +15,7 @@ describe('walkthrough routes', () => {
   let job;
 
   let lastArgs;
+  let lastOptions;
   let generateCalls = 0;
 
   const service = {
@@ -33,8 +34,14 @@ describe('walkthrough routes', () => {
       if (file.path === 'huge.bin') throw Object.assign(new Error('too large'), { statusCode: 413, code: 'file-too-large' });
       return { original: 'before', modified: 'after' };
     },
-    async getWalkthrough(args) {
+    async getWalkthrough(args, options) {
       lastArgs = args;
+      lastOptions = options;
+      if (args.directory === '/aborted') {
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
+        });
+      }
       return { walkthrough: null, hunks: [], hunkCount: 0, generating: Boolean(job) };
     },
     async generateWalkthrough(args) {
@@ -62,6 +69,7 @@ describe('walkthrough routes', () => {
     job = null;
     releaseJob = undefined;
     lastArgs = undefined;
+    lastOptions = undefined;
     const app = express();
     app.use(express.json());
     registerWalkthroughRoutes(app, { getWalkthroughService: async () => service });
@@ -115,6 +123,7 @@ describe('walkthrough routes', () => {
   });
 
   it('aborts a PR collection when the request disconnects', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const controller = new AbortController();
     const pending = fetch(`${base}/api/walkthrough/pr-diff?directory=/repo&source=${encodeURIComponent(JSON.stringify({ kind: 'pr', number: 88 }))}`, {
       signal: controller.signal,
@@ -125,6 +134,24 @@ describe('walkthrough routes', () => {
     await pending.catch(() => undefined);
 
     await vi.waitFor(() => expect(lastArgs.options.signal.aborted).toBe(true));
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it('does not log or answer an ordinary read error after the walkthrough request disconnects', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const controller = new AbortController();
+    const pending = fetch(`${base}/api/walkthrough?directory=/aborted&source=${encodeURIComponent(JSON.stringify(SOURCE))}`, {
+      signal: controller.signal,
+    });
+
+    await vi.waitFor(() => expect(lastOptions?.signal).toBeInstanceOf(AbortSignal));
+    controller.abort();
+    await pending.catch(() => undefined);
+    await vi.waitFor(() => expect(lastOptions.signal.aborted).toBe(true));
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it('distinguishes empty PRs, upstream failure, and invalid sources', async () => {

@@ -1,4 +1,4 @@
-import { createRequestAbortSignal } from '../request-abort.js';
+import { canRespondToRequest, createRequestAbortSignal } from '../request-abort.js';
 
 const PR_STATUS_CACHE_TTL_MS = 90_000;
 const PR_STATUS_CACHE_MAX_ENTRIES = 200;
@@ -523,20 +523,32 @@ export function registerGitHubRoutes(app, dependencies = {}) {
   // ================= GitHub PR APIs =================
 
   app.get('/api/github/pr/status', async (req, res) => {
+    const requestAbort = createRequestAbortSignal(req, res);
+    const sendStatus = (payload) => {
+      if (!canRespondToRequest(res, requestAbort)) return false;
+      res.json(payload);
+      return true;
+    };
+    const sendStatusError = (status, payload) => {
+      if (!canRespondToRequest(res, requestAbort)) return false;
+      res.status(status).json(payload);
+      return true;
+    };
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const directory = typeof req.query?.directory === 'string' ? req.query.directory.trim() : '';
       const branch = typeof req.query?.branch === 'string' ? req.query.branch.trim() : '';
       const remote = typeof req.query?.remote === 'string' ? req.query.remote.trim() : 'origin';
       const force = req.query?.force === 'true' || req.query?.force === '1';
       if (!directory || !branch) {
-        return res.status(400).json({ error: 'directory and branch are required' });
+        return sendStatusError(400, { error: 'directory and branch are required' });
       }
 
       // Check cache (skip when force=true to allow manual refresh bypass)
       const cacheKey = `${directory}::${branch}::${remote}`;
       const cached = prStatusCache.get(cacheKey);
       if (!force && cached && Date.now() - cached.fetchedAt < PR_STATUS_CACHE_TTL_MS) {
-        return res.json(cached.data);
+        return sendStatus(cached.data);
       }
 
       // If GitHub recently rate-limited us, don't pile on more calls that will
@@ -545,9 +557,9 @@ export function registerGitHubRoutes(app, dependencies = {}) {
       const { isGitHubRateLimited } = await import('./rate-limit.js');
       if (isGitHubRateLimited()) {
         if (cached) {
-          return res.json(cached.data);
+          return sendStatus(cached.data);
         }
-        return res.status(503).json({ error: 'GitHub rate limited' });
+        return sendStatusError(503, { error: 'GitHub rate limited' });
       }
 
       // Intercept res.json to cache successful responses before sending
@@ -569,46 +581,43 @@ export function registerGitHubRoutes(app, dependencies = {}) {
       const { getOctokitOrNull, getGitHubAuth } = await getGitHubLibraries();
       const octokit = getOctokitOrNull();
       if (!octokit) {
-        return res.json({ connected: false });
+        return sendStatus({ connected: false });
       }
 
       const { resolveGitHubPrStatus } = await loadPrStatus();
-      const requestAbort = createRequestAbortSignal(req, res);
-      try {
-        let resolvedStatus;
-        resolvedStatus = await withTimeout(
-          resolveGitHubPrStatus({
-            octokit,
-            directory,
-            branch,
-            remoteName: remote,
-            force,
-            signal: requestAbort.signal,
-          }),
-          PR_STATUS_RESOLVE_TIMEOUT_MS,
-          'resolveGitHubPrStatus',
-          requestAbort.abort,
-        );
-        const searchRepo = resolvedStatus.repo;
-        const first = resolvedStatus.pr;
-        if (!searchRepo) {
-          return res.json({ connected: true, repo: null, branch, pr: null, checks: null, canMerge: false, defaultBranch: null, resolvedRemoteName: null });
-        }
-        if (!first) {
-          return res.json({ connected: true, repo: searchRepo, branch, pr: null, checks: null, canMerge: false, defaultBranch: resolvedStatus.defaultBranch ?? null, resolvedRemoteName: resolvedStatus.resolvedRemoteName ?? null });
-        }
+      const resolvedStatus = await withTimeout(
+        resolveGitHubPrStatus({
+          octokit,
+          directory,
+          branch,
+          remoteName: remote,
+          force,
+          signal: requestAbort.signal,
+        }),
+        PR_STATUS_RESOLVE_TIMEOUT_MS,
+        'resolveGitHubPrStatus',
+        requestAbort.abort,
+      );
+      const searchRepo = resolvedStatus.repo;
+      const first = resolvedStatus.pr;
+      if (!searchRepo) {
+        return sendStatus({ connected: true, repo: null, branch, pr: null, checks: null, canMerge: false, defaultBranch: null, resolvedRemoteName: null });
+      }
+      if (!first) {
+        return sendStatus({ connected: true, repo: searchRepo, branch, pr: null, checks: null, canMerge: false, defaultBranch: resolvedStatus.defaultBranch ?? null, resolvedRemoteName: resolvedStatus.resolvedRemoteName ?? null });
+      }
 
-        // Enrich with mergeability fields
-        const prFull = await octokit.rest.pulls.get({
+      // Enrich with mergeability fields
+      const prFull = await octokit.rest.pulls.get({
         owner: searchRepo.owner,
         repo: searchRepo.repo,
         pull_number: first.number,
         signal: requestAbort.signal,
-        });
-        const prData = prFull?.data;
-        if (!prData) {
-          return res.json({ connected: true, repo: searchRepo, branch, pr: null, checks: null, canMerge: false });
-        }
+      });
+      const prData = prFull?.data;
+      if (!prData) {
+        return sendStatus({ connected: true, repo: searchRepo, branch, pr: null, checks: null, canMerge: false });
+      }
 
       const isMerged = Boolean(prData.merged || prData.merged_at);
       const prState = isMerged ? 'merged' : (prData.state === 'closed' ? 'closed' : 'open');
@@ -691,7 +700,7 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         }
       }
 
-      return res.json({
+      return sendStatus({
         connected: true,
         repo: searchRepo,
         branch,
@@ -713,14 +722,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         defaultBranch: resolvedStatus.defaultBranch ?? null,
         resolvedRemoteName: resolvedStatus.resolvedRemoteName ?? null,
       });
-      } finally {
-        requestAbort.cleanup();
-      }
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       if (error?.status === 401) {
         const { clearGitHubAuth } = await getGitHubLibraries();
         clearGitHubAuth();
-        return res.json({ connected: false });
+        return sendStatus({ connected: false });
       }
       // Transient failures — a rate limit, or the overall resolve timeout
       // firing — are expected under heavy load and should not be logged as hard
@@ -736,12 +743,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         const rem = typeof req.query?.remote === 'string' ? req.query.remote.trim() : 'origin';
         const cached = prStatusCache.get(`${dir}::${br}::${rem}`);
         if (cached) {
-          return res.json(cached.data);
+          return sendStatus(cached.data);
         }
-        return res.status(503).json({ error: wasRateLimited ? 'GitHub rate limited' : 'GitHub request timed out' });
+        return sendStatusError(503, { error: wasRateLimited ? 'GitHub rate limited' : 'GitHub request timed out' });
       }
       if (isGitHubResourceUnavailable(error)) {
-        return res.json({
+        return sendStatus({
           connected: true,
           repo: null,
           branch: typeof req.query?.branch === 'string' ? req.query.branch.trim() : '',
@@ -753,7 +760,9 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         });
       }
       console.error('Failed to load GitHub PR status:', error);
-      return res.status(500).json({ error: error.message || 'Failed to load GitHub PR status' });
+      return sendStatusError(500, { error: error.message || 'Failed to load GitHub PR status' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
