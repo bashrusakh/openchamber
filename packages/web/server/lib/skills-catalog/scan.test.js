@@ -246,4 +246,25 @@ describe('skills catalog repository scanning', () => {
       await fs.rm(runner.getTempBase(), { recursive: true, force: true });
     }
   });
+
+  it('does not start the clone fallback after the preferred clone is cancelled', async () => {
+    const controller = new AbortController();
+    const runner = createGitRunner();
+    const runGit = async (args, options) => {
+      const result = await runner.runGit(args, options);
+      if (args[0] === 'clone' && args.includes('--filter=blob:none')) {
+        controller.abort();
+        return { ...result, ok: false, stderr: 'cancelled', message: 'cancelled', code: 'ABORT_ERR' };
+      }
+      return result;
+    };
+
+    await expect(scanSkillsRepository({
+      source: 'owner/repository',
+      runGit,
+      signal: controller.signal,
+    })).resolves.toMatchObject({ ok: false, error: { kind: 'networkError' } });
+    expect(runner.calls.filter(({ args }) => args[0] === 'clone')).toHaveLength(1);
+    await expect(fs.stat(runner.getTempBase())).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });

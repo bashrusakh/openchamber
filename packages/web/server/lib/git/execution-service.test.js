@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,6 +27,26 @@ const waitFor = async (predicate) => {
 };
 
 describe('Git execution service', () => {
+  it('keeps repository-root discovery inside the cancellable admission boundary', async () => {
+    const controller = new AbortController();
+    const raw = {
+      getRepositoryRoot: vi.fn(async (_directory, options) => {
+        expect(options.signal).toBe(controller.signal);
+        return '/repo';
+      }),
+    };
+    const resolver = {
+      resolve: vi.fn(async (_directory, options) => {
+        expect(options.signal).toBe(controller.signal);
+        return contextFor('/repo');
+      }),
+    };
+    const service = createGitExecutionService({ raw, resolver });
+
+    await expect(service.getRepositoryRoot('/repo', { signal: controller.signal })).resolves.toBe('/repo');
+    expect(raw.getRepositoryRoot).toHaveBeenCalledWith('/repo', { signal: controller.signal });
+  });
+
   it('coordinates wrapped worktree reads and writes through the shared scheduler', async () => {
     const calls = [];
     let releaseWrite;

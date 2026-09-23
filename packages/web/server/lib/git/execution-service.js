@@ -479,7 +479,12 @@ export const createGitExecutionService = (dependencies = {}) => {
     label: 'getGlobalIdentity',
   }, () => runWithGitExecutionScope(true, () => raw.getGlobalIdentity(...args)));
   wrapped.getWorktreeBootstrapStatus = (...args) => raw.getWorktreeBootstrapStatus(...args);
-  wrapped.getRepositoryRoot = (...args) => runOperation('getRepositoryRoot', args[0], args);
+  wrapped.getRepositoryRoot = (directory, options = {}) => runOperation(
+    'getRepositoryRoot',
+    directory,
+    [directory, options],
+    options,
+  );
   wrapped.getIntegrateConflictDetails = (...args) => runOperation(
     'getIntegrateConflictDetails',
     args[0],

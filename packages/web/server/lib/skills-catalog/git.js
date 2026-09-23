@@ -88,11 +88,18 @@ export const runWithGitCloneReservation = ({
   destination,
   label,
   queueTimeoutMs,
+  signal,
   gitExecutionService,
 }, task) => {
   const coordinator = gitExecutionService?.coordinator;
   if (coordinator?.runClone) {
-    return coordinator.runClone({ destination, label, queueTimeoutMs }, task);
+    const cloneOptions = {
+      destination,
+      label,
+      queueTimeoutMs,
+    };
+    if (signal) cloneOptions.signal = signal;
+    return coordinator.runClone(cloneOptions, task);
   }
   return task({ releaseNetwork: () => {} });
 };

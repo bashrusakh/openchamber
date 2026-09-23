@@ -3365,7 +3365,10 @@ export async function getRangeDiff(directory, { base, head, path: filePath, cont
         const target = path.resolve(root, filePath);
         if (!isInsideOrSameDirectory(repoRoot, target)) continue;
         const repoPath = toGitPath(path.relative(repoRoot, target));
-        const exists = await git.raw(['cat-file', '-e', `${mergeBase}:${repoPath}`]).then(() => true).catch(() => false);
+        const exists = await git.raw(['cat-file', '-e', `${mergeBase}:${repoPath}`]).then(() => true).catch((error) => {
+          if (isProcessTreeCleanupBlocked(error) || signal?.aborted) throw error;
+          return false;
+        });
         if (exists) {
           paths.push(repoPath);
           break;
@@ -6175,22 +6178,29 @@ export async function continueMerge(directory) {
   }
 }
 
-export async function getConflictDetails(directory) {
-  const { repoRoot, git } = await createRepositoryGitContext(directory);
+export async function getConflictDetails(directory, { signal = undefined } = {}) {
+  const { repoRoot, git } = await createRepositoryGitContext(directory, {
+    ownedProcessTree: true,
+    signal,
+  });
+  const read = (args, fallback = '') => git.raw(args).catch((error) => {
+    if (isProcessTreeCleanupBlocked(error) || signal?.aborted) throw error;
+    return fallback;
+  });
 
   try {
     // Get git status --porcelain
-    const statusPorcelain = await git.raw(['status', '--porcelain']).catch(() => '');
+    const statusPorcelain = await read(['status', '--porcelain']);
 
     // Get unmerged files
-    const unmergedFilesRaw = await git.raw(['diff', '--name-only', '--diff-filter=U']).catch(() => '');
+    const unmergedFilesRaw = await read(['diff', '--name-only', '--diff-filter=U']);
     const unmergedFiles = unmergedFilesRaw
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean);
 
     // Get current diff
-    const diff = await git.raw(['diff']).catch(() => '');
+    const diff = await read(['diff']);
 
     // Detect operation type and get head info
     let operation = 'merge';
@@ -6200,12 +6210,18 @@ export async function getConflictDetails(directory) {
     const mergeHeadExists = await git
       .raw(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])
       .then(() => true)
-      .catch(() => false);
+      .catch((error) => {
+        if (isProcessTreeCleanupBlocked(error) || signal?.aborted) throw error;
+        return false;
+      });
 
     if (mergeHeadExists) {
       operation = 'merge';
-      const mergeHead = await git.raw(['rev-parse', 'MERGE_HEAD']).catch(() => '');
-      const mergeMsgPath = await resolveGitInternalPath(repoRoot, git, 'MERGE_MSG').catch(() => '');
+      const mergeHead = await read(['rev-parse', 'MERGE_HEAD']);
+      const mergeMsgPath = await resolveGitInternalPath(repoRoot, git, 'MERGE_MSG').catch((error) => {
+        if (isProcessTreeCleanupBlocked(error) || signal?.aborted) throw error;
+        return '';
+      });
       const mergeMsg = mergeMsgPath ? await fsp.readFile(mergeMsgPath, 'utf8').catch(() => '') : '';
       headInfo = `MERGE_HEAD: ${mergeHead.trim()}\n${mergeMsg}`;
     } else {
@@ -6213,11 +6229,14 @@ export async function getConflictDetails(directory) {
       const rebaseHeadExists = await git
         .raw(['rev-parse', '--verify', '--quiet', 'REBASE_HEAD'])
         .then(() => true)
-        .catch(() => false);
+        .catch((error) => {
+          if (isProcessTreeCleanupBlocked(error) || signal?.aborted) throw error;
+          return false;
+        });
 
       if (rebaseHeadExists) {
         operation = 'rebase';
-        const rebaseHead = await git.raw(['rev-parse', 'REBASE_HEAD']).catch(() => '');
+        const rebaseHead = await read(['rev-parse', 'REBASE_HEAD']);
         headInfo = `REBASE_HEAD: ${rebaseHead.trim()}`;
       }
     }
