@@ -117,6 +117,7 @@ describe('GitHub PR status route cancellation', () => {
   });
 
   it('aborts an enrichment request without removing the listener early', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const request = createRequest({ directory: '/repo', branch: 'cancelled', force: 'true' });
     const response = createResponse();
     let pullOptions;
@@ -153,6 +154,10 @@ describe('GitHub PR status route cancellation', () => {
     expect(pullOptions.signal.aborted).toBe(true);
     rejectPull?.(new Error('request aborted'));
     await pending;
+
+    expect(response.body).toBeNull();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it('aborts repository branch reads when the request disconnects', async () => {

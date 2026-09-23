@@ -1,14 +1,9 @@
 import { parseSource } from './sources.js';
-import { createRequestAbortSignal } from '../request-abort.js';
-
-// `req.destroyed` is true for every healthy request once the body parser has
-// consumed the stream, so using it as a disconnect check silently swallows every
-// response. The response socket is the one that actually reflects whether the
-// client is still there.
-const clientIsGone = (res) => res.writableEnded || res.destroyed;
+import { canRespondToRequest, createRequestAbortSignal } from '../request-abort.js';
 
 export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
-  const respondWithError = (res, error, fallback) => {
+  const respondWithError = (res, error, fallback, requestAbort) => {
+    if (!canRespondToRequest(res, requestAbort)) return;
     const statusCode = Number(error?.statusCode) || 500;
     if (statusCode >= 500) {
       console.error(`${fallback}:`, error);
@@ -34,6 +29,7 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
   app.get('/api/walkthrough', async (req, res) => {
     const requestAbort = createRequestAbortSignal(req, res);
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const { getWalkthrough, getPullRequestDiff } = await getWalkthroughService();
       const directory = typeof req.query.directory === 'string' ? req.query.directory : '';
       if (!directory) {
@@ -49,9 +45,10 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
         },
         { getPullRequestDiff, signal: requestAbort.signal },
       );
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json(result);
     } catch (error) {
-      respondWithError(res, error, 'Failed to load walkthrough');
+      respondWithError(res, error, 'Failed to load walkthrough', requestAbort);
     } finally {
       requestAbort.cleanup();
     }
@@ -62,6 +59,7 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
   app.get('/api/walkthrough/pr-diff', async (req, res) => {
     const requestAbort = createRequestAbortSignal(req, res);
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const query = new URL(req.originalUrl, 'http://localhost').searchParams;
       const directory = query.get('directory')?.trim() ?? '';
       if (!directory) return res.status(400).json({ error: 'directory parameter is required' });
@@ -72,9 +70,10 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
         allowEmpty: true,
         signal: requestAbort.signal,
       });
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.type('text/plain').send(patch);
     } catch (error) {
-      respondWithError(res, error, 'Failed to load pull request diff');
+      respondWithError(res, error, 'Failed to load pull request diff', requestAbort);
     } finally {
       requestAbort.cleanup();
     }
@@ -85,6 +84,7 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
   app.get('/api/walkthrough/pr-file', async (req, res) => {
     const requestAbort = createRequestAbortSignal(req, res);
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const query = new URL(req.originalUrl, 'http://localhost').searchParams;
       const directory = query.get('directory')?.trim() ?? '';
       if (!directory) return res.status(400).json({ error: 'directory parameter is required' });
@@ -95,14 +95,16 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
       const previousPath = query.get('previousPath')?.trim() || undefined;
       const status = query.get('status') ?? 'M';
       const { getPullRequestFileContents } = await getWalkthroughService();
-      res.json(await getPullRequestFileContents(directory, source.number, source.sourceRepo, {
+      const result = await getPullRequestFileContents(directory, source.number, source.sourceRepo, {
         path,
         previousPath,
         status,
         signal: requestAbort.signal,
-      }));
+      });
+      if (!canRespondToRequest(res, requestAbort)) return;
+      res.json(result);
     } catch (error) {
-      respondWithError(res, error, 'Failed to load pull request file');
+      respondWithError(res, error, 'Failed to load pull request file', requestAbort);
     } finally {
       requestAbort.cleanup();
     }
@@ -130,10 +132,10 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
         },
         { getPullRequestDiff },
       );
-      if (clientIsGone(res)) return;
+      if (!canRespondToRequest(res)) return;
       res.json(result);
     } catch (error) {
-      if (clientIsGone(res)) return;
+      if (!canRespondToRequest(res)) return;
       respondWithError(res, error, 'Failed to generate walkthrough');
     }
   });
@@ -143,6 +145,7 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
   app.get('/api/walkthrough/progress', async (req, res) => {
     const requestAbort = createRequestAbortSignal(req, res);
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const { getGenerationStage, getRepositoryRootFor } = await getWalkthroughService();
       const directory = typeof req.query.directory === 'string' ? req.query.directory : '';
       if (!directory) {
@@ -154,9 +157,10 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService }) {
         readSource(req.query.source),
         { signal: requestAbort.signal },
       );
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json({ stage: getGenerationStage(repoRoot, sourceKey) });
     } catch (error) {
-      respondWithError(res, error, 'Failed to read walkthrough progress');
+      respondWithError(res, error, 'Failed to read walkthrough progress', requestAbort);
     } finally {
       requestAbort.cleanup();
     }

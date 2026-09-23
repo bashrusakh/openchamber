@@ -1,4 +1,4 @@
-import { createRequestAbortSignal } from '../request-abort.js';
+import { canRespondToRequest, createRequestAbortSignal } from '../request-abort.js';
 
 export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
   let gitLibraries = null;
@@ -263,12 +263,14 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
     const requestAbort = createRequestAbortSignal(req, res);
 
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const directory = resolveDirectoryQuery(req.query.directory);
       if (!directory) {
         return res.status(400).json({ error: 'directory parameter is required' });
       }
 
       const isRepo = await isGitRepository(directory, { signal: requestAbort.signal });
+      if (!canRespondToRequest(res, requestAbort)) return;
       if (!isRepo) {
         return res.json(nonRepoStatusPayload());
       }
@@ -280,8 +282,10 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
       const mode = req.query.mode === 'light' ? 'light' : undefined;
       const status = await getStatus(directory, { mode, signal: requestAbort.signal });
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json(status);
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       // Non-repo / GitError must not abort callers that enumerate projects or
       // sessions (e.g. sidebar discovery). Log a warning and continue.
       if (isNonRepoGitError(error)) {
@@ -395,6 +399,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
     const { getPathDiff } = await getGitLibraries();
     const requestAbort = createRequestAbortSignal(req, res);
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const directory = req.query.directory;
       if (!directory) {
         return res.status(400).json({ error: 'directory parameter is required' });
@@ -415,8 +420,10 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         signal: requestAbort.signal,
       });
 
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json({ diff, submodule });
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       if (sendGitPathError(res, error)) return;
       console.error('Failed to get git diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get git diff' });
@@ -429,6 +436,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
     const { getFileDiff } = await getGitLibraries();
     const requestAbort = createRequestAbortSignal(req, res);
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const directory = req.query.directory;
       if (!directory || typeof directory !== 'string') {
         return res.status(400).json({ error: 'directory parameter is required' });
@@ -447,6 +455,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         signal: requestAbort.signal,
       });
 
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json({
         original: result.original,
         modified: result.modified,
@@ -455,6 +464,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         submodule: result.submodule ?? null,
       });
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       if (sendGitPathError(res, error)) return;
       console.error('Failed to get git file diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get git file diff' });
@@ -467,6 +477,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
     const { getRangeDiff } = await getGitLibraries();
     const requestAbort = createRequestAbortSignal(req, res);
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const directory = req.query.directory;
       if (!directory || typeof directory !== 'string') {
         return res.status(400).json({ error: 'directory parameter is required' });
@@ -490,8 +501,10 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         signal: requestAbort.signal,
       });
 
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json({ diff });
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       console.error('Failed to get git range diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get git range diff' });
     } finally {
@@ -528,6 +541,7 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
     const { getRangeFiles } = await getGitLibraries();
     const requestAbort = createRequestAbortSignal(req, res);
     try {
+      if (!canRespondToRequest(res, requestAbort)) return;
       const directory = resolveDirectoryQuery(req.query.directory);
       if (!directory) {
         return res.status(400).json({ error: 'directory parameter is required' });
@@ -545,8 +559,10 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         includeWorkingTree: req.query.includeWorkingTree === 'true',
         signal: requestAbort.signal,
       });
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json({ files });
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       console.error('Failed to get git range files:', error);
       res.status(500).json({ error: error.message || 'Failed to get git range files' });
     } finally {

@@ -265,12 +265,16 @@ export function spawnOwnedProcess(
         }
       }
       if (!await waitForClose(terminationTimeoutMs)) {
+        const cleanupReconciliation = platform === 'win32'
+          ? observeWindowsTreeCleanup(child.pid, closed)
+          : undefined;
         throw terminationFailure(
           child.pid,
           new Error('Owned process did not close after termination'),
           null,
           false,
           `Failed to terminate owned process PID ${child.pid}; process close was not confirmed`,
+          cleanupReconciliation,
         );
       }
     })();

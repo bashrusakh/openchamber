@@ -305,6 +305,65 @@ describe('VS Code Git process runtime executable selection', () => {
      }
    });
 
+  it('retains ownership when taskkill succeeds but the Windows root closes late', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      const childProcess = new EventEmitter();
+      childProcess.stdout = new EventEmitter();
+      childProcess.stderr = new EventEmitter();
+      childProcess.pid = 1238;
+      childProcess.exitCode = null;
+      childProcess.signalCode = null;
+      childProcess.kill = mock();
+      spawn.mockImplementationOnce(() => childProcess);
+      let taskkillCalls = 0;
+      let finishConfirmation;
+      execFile.mockImplementation((_command, _args, _options, callback) => {
+        taskkillCalls += 1;
+        if (taskkillCalls === 1) {
+          callback(null);
+        } else {
+          finishConfirmation = () => callback(null);
+        }
+      });
+
+      const controller = new AbortController();
+      const runtime = createGitProcessRuntime();
+      const pending = runtime.execGit(['status'], '/repo', { signal: controller.signal });
+      for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      controller.abort();
+
+      const result = await pending;
+      expect(result).toMatchObject({
+        exitCode: 1,
+        cleanupBlocked: true,
+        descendantsTerminated: false,
+      });
+      expect(result.cleanupReconciliation).toBeDefined();
+      expect(taskkillCalls).toBe(1);
+      await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
+      await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({
+        exitCode: 1,
+        cleanupBlocked: true,
+      });
+
+      childProcess.emit('close', null);
+      for (let attempt = 0; attempt < 5 && !finishConfirmation; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(taskkillCalls).toBe(2);
+      finishConfirmation();
+      await expect(result.cleanupReconciliation.promise).resolves.toBe(true);
+      await expect(runtime.resetGitProcesses()).resolves.toBeUndefined();
+      await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({ exitCode: 0 });
+    } finally {
+      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+    }
+  });
+
   it('retains ownership when late Windows tree confirmation fails', async () => {
     const originalPlatform = process.platform;
     Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });

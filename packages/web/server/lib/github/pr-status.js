@@ -692,6 +692,7 @@ export async function resolveGitHubPrStatus({ octokit, directory, branch, remote
   // directory that no longer exists — otherwise every poll spends a git call
   // (and the remote/repo resolution that follows) on a path that's gone.
   if (!(await directoryExists(directory))) {
+    throwIfAborted(signal);
     return { repo: null, pr: null, defaultBranch: null, resolvedRemoteName: null };
   }
   const normalizedBranch = normalizeText(branch);

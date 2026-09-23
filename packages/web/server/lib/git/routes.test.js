@@ -379,6 +379,35 @@ describe('git collection routes', () => {
       signal: expect.any(AbortSignal),
     }));
   });
+
+  it.each([
+    ['status', '/api/git/status', { directory: '/repo' }, 'getStatus'],
+    ['diff', '/api/git/diff', { directory: '/repo', path: 'file.ts' }, 'getPathDiff'],
+    ['range diff', '/api/git/range-diff', { directory: '/repo', base: 'main', head: 'feature' }, 'getRangeDiff'],
+    ['range files', '/api/git/range-files', { directory: '/repo', base: 'main', head: 'feature' }, 'getRangeFiles'],
+  ])('does not log or answer an ordinary error after the %s request aborts', async (_label, routePath, query, operation) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    if (operation === 'getStatus') {
+      gitLibraries.isGitRepository.mockResolvedValue(true);
+    }
+    gitLibraries[operation].mockImplementation((_directory, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
+    }));
+
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const request = Object.assign(new EventEmitter(), { query });
+    const response = createMockResponse();
+    const pending = getRoute('GET', routePath)(request, response);
+    await vi.waitFor(() => expect(gitLibraries[operation]).toHaveBeenCalled());
+    request.emit('aborted');
+    await pending;
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toBeNull();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
 });
 
 describe('remaining git read route cancellation', () => {
