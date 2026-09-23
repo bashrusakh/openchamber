@@ -22,6 +22,16 @@ const processTreeMetadataSources = (value) => {
   return nested && Object(nested) === nested ? [value, nested] : [value];
 };
 
+export const getGitProcessCleanupReconciliation = (value) => {
+  for (const metadata of processTreeMetadataSources(value)) {
+    const reconciliation = metadata.cleanupReconciliation;
+    if (!reconciliation || Object(reconciliation) !== reconciliation) continue;
+    if (!reconciliation.promise || Object.prototype.toString.call(reconciliation.retire) !== '[object Function]') continue;
+    return reconciliation;
+  }
+  return null;
+};
+
 /**
  * Keep process-tree termination facts when a raw Git result crosses an
  * adapter boundary. A cleanup failure is not an ordinary Git exit, because
@@ -37,6 +47,9 @@ export const copyGitProcessMetadata = (target, source) => {
     if (metadata.cause !== undefined) target.cause = metadata.cause;
     if (metadata.rootError !== undefined) target.rootError = metadata.rootError;
     if (metadata.operationError !== undefined) target.operationError = metadata.operationError;
+    if (metadata.cleanupReconciliation !== undefined) {
+      target.cleanupReconciliation = metadata.cleanupReconciliation;
+    }
   }
   return target;
 };

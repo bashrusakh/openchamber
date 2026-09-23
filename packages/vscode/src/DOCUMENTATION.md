@@ -26,7 +26,7 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
   - Tracks outstanding commands through completion and timeout cleanup. Extension deactivation awaits `stopGitProcesses`, which terminates active work and rejects later launches; activation resets the same runtime boundary after cleanup so Git, status/diff, and skills reads work again. Operations delegated to VS Code's built-in Git API remain owned by that extension.
 
 - `owned-process.ts`
-  - Owns background child termination shared by Git and managed OpenCode. POSIX children have a separate process group, which receives SIGKILL after the grace period or root exit so a SIGTERM-resistant descendant cannot survive. Windows enumerates and terminates the tree before losing its root, using an asynchronous hidden `taskkill` invocation. Completion waits for stdio closure; a failed `taskkill` attempts a bounded root fallback, reports `ERR_PROCESS_TREE_TERMINATION` with descendant termination unconfirmed, and never resolves as if the tree was killed.
+  - Owns background child termination shared by Git and managed OpenCode. POSIX children have a separate process group, which receives SIGKILL after the grace period or root exit so a SIGTERM-resistant descendant cannot survive. Windows enumerates and terminates the tree before losing its root, using an asynchronous hidden `taskkill` invocation. Completion waits for stdio closure; a failed `taskkill` attempts a bounded root fallback, reports `ERR_PROCESS_TREE_TERMINATION` with descendant termination unconfirmed, and never resolves as if the tree was killed. A bounded failure retains a late tree-confirmation reconciliation, so the active-process registry and deactivation reset latch clear exactly once only after descendant cleanup is confirmed.
 
 - `managed-opencode-process.ts` and `opencode.ts`
   - The process handle and shared registry entry exist from spawn, before readiness. Startup timeout, malformed output, and cancellation terminate the child before the attempt settles. Registry removal follows confirmed termination. Startup diagnostics retain a bounded output tail; ready processes keep draining both streams.
@@ -69,7 +69,7 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
   - Skill Git commands retain a 4 MiB stdout/stderr bound. Repository reads
     (`ls-files`, `ls-tree`, and `show`) run inside the read-only execution scope
     (`GIT_OPTIONAL_LOCKS=0`); clone and sparse-checkout materialization keeps
-    normal locking.
+    normal locking. A retained temporary clone is removed when its late process cleanup reconciliation closes; before then its clone lease and destination remain owned.
 
 - `git-context-resolver.ts`, `git-execution-coordinator.ts`,
   `git-execution-errors.ts`

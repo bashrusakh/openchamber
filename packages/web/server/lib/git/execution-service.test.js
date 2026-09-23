@@ -439,6 +439,28 @@ describe('Git execution service', () => {
     }
   });
 
+  it('passes cancellation through the execution facade for alternate remote reads', async () => {
+    const controller = new AbortController();
+    let receivedOptions;
+    const service = createGitExecutionService({
+      raw: {
+        getRemotes: async (_directory, options) => {
+          receivedOptions = options;
+          return [{ name: 'upstream' }];
+        },
+      },
+      coordinator: {
+        run: async (options, task) => task({ active: true, ...options }),
+      },
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+
+    await expect(service.getRemotes('/repo', { signal: controller.signal })).resolves.toEqual([
+      { name: 'upstream' },
+    ]);
+    expect(receivedOptions).toEqual({ signal: controller.signal });
+  });
+
   it('recognizes configured bare remote names without classifying other slash branches as network work', async () => {
     const network = [];
     const service = createGitExecutionService({

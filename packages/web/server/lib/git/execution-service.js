@@ -119,7 +119,13 @@ const operationDirectory = (name, args) => (
 );
 
 const operationExecutionOptions = (name, args) => {
-  const options = name === 'getUntrackedDiffs' || name === 'isAncestorOfHead' ? args[2] : args[1];
+  const options = name === 'getUntrackedDiffs'
+    || name === 'isAncestorOfHead'
+    || name === 'getBranchBase'
+    || name === 'getUnpushedBranchCounts'
+    || name === 'countStashFiles'
+    ? args[2]
+    : args[1];
   if (!options || Object.prototype.toString.call(options) !== '[object Object]') return {};
   const executionOptions = {};
   if (options.signal) executionOptions.signal = options.signal;
@@ -188,7 +194,7 @@ const worktreeMayUseNetwork = (input) => Boolean(
   || String(input?.startRef || '').includes('/'),
 );
 
-const checkoutBranchMayUseNetwork = async (raw, directory, branchName) => {
+const checkoutBranchMayUseNetwork = async (raw, directory, branchName, signal) => {
   const requested = String(branchName || '').trim();
   if (!requested || !requested.includes('/')) {
     return false;
@@ -208,7 +214,7 @@ const checkoutBranchMayUseNetwork = async (raw, directory, branchName) => {
 
   let configuredRemote = explicitRemoteRef;
   try {
-    const remotes = await raw.getRemotes(directory);
+    const remotes = await raw.getRemotes(directory, signal ? { signal } : {});
     configuredRemote = Array.isArray(remotes) && remotes.some((remote) => remote?.name === remoteName);
   } catch {
     // Let the checkout operation report the underlying Git error, but do not
@@ -263,6 +269,7 @@ const checkoutBranchClassification = async (
     raw,
     directory,
     branchName,
+    options.signal,
   )));
   return {
     kind: network ? GIT_OPERATION_KIND.COMMON_WRITE : GIT_OPERATION_KIND.WORKTREE_WRITE,

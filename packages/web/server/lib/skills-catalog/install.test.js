@@ -196,6 +196,11 @@ describe('skills catalog repository installation', () => {
   it('retains the temporary clone and skips fallback when cleanup is unconfirmed', async () => {
     const workingDirectory = await createWorkingDirectory();
     const runner = createInstallRunner();
+    let close;
+    const cleanupReconciliation = {
+      promise: new Promise((resolve) => { close = resolve; }),
+      retire: () => close?.(),
+    };
     const runGit = async (args, options) => {
       const result = await runner.runGit(args, options);
       if (args[0] === 'clone' && args.includes('--filter=blob:none')) {
@@ -204,6 +209,7 @@ describe('skills catalog repository installation', () => {
           ok: false,
           cleanupBlocked: true,
           descendantsTerminated: false,
+          cleanupReconciliation,
         };
       }
       return result;
@@ -229,6 +235,8 @@ describe('skills catalog repository installation', () => {
       });
       expect(runner.calls.filter(({ args }) => args[0] === 'clone')).toHaveLength(1);
       await expect(fs.stat(runner.getTempBase())).resolves.toBeTruthy();
+      close();
+      await expect.poll(() => fs.stat(runner.getTempBase()).then(() => true, () => false)).toBe(false);
     } finally {
       await fs.rm(runner.getTempBase(), { recursive: true, force: true });
     }

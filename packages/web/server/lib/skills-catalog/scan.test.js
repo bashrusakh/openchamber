@@ -247,6 +247,36 @@ describe('skills catalog repository scanning', () => {
     }
   });
 
+  it('reaps a retained temporary clone after late process cleanup', async () => {
+    const runner = createGitRunner();
+    let close;
+    const cleanupReconciliation = {
+      promise: new Promise((resolve) => { close = resolve; }),
+      retire: () => close?.(),
+    };
+    const runGit = async (args, options) => {
+      const result = await runner.runGit(args, options);
+      if (args[0] === 'clone' && args.includes('--filter=blob:none')) {
+        return {
+          ...result,
+          ok: false,
+          cleanupBlocked: true,
+          descendantsTerminated: false,
+          cleanupReconciliation,
+        };
+      }
+      return result;
+    };
+
+    await expect(scanSkillsRepository({ source: 'owner/repository', runGit })).resolves.toMatchObject({
+      ok: false,
+      cleanupBlocked: true,
+    });
+    await expect(fs.stat(runner.getTempBase())).resolves.toBeTruthy();
+    close();
+    await expect.poll(() => fs.stat(runner.getTempBase()).then(() => true, () => false)).toBe(false);
+  });
+
   it('does not start the clone fallback after the preferred clone is cancelled', async () => {
     const controller = new AbortController();
     const runner = createGitRunner();

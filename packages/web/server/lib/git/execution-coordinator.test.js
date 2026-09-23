@@ -266,6 +266,28 @@ describe('GitExecutionCoordinator', () => {
     expect(coordinator.getStats()).toMatchObject({ active: 1, statusInFlight: 1 });
   });
 
+  it('reconciles a late status close exactly once', async () => {
+    const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
+    let close;
+    const cleanupReconciliation = {
+      promise: new Promise((resolve) => { close = resolve; }),
+      retire: () => close?.(),
+    };
+    const blocked = coordinator.runStatus({ context: context(), mode: 'full' }, () => Promise.reject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+      cleanupReconciliation,
+    }));
+
+    await expect(blocked).rejects.toMatchObject({ cleanupBlocked: true });
+    expect(coordinator.getStats()).toMatchObject({ active: 1, statusInFlight: 1 });
+    close();
+    await waitFor(() => coordinator.getStats().active === 0
+      && coordinator.getStats().statusInFlight === 0);
+    expect(coordinator.getStats()).toMatchObject({ active: 0, statusInFlight: 0 });
+  });
+
   it('does not reuse a status source that is before a queued mutation', async () => {
     const coordinator = createGitExecutionCoordinator({ globalConcurrency: 2 });
     const calls = [];
@@ -382,6 +404,30 @@ describe('GitExecutionCoordinator', () => {
       clonePending: 0,
       cloneDestinations: 1,
     });
+  });
+
+  it('reconciles a late clone close and releases its destination once', async () => {
+    const coordinator = createGitExecutionCoordinator({
+      globalConcurrency: 2,
+      canonicalizeCloneDestination: async (destination) => path.resolve(destination),
+    });
+    let close;
+    const cleanupReconciliation = {
+      promise: new Promise((resolve) => { close = resolve; }),
+      retire: () => close?.(),
+    };
+    const blocked = coordinator.runClone({ destination: '/tmp/late-clone' }, () => ({
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+      cleanupReconciliation,
+    }));
+
+    await expect(blocked).resolves.toMatchObject({ cleanupBlocked: true });
+    expect(coordinator.getStats()).toMatchObject({ active: 1, cloneDestinations: 1, activeNetwork: 1 });
+    close();
+    await waitFor(() => coordinator.getStats().active === 0
+      && coordinator.getStats().cloneDestinations === 0);
+    expect(coordinator.getStats()).toMatchObject({ active: 0, cloneDestinations: 0, activeNetwork: 0 });
   });
 
   it('counts active clones against the global concurrency limit', async () => {

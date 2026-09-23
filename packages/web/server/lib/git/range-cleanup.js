@@ -1,5 +1,8 @@
 import fs from 'fs';
-import { isGitProcessCleanupBlocked } from './execution-errors.js';
+import {
+  getGitProcessCleanupReconciliation,
+  isGitProcessCleanupBlocked,
+} from './execution-errors.js';
 
 const fsp = fs.promises;
 
@@ -9,6 +12,13 @@ export const cleanupWorkingTreeRangeDirectory = async (temporaryDirectory, opera
   // it here can turn the original termination failure into an ordinary cleanup
   // error and release the surrounding read lease too early.
   if (operationError && isGitProcessCleanupBlocked(operationError)) {
+    const reconciliation = getGitProcessCleanupReconciliation(operationError);
+    if (reconciliation) {
+      void Promise.resolve(reconciliation.promise).then(() => fsp.rm(
+        temporaryDirectory,
+        { recursive: true, force: true },
+      ).catch(() => undefined));
+    }
     return;
   }
 

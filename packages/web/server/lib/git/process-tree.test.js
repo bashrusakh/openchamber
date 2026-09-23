@@ -116,6 +116,29 @@ describe('Git process-tree ownership', () => {
     });
   });
 
+  it('retains a late close observer after bounded cleanup failure', async () => {
+    const child = new EventEmitter();
+    child.pid = 987657;
+    child.kill = vi.fn();
+
+    let failure;
+    try {
+      await killProcessTree(child, {
+        platform: 'linux',
+        terminationTimeoutMs: 5,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      cleanupReconciliation: { promise: expect.any(Promise) },
+    });
+    child.emit('close', 137, 'SIGKILL');
+    await failure.cleanupReconciliation.promise;
+  });
+
   it('reports a bounded confirmation failure when taskkill succeeds without root close', async () => {
     const child = new EventEmitter();
     child.pid = 1234;
