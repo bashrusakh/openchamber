@@ -44,7 +44,7 @@ describe('GET /api/opencode/version', () => {
     await registerVersionRoute()({}, res);
 
     expect(globalThis.fetch).toHaveBeenCalledWith('/global/health', expect.objectContaining({ method: 'GET' }));
-    expect(res.body).toEqual({ version: '1.18.31', consultProtocol: 1 });
+    expect(res.body).toEqual({ version: '1.18.31', consultProtocol: 2 });
   });
 
   it('omits the consult protocol capability when OpenCode health fails', async () => {

@@ -535,11 +535,17 @@ describe("server-owned message queue", () => {
       { status: "claim-lost" },
       { status: "not-found" },
       { status: "not-consult" },
+      { status: "attempt-present" },
+      { status: "attempt-write-failed" },
       { status: "sending" },
       { status: "send-failed", delivered: "no" },
       { status: "send-failed", delivered: "unknown" },
       { status: "dispatched" },
       { status: "dispatched", item: serverItem("q1", "the consult"), delivery: "confirmed-after-failure" },
+      // The new witness statuses and the delivery evidence parse as bodies,
+      // not as malformed responses.
+      { status: "dispatched", evidence: "admission" },
+      { status: "dispatched", item: serverItem("q1", "the consult"), delivery: "confirmed-after-failure", evidence: "address" },
     ]
     for (const outcome of outcomes) {
       respond = () => json(outcome)
@@ -549,10 +555,27 @@ describe("server-owned message queue", () => {
       expect(parsed.status).toBe(outcome.status)
       if ("delivered" in outcome) expect(parsed).toMatchObject({ delivered: outcome.delivered })
       if ("delivery" in outcome && outcome.delivery) expect(parsed).toMatchObject({ delivery: outcome.delivery })
+      if ("evidence" in outcome && outcome.evidence) expect(parsed).toMatchObject({ evidence: outcome.evidence })
       if (outcome.status === "dispatched" && "item" in outcome) {
         expect(parsed).toMatchObject({ item: { id: "q1" } })
       }
     }
+  })
+
+  test("hydrate projects the consult item's attempted witness marker onto the queued message", async () => {
+    respond = () => json({
+      revision: 5,
+      sessions: [session([
+        serverItem("consult-w", "witnessed", { kind: "consult", attempted: true }),
+        serverItem("consult-p", "plain", { kind: "consult" }),
+      ])],
+    })
+    await useMessageQueueStore.getState().hydrate()
+    // The server-only witness projects as the boolean, so the chip can refuse
+    // Resume without ever holding the request's identity.
+    expect(useMessageQueueStore.getState().queuedMessages[key]?.[0])
+      .toMatchObject({ id: "consult-w", kind: "consult", attempted: true })
+    expect(useMessageQueueStore.getState().queuedMessages[key]?.[1]?.attempted).toBeUndefined()
   })
 
   test("hydrate projects the consult item's recoverable marker onto the queued message", async () => {
@@ -609,6 +632,8 @@ describe("server-owned message queue", () => {
     test("parses every structured outcome", async () => {
       const outcomes = [
         { status: "dispatched", delivered: "confirmed" },
+        { status: "dispatched", delivered: "confirmed", evidence: "address" },
+        { status: "dispatched", delivered: "confirmed", evidence: "legacy-marker" },
         { status: "resumable" },
         { status: "unresolved" },
         { status: "unresolved", recoverable: true },
@@ -691,10 +716,11 @@ describe("server-owned message queue", () => {
       expect(useMessageQueueStore.getState().queuedMessages[consultKey]?.map((m) => m.id)).toEqual(["consult-1"])
     })
 
-    test("only claimed or recoverable consult items are resolved", async () => {
+    test("only claimed, recoverable, or witnessed consult items are resolved", async () => {
       const snapshotItems = [
         serverItem("consult-c", "claimed", { kind: "consult", claimed: { owner: "o", claimedAt: 1 } }),
         serverItem("consult-r", "recoverable", { kind: "consult", recoverable: true }),
+        serverItem("consult-w", "witnessed lapsed", { kind: "consult", attempted: true }),
         serverItem("consult-p", "plain", { kind: "consult" }),
         serverItem("normal-1", "normal"),
       ]
@@ -702,7 +728,7 @@ describe("server-owned message queue", () => {
         ? json({ status: "unresolved" })
         : json({ revision: 3, sessions: [consultSession(snapshotItems)] }))
       await useMessageQueueStore.getState().hydrate()
-      expect(calls.filter((call) => call.path.endsWith("/resolve-consult")).map((call) => call.path.split("/").at(-2))).toEqual(["consult-c", "consult-r"])
+      expect(calls.filter((call) => call.path.endsWith("/resolve-consult")).map((call) => call.path.split("/").at(-2))).toEqual(["consult-c", "consult-r", "consult-w"])
     })
 
     test("a stale runtime's snapshot never resolves across runtimes", async () => {

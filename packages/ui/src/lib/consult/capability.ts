@@ -69,8 +69,14 @@ export const CONSULT_MIN_OPENCODE_VERSION = '1.18.29';
  * independent of the OpenCode version: the server that speaks the consult
  * queue reports it as `consultProtocol` on `GET /api/opencode/version`, and
  * the live gate refuses when that field is absent or below this value.
+ *
+ * Version 2 added the dispatch witness: `resumable` now means "no dispatch
+ * attempt is recorded", and the claim/dispatch routes answer the witness
+ * refusals (`attempt-recorded`, `attempt-present`, `attempt-write-failed`).
+ * A protocol-1 backend cannot be trusted by this client, so an older value
+ * refuses.
  */
-export const CONSULT_BACKEND_PROTOCOL_VERSION = 1;
+export const CONSULT_BACKEND_PROTOCOL_VERSION = 2;
 
 /** The version payload `GET /api/opencode/version` returns. */
 export type ConsultServerVersionResponse = { version: string | null; error?: string; consultProtocol?: unknown };

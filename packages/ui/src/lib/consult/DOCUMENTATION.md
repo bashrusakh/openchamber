@@ -363,27 +363,50 @@ chip's Resume affordance: `resumeConsultItem(target, item, runOptions)` claims
 the existing item (never enqueueing, never sending raw) and re-runs the
 consultation through the same claim → fan-out → payload → dispatch route as a
 new submission, with fresh advisor options from the caller. The chip offers
-Resume only on the queue head, the only item the server will claim. Because
-the server keeps the item's receipt metadata through a lapse and a restart,
-the resume checks delivery first and proceeds only on a decided answer: a
-`dispatched` answer from the resolve route means a previous run already
-delivered the turn, so the resume reports the neutral `delivered` result — no
-claim, no fan-out, no dispatch, no composer restore — instead of running a
-duplicate consultation; `resumable` means the server proved the item never
-reached an acting payload, and it is the only state that may claim, fan out,
-and dispatch. Every other answer refuses without claiming: `unresolved` (the
-tail read failed, or a payload-bearing item has no marker), `sending`,
-`not-found`, `not-consult`, and any resolve transport failure. The item stays
-queued so a later Resume can resolve it, and a later `dispatched` still
-resolves it as delivered exactly once. Uncertain delivery is never treated as
-safe to resume.
+Resume only on the queue head, the only item the server will claim.
+
+The resume checks delivery first and proceeds only on a decided answer. The
+resolve route's `resumable` means the server proved the item never reached a
+dispatch attempt: no witness is recorded, the item is unclaimed, and no send is
+in flight. A `dispatched` answer means a previous run already delivered the
+turn, so the resume reports the neutral `delivered` result — no claim, no
+fan-out, no dispatch, no composer restore — instead of running a duplicate
+consultation. Every other answer refuses without claiming: `unresolved`
+(delivery is unknown), `sending`, `not-found`, `not-consult`, and any resolve
+transport failure. The item stays queued so a later Resume can resolve it, and
+a later `dispatched` still resolves it as delivered exactly once. Uncertain
+delivery is never treated as safe to resume.
+
+A witnessed item — one the server recorded a dispatch attempt for — projects as
+`attempted` and never carries `recoverable`, so Resume is not offered. Its
+delivery is decided by the server's own address check: `GET
+/session/{id}/message/{msg_…}` returning 200 proves the attempt landed. A 404
+(or a read failure) is NOT proof that nothing was sent: revert, delete, and
+summary operations can all hide a landed message, so anything other than 200
+stays unknown and only a later read or manual removal settles it. A witnessed
+item that somehow reaches the claim anyway is refused with a 409 whose message
+contains `attempt-recorded`; `waitForClaim` treats that as terminal (it is
+rethrown immediately, never retried), the resume refuses as uncertain, and
+nothing is claimed, fanned out, or dispatched.
+
+Dispatch outcomes gained two witness answers: `attempt-present` (a request may
+exist for the item) and `attempt-write-failed` (the server could not durably
+record the attempt, so it sent nothing). Both settle uncertain with the item
+and claim left reserved server-side; the submission never re-issues a request
+for an item that already carries an attempt (a same-id resend can replace a
+turn after a staged revert).
 
 **Reconnect resolution (#3743).** On every queue hydration the store scans
-dangling consult items (`claimed` or `recoverable`) and posts one outcome
-check per item to the server's never-prompting resolve route, guarded
+dangling consult items (`claimed`, `recoverable`, or `attempted`) and posts one
+outcome check per item to the server's never-prompting resolve route, guarded
 in-flight per item; `dispatched` removes the chip through the server's own
 broadcast, `unresolved` keeps it (Resume when `recoverable`), and a failed
 check is swallowed so hydration never breaks.
+
+**Pending string.** A witnessed or legacy item that cannot offer Resume has no
+dedicated user-facing line yet: the key (e.g.
+`chat.consult.queue.resumeUnavailable`) is not in the dictionaries and is left
+to a later micro-step; the dictionaries are untouched in this round.
 
 **VS Code.** `setServerHold` is a no-op where the queue is not server-owned,
 and the local `useQueuedMessageAutoSend` hook can deliver the item before the
@@ -492,6 +515,9 @@ The composer action is gated by `useConsultLiveCapability` /
   the backend half of the handshake: a backend that predates the field ignores
   the unknown consult item `kind` and would deliver the message as a normal
   queued item, so absence must refuse rather than assume support.
+  `CONSULT_BACKEND_PROTOCOL_VERSION` is 2 since the dispatch witness landed:
+  a protocol-1 backend's `resumable` is not backed by "no attempt recorded",
+  so it is refused as `protocol-unsupported` rather than trusted.
 
 The composer's `resolveConsultAvailability` consumes that live capability and
 disables the action for every refusal; there is no `unverified` availability
@@ -504,7 +530,8 @@ path in the composer:
 - `version-unsupported`: a real OpenCode version below the floor;
 - `protocol-missing`: `consultProtocol` is absent or malformed — the
   older-backend case above;
-- `protocol-unsupported`: a protocol number below the required version.
+- `protocol-unsupported`: a protocol number below the required version (a
+  protocol-1 backend since the witness bump).
 
 The submission re-checks the same capability independently in its
 `verifyCapability` seam before it acquires any hold or enqueues, so a caller

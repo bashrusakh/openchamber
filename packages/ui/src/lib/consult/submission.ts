@@ -694,6 +694,10 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         if (deps.runs.currentPhase(input.parentSessionId, capture.runId) === 'cancelled') throw error;
         if (deps.isAutoReviewRunning(input.parentSessionId)) throw error;
         const message = error instanceof Error ? error.message : String(error);
+        // A witnessed item cannot be claimed again: the server refuses with
+        // `attempt-recorded` and no amount of re-polling can change that, so
+        // the resume path must refuse instead of looping. It is terminal.
+        if (/attempt-recorded/.test(message)) throw error;
         // The head moved or the session went busy again between the admission
         // check and the claim: wait for the next admission window like
         // waitForAdmission does.
@@ -1175,6 +1179,22 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
           'Another dispatch is already in flight for this consult message, so the outcome is unconfirmed; check the session before retrying.',
         );
       }
+      if (outcome.status === 'attempt-present') {
+        // The server already holds a dispatch witness for this item: a request
+        // may exist, and a same-id re-issue could replace a turn after a
+        // staged revert, so nothing is retried. The item and the claim stay
+        // server-side; only a resolve (or manual removal) can settle it.
+        return settleUncertain(
+          'The server reports a dispatch attempt already exists for this consult message, so the outcome is unconfirmed; the message stays reserved and is never re-sent. Check the session, or remove the queued consult item.',
+        );
+      }
+      if (outcome.status === 'attempt-write-failed') {
+        // Fail-closed: the server could not record the attempt durably, so it
+        // issued no request at all. The claim is still live server-side.
+        return settleUncertain(
+          'The server could not record the dispatch attempt, so nothing was sent; the message stays reserved. Check the server log before retrying.',
+        );
+      }
       if (outcome.status === 'send-failed' && outcome.delivered === 'unknown') {
         return settleUncertain(
           'The consult message could not be confirmed as sent. It stays in the session queue and keeps the session held until the server lease resolves or expires; it will never be sent without a new consultation. Removing the queued consult item releases the session.',
@@ -1510,6 +1530,14 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         claimedItem = await deps.queue.claimConsultItem(target, item.id, consultHoldOwner(runId));
       } catch (error) {
         if (!runtimeMatches(capture, deps)) return finishRuntimeChangedRun(capture);
+        // A witness appeared between the `resumable` read and the claim: the
+        // server refuses with `attempt-recorded`, and the previous delivery is
+        // undecided again. Treat it exactly like a strict-gate refusal — no
+        // composer restore, the item stays queued, uncertain.
+        if (/attempt-recorded/.test(error instanceof Error ? error.message : String(error))) {
+          await releaseHold(capture);
+          return refuseUnconfirmedResume();
+        }
         await releaseHold(capture);
         return failRun(capture, `Could not claim the queued consult item: ${error instanceof Error ? error.message : String(error)}`);
       }

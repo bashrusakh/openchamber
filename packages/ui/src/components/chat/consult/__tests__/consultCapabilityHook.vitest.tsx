@@ -29,7 +29,7 @@ const nextFetch = (): DeferredFetch => {
 };
 
 const verifiedServerPayload = (): Response => new Response(
-  JSON.stringify({ version: '1.18.31', consultProtocol: 1 }),
+  JSON.stringify({ version: '1.18.31', consultProtocol: 2 }),
   { status: 200, headers: { 'Content-Type': 'application/json' } },
 );
 

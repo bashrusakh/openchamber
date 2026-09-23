@@ -11,11 +11,15 @@
 // it sends, because a queued prompt sent into a running turn would be steered
 // into it instead of starting the next one.
 
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
 const QUEUE_FILE_NAME = 'message-queue.json';
-const QUEUE_FILE_VERSION = 1;
+// Version 2 added the consult dispatch witness (`consult.attempt`). A version-1
+// file is restored with a conservative legacy witness (see `load`), and a file
+// from a newer build is quarantined rather than guessed at.
+const QUEUE_FILE_VERSION = 2;
 
 const MAX_SESSIONS = 50;
 const MAX_ITEMS_PER_SESSION = 20;
@@ -130,13 +134,17 @@ const CONSULT_ITEM_KIND = 'consult';
 
 // Bump whenever the consult queue protocol changes. The UI capability gate
 // reads this through GET /api/opencode/version and must fail closed when the
-// value is absent or lower than the version it requires.
-export const CONSULT_PROTOCOL_VERSION = 1;
+// value is absent or lower than the version it requires. Version 2 added the
+// dispatch witness: `resumable` now means "no dispatch attempt is recorded",
+// and the claim/dispatch routes answer the witness refusals.
+export const CONSULT_PROTOCOL_VERSION = 2;
 
 // Parses the optional consult payload: { system?, textPartMetadata? }. `system`
 // is a plain string; `textPartMetadata` is carried as JSON text (it must be
 // serializable and bounded) so the stored item round-trips like every other
-// persisted field.
+// persisted field. The dispatch witness (`consult.attempt`) is deliberately not
+// read here: it is server-written only, so the enqueue parser and the
+// `/payload` merge strip any client-supplied attempt.
 const parseConsultPayload = (value) => {
   const raw = asRecord(value);
   if (!raw) throw new TypeError('invalid consult payload');
@@ -161,6 +169,42 @@ const parseConsultPayload = (value) => {
   }
   return consult;
 };
+
+// The consult dispatch witness: the durable record that a dispatch request may
+// have been issued for the item. It is written by the server alone
+// (`commitAttempt`), stripped from every client-supplied payload, and read back
+// only by the stored-item parser. Its absence is the only licence to call a
+// consult item "never dispatched".
+const CONSULT_ATTEMPT_ID_PATTERN = /^att_[A-Za-z0-9_-]{8,64}$/;
+const CONSULT_ATTEMPT_MESSAGE_ID_PATTERN = /^msg_[A-Za-z0-9_-]{1,120}$/;
+
+/**
+ * The validated witness carried by an attempt record, or null when the record
+ * is absent or malformed. A malformed record never reads back as a usable
+ * witness; every caller must treat null as "unknown", never as "never sent".
+ * The record deliberately carries only what a decision reads: the server's
+ * attemptId, the request's messageId, and when it was written. The claim owner
+ * is not stored here — decisions read the item's own `claimed`.
+ */
+const parseConsultAttempt = (value) => {
+  const raw = asRecord(value);
+  if (!raw) return null;
+  const at = asCount(raw.at);
+  if (at === null) return null;
+  // A legacy witness predates the addressable id: it only ever proves delivery
+  // through the receipt marker (or stays unknown). Any extra fields are noise.
+  if (raw.legacy === true) return { legacy: true, at };
+  const attemptId = asNonEmptyString(raw.attemptId);
+  if (!CONSULT_ATTEMPT_ID_PATTERN.test(attemptId)) return null;
+  const messageId = asNonEmptyString(raw.messageId);
+  if (!CONSULT_ATTEMPT_MESSAGE_ID_PATTERN.test(messageId)) return null;
+  return { attemptId, messageId, at };
+};
+
+/** The item's validated dispatch witness, or null when it has none. */
+const readConsultAttempt = (item) => parseConsultAttempt(asRecord(item?.consult)?.attempt);
+
+const isAttemptWitnessed = (item) => readConsultAttempt(item) !== null;
 
 /**
  * Validates a queued item posted by a client. Throws a TypeError (→ 400) for
@@ -203,7 +247,21 @@ const parseStoredItem = (value) => {
   const id = raw ? asNonEmptyString(raw.id) : '';
   if (!id) return null;
   try {
-    return { id, createdAt: asCount(raw.createdAt) ?? Date.now(), ...parseQueuedItemInput(raw) };
+    const item = { id, createdAt: asCount(raw.createdAt) ?? Date.now(), ...parseQueuedItemInput(raw) };
+    // The dispatch witness is attached server-side only: `parseQueuedItemInput`
+    // (and with it the enqueue and `/payload` paths) copies just
+    // `system`/`textPartMetadata`, so a client-supplied attempt can never enter.
+    const rawAttempt = asRecord(asRecord(raw.consult))?.attempt;
+    const attempt = parseConsultAttempt(rawAttempt);
+    if (attempt) {
+      item.consult = { ...item.consult, attempt };
+    } else if (rawAttempt !== undefined) {
+      // A present-but-unreadable record must never read as "never sent": it is
+      // unknown, so it is normalized to the conservative legacy witness (the
+      // version-1 shape), which only a delivery marker can prove delivered.
+      item.consult = { ...item.consult, attempt: { legacy: true, at: item.createdAt } };
+    }
+    return item;
   } catch {
     return null;
   }
@@ -229,6 +287,33 @@ const dropStaleConsultSynthesis = (item) => {
 
 const toPublicAttachment = ({ dataUrl: _dataUrl, ...attachment }) => attachment;
 
+/**
+ * The client-facing consult payload: the model-facing fields only. The
+ * dispatch witness (`consult.attempt`) is server-only state — it carries the
+ * request's message id and must never ride a snapshot or broadcast — so it is
+ * projected as the boolean `attempted` instead, which is all a client needs
+ * to know that a resume is off the table.
+ */
+const toPublicConsult = (consult) => {
+  const publicConsult = {};
+  if (consult.system !== undefined) publicConsult.system = consult.system;
+  if (consult.textPartMetadata !== undefined) publicConsult.textPartMetadata = consult.textPartMetadata;
+  return publicConsult;
+};
+
+/**
+ * The item a route hands back to its caller. The full item is intentional for
+ * take/claim (payloads included), but the dispatch witness stays server-only
+ * wherever an item leaves the runtime: the consult payload is projected and
+ * the witness becomes the boolean `attempted`.
+ */
+const toResponseItem = (item) => {
+  if (!item.consult) return item;
+  const responseItem = { ...item, consult: toPublicConsult(item.consult) };
+  if (isAttemptWitnessed(item)) responseItem.attempted = true;
+  return responseItem;
+};
+
 // What clients see: everything except the payloads — attachment data URLs
 // (megabytes of base64) and captured context (a PR diff, say) — which would
 // otherwise ride every broadcast. A take hands the full item back.
@@ -238,8 +323,12 @@ const toPublicItem = (item) => {
   // Consult state rides the projection so every client sees what is reserved,
   // by whom, and what the consult will carry.
   if (item.kind) publicItem.kind = item.kind;
-  if (item.consult) publicItem.consult = item.consult;
+  if (item.consult) publicItem.consult = toPublicConsult(item.consult);
   if (item.claimed) publicItem.claimed = item.claimed;
+  // The witness is server-only: clients learn that it exists, never its
+  // contents, so a witnessed item can show "no resume" without holding the
+  // request's identity.
+  if (isAttemptWitnessed(item)) publicItem.attempted = true;
   // Recovery marker: only a consult item that lost its reservation (a lapsed
   // hold or a restart) exposes it, so clients can offer re-claim or removal.
   if (isConsultItem(item) && item.recoverable) publicItem.recoverable = true;
@@ -305,6 +394,9 @@ export function createMessageQueueRuntime({
   dispatchQuietMs = DISPATCH_QUIET_MS,
   abortHoldMs = ABORT_HOLD_MS,
   retryDelayMs = getQueuedSendRetryDelayMs,
+  // Test seam: lets a test observe or delay the strict witness write (the
+  // dispatch's fail-closed dependency). Production always uses the real one.
+  persistStrictImpl = null,
 }) {
   const filePath = path.join(dataDir, QUEUE_FILE_NAME);
 
@@ -350,26 +442,35 @@ export function createMessageQueueRuntime({
     ),
   });
 
+  /** Malformed or unknown-version bytes are kept for the user, never overwritten. */
+  const quarantineFile = async (reason) => {
+    const backup = `${filePath}.corrupt-${now()}`;
+    await fs.promises.rename(filePath, backup).catch(() => undefined);
+    console.warn(`[message-queue] queue file ${reason} and moved to ${backup}`);
+    return { sessions: {}, revision: 0, version: 0 };
+  };
+
   const readFile = async () => {
     let raw;
     try {
       raw = await fs.promises.readFile(filePath, 'utf8');
     } catch (error) {
-      if (asRecord(error)?.code === 'ENOENT') return { sessions: {}, revision: 0 };
+      if (asRecord(error)?.code === 'ENOENT') return { sessions: {}, revision: 0, version: 0 };
       throw error;
     }
     let parsed;
     try {
       parsed = JSON.parse(raw);
-    } catch (error) {
+    } catch {
       // Malformed is a failure, not an empty queue: keep the bytes for the
       // user and start over rather than overwriting them on the next write.
-      const backup = `${filePath}.corrupt-${now()}`;
-      await fs.promises.rename(filePath, backup).catch(() => undefined);
-      console.warn(`[message-queue] queue file was unreadable and moved to ${backup}: ${error?.message ?? error}`);
-      return { sessions: {}, revision: 0 };
+      return quarantineFile('was unreadable');
     }
     const stored = asRecord(parsed) ?? {};
+    const fileVersion = asCount(stored.version) ?? 0;
+    // A file from a newer build may carry fields this runtime would silently
+    // drop or misread; quarantine it like malformed data instead of guessing.
+    if (fileVersion > QUEUE_FILE_VERSION) return quarantineFile(`has unknown version ${fileVersion}`);
     const sessions = {};
     for (const [sessionId, value] of Object.entries(asRecord(stored.sessions) ?? {})) {
       const entry = asRecord(value);
@@ -379,7 +480,7 @@ export function createMessageQueueRuntime({
       if (!directory || items.length === 0) continue;
       sessions[sessionId] = { directory, items };
     }
-    return { sessions, revision: asCount(stored.revision) ?? 0 };
+    return { sessions, revision: asCount(stored.revision) ?? 0, version: fileVersion };
   };
 
   const load = () => {
@@ -393,13 +494,25 @@ export function createMessageQueueRuntime({
             // dropped) and is therefore never tick-delivered. The receipt
             // metadata survives: it is the run's delivery-correlation identity,
             // so a Resume can re-check whether the pre-restart dispatch already
-            // landed before it re-fans-out. A restored one is recoverable: its
-            // reservation is gone, so a client may re-claim it (the claim route
-            // accepts an unclaimed head consult) or the user may remove it.
+            // landed before it re-fans-out.
+            //
+            // The dispatch witness survives too. A version-1 file has no
+            // witness for any item, and its fire-and-forget payload persist
+            // means "no attempt recorded" is NOT proof that no attempt was
+            // made: every consult item from such a file gets a legacy witness
+            // so the new invariant cannot retroactively call it never-sent.
+            // Legacy items are provable only by the delivery marker; otherwise
+            // they stay unknown and are removed manually.
             for (const item of entry.items) {
               delete item.claimed;
               dropStaleConsultSynthesis(item);
-              if (isConsultItem(item)) item.recoverable = true;
+              if (stored.version <= 1 && isConsultItem(item) && !isAttemptWitnessed(item)) {
+                item.consult = { ...item.consult, attempt: { legacy: true, at: item.createdAt } };
+              }
+              // Only an unwitnessed item lost its reservation safely: a
+              // witnessed one may have been dispatched and must not offer a
+              // Resume that could duplicate the turn.
+              if (isConsultItem(item) && !isAttemptWitnessed(item)) item.recoverable = true;
             }
             queues.set(sessionId, entry);
           }
@@ -429,6 +542,30 @@ export function createMessageQueueRuntime({
         console.warn('[message-queue] failed to persist queue:', error?.message ?? error);
       });
     return writePromise;
+  };
+
+  /**
+   * A strict twin of `persist` for writes a fail-closed decision depends on:
+   * it rejects to the caller when the bytes did not land. The fire-and-forget
+   * `persist` cannot back such a decision — a request must never be issued on
+   * top of a write that silently failed. The shared write chain stays alive
+   * for later writes (the rejection is swallowed on the chain itself).
+   */
+  const persistStrict = () => {
+    const payload = JSON.stringify(serialize());
+    const writeBytes = persistStrictImpl
+      ? () => persistStrictImpl({ dataDir, filePath, payload })
+      : async () => {
+        await fs.promises.mkdir(dataDir, { recursive: true });
+        const tmpPath = `${filePath}.${process.pid}.tmp`;
+        await fs.promises.writeFile(tmpPath, payload, 'utf8');
+        await fs.promises.rename(tmpPath, filePath);
+      };
+    const write = writePromise.then(writeBytes);
+    writePromise = write.catch((error) => {
+      console.warn('[message-queue] failed to persist queue:', error?.message ?? error);
+    });
+    return write;
   };
 
   // --- snapshots -----------------------------------------------------------
@@ -474,6 +611,29 @@ export function createMessageQueueRuntime({
     }
     queues.set(sessionId, { directory, items });
   };
+
+  /**
+   * The strict witness write: the attempt record must be durable before the
+   * dispatch request is issued. The revision and broadcast follow a landed
+   * write only, and a rejected write removes the in-memory attempt again and
+   * rethrows, so the caller can fail closed with no request sent.
+   */
+  const commitAttempt = async (sessionId, item, attempt) => {
+    item.consult = { ...item.consult, attempt };
+    revision += 1;
+    try {
+      await persistStrict();
+    } catch (error) {
+      delete item.consult.attempt;
+      if (Object.keys(item.consult).length === 0) delete item.consult;
+      throw error;
+    }
+    broadcast(sessionId);
+    return { revision, attempt };
+  };
+
+  /** A fresh OpenCode message id for one dispatch attempt (the `msg_` prefix is proven). */
+  const newAttemptMessageId = () => `msg_${crypto.randomUUID().replace(/-/g, '')}`;
 
   // --- OpenCode access -----------------------------------------------------
 
@@ -706,10 +866,12 @@ export function createMessageQueueRuntime({
    * synthesis, but keep `kind: 'consult'` and the receipt metadata: the user's
    * consult intent survives a lapsed reservation, so the item is still never
    * handed to a raw send — the generic dispatcher skips it and only an
-   * explicit remove/clear deletes it. The cleared item is marked
-   * `recoverable`: it lost its owner, so a client may re-claim it through the
-   * claim route or the user may remove it. An item that was never claimed
-   * keeps waiting for its flow to claim it.
+   * explicit remove/clear deletes it. An unwitnessed cleared item is marked
+   * `recoverable`: it lost its owner and no dispatch was ever attempted, so a
+   * client may re-claim it through the claim route or the user may remove it.
+   * A witnessed item gets no `recoverable`: it may already have been sent, so
+   * its only exits are the resolve route's proven outcomes or manual removal.
+   * An item that was never claimed keeps waiting for its flow to claim it.
    * Runs inside the expiry sweep, so the tick and every hold mutation both see
    * the cleared claims immediately.
    */
@@ -725,7 +887,11 @@ export function createMessageQueueRuntime({
       if (liveHoldOwners(sessionId)?.has(owner)) continue;
       delete item.claimed;
       dropStaleConsultSynthesis(item);
-      item.recoverable = true;
+      // Only an unwitnessed item lost its reservation safely: one that already
+      // carries a dispatch witness may have been sent, so it must never offer
+      // a Resume (the client's only safe action there is manual removal). The
+      // witnessed item keeps its witness and keeps blocking the head.
+      if (!isAttemptWitnessed(item)) item.recoverable = true;
       changed = true;
     }
     return changed;
@@ -1155,6 +1321,10 @@ export function createMessageQueueRuntime({
       if (item.kind !== CONSULT_ITEM_KIND) throw refuseClaim('not-consult');
       if (index !== 0) throw refuseClaim('not-head');
       if (sending.has(sessionId)) throw refuseClaim('sending');
+      // A witnessed item may have been dispatched already: it must never be
+      // re-claimed, because a claim is what lets a resume fan out again. The
+      // refusal is re-checked after every await because `checkItem` runs there too.
+      if (isAttemptWitnessed(item)) throw refuseClaim('attempt-recorded');
       return item;
     };
 
@@ -1204,7 +1374,7 @@ export function createMessageQueueRuntime({
     }
     if (sending.has(sessionId)) throw httpError('cannot update consult payload: sending', 409);
     item.consult = { ...item.consult, ...parseConsultPayload(payloadInput) };
-    return { ok: true, item, ...commit(sessionId) };
+    return { ok: true, item: toResponseItem(item), ...commit(sessionId) };
   };
 
   /** Wait bound for dispatchConsult's idle loop, mirroring the fetch timeout. */
@@ -1287,6 +1457,25 @@ export function createMessageQueueRuntime({
   };
 
   /**
+   * Bounded address poll for a dispatch attempt that carries a messageId:
+   * OpenCode admits a message under the id sent with the request, so a
+   * readable address proves the turn landed even when the response was lost.
+   * Only an actual 200 proves delivery; a 404, a rejection, or a read failure
+   * is inconclusive (the A0 probe showed a landed message can read 404 through
+   * legitimate operations), so the outcome stays unknown.
+   */
+  const confirmConsultAddress = async (sessionId, directory, messageId) => {
+    for (let attempt = 0; attempt < CONSULT_DELIVERY_CONFIRM_ATTEMPTS; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, CONSULT_DELIVERY_CONFIRM_DELAY_MS));
+      const found = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`, { directory })
+        .then(() => true)
+        .catch(() => false);
+      if (found) return true;
+    }
+    return false;
+  };
+
+  /**
    * The consult item's own dispatch route: it was never going to be sent by
    * the generic tick, so the claim owner asks for it explicitly. Every
    * control-flow answer is a structured outcome (HTTP 200) instead of a
@@ -1301,9 +1490,12 @@ export function createMessageQueueRuntime({
     const owner = parseHoldOwner(ownerInput);
 
     /**
-     * Entry order: not-found → not-consult → claim-lost → sending. A missing
-     * claim, another owner, or a lapsed reservation all read as claim-lost;
-     * nothing is mutated on any refusal.
+     * Entry order: not-found → not-consult → claim-lost → attempt-present →
+     * sending. A missing claim, another owner, or a lapsed reservation all read
+     * as claim-lost; nothing is mutated on any refusal. An item that already
+     * carries a dispatch witness may have been sent already, so a second
+     * dispatch must refuse rather than mint another request for it (a same-id
+     * re-issue could replace a turn after a staged revert).
      */
     const inspect = () => {
       const queue = queues.get(sessionId);
@@ -1311,6 +1503,7 @@ export function createMessageQueueRuntime({
       if (!item) return { kind: 'not-found' };
       if (item.kind !== CONSULT_ITEM_KIND) return { kind: 'not-consult' };
       if (!item.claimed || item.claimed.owner !== owner) return { kind: 'claim-lost' };
+      if (isAttemptWitnessed(item)) return { kind: 'attempt-present' };
       if (sending.has(sessionId)) return { kind: 'sending' };
       if (!liveHoldOwners(sessionId)?.has(owner)) return { kind: 'claim-lost' };
       return { kind: 'ok', item, queue };
@@ -1344,6 +1537,54 @@ export function createMessageQueueRuntime({
     };
     const releaseOwnerHold = () => setHold(sessionId, false, undefined, owner || undefined);
 
+    // The witness precedes the request: it must be durable before the prompt
+    // can be issued, or a crash between the two would leave no record that an
+    // attempt may exist. A failed strict write sends nothing (fail-closed):
+    // the dispatch refuses instead of issuing an unaddressable request.
+    const attempt = {
+      attemptId: `att_${crypto.randomUUID().replace(/-/g, '')}`,
+      messageId: newAttemptMessageId(),
+      at: now(),
+    };
+    try {
+      await commitAttempt(sessionId, item, attempt);
+    } catch {
+      console.warn(`[message-queue] consult dispatch to ${sessionId} refused: the attempt could not be recorded`);
+      return { status: 'attempt-write-failed' };
+    }
+
+    // The witness write is awaited, and this post-write re-inspect is what
+    // keeps a removal or a claim change during that await from being overtaken
+    // by the request: nothing is sent without a present item and a live
+    // reservation. `inspect` reads our own just-written witness as
+    // `attempt-present` (it is checked before `sending`), so a healthy
+    // post-write state is "attempt-present with our own attemptId"; a
+    // different attemptId means a foreign dispatch wrote over ours and this
+    // dispatch must neither touch nor send.
+    const afterWrite = inspect();
+    const ownWitnessStored = readConsultAttempt(item)?.attemptId === attempt.attemptId;
+    if (afterWrite.kind === 'not-found' || afterWrite.kind === 'not-consult') {
+      // The item (and with it the witness) was removed during the await.
+      return { status: 'not-found' };
+    }
+    const claimLost = afterWrite.kind === 'claim-lost';
+    if (claimLost || sending.has(sessionId)) {
+      // The reservation or the in-flight slot changed while the write was
+      // awaited, so this dispatch sends nothing. Its own witness is removed
+      // again to unblock the item (nothing was sent by this dispatch); a
+      // foreign witness is left alone.
+      if (ownWitnessStored) {
+        delete item.consult.attempt;
+        if (Object.keys(item.consult).length === 0) delete item.consult;
+        commit(sessionId);
+      }
+      return { status: claimLost ? 'claim-lost' : 'sending' };
+    }
+    if (afterWrite.kind !== 'ok' && !(afterWrite.kind === 'attempt-present' && ownWitnessStored)) {
+      // A foreign witness owns this item now (attempt-present with another
+      // attemptId): no cleanup, no request.
+      return { status: afterWrite.kind };
+    }
     sending.set(sessionId, item.id);
     broadcast(sessionId);
     // The receipt runId is this acting turn's identity in the parent
@@ -1364,6 +1605,10 @@ export function createMessageQueueRuntime({
         system: item.consult?.system ?? '',
         textPartMetadata: item.consult?.textPartMetadata,
       });
+      // The attempt's own id: the address check below (and a later resolve)
+      // can prove delivery by reading this exact message, and no other client's
+      // message can be mistaken for this turn.
+      body.messageID = attempt.messageId;
       await resolvePromptBody?.(body, { sessionId, directory });
       await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/prompt_async`, { directory, method: 'POST', body });
       removeItem();
@@ -1376,17 +1621,23 @@ export function createMessageQueueRuntime({
         // bookkeeping only
       }
       console.log(`[message-queue] sent consult message to ${sessionId}`);
-      return { status: 'dispatched', item };
+      return { status: 'dispatched', item: toResponseItem(item), evidence: 'admission' };
     } catch (error) {
       sending.delete(sessionId);
       console.warn(`[message-queue] consult send to ${sessionId} failed:`, error?.message ?? error);
-      // The prompt may have been accepted before the failure surfaced: poll
-      // the parent tail for this acting turn's receipt marker. Correlation is
-      // only possible with a runId; without one a timeout must never become
-      // 'no' — only an explicit HTTP rejection can prove non-acceptance.
-      const delivered = consultRunId
-        ? await confirmConsultDelivery(sessionId, directory, consultRunId)
-        : null;
+      // The prompt may have been accepted before the failure surfaced. The
+      // attempt's message id is the primary check: OpenCode admits under the
+      // id sent with the request, so a readable address proves the turn
+      // landed. The receipt marker stays as a secondary signal for witnesses
+      // without a messageId (legacy) and as a fallback correlation. Only a
+      // positive read proves delivery; an unreadable or missing one never does.
+      const witness = readConsultAttempt(item);
+      const addressDelivered = witness?.messageId
+        ? await confirmConsultAddress(sessionId, directory, witness.messageId)
+        : false;
+      const delivered = addressDelivered
+        ? true
+        : (consultRunId ? await confirmConsultDelivery(sessionId, directory, consultRunId) : null);
       if (delivered === true) {
         // Landed despite the failed response: the dispatch succeeded.
         removeItem();
@@ -1398,7 +1649,12 @@ export function createMessageQueueRuntime({
           // bookkeeping only
         }
         console.log(`[message-queue] consult send to ${sessionId} landed after a reported failure`);
-        return { status: 'dispatched', item, delivery: 'confirmed-after-failure' };
+        return {
+          status: 'dispatched',
+          item: toResponseItem(item),
+          delivery: 'confirmed-after-failure',
+          evidence: addressDelivered ? 'address' : 'marker',
+        };
       }
       // A read failure is always indeterminate, even with an HTTP status: the
       // transcript could not be checked, so acceptance cannot be disproven.
@@ -1416,9 +1672,14 @@ export function createMessageQueueRuntime({
         || connectionCode === 'ENOTFOUND'
         || connectionCode === 'EAI_AGAIN'
       );
-      if (!readFailed && neverAccepted) {
-        // Proven non-acceptance: with correlation the marker reads also found
-        // nothing; without a runId this proof is the only path to 'no'.
+      if (!readFailed && neverAccepted && !witness?.legacy) {
+        // Proven non-acceptance: with correlation the reads also found nothing.
+        // The witness is cleared in the same commit as the removal — proven
+        // not-created is the only outcome that may clear one. A legacy witness
+        // has no addressable id to check, so it keeps the item, its claim, and
+        // the witness, exactly like the unknown path.
+        delete item.consult?.attempt;
+        if (item.consult && Object.keys(item.consult).length === 0) delete item.consult;
         removeItem();
         releaseOwnerHold();
         commit(sessionId);
@@ -1450,31 +1711,43 @@ export function createMessageQueueRuntime({
    * the claiming client may be gone, which is the whole point — and stops at
    * an in-flight send, which may still be the one that lands the marker.
    *
-   * The marker read awaits, so the decision is re-checked against the queue
-   * afterwards: a claim or dispatch that started meanwhile owns the item now,
-   * and acting on the stale read would clobber that live reservation. On any
-   * change (item gone, claim identity different, a send in flight) the outcome
-   * stays undecided and nothing is mutated.
+   * The witness decides what is provable:
+   *
+   * - No witness: no dispatch pre-send step ever ran for this item, so no
+   *   request can have been issued (the witness precedes the request). With no
+   *   live claim either, a resume is provably safe. This is the ONLY source of
+   *   `resumable`; payload/runID presence proves nothing either way.
+   * - Legacy witness (restored from a version-1 file): the old build's
+   *   fire-and-forget persist means absence proves nothing, and there is no
+   *   addressable id. Only the receipt marker can prove delivery; otherwise
+   *   the item stays unknown — never resumable, never recoverable.
+   * - Modern witness: the attempt's `msg_` id is the request's admissions
+   *   identity, so a readable address proves delivery. A 404 is NOT proof of
+   *   non-delivery: the A0 probe showed revert/delete operations make a landed
+   *   message read 404, so anything other than 200 is unknown.
+   *
+   * Resolve never clears a witness (only a proven dispatch rejection does) and
+   * never marks `recoverable` — a witnessed item's only exits are delivered or
+   * manual removal.
    *
    * Outcomes, all evidence-based and all fail-closed:
    * - `not-found` / `not-consult` / `sending`: nothing is mutated.
-   * - No receipt runId in the item metadata: the acting payload was never
-   *   merged onto this item, so no prompt for it can have been sent. Unclaimed
-   *   → `{ status: 'resumable' }`: provably never dispatched, nothing mutated,
-   *   the client may resume it. Claimed → `{ status: 'unresolved' }`: the
-   *   owner is mid-flow and decides; nothing is mutated either way.
-   * - Marker found in a deeper tail (200): the dispatch landed — remove the
-   *   item exactly once, release the claimed owner's hold (a non-empty owner
-   *   only: an unclaimed or owner-less item has no own slot, and the shared
-   *   legacy slot is never cleared from here), commit, broadcast.
-   * - Marker absent and the item is unclaimed: the reservation is gone and
-   *   there is no evidence of delivery — mark `recoverable` and answer
-   *   `{ status: 'unresolved', recoverable: true }`; the item keeps blocking
-   *   the head and clients may Resume or remove it.
-   * - Marker absent but the item is still claimed: the owning client may still
-   *   be mid-flight — `{ status: 'unresolved' }`, its lease is untouched.
-   * - Marker read failed, or the item/claim changed during the read: never
-   *   guess — `{ status: 'unresolved' }`, the live reservation decides.
+   * - No witness + unclaimed → `{ status: 'resumable' }`: provably never
+   *   dispatched, nothing mutated, the client may resume it.
+   * - No witness + claimed → `{ status: 'unresolved' }`: the owner is mid-flow
+   *   and decides; nothing is mutated.
+   * - Legacy witness + marker found in a deeper tail (200): delivered —
+   *   `{ status: 'dispatched', delivered: 'confirmed', evidence: 'legacy-marker' }`,
+   *   remove once, release the claimed non-empty owner's hold, commit.
+   * - Legacy witness without a runId, or with no marker / an unreadable tail:
+   *   `{ status: 'unresolved' }`, nothing mutated.
+   * - Modern witness + address 200: delivered —
+   *   `{ status: 'dispatched', delivered: 'confirmed', evidence: 'address' }`,
+   *   same removal/release.
+   * - Modern witness + any other address outcome (404, 400, read failure):
+   *   `{ status: 'unresolved' }`, witness kept, nothing mutated.
+   * - The item, attempt, or claim changed during a read, or a send started
+   *   meanwhile: `{ status: 'unresolved' }`, nothing mutated.
    */
   const resolveConsult = async (sessionIdInput, itemIdInput) => {
     const sessionId = requireSessionId(sessionIdInput);
@@ -1486,25 +1759,44 @@ export function createMessageQueueRuntime({
     if (item.kind !== CONSULT_ITEM_KIND) return { status: 'not-consult' };
     if (sending.has(sessionId)) return { status: 'sending' };
 
-    // The receipt runId is the only non-heuristic correlation between the item
-    // and a prompt that may have landed. The product flow merges the acting
-    // payload's metadata immediately before dispatch, so a missing runId means
-    // the item never reached that stage: with no claim either, nothing was
-    // ever sent for it and a resume is provably safe. A claimed item is its
-    // owner's live flow; leave the decision there.
-    const runId = readConsultReceiptRunId(item);
-    if (!runId) return item.claimed ? { status: 'unresolved' } : { status: 'resumable' };
+    const attempt = readConsultAttempt(item);
+    if (!attempt) {
+      // No dispatch pre-send step ever ran (the witness precedes the request),
+      // so an unclaimed item is provably never-dispatched. Nothing is mutated.
+      return item.claimed ? { status: 'unresolved' } : { status: 'resumable' };
+    }
 
-    // The claim identity this decision is based on, so the post-read re-check
-    // can tell a concurrent claim, re-claim, or release from "unchanged".
+    // The identities this decision is based on, so the post-read re-check can
+    // tell a concurrent claim, re-claim, release, or second attempt from
+    // "unchanged".
     const entryClaim = item.claimed ?? null;
-    const found = await hasConsultDeliveryMarker(sessionId, queue.directory, runId, CONSULT_RESOLVE_TAIL_LIMIT);
-    if (found === null) return { status: 'unresolved' };
+    const entryAttemptId = attempt.attemptId ?? null;
+    let evidence = null;
+    if (attempt.legacy) {
+      // A legacy witness has no addressable id: only the receipt marker can
+      // prove that the turn it belonged to landed. Absence proves nothing.
+      const runId = readConsultReceiptRunId(item);
+      if (!runId) return { status: 'unresolved' };
+      const found = await hasConsultDeliveryMarker(sessionId, queue.directory, runId, CONSULT_RESOLVE_TAIL_LIMIT);
+      if (found !== true) return { status: 'unresolved' };
+      evidence = 'legacy-marker';
+    } else {
+      // The attempt's own `msg_` id: its readable address is the request's
+      // admission record. Only a 200 proves delivery; a 404/400/read failure
+      // is inconclusive (revert/delete can hide a landed message).
+      const addressRead = await openCodeFetch(
+        `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(attempt.messageId)}`,
+        { directory: queue.directory },
+      ).then(() => true).catch(() => false);
+      if (!addressRead) return { status: 'unresolved' };
+      evidence = 'address';
+    }
 
-    // The tail read awaited: a claim or dispatch that started meanwhile owns
-    // the item now, and removing it (or releasing its hold) would clobber that
-    // live reservation. Proceed only on the same item, with the same claim
-    // (same owner and claimedAt, or both absent), and no send in flight.
+    // The read awaited: a claim, a second attempt, or a dispatch that started
+    // meanwhile owns the item now, and removing it (or releasing its hold)
+    // would clobber that live reservation. Proceed only on the same item, the
+    // same attempt, the same claim (same owner and claimedAt, or both absent),
+    // and no send in flight.
     const current = queues.get(sessionId);
     const currentItem = current ? current.items.find((entry) => entry.id === itemIdInput) : null;
     const currentClaim = currentItem?.claimed ?? null;
@@ -1517,31 +1809,20 @@ export function createMessageQueueRuntime({
         && entryClaim.claimedAt === currentClaim.claimedAt
       )
     );
-    if (!currentItem || sending.has(sessionId) || !claimUnchanged) return { status: 'unresolved' };
+    const attemptUnchanged = (readConsultAttempt(currentItem)?.attemptId ?? null) === entryAttemptId;
+    if (!currentItem || sending.has(sessionId) || !claimUnchanged || !attemptUnchanged) return { status: 'unresolved' };
 
-    if (found) {
-      // Delivered: remove exactly once (the filter drops nothing else), then
-      // release the claim owner's hold. Only a claimed item with a non-empty
-      // owner has a hold slot of its own to release: an unclaimed item maps
-      // onto no owner, and the shared owner-less legacy slot must not be
-      // cleared on another feature's behalf.
-      setQueueItems(sessionId, current.directory, current.items.filter((entry) => entry.id !== currentItem.id));
-      const claimedOwner = asNonEmptyString(currentItem.claimed?.owner);
-      if (claimedOwner) setHold(sessionId, false, undefined, claimedOwner);
-      commit(sessionId);
-      console.log(`[message-queue] resolved stranded consult message in ${sessionId} as delivered`);
-      return { status: 'dispatched', delivered: 'confirmed' };
-    }
-    if (!currentItem.claimed) {
-      // The reservation is gone (lapse or restart) and the tail shows no
-      // marker: no evidence of delivery. Surface the recovery hint and leave
-      // the item exactly as it was — a consult item still blocking the head.
-      currentItem.recoverable = true;
-      commit(sessionId);
-      return { status: 'unresolved', recoverable: true };
-    }
-    // Still claimed with a live hold: the owning client may still be mid-flight.
-    return { status: 'unresolved' };
+    // Delivered: remove exactly once (the filter drops nothing else), then
+    // release the claim owner's hold. Only a claimed item with a non-empty
+    // owner has a hold slot of its own to release: an unclaimed item maps
+    // onto no owner, and the shared owner-less legacy slot must not be
+    // cleared on another feature's behalf.
+    setQueueItems(sessionId, current.directory, current.items.filter((entry) => entry.id !== currentItem.id));
+    const claimedOwner = asNonEmptyString(currentItem.claimed?.owner);
+    if (claimedOwner) setHold(sessionId, false, undefined, claimedOwner);
+    commit(sessionId);
+    console.log(`[message-queue] resolved stranded consult message in ${sessionId} as delivered`);
+    return { status: 'dispatched', delivered: 'confirmed', evidence };
   };
 
   // --- events --------------------------------------------------------------

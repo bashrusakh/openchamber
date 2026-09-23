@@ -81,6 +81,13 @@ the next write cannot overwrite the user's data. A failed read leaves writes
 disabled until a later load succeeds. `revision` is a global monotonic counter
 bumped on every mutation; clients use it to reject stale snapshots.
 
+The file format is version 2. A file whose version is above the runtime's own
+is moved aside like malformed data (its fields cannot be trusted to this
+build), and a version-1 or version-absent file is read with the legacy rule:
+every restored consult item gets a legacy dispatch witness, because the old
+build's fire-and-forget persist means a missing attempt record is not proof
+that no dispatch was attempted (see "Consult items").
+
 In-memory only, deliberately: the in-flight item (`sendingId`), retry
 backoff, abort timestamps, and holds. A restart has no in-flight sends; a
 persisted "sending" flag would strand a message forever.
@@ -167,15 +174,15 @@ never sends it. Three optional fields extend the item:
 
 ```
 kind: 'consult'              // only the literal 'consult' is accepted; absent = normal
-consult: { system?, textPartMetadata? }  // model-facing payload, size-bounded
+consult: { system?, textPartMetadata?, attempt? }  // model-facing payload + dispatch witness
 claimed: { owner, claimedAt }            // set by a successful claim
 ```
 
 `consult.system` is a string capped at 24 000 characters;
 `consult.textPartMetadata` is carried as JSON capped at 8 000 serialized
 characters and must be serializable. Violations are TypeErrors (→ 400), the
-same contract as every other item field. All three fields ride snapshots,
-broadcasts, and the JSON round-trip.
+same contract as every other item field. `kind`, `consult`, and `claimed` ride
+snapshots, broadcasts, and the JSON round-trip.
 
 `CONSULT_PROTOCOL_VERSION` (exported by `runtime.js`) is the backend half of the
 Consult Models capability handshake: the version route exposes it as
@@ -188,6 +195,81 @@ and the submission's own re-check are what keep a backend that predates
 `kind: 'consult'` from ever receiving one; a direct HTTP enqueue that bypasses
 both is outside the capability contract (on a protocol-1 backend the
 never-raw-send rule in "Dispatcher skip rule" still holds).
+
+### Dispatch witness (`consult.attempt`)
+
+`consult.attempt` is the durable record that a dispatch request may have been
+issued for this item:
+
+```
+attempt: {
+  attemptId,    // att_ + random; the server's own mutation identity
+  messageId,    // msg_ + random; the request's OpenCode message id
+  at,           // when the witness was written
+  legacy?,      // true: restored from a version-1 file, no messageId
+}
+```
+
+The record carries only what a decision reads; the claim owner is not stored
+here (decisions read the item's own `claimed`).
+
+The server writes it and only the server writes it: `parseConsultPayload` (the
+enqueue parser and the `/payload` merge) copies just `system` and
+`textPartMetadata`, so a client-supplied attempt is silently stripped, and the
+stored-item parser is the only reader. It is written by `dispatchConsult` in a
+single strict, awaited write (`commitAttempt` uses `persistStrict`, which
+rejects to the caller instead of swallowing the failure like the ordinary
+fire-and-forget `persist`), and the prompt request is only issued after that
+write lands. If the write fails, the dispatch answers
+`{ status: 'attempt-write-failed' }` and sends nothing: no request may exist
+without a durable witness. Because the write is awaited, `dispatchConsult`
+re-inspects right after it: a removal, a lost claim, or a send that started
+during the write is never overtaken by the request.
+
+Three committed sites clear or drop the witness, and nothing else does
+(`resolveConsult` only reads it):
+
+- the dispatch's proven-rejection path (a 4xx or `ECONNREFUSED`/`ENOTFOUND`/
+  `EAI_AGAIN`), which also removes the item and answers
+  `send-failed delivered: 'no'`;
+- the post-write re-inspect, when the claim was lost (or another send took the
+  session) while the witness write was awaited: this dispatch sent nothing, so
+  it deletes its own witness and commits, which unblocks the item;
+- the `commitAttempt` rollback when the strict write itself rejects, which
+  leaves no in-memory witness behind (the request is never issued).
+
+A foreign witness is never touched by either cleanup: the attemptId recorded on
+the item decides.
+
+Its absence is the server's only proof that a consult item was never
+dispatched, so that is what gates a resume (see "Recovery"). A stored attempt
+record that is present but unreadable is normalized at the stored-item boundary
+to the conservative legacy witness, never to "never sent". While a witness
+stands the item is not claimable and carries no `recoverable`: `claim` refuses
+`attempt-recorded` (409) and `dispatchConsult` refuses `attempt-present` (200),
+both re-checked after every await. The only ways a witness disappears are the
+proven-rejection path and the dispatch's own-write claim-lost cleanup; after
+either, the item is legitimately resumable again. The witness survives a lapsed
+reservation and a restart (only `claimed` and the stale synthesis drop), which
+is what keeps a restart from licensing a duplicate resume.
+
+Delivery of a witnessed item is proven by one of two reads:
+
+- the address check `GET /session/{id}/message/{messageId}` returning 200 —
+  OpenCode admits a message under the id the request carried, so a readable
+  address proves the turn landed. This is the dispatch failure path's bounded
+  poll and the modern-witness resolve read;
+- the receipt-marker tail read (secondary): the acting turn's
+  `consult.textPartMetadata` marker found in the parent transcript, used for
+  legacy witnesses, which have no addressable message id.
+
+A 404 on the address check is not proof of non-delivery. The A0 probe showed
+that ordinary operations (`DELETE /session/{id}/message/{id}`, and a
+revert-to-message followed by any new prompt) make a landed message read 404,
+so anything other than 200 leaves the outcome unknown and the item, claim, and
+witness in place. There is no time window and no revert-marker read: unknown
+is a permanent answer until a later read says otherwise or the user removes
+the item, and the client's only safe action on a witnessed item is removal.
 
 ### Dispatcher skip rule
 
@@ -206,7 +288,10 @@ item for one owner: it marks the item claimed, starts/refreshes that owner's
 hold (TTL capped at 10 min), and the same-owner re-claim extends the
 reservation. Only the queue head can be claimed, only while the session is
 idle (the same `isSessionIdle` gate the tick applies; a failed status read is
-"unknown, never idle" and refuses). `setConsultPayload` merges
+"unknown, never idle" and refuses), and never an item that already carries a
+dispatch witness (409 `attempt-recorded`; re-checked after the idle read, so a
+witness that appears mid-claim wins and the claim refuses). The claim never
+writes or clears the witness. `setConsultPayload` merges
 `item.consult` while the item is claimed by that owner and not in flight —
 the claim flow may refine the system prompt or text metadata between claim
 and dispatch. Manual removal is a full cancellation of the item's own
@@ -221,61 +306,70 @@ failures 500):
 
 | Outcome | Meaning |
 |---|---|
-| `{ status: 'dispatched', item }` | sent and removed; the owner hold was released and the result committed/broadcast. A `delivery: 'confirmed-after-failure'` marks a send whose response failed but whose user message was found in the parent tail. |
+| `{ status: 'dispatched', item, evidence: 'admission' }` | sent and removed; the owner hold was released and the result committed/broadcast. A `delivery: 'confirmed-after-failure'` with `evidence: 'address'` or `'marker'` marks a send whose response failed but whose delivery was proven afterwards. |
 | `{ status: 'busy' }` | the session was busy at entry or the bounded idle wait (60 s) expired; the claim and item are untouched. |
 | `{ status: 'claim-lost' }` | the item has no claim, another owner claims it, or the reservation hold is not live (checked at entry and after every await). |
 | `{ status: 'not-found' }` | the item does not exist. |
 | `{ status: 'not-consult' }` | the item is not a consult item. |
+| `{ status: 'attempt-present' }` | the item already carries a dispatch witness, so a request for it may already exist; nothing is mutated and no request is issued (checked at entry and after every await, before `sending`). |
+| `{ status: 'attempt-write-failed' }` | the strict witness write failed, so no request was issued; the item and claim are untouched. |
 | `{ status: 'sending' }` | the session already has an item in flight. |
-| `{ status: 'send-failed', delivered: 'no' }` | the prompt definitely did not land; the item was removed and the hold released. |
-| `{ status: 'send-failed', delivered: 'unknown' }` | the prompt may or may not have landed; the item, claim, and hold stay reserved for a retry. The client deliberately leaves the owner lease to the server (resolution or expiry) instead of releasing it, so the proxy prompt gate keeps protecting a session whose send may still be running. |
+| `{ status: 'send-failed', delivered: 'no' }` | the prompt definitely did not land; the witness was cleared, the item removed, and the hold released. |
+| `{ status: 'send-failed', delivered: 'unknown' }` | the prompt may or may not have landed; the item, claim, hold, and witness stay reserved for a resolve. The client deliberately leaves the owner lease to the server (resolution or expiry) instead of releasing it, so the proxy prompt gate keeps protecting a session whose send may still be running. |
 
-A prompt failure does not immediately decide the outcome. The dispatch uses
-the acting turn's own identity, not any new message: it extracts the receipt
+A prompt failure does not immediately decide the outcome. Before the request
+the dispatch writes the witness' `messageId`, so the primary check is the
+address: up to four reads of `GET /session/{id}/message/{messageId}` ~400 ms
+apart (~1.6 s total), any 200 proving the turn landed. The acting turn's
+receipt marker stays as the secondary signal: the dispatch extracts the receipt
 `runId` from the item's `textPartMetadata` (`openchamberConsultReceipt`) and
-polls the parent tail up to four times, ~400 ms apart (~1.6 s total), for a
-user message whose text-part metadata carries that same `runId`. The marker
-names exactly this acting turn, so another client's concurrent message can
-never be mistaken for the dispatch.
+also polls the parent tail for a user message whose text-part metadata carries
+that same `runId`. Both names are exact, so another client's concurrent message
+can never be mistaken for the dispatch.
 
-- Marker found → the send landed: `dispatched` with
-  `delivery: 'confirmed-after-failure'` (item removed, hold released like a
-  normal success).
-- No marker and the failure PROVES the request was never accepted → 
-  `send-failed delivered: 'no'` (item removed, hold released, no raw or queued
-  re-delivery). Only two kinds of failure prove that: an HTTP 4xx (the server
-  rejected the request before accepting it) and a connection-level failure
-  before the request reached the server (`error.cause.code` of
-  `ECONNREFUSED`, `ENOTFOUND`, or `EAI_AGAIN`).
+- Address 200 or marker found → the send landed: `dispatched` with
+  `delivery: 'confirmed-after-failure'` and `evidence: 'address'` or
+  `'marker'` (item removed, hold released like a normal success).
+- Neither found and the failure PROVES the request was never accepted →
+  `send-failed delivered: 'no'` (witness cleared, item removed, hold released,
+  no raw or queued re-delivery). Only two kinds of failure prove that: an HTTP
+  4xx (the server rejected the request before accepting it) and a
+  connection-level failure before the request reached the server
+  (`error.cause.code` of `ECONNREFUSED`, `ENOTFOUND`, or `EAI_AGAIN`). A
+  legacy witness (no message id to check) never takes this path.
 - Every other failure — an HTTP 5xx (it may have been accepted before the
   error surfaced), a timeout/abort, any other network error, an unknown error
-  shape, any marker read failure, or a 5xx with no `runId` to correlate at all
-  — is `send-failed delivered: 'unknown'`: the item, claim, and hold stay
-  reserved and the owner retries. A timeout alone never yields `'no'`, and a
-  later-found marker always overrides the failure classification
-  (`dispatched`).
+  shape, any read failure, or a 5xx/4xx on a legacy witness — is
+  `send-failed delivered: 'unknown'`: the item, claim, hold, and witness stay
+  reserved. A timeout alone never yields `'no'`, a 404 address read never
+  proves non-delivery, and a later-found address or marker always overrides
+  the failure classification (`dispatched`).
 
 There is no tick-side retry bookkeeping for consult dispatches — the owner
-drives retries.
+drives retries, and no dispatch ever re-issues a request for an item that
+already carries a witness: the probe showed a same-id re-send can replace a
+turn after a staged revert.
 
 `resolveConsult(sessionId, itemId)` is the reconnect-time outcome check for an
 item stranded by an ambiguous dispatch (route
-`POST .../items/:itemId/resolve-consult`): it never prompts. With the receipt
-`runId` present it reads a deeper tail (200 messages vs. the dispatch's 20) —
-marker found → `dispatched delivered: 'confirmed'` with exactly-once removal
-and the claimed owner's hold released (a non-empty owner only: an unclaimed or
-owner-less item never clears the shared owner-less slot); marker absent and
-the item unclaimed → `unresolved` with `recoverable: true` (the item keeps
-blocking the head; clients may Resume or remove). Without a receipt `runId`
-the acting payload was never merged, so no prompt for the item can have been
-sent: unclaimed → `resumable` (provably never reached the acting payload,
-nothing mutated; clients may claim or resume), still claimed → `unresolved`
-untouched (the owner is mid-flow). A failed tail read → `unresolved`
-untouched. The tail read awaits, so the decision
-is re-checked against the queue afterwards: when the item vanished, its claim
-identity changed (owner and `claimedAt`), or a send started meanwhile, the
-answer is `unresolved` and nothing is mutated. The live reservation decides,
-never the stale read.
+`POST .../items/:itemId/resolve-consult`): it never prompts, never clears a
+witness, and never sets `recoverable`. The witness decides what is provable:
+
+| Item state | Answer |
+|---|---|
+| no witness, unclaimed, not sending | `{ status: 'resumable' }`: no dispatch step ever ran, so no request can exist; nothing is mutated and clients may claim or resume. |
+| no witness, claimed | `{ status: 'unresolved' }` untouched (the owner is mid-flow). |
+| legacy witness, no receipt runId | `{ status: 'unresolved' }` — never `resumable`, never `recoverable`. |
+| legacy witness, marker found in the deeper tail (200) | `{ status: 'dispatched', delivered: 'confirmed', evidence: 'legacy-marker' }`; remove exactly once, release the claimed owner's hold (a non-empty owner only). |
+| legacy witness, no marker or a failed read | `{ status: 'unresolved' }` untouched. |
+| modern witness, address 200 | `{ status: 'dispatched', delivered: 'confirmed', evidence: 'address' }`; same removal/release. |
+| modern witness, any other address outcome (404, 400, read failure) | `{ status: 'unresolved' }` untouched with the witness kept. |
+
+The read awaits, so the decision is re-checked against the queue afterwards:
+when the item vanished, its attempt id changed, its claim identity changed
+(owner and `claimedAt`), or a send started meanwhile, the answer is
+`unresolved` and nothing is mutated. The live queue state decides, never the
+stale read.
 
 The prompt body is built exactly as `sendItem` builds it, plus a top-level
 `system` and the consult metadata attached to the primary text part the way a
@@ -313,34 +407,46 @@ tick/snapshot read paths) clears a lapsed claim: `claimed` and the stale
 synthesis `consult.system` are dropped, `kind: 'consult'` stays, and the
 cleared claim is committed and broadcast. The receipt metadata
 (`consult.textPartMetadata`) survives: it is the acting run's
-delivery-correlation identity, so a later Resume can re-check whether that
-turn already landed before it re-fans-out, and the payload stays bounded
-because the metadata was capped when it was parsed. The item keeps its message
-content (text, attachments, context, sendConfig, contextPreview) and keeps
-blocking the queue, because the generic dispatcher still refuses to send it.
-Holds are memory-only, so on startup every persisted consult item is restored
-unclaimed (stale `claimed` and `consult.system` dropped, kind and receipt
-metadata kept) and is likewise never tick-delivered. A stuck consult item is
-removed only by an explicit user action (`remove`/`clear`); `take` refuses
-consult items with a 409 `consult-item` reason and `takeAll` skips them, so a
-raw-send client can never lose the consult intent. This is the
-no-raw-delivery guarantee: a consult message is either dispatched through its
-own route or deleted by the user.
+delivery-correlation identity, so a later resolve can re-check whether that
+turn already landed before a resume re-fans-out, and the payload stays bounded
+because the metadata was capped when it was parsed. The dispatch witness
+(`consult.attempt`) survives a lapse and a restart too; only `claimed` and the
+stale synthesis drop. The item keeps its message content (text, attachments,
+context, sendConfig, contextPreview) and keeps blocking the queue, because the
+generic dispatcher still refuses to send it. Holds are memory-only, so on
+startup every persisted consult item is restored unclaimed (stale `claimed`
+and `consult.system` dropped, kind, receipt metadata, and witness kept) and is
+likewise never tick-delivered. A version-1 file restores every consult item
+with a legacy witness (`{ legacy: true, at: createdAt }`): the old build
+persisted payloads fire-and-forget, so "no attempt recorded" there is not
+proof that none was made. A stuck consult item is removed only by an explicit
+user action (`remove`/`clear`); `take` refuses consult items with a 409
+`consult-item` reason and `takeAll` skips them, so a raw-send client can never
+lose the consult intent. This is the no-raw-delivery guarantee: a consult
+message is either dispatched through its own route or deleted by the user.
 
 ### Recovery (`recoverable`)
 
-A consult item whose reservation is gone — the hold lapsed, or a restart
-stripped the claim (a reservation never survives a restart) — becomes
-`recoverable: true` (set in the same sweep that clears the claim, and on
-restore in `load()`). The marker is consult-only and rides snapshots,
-broadcasts, and persistence like the other item fields; it is a hint for
-clients, not a behavior switch: the item keeps blocking the head exactly as
-before and is never raw-sent. A client may resume the consult by claiming the
-recoverable head item through the existing claim route (the marker is cleared
-on the claim) or the user may remove it. The kept receipt metadata is what
-makes a resume safe: `resolveConsult` can still correlate the acting turn, so
-a marker found in the parent tail proves the turn already landed and the
-resume must not re-send it.
+A consult item whose reservation is gone and which carries no dispatch
+witness — the hold lapsed, or a restart stripped the claim (a reservation
+never survives a restart) — becomes `recoverable: true` (set in the same sweep
+that clears the claim, and on restore in `load()` when the witness is absent).
+The marker is consult-only and rides snapshots, broadcasts, and persistence
+like the other item fields; it is a hint for clients, not a behavior switch:
+the item keeps blocking the head exactly as before and is never raw-sent. A
+client may resume the consult by claiming the recoverable head item through
+the existing claim route (the marker is cleared on the claim) or the user may
+remove it.
+
+A witnessed item never carries `recoverable`: the witness means a request may
+already exist for it, so a resume could duplicate a turn the user paid for.
+Its only exits are a resolve that proves delivery (address 200 or the legacy
+marker) or manual removal; the client's safe action there is removal. A
+version-1 item restored with a legacy witness is in the same position: no
+resume, delivered only if its receipt marker is still in the transcript, and
+otherwise unknown until the user removes it. The kept receipt metadata is what
+makes a legacy check possible; a modern witness uses its own message id
+instead.
 
 ## Routes (`/api/message-queue`)
 
@@ -357,10 +463,10 @@ allowlists.
 | `PUT .../sessions/:id/order` | `{ itemIds }` must be a complete permutation |
 | `DELETE .../sessions/:id` | Clear; the in-flight item stays |
 | `PUT .../sessions/:id/hold` | `{ held, ttlMs?, owner? }`; per-owner TTL, held while any owner is live |
-| `POST .../sessions/:id/items/:itemId/claim` | `{ owner?, ttlMs? }`; reserve the head consult item; `409` reasons: `not found`, `not-consult`, `not-head`, `sending`, `already-claimed`, `not-idle` |
-| `POST .../sessions/:id/items/:itemId/payload` | `{ owner?, consult }`; merge the claimed item's consult payload; `409`: `not found`/`not-consult`/`not-claiming`/`sending`, `400` on size violations |
-| `POST .../sessions/:id/items/:itemId/dispatch-consult` | `{ owner? }`; dispatch the claimed consult item on its dedicated route; always `200` with a structured outcome (`dispatched`/`busy`/`claim-lost`/`not-found`/`not-consult`/`sending`/`send-failed`), `400`/`500` only for malformed/unexpected errors |
-| `POST .../sessions/:id/items/:itemId/resolve-consult` | Reconnect-time outcome check for a stranded consult item; always `200` with a structured outcome (`dispatched` with `delivered: 'confirmed'`, `resumable` (provably never reached the acting payload, nothing mutated; clients may claim or resume), `unresolved` with optional `recoverable`, `not-found`/`not-consult`/`sending`), `400`/`500` only for malformed/unexpected errors; never sends a prompt |
+| `POST .../sessions/:id/items/:itemId/claim` | `{ owner?, ttlMs? }`; reserve the head consult item; `409` reasons: `not found`, `not-consult`, `not-head`, `sending`, `attempt-recorded`, `already-claimed`, `not-idle` |
+| `POST .../sessions/:id/items/:itemId/payload` | `{ owner?, consult }`; merge the claimed item's consult payload (a client-supplied `attempt` is stripped); `409`: `not found`/`not-consult`/`not-claiming`/`sending`, `400` on size violations |
+| `POST .../sessions/:id/items/:itemId/dispatch-consult` | `{ owner? }`; dispatch the claimed consult item on its dedicated route; always `200` with a structured outcome (`dispatched`/`busy`/`claim-lost`/`not-found`/`not-consult`/`attempt-present`/`attempt-write-failed`/`sending`/`send-failed`), `400`/`500` only for malformed/unexpected errors |
+| `POST .../sessions/:id/items/:itemId/resolve-consult` | Reconnect-time outcome check for a stranded consult item; always `200` with a structured outcome (`dispatched` with `delivered: 'confirmed'` and an `evidence`, `resumable` (no witness, unclaimed, not sending: nothing mutated; clients may claim or resume), `unresolved`, `not-found`/`not-consult`/`sending`), `400`/`500` only for malformed/unexpected errors; never sends a prompt and never clears a witness |
 
 Every mutation broadcasts `openchamber:message-queue.updated` with
 `{ revision, session }` to all connected clients (SSE and WS), so several

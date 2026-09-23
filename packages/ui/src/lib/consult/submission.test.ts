@@ -1541,6 +1541,50 @@ describe('cancellation and failures', () => {
     expect(harness.state.heartbeatActive).toBe(false);
   });
 
+  test('an attempt-present outcome settles uncertain: the item stays reserved and is never re-sent', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultOutcome = { status: 'attempt-present' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(errorOf(result)).toContain('dispatch attempt already exists');
+    expect(result.queueItemRestored).toBe(false);
+    // No re-dispatch: the server would refuse it anyway, so the submission
+    // must not loop. Item + claim + hold stay server-side.
+    expect(harness.state.dispatchConsultCalls).toBe(1);
+    expect(harness.state.queueItems).toHaveLength(1);
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('an attempt-write-failed outcome settles uncertain with the honest nothing-was-sent message, hold kept', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultOutcome = { status: 'attempt-write-failed' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(errorOf(result)).toContain('could not record the dispatch attempt');
+    expect(result.queueItemRestored).toBe(false);
+    // Fail-closed on the server: no request was issued, and the live claim's
+    // lease owns the hold (the submission never releases it here).
+    expect(harness.state.dispatchConsultCalls).toBe(1);
+    expect(harness.state.queueItems).toHaveLength(1);
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
   test('a not-found outcome is a definite failure', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
@@ -1896,6 +1940,30 @@ describe('resume of a stranded consult item', () => {
     expect(harness.state.startInputs).toHaveLength(0);
     // The hold was acquired before the claim, so the failed claim releases it.
     expect(harness.state.holds).toEqual([true, false]);
+  });
+
+  test('a claim refused with attempt-recorded is terminal: refused once, never re-polled', async () => {
+    const harness = createHarness();
+    const item = strandedItem();
+    harness.state.queueItems.push(item);
+    // The strict resolve gate passed, then a witness appeared before the
+    // claim (a concurrent dispatch): the server refuses with attempt-recorded.
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
+    harness.state.claimRefusal = new Error('cannot claim queued message: attempt-recorded');
+    const result = await harness.resume(resumeTarget(), item, resumeOptions());
+
+    // Terminal, not retryable: exactly one claim attempt, no polling loop.
+    expect(harness.state.claims).toBe(1);
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+    expect(harness.state.startInputs).toHaveLength(0);
+    expect(harness.state.payloadCalls).toHaveLength(0);
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(errorOf(result)).toContain('could not be confirmed');
+    // The item stays queued exactly as it was: only a resolve or manual
+    // removal can settle a witnessed item.
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-stranded']);
   });
 
   test('a runtime switch during resume stops without touching the item', async () => {

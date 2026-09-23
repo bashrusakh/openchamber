@@ -72,11 +72,11 @@ describe('verifyConsultServerVersion (F3)', () => {
   test('a real version below the floor is version-unsupported with the version attached', async () => {
     expect(await verifyConsultServerVersion(async () => ({ version: '1.18.28' })))
       .toEqual({ verified: false, reason: 'version-unsupported', version: '1.18.28' });
-    expect(await verifyConsultServerVersion(async () => ({ version: '1.18.29', consultProtocol: 1 })))
+    expect(await verifyConsultServerVersion(async () => ({ version: '1.18.29', consultProtocol: 2 })))
       .toEqual({ verified: true, version: '1.18.29' });
-    expect(await verifyConsultServerVersion(async () => ({ version: '1.18.31', consultProtocol: 1 })))
+    expect(await verifyConsultServerVersion(async () => ({ version: '1.18.31', consultProtocol: 2 })))
       .toEqual({ verified: true, version: '1.18.31' });
-    expect(await verifyConsultServerVersion(async () => ({ version: '2.0.0', consultProtocol: 1 })))
+    expect(await verifyConsultServerVersion(async () => ({ version: '2.0.0', consultProtocol: 2 })))
       .toEqual({ verified: true, version: '2.0.0' });
   });
 });
@@ -121,19 +121,28 @@ describe('resolveConsultLiveCapability (F3)', () => {
   });
 
   test('a version at or above the floor is verified', async () => {
-    expect(await resolveConsultLiveCapability(async () => ({ version: '1.18.29', consultProtocol: 1 }), { serverQueueSupported: true }))
+    expect(await resolveConsultLiveCapability(async () => ({ version: '1.18.29', consultProtocol: 2 }), { serverQueueSupported: true }))
       .toEqual({ available: true, assurance: 'verified', version: '1.18.29' });
   });
 });
 
 describe('consult backend protocol gate', () => {
   test('the backend protocol floor is the queue protocol the UI speaks', () => {
-    expect(CONSULT_BACKEND_PROTOCOL_VERSION).toBe(1);
+    expect(CONSULT_BACKEND_PROTOCOL_VERSION).toBe(2);
   });
 
-  test('a verified version with protocol 1 is available and verified', async () => {
-    expect(await resolveConsultLiveCapability(async () => ({ version: '1.18.31', consultProtocol: 1 }), { serverQueueSupported: true }))
+  test('a verified version with protocol 2 is available and verified', async () => {
+    expect(await resolveConsultLiveCapability(async () => ({ version: '1.18.31', consultProtocol: 2 }), { serverQueueSupported: true }))
       .toEqual({ available: true, assurance: 'verified', version: '1.18.31' });
+  });
+
+  test('a protocol-1 backend refuses as protocol-unsupported (the witness protocol)', async () => {
+    // A protocol-1 backend predates the dispatch witness: its `resumable`
+    // answer is not backed by "no attempt recorded", so this client refuses it.
+    expect(await verifyConsultServerVersion(async () => ({ version: '1.18.31', consultProtocol: 1 })))
+      .toEqual({ verified: false, reason: 'protocol-unsupported', protocol: 1 });
+    expect(await resolveConsultLiveCapability(async () => ({ version: '1.18.31', consultProtocol: 1 }), { serverQueueSupported: true }))
+      .toEqual({ available: false, reason: 'protocol-unsupported' });
   });
 
   test('a backend without the protocol field refuses as protocol-missing', async () => {
@@ -158,12 +167,12 @@ describe('consult backend protocol gate', () => {
   });
 
   test('a protocol above the backend version is forward compatible', async () => {
-    expect(await resolveConsultLiveCapability(async () => ({ version: '1.18.31', consultProtocol: 2 }), { serverQueueSupported: true }))
+    expect(await resolveConsultLiveCapability(async () => ({ version: '1.18.31', consultProtocol: 3 }), { serverQueueSupported: true }))
       .toEqual({ available: true, assurance: 'verified', version: '1.18.31' });
   });
 
   test('the version reason wins when the version is below the floor', async () => {
-    expect(await verifyConsultServerVersion(async () => ({ version: '1.18.28', consultProtocol: 1 })))
+    expect(await verifyConsultServerVersion(async () => ({ version: '1.18.28', consultProtocol: 2 })))
       .toEqual({ verified: false, reason: 'version-unsupported', version: '1.18.28' });
   });
 
@@ -186,11 +195,11 @@ describe('consult backend protocol gate', () => {
   test('fetchConsultServerVersion keeps the backend protocol from the payload', async () => {
     const originalFetch = globalThis.fetch;
     try {
-      globalThis.fetch = async () => new Response(JSON.stringify({ version: '1.18.31', consultProtocol: 1 }), {
+      globalThis.fetch = async () => new Response(JSON.stringify({ version: '1.18.31', consultProtocol: 2 }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       });
-      expect(await fetchConsultServerVersion()).toEqual({ version: '1.18.31', consultProtocol: 1 });
+      expect(await fetchConsultServerVersion()).toEqual({ version: '1.18.31', consultProtocol: 2 });
     } finally {
       globalThis.fetch = originalFetch;
     }

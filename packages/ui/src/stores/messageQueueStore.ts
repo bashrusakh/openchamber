@@ -117,6 +117,13 @@ export interface QueuedMessage {
      * Only consult items ever carry it.
      */
     recoverable?: true;
+    /**
+     * The server recorded a dispatch attempt for this item: a request may
+     * already exist, so a resume could duplicate it. The raw witness is
+     * server-only; the projection carries this boolean instead. Only consult
+     * items ever carry it.
+     */
+    attempted?: true;
 }
 
 /**
@@ -223,6 +230,12 @@ const serverItemSchema = z.object({
         claimedAt: z.number(),
     }).nullable().optional(),
     recoverable: z.literal(true).optional(),
+    /**
+     * A dispatch attempt is recorded server-side for this item. The raw
+     * witness stays on the server; the projection carries this boolean so a
+     * witnessed item never offers Resume.
+     */
+    attempted: z.literal(true).optional(),
 });
 
 const serverSessionSchema = z.object({
@@ -254,20 +267,25 @@ const serverClaimResponseSchema = z.object({ claimed: z.literal(true), item: ser
  * The consult dispatch route answers every control-flow case with HTTP 200
  * and a structured outcome; only malformed requests or unexpected failures
  * are non-2xx. `dispatched` carries the removed item; `busy`/`claim-lost`/
- * `sending` leave the claim and item untouched; `send-failed` says whether
- * the prompt landed (`no`), did not (`unknown` is indeterminate and keeps the
- * item reserved).
+ * `sending` leave the claim and item untouched; `attempt-present` means the
+ * item already carries a dispatch witness (a request may exist, so no retry);
+ * `attempt-write-failed` means the witness could not be persisted and nothing
+ * was sent; `send-failed` says whether the prompt landed (`no`), did not
+ * (`unknown` is indeterminate and keeps the item reserved).
  */
 const serverConsultDispatchResponseSchema = z.discriminatedUnion('status', [
   z.object({
     status: z.literal('dispatched'),
     item: serverItemSchema.optional(),
     delivery: z.literal('confirmed-after-failure').optional(),
+    evidence: z.enum(['admission', 'address', 'marker', 'legacy-marker']).optional(),
   }),
   z.object({ status: z.literal('busy') }),
   z.object({ status: z.literal('claim-lost') }),
   z.object({ status: z.literal('not-found') }),
   z.object({ status: z.literal('not-consult') }),
+  z.object({ status: z.literal('attempt-present') }),
+  z.object({ status: z.literal('attempt-write-failed') }),
   z.object({ status: z.literal('sending') }),
   z.object({ status: z.literal('send-failed'), delivered: z.enum(['no', 'unknown']) }),
 ]);
@@ -283,7 +301,11 @@ const serverConsultDispatchResponseSchema = z.discriminatedUnion('status', [
  * offers Resume); `sending` means a delivery is still in flight.
  */
 const serverConsultResolveResponseSchema = z.discriminatedUnion('status', [
-  z.object({ status: z.literal('dispatched'), delivered: z.literal('confirmed') }),
+  z.object({
+    status: z.literal('dispatched'),
+    delivered: z.literal('confirmed'),
+    evidence: z.enum(['address', 'legacy-marker']).optional(),
+  }),
   z.object({ status: z.literal('resumable') }),
   z.object({ status: z.literal('unresolved'), recoverable: z.literal(true).optional() }),
   z.object({ status: z.literal('not-found') }),
@@ -293,11 +315,18 @@ const serverConsultResolveResponseSchema = z.discriminatedUnion('status', [
 
 /** The store-facing dispatch outcome: the server body with the item projected. */
 export type ConsultDispatchOutcome =
-  | { status: 'dispatched'; item?: QueuedMessage; delivery?: 'confirmed-after-failure' }
+  | {
+        status: 'dispatched';
+        item?: QueuedMessage;
+        delivery?: 'confirmed-after-failure';
+        evidence?: 'admission' | 'address' | 'marker' | 'legacy-marker';
+    }
   | { status: 'busy' }
   | { status: 'claim-lost' }
   | { status: 'not-found' }
   | { status: 'not-consult' }
+  | { status: 'attempt-present' }
+  | { status: 'attempt-write-failed' }
   | { status: 'sending' }
   | { status: 'send-failed'; delivered: 'no' | 'unknown' };
 
@@ -310,7 +339,7 @@ export type ConsultDispatchOutcome =
  * undecided and a resume must not proceed.
  */
 export type ConsultResolveOutcome =
-  | { status: 'dispatched'; delivered?: 'confirmed' }
+  | { status: 'dispatched'; delivered?: 'confirmed'; evidence?: 'address' | 'legacy-marker' }
   | { status: 'resumable' }
   | { status: 'unresolved'; recoverable?: true }
   | { status: 'not-found' }
@@ -386,6 +415,7 @@ const toQueuedMessage = (item: ServerQueueItem): QueuedMessage => {
     if (item.consult) message.consult = item.consult;
     if (item.claimed) message.claimed = item.claimed;
     if (item.recoverable) message.recoverable = true;
+    if (item.attempted) message.attempted = true;
     return message;
 };
 
@@ -692,6 +722,9 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                  * removes a delivered item's projection, `unresolved` keeps the
                  * chip (with Resume when `recoverable`), and
                  * not-found/not-consult mean nothing is stranded here anymore.
+                 * A witnessed lapsed item (`attempted`) is neither claimed nor
+                 * recoverable, so the scan includes it explicitly: otherwise no
+                 * resolve would ever settle it.
                  */
                 const resolveDanglingConsultItems = (runtimeKey: string) => {
                     for (const [key, queue] of Object.entries(get().queuedMessages)) {
@@ -699,7 +732,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         if (!target || target.runtimeKey !== runtimeKey) continue;
                         for (const message of queue) {
                             if (message.kind !== 'consult') continue;
-                            if (!message.claimed && !message.recoverable) continue;
+                            if (!message.claimed && !message.recoverable && !message.attempted) continue;
                             const guard = `${runtimeKey}:${target.sessionId}:${message.id}`;
                             if (consultResolveInFlight.has(guard)) continue;
                             consultResolveInFlight.add(guard);
@@ -1080,6 +1113,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                             ? { status: 'dispatched', item: toQueuedMessage(result.item) }
                             : { status: 'dispatched' };
                         if (result.delivery) outcome.delivery = result.delivery;
+                        if (result.evidence) outcome.evidence = result.evidence;
                         return outcome;
                     },
 
