@@ -51,7 +51,7 @@ export function createSerialRefresh({ maxConcurrent = Number.POSITIVE_INFINITY }
     run.waiters.delete(waiter);
   };
 
-  const waitForRun = (run, signal) => {
+  const waitForRun = (run, signal, owner = run) => {
     if (signal?.aborted) {
       return Promise.reject(abortError(signal));
     }
@@ -73,6 +73,9 @@ export function createSerialRefresh({ maxConcurrent = Number.POSITIVE_INFINITY }
         releaseWaiter(run, waiter);
         signal?.removeEventListener('abort', onAbort);
         abortWhenUnused(run, signal.reason);
+        if (owner !== run) {
+          abortWhenUnused(owner, signal.reason);
+        }
         finish(reject, abortError(signal));
       };
 
@@ -155,6 +158,9 @@ export function createSerialRefresh({ maxConcurrent = Number.POSITIVE_INFINITY }
         const run = createRun(key, [request], execute);
         return waitForRun(run, request?.signal);
       }
+      if (current.follower?.sourceAbortRequested || current.follower?.waiters.size === 0) {
+        current.follower = null;
+      }
       if (!current.follower) {
         const follower = {
           requests: [],
@@ -176,7 +182,7 @@ export function createSerialRefresh({ maxConcurrent = Number.POSITIVE_INFINITY }
         current.follower = follower;
       }
       current.follower.requests.push(request);
-      return waitForRun(current.follower, request?.signal);
+      return waitForRun(current.follower, request?.signal, current);
     },
     /** Keys with a running or pending refresh. Exposed for tests. */
     get activeKeys() {

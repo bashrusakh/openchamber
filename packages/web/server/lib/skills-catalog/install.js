@@ -12,7 +12,10 @@ import {
 } from './git.js';
 import { parseSkillRepoSource } from './source.js';
 import { OPENCODE_CONFIG_DIR } from '../opencode/shared.js';
-import { getGitProcessCleanupReconciliation } from '../git/execution-errors.js';
+import {
+  chainGitProcessCleanupReconciliation,
+  getGitProcessCleanupReconciliation,
+} from '../git/execution-errors.js';
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 
@@ -270,10 +273,13 @@ export async function installSkillsFromRepository({
     cleanupBlocked = true;
     const reconciliation = getGitProcessCleanupReconciliation(result);
     if (reconciliation) {
-      void Promise.resolve(reconciliation.promise).then(() => {
+      const cleanupReconciliation = chainGitProcessCleanupReconciliation(reconciliation, async () => {
         cleanupBlocked = false;
-        return cleanup();
+        await cleanup();
       });
+      const retained = copyGitProcessMetadata({}, result);
+      retained.cleanupReconciliation = cleanupReconciliation;
+      return cleanupBlockedResult(retained);
     }
     return cleanupBlockedResult(result);
   };
