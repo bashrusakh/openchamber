@@ -755,7 +755,15 @@ export const SessionTabsStrip: React.FC<{
   }, [handleClose, hiddenTabs]);
 
   return (
-    <div ref={outerRef} tabIndex={-1} className="app-region-no-drag flex h-full min-w-0 flex-1 items-center gap-1.5">
+    // The strip floor is one tab floor (`min-w-[4.75rem]`) + the row gap
+    // (`gap-1.5` = 0.375rem) + the overflow trigger's minimum (~3.125rem) =
+    // 8.25rem, plus 0.5rem of buffer: the trigger can measure wider than its
+    // estimate, and `deriveLayout`'s `title` branch fires at exactly that sum,
+    // so without the buffer a wider trigger would make `title` reachable again.
+    // The header drops its secondary right-cluster controls before the row can
+    // shrink this far (see `deriveHeaderHideLevel`), keeping `title` a latent
+    // safety net. Must stay in sync with `TAB_STRIP_FLOOR_REM` in `Header.tsx`.
+    <div ref={outerRef} tabIndex={-1} className="app-region-no-drag flex h-full min-w-[8.75rem] flex-1 items-center gap-1.5">
       {layout.mode === 'title' ? (
         <div className="flex min-w-0 flex-1 items-center">{children}</div>
       ) : (
