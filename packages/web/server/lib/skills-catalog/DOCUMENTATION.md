@@ -62,7 +62,7 @@ The following functions are internal helpers used by exported functions:
 - `normalizeUserSkillDir(userSkillDir)`: Normalize the user skill directory path (handles the legacy `skill` directory in the XDG config location, or `~/.config/opencode/skill` when XDG is unset, by selecting the plural `skills` directory when appropriate).
 
 ### Git Clone Helpers (`install.js`, `scan.js`)
-- `cloneRepo({ cloneUrl, identity, tempDir })`: Clone git repository with preferred partial clone (`--filter=blob:none`) and fallback. Uses non-interactive mode.
+- `cloneRepo({ cloneUrl, identity, tempDir, signal })`: Clone git repository with preferred partial clone (`--filter=blob:none`) and fallback. Uses non-interactive mode; cancellation reaches clone admission and the owned process, and an aborted preferred attempt never starts the fallback.
 
 ### SKILL.md Parsing (`scan.js`)
 - `parseSkillMd(content)`: Parse YAML frontmatter from SKILL.md content. Returns `{ ok, frontmatter, warnings }`.

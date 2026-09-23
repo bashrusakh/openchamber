@@ -151,4 +151,24 @@ describe('skills catalog Git helpers', () => {
     }, task);
     expect(releaseNetwork).toHaveBeenCalledOnce();
   });
+
+  it('passes cancellation into clone admission', async () => {
+    const controller = new AbortController();
+    const runClone = vi.fn(async (options, callback) => callback({ releaseNetwork: vi.fn() }));
+
+    await runWithGitCloneReservation({
+      destination: '/tmp/skills',
+      label: 'skills-test',
+      queueTimeoutMs: 10,
+      signal: controller.signal,
+      gitExecutionService: { coordinator: { runClone } },
+    }, async () => 'done');
+
+    expect(runClone).toHaveBeenCalledWith({
+      destination: '/tmp/skills',
+      label: 'skills-test',
+      queueTimeoutMs: 10,
+      signal: controller.signal,
+    }, expect.any(Function));
+  });
 });

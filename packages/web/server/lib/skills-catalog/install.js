@@ -117,11 +117,11 @@ async function copyDirectoryNoSymlinks(srcDir, dstDir, signal) {
   await walk(srcDir, dstDir);
 }
 
-async function cloneRepo({ cloneUrl, identity, tempDir, runGitCommand }) {
+async function cloneRepo({ cloneUrl, identity, tempDir, runGitCommand, signal }) {
   const preferred = ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', cloneUrl, tempDir];
   const fallback = ['clone', '--depth', '1', '--no-checkout', cloneUrl, tempDir];
 
-  const result = await runGitCommand(preferred, { identity, timeoutMs: 90_000 });
+  const result = await runGitCommand(preferred, { identity, timeoutMs: 90_000, signal });
   if (result.ok) return { ok: true };
 
   if (isProcessTreeCleanupBlocked(result)) {
@@ -129,7 +129,10 @@ async function cloneRepo({ cloneUrl, identity, tempDir, runGitCommand }) {
   }
 
   await safeRm(tempDir);
-  const fallbackResult = await runGitCommand(fallback, { identity, timeoutMs: 90_000 });
+  if (signal?.aborted) {
+    return { ok: false, error: result };
+  }
+  const fallbackResult = await runGitCommand(fallback, { identity, timeoutMs: 90_000, signal });
   if (fallbackResult.ok) return { ok: true };
 
   return {
@@ -280,6 +283,7 @@ export async function installSkillsFromRepository({
         identity,
         tempDir: tempBase,
         runGitCommand: runConfiguredGit,
+        signal,
       });
       if (!cloned.ok) {
         if (cloned.cleanupBlocked) {

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const gitLibraries = {
@@ -10,6 +11,7 @@ const gitLibraries = {
   getCommitDiff: vi.fn(),
   getCommitFiles: vi.fn(),
   getCommitFileDiff: vi.fn(),
+  getConflictDetails: vi.fn(),
   getWorktrees: vi.fn(),
   observeWorktreeTopology: vi.fn(),
   subscribeWorktreeTopologyChanges: vi.fn(),
@@ -29,6 +31,7 @@ vi.mock('./index.js', () => ({
   getCommitDiff: gitLibraries.getCommitDiff,
   getCommitFiles: gitLibraries.getCommitFiles,
   getCommitFileDiff: gitLibraries.getCommitFileDiff,
+  getConflictDetails: gitLibraries.getConflictDetails,
   getWorktrees: gitLibraries.getWorktrees,
   observeWorktreeTopology: gitLibraries.observeWorktreeTopology,
   subscribeWorktreeTopologyChanges: gitLibraries.subscribeWorktreeTopologyChanges,
@@ -96,6 +99,7 @@ describe('git routes index mutations', () => {
     gitLibraries.getCommitDiff.mockReset();
     gitLibraries.getCommitFiles.mockReset();
     gitLibraries.getCommitFileDiff.mockReset();
+    gitLibraries.getConflictDetails.mockReset();
     gitLibraries.resolvePrimaryWorktreeRoot.mockReset();
     gitLibraries.resolveWorktreeTopLevel.mockReset();
   });
@@ -224,6 +228,62 @@ describe('git diff routes', () => {
       path: 'file.ts',
       signal: expect.any(AbortSignal),
     }));
+  });
+});
+
+describe('git cancellation routes', () => {
+  beforeEach(() => {
+    gitLibraries.isGitRepository.mockReset();
+    gitLibraries.getConflictDetails.mockReset();
+  });
+
+  it('passes request cancellation into repository checks', async () => {
+    let options;
+    gitLibraries.isGitRepository.mockImplementation((_directory, nextOptions) => {
+      options = nextOptions;
+      return new Promise((_resolve, reject) => {
+        nextOptions.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
+      });
+    });
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const request = Object.assign(new EventEmitter(), { query: { directory: '/repo' } });
+    const response = createMockResponse();
+
+    const pending = getRoute('GET', '/api/git/check')(request, response);
+    for (let attempt = 0; attempt < 20 && !options; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    request.emit('aborted');
+    await pending;
+
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    expect(options.signal.aborted).toBe(true);
+    expect(response.body).toBeNull();
+  });
+
+  it('passes request cancellation into conflict details without changing its response', async () => {
+    const result = {
+      statusPorcelain: '',
+      unmergedFiles: [],
+      diff: '',
+      headInfo: '',
+      operation: 'merge',
+    };
+    gitLibraries.getConflictDetails.mockResolvedValue(result);
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const response = createMockResponse();
+
+    await getRoute('GET', '/api/git/conflict-details')(
+      { query: { directory: '/repo' } },
+      response,
+    );
+
+    expect(gitLibraries.getConflictDetails).toHaveBeenCalledWith('/repo', {
+      signal: expect.any(AbortSignal),
+    });
+    expect(response.body).toEqual(result);
   });
 });
 

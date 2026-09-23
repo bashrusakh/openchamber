@@ -154,4 +154,36 @@ describe('GitHub PR status route cancellation', () => {
     rejectPull?.(new Error('request aborted'));
     await pending;
   });
+
+  it('aborts repository branch reads when the request disconnects', async () => {
+    const request = createRequest({ owner: 'owner', repo: 'project' });
+    const response = createResponse();
+    let branchOptions;
+    const octokit = {
+      rest: {
+        repos: {
+          listBranches: vi.fn((options) => {
+            branchOptions = options;
+            return new Promise((_resolve, reject) => {
+              options.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
+            });
+          }),
+        },
+      },
+    };
+    mocks.getOctokitOrNull.mockReturnValue(octokit);
+
+    const { app, getRoute } = createRouteRegistry();
+    registerGitHubRoutes(app, { getGitHubLibraries: async () => mocks });
+    const pending = getRoute('GET', '/api/github/repo/branches')(request, response);
+    for (let attempt = 0; attempt < 20 && !branchOptions; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(branchOptions?.signal).toBeInstanceOf(AbortSignal);
+
+    request.emit('aborted');
+    expect(branchOptions.signal.aborted).toBe(true);
+    await pending;
+    expect(response.body).toBeNull();
+  });
 });

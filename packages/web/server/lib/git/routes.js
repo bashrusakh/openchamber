@@ -139,21 +139,25 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
   app.get('/api/git/check', async (req, res) => {
     const { isGitRepository } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = resolveDirectoryQuery(req.query.directory);
       if (!directory) {
         return res.status(400).json({ error: 'directory parameter is required' });
       }
 
-      const isRepo = await isGitRepository(directory);
+      const isRepo = await isGitRepository(directory, { signal: requestAbort.signal });
       res.json({ isGitRepository: isRepo });
     } catch (error) {
+      if (requestAbort.signal.aborted) return;
       if (isNonRepoGitError(error)) {
         console.warn('Git check treated non-repository path as not a git repo:', extractGitErrorText(error));
         return res.json({ isGitRepository: false });
       }
       console.error('Failed to check git repository:', error);
       res.status(500).json({ error: 'Failed to check git repository' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
@@ -881,17 +885,21 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
 
   app.get('/api/git/conflict-details', async (req, res) => {
     const { getConflictDetails } = await getGitLibraries();
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = req.query.directory;
       if (!directory) {
         return res.status(400).json({ error: 'directory parameter is required' });
       }
 
-      const result = await getConflictDetails(directory);
+      const result = await getConflictDetails(directory, { signal: requestAbort.signal });
       res.json(result);
     } catch (error) {
+      if (requestAbort.signal.aborted) return;
       console.error('Failed to get conflict details:', error);
       res.status(500).json({ error: error.message || 'Failed to get conflict details' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 

@@ -110,7 +110,7 @@ mount these Git panels and keeps its separate extension-host Git implementation.
 - `merge(directory, options)`: Merge a branch into current branch.
 - `abortMerge(directory)`: Abort an in-progress merge.
 - `continueMerge(directory)`: Continue a merge after conflict resolution.
-- `getConflictDetails(directory)`: Get detailed conflict information including operation type, unmerged files, and diff.
+- `getConflictDetails(directory, { signal })`: Get detailed conflict information including operation type, unmerged files, and diff. A request signal cancels each owned Git read and keeps process-cleanup metadata visible to the caller.
 
 ### Stash Operations
 - `listStashes(directory)`: List stash entries with ref, message, relative time, and hash.
