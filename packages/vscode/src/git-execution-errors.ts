@@ -1,5 +1,6 @@
 export {
   copyGitProcessMetadata,
+  chainGitProcessCleanupReconciliation,
   createGitProcessError,
   getGitProcessCleanupReconciliation,
   GIT_EXECUTION_ERROR_CODES,

@@ -10,7 +10,10 @@ import type {
   GitProcessExecutionResult,
 } from './bridge-git-process-runtime';
 import { runWithGitExecutionScope } from './git-execution-scope';
-import { getGitProcessCleanupReconciliation } from './git-execution-errors';
+import {
+  chainGitProcessCleanupReconciliation,
+  getGitProcessCleanupReconciliation,
+} from './git-execution-errors';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_BUFFER = 4 * 1024 * 1024;
@@ -485,10 +488,12 @@ export async function scanSkillsRepository(
     cleanupBlocked = true;
     const reconciliation = getGitProcessCleanupReconciliation(result);
     if (reconciliation) {
-      void Promise.resolve(reconciliation.promise).then(() => {
+      const cleanupReconciliation = chainGitProcessCleanupReconciliation(reconciliation, async () => {
         cleanupBlocked = false;
-        return cleanup();
+        await cleanup();
       });
+      const retained = { ...result, cleanupReconciliation };
+      return processCleanupBlockedResult(retained);
     }
     return processCleanupBlockedResult(result);
   };
@@ -792,10 +797,12 @@ export async function installSkillsFromRepository(options: {
     cleanupBlocked = true;
     const reconciliation = getGitProcessCleanupReconciliation(result);
     if (reconciliation) {
-      void Promise.resolve(reconciliation.promise).then(() => {
+      const cleanupReconciliation = chainGitProcessCleanupReconciliation(reconciliation, async () => {
         cleanupBlocked = false;
         return cleanup();
       });
+      const retained = { ...result, cleanupReconciliation };
+      return processCleanupBlockedResult(retained);
     }
     return processCleanupBlockedResult(result);
   };

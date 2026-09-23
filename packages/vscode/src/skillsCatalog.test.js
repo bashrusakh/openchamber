@@ -121,6 +121,7 @@ process.env.OPENCHAMBER_VSCODE_SKILLS_GIT_LOG = gitLogPath;
 process.env.OPENCHAMBER_TEST_AUTH_MARKER = 'configured-auth';
 
 const { installSkillsFromRepository, scanSkillsRepository } = await import('./skillsCatalog');
+const { createGitExecutionCoordinator } = await import('./git-execution-coordinator');
 
 const dependencies = {
   resolveGitExecutable: executableResolver,
@@ -348,6 +349,176 @@ describe('VS Code skills catalog Git execution', () => {
     expect(networkReleased).toBe(false);
     await fs.rm(installTarget, { recursive: true, force: true });
     await fs.rm(workingDirectory, { recursive: true, force: true });
+  });
+
+  it('keeps the clone lease until delayed filesystem cleanup completes', async () => {
+    let close;
+    const cleanupReconciliation = {
+      promise: new Promise((resolve) => { close = resolve; }),
+      retire: () => close?.(),
+    };
+    const blockedExecGit = async (args, cwd, options = {}) => {
+      const result = await testExecGit(args, cwd, options);
+      if (args[0] === 'clone' && args.includes('--filter=blob:none')) {
+        return {
+          ...result,
+          exitCode: 1,
+          stderr: 'Failed to terminate the Windows process tree',
+          cleanupBlocked: true,
+          descendantsTerminated: false,
+          rootClosed: false,
+          cleanupReconciliation,
+        };
+      }
+      return result;
+    };
+    let releaseCleanup;
+    let cleanupStarted;
+    let cleanupCalls = 0;
+    const cleanupWasStarted = new Promise((resolve) => { cleanupStarted = resolve; });
+    const originalRm = fs.rm;
+
+    try {
+      const coordinator = createGitExecutionCoordinator({
+        canonicalizeCloneDestination: async (destination) => path.resolve(destination),
+      });
+      let cloneTarget;
+      const trackingExecGit = async (args, cwd, options = {}) => {
+        const result = await blockedExecGit(args, cwd, options);
+        if (args[0] === 'clone') cloneTarget = args.at(-1);
+        return result;
+      };
+      const originalRemove = fs.rm;
+      const delayedRemove = async (target, options) => {
+        if (target === cloneTarget) {
+          cleanupCalls += 1;
+          cleanupStarted();
+          await new Promise((resolve) => { releaseCleanup = resolve; });
+        }
+        return originalRemove(target, options);
+      };
+      fs.rm = delayedRemove;
+
+      const result = await scanSkillsRepository({ source: 'owner/skills' }, {
+        ...dependencies,
+        execGit: trackingExecGit,
+        gitExecutionRuntime: { coordinator },
+      });
+      expect(result).toMatchObject({ ok: false, cleanupBlocked: true });
+      expect(coordinator.getStats()).toMatchObject({ active: 1, cloneDestinations: 1 });
+      await expect(fs.stat(cloneTarget)).resolves.toBeTruthy();
+
+      close();
+      await cleanupWasStarted;
+      expect(coordinator.getStats()).toMatchObject({ active: 1, cloneDestinations: 1 });
+      await expect(fs.stat(cloneTarget)).resolves.toBeTruthy();
+
+      releaseCleanup();
+      for (let attempt = 0; attempt < 100 && coordinator.getStats().active !== 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(coordinator.getStats().active).toBe(0);
+      let targetExists = true;
+      for (let attempt = 0; attempt < 100 && targetExists; attempt += 1) {
+        targetExists = await fs.stat(cloneTarget).then(() => true, () => false);
+        if (targetExists) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      expect(targetExists).toBe(false);
+      expect(cleanupCalls).toBe(1);
+      expect(coordinator.getStats()).toMatchObject({ active: 0, cloneDestinations: 0 });
+    } finally {
+      fs.rm = originalRm;
+    }
+  });
+
+  it('keeps the install clone lease until delayed filesystem cleanup completes', async () => {
+    const workingDirectory = await fs.mkdtemp(path.join(testRoot, 'delayed-install-'));
+    let close;
+    const cleanupReconciliation = {
+      promise: new Promise((resolve) => { close = resolve; }),
+      retire: () => close?.(),
+    };
+    const blockedExecGit = async (args, cwd, options = {}) => {
+      const result = await testExecGit(args, cwd, options);
+      if (args[0] === 'clone' && args.includes('--filter=blob:none')) {
+        return {
+          ...result,
+          exitCode: 1,
+          stderr: 'Failed to terminate the Windows process tree',
+          cleanupBlocked: true,
+          descendantsTerminated: false,
+          rootClosed: false,
+          cleanupReconciliation,
+        };
+      }
+      return result;
+    };
+    let releaseCleanup;
+    let cleanupStarted;
+    let cleanupCalls = 0;
+    const cleanupWasStarted = new Promise((resolve) => { cleanupStarted = resolve; });
+    const originalRm = fs.rm;
+
+    try {
+      const coordinator = createGitExecutionCoordinator({
+        canonicalizeCloneDestination: async (destination) => path.resolve(destination),
+      });
+      let cloneTarget;
+      const trackingExecGit = async (args, cwd, options = {}) => {
+        const result = await blockedExecGit(args, cwd, options);
+        if (args[0] === 'clone') cloneTarget = args.at(-1);
+        return result;
+      };
+      const originalRemove = fs.rm;
+      fs.rm = async (target, options) => {
+        if (target === cloneTarget) {
+          cleanupCalls += 1;
+          cleanupStarted();
+          await new Promise((resolve) => { releaseCleanup = resolve; });
+        }
+        return originalRemove(target, options);
+      };
+
+      const result = await installSkillsFromRepository({
+        source: 'owner/skills',
+        scope: 'project',
+        workingDirectory,
+        selections: [{ skillDir: 'skills/example' }],
+      }, {
+        ...dependencies,
+        execGit: trackingExecGit,
+        gitExecutionRuntime: { coordinator },
+      });
+      expect(result).toMatchObject({ ok: false, cleanupBlocked: true });
+      expect(coordinator.getStats()).toMatchObject({ active: 1, cloneDestinations: 1 });
+      await expect(fs.stat(cloneTarget)).resolves.toBeTruthy();
+
+      close();
+      await cleanupWasStarted;
+      expect(coordinator.getStats()).toMatchObject({ active: 1, cloneDestinations: 1 });
+      await expect(fs.stat(cloneTarget)).resolves.toBeTruthy();
+
+      releaseCleanup();
+      for (let attempt = 0; attempt < 100 && coordinator.getStats().active !== 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(coordinator.getStats().active).toBe(0);
+      let targetExists = true;
+      for (let attempt = 0; attempt < 100 && targetExists; attempt += 1) {
+        targetExists = await fs.stat(cloneTarget).then(() => true, () => false);
+        if (targetExists) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+      expect(targetExists).toBe(false);
+      expect(cleanupCalls).toBe(1);
+      expect(coordinator.getStats()).toMatchObject({ active: 0, cloneDestinations: 0 });
+    } finally {
+      fs.rm = originalRm;
+      await fs.rm(workingDirectory, { recursive: true, force: true });
+    }
   });
 
   it('rejects Git output that exceeds the bounded process buffer', async () => {

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import {
+  chainGitProcessCleanupReconciliation,
   getGitProcessCleanupReconciliation,
   isGitProcessCleanupBlocked,
 } from './execution-errors.js';
@@ -14,10 +15,10 @@ export const cleanupWorkingTreeRangeDirectory = async (temporaryDirectory, opera
   if (operationError && isGitProcessCleanupBlocked(operationError)) {
     const reconciliation = getGitProcessCleanupReconciliation(operationError);
     if (reconciliation) {
-      void Promise.resolve(reconciliation.promise).then(() => fsp.rm(
-        temporaryDirectory,
-        { recursive: true, force: true },
-      ).catch(() => undefined));
+      operationError.cleanupReconciliation = chainGitProcessCleanupReconciliation(
+        reconciliation,
+        () => fsp.rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined),
+      );
     }
     return;
   }

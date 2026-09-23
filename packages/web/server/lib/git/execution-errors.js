@@ -32,6 +32,16 @@ export const getGitProcessCleanupReconciliation = (value) => {
   return null;
 };
 
+export const chainGitProcessCleanupReconciliation = (reconciliation, cleanup) => {
+  if (!reconciliation || !(cleanup instanceof Function)) {
+    return reconciliation;
+  }
+  return {
+    promise: Promise.resolve(reconciliation.promise).then(cleanup),
+    retire: reconciliation.retire,
+  };
+};
+
 /**
  * Keep process-tree termination facts when a raw Git result crosses an
  * adapter boundary. A cleanup failure is not an ordinary Git exit, because

@@ -13,7 +13,10 @@ import {
 } from './git.js';
 import { parseSkillRepoSource } from './source.js';
 import { runWithGitExecutionScope } from '../git/execution-scope.js';
-import { getGitProcessCleanupReconciliation } from '../git/execution-errors.js';
+import {
+  chainGitProcessCleanupReconciliation,
+  getGitProcessCleanupReconciliation,
+} from '../git/execution-errors.js';
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 const isStringValue = (value) => Object.prototype.toString.call(value) === '[object String]';
@@ -141,10 +144,13 @@ export async function scanSkillsRepository({
     cleanupBlocked = true;
     const reconciliation = getGitProcessCleanupReconciliation(result);
     if (reconciliation) {
-      void Promise.resolve(reconciliation.promise).then(() => {
+      const cleanupReconciliation = chainGitProcessCleanupReconciliation(reconciliation, async () => {
         cleanupBlocked = false;
-        return cleanup();
+        await cleanup();
       });
+      const retained = copyGitProcessMetadata({}, result);
+      retained.cleanupReconciliation = cleanupReconciliation;
+      return cleanupBlockedResult(retained);
     }
     return cleanupBlockedResult(result);
   };

@@ -69,7 +69,7 @@ Keep `bridge.ts` as a thin orchestration layer that delegates message handling t
   - Skill Git commands retain a 4 MiB stdout/stderr bound. Repository reads
     (`ls-files`, `ls-tree`, and `show`) run inside the read-only execution scope
     (`GIT_OPTIONAL_LOCKS=0`); clone and sparse-checkout materialization keeps
-    normal locking. A retained temporary clone is removed when its late process cleanup reconciliation closes; before then its clone lease and destination remain owned.
+    normal locking. A retained temporary clone is removed before its late process cleanup reconciliation closes; before then its clone lease and destination remain owned.
 
 - `git-context-resolver.ts`, `git-execution-coordinator.ts`,
   `git-execution-errors.ts`

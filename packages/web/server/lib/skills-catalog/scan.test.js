@@ -1,10 +1,11 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { scanSkillsRepository } from './scan.js';
 import { getGitExecutionEnv } from '../git/execution-scope.js';
+import { createGitExecutionCoordinator } from '../git/execution-coordinator.js';
 
 const temporaryRoots = [];
 
@@ -275,6 +276,69 @@ describe('skills catalog repository scanning', () => {
     await expect(fs.stat(runner.getTempBase())).resolves.toBeTruthy();
     close();
     await expect.poll(() => fs.stat(runner.getTempBase()).then(() => true, () => false)).toBe(false);
+  });
+
+  it('keeps the clone lease until delayed filesystem cleanup completes', async () => {
+    const runner = createGitRunner();
+    let close;
+    const cleanupReconciliation = {
+      promise: new Promise((resolve) => { close = resolve; }),
+      retire: () => close?.(),
+    };
+    const runGit = async (args, options) => {
+      const result = await runner.runGit(args, options);
+      if (args[0] === 'clone' && args.includes('--filter=blob:none')) {
+        return {
+          ...result,
+          ok: false,
+          cleanupBlocked: true,
+          descendantsTerminated: false,
+          cleanupReconciliation,
+        };
+      }
+      return result;
+    };
+    let releaseCleanup;
+    let cleanupStarted;
+    let cleanupCalls = 0;
+    const cleanupWasStarted = new Promise((resolve) => { cleanupStarted = resolve; });
+    const originalRm = fs.rm;
+    const rmSpy = vi.spyOn(fs, 'rm').mockImplementation(async (target, options) => {
+      if (target === runner.getTempBase()) {
+        cleanupCalls += 1;
+        cleanupStarted();
+        await new Promise((resolve) => { releaseCleanup = resolve; });
+      }
+      return originalRm(target, options);
+    });
+    const coordinator = createGitExecutionCoordinator({
+      canonicalizeCloneDestination: async (destination) => path.resolve(destination),
+    });
+
+    try {
+      const result = await scanSkillsRepository({
+        source: 'owner/repository',
+        gitExecutionService: { coordinator },
+        runGit,
+      });
+      expect(result).toMatchObject({ ok: false, cleanupBlocked: true });
+      expect(coordinator.getStats()).toMatchObject({ active: 1, cloneDestinations: 1 });
+      await expect(fs.stat(runner.getTempBase())).resolves.toBeTruthy();
+
+      close();
+      await cleanupWasStarted;
+      expect(coordinator.getStats()).toMatchObject({ active: 1, cloneDestinations: 1 });
+      await expect(fs.stat(runner.getTempBase())).resolves.toBeTruthy();
+
+      releaseCleanup();
+      await expect.poll(() => coordinator.getStats().active).toBe(0);
+      await expect.poll(() => fs.stat(runner.getTempBase()).then(() => true, () => false)).toBe(false);
+      expect(cleanupCalls).toBe(1);
+      expect(coordinator.getStats()).toMatchObject({ active: 0, cloneDestinations: 0 });
+    } finally {
+      rmSpy.mockRestore();
+      await fs.rm(runner.getTempBase(), { recursive: true, force: true });
+    }
   });
 
   it('does not start the clone fallback after the preferred clone is cancelled', async () => {
