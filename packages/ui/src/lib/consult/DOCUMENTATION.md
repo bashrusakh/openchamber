@@ -251,11 +251,14 @@ turn was sent by this submission:
   consultation did not happen. `queueItemRestored` is `false`. The composer
   branch implements this as `consultCaptureDisposition` (keep the capture
   cleared) plus the localized delivered-raw toast;
-- `delivered` — a resume's delivery-first resolve found the turn already
-  landed (`resumedResolvedDelivered: true`): a previous run sent it and the
-  server removed the item exactly once. Nothing was claimed, fanned out, or
-  dispatched; the caller returns without restoring the composer or reporting
-  anything, and the server's removal broadcast drops the queued chip.
+- `delivered` — a resolve found the turn already landed
+  (`resolvedDelivered: true` with `via: 'resume' | 'dispatch'`): a previous
+  run sent it and the server removed the item exactly once. On the resume
+  this is the delivery-first resolve; in the dispatch loop it is the
+  reclaim-exhaustion reconcile. Nothing was claimed, fanned out, or
+  dispatched by this run; the caller returns without restoring the composer
+  or reporting anything, and the server's removal broadcast drops the queued
+  chip.
 
 `queueItemRestored` on `refused`/`failed` is `true` only for the
 enqueue-rejection and unattributable-append edges (a copy of the message is
@@ -308,7 +311,15 @@ The lifecycle:
    `attempt-present` paths); the resume site refuses with the same uncertain
    result as the strict resolve gate. A witnessed item is never resume-able, so
    this path means "reconcile first": a retry is not automatic and the item is
-   never re-sent without a confirmed outcome.
+   never re-sent without a confirmed outcome. Every other dispatch-loop re-claim
+   failure reconciles too: one `resolveConsultItem` round trip decides —
+   `dispatched` → the neutral `delivered` result with `via: 'dispatch'` (this
+   run's own hold released, the item gone server-side), `resumable` →
+   uncertain-keep on the server's never-attempted proof (the item stays queued,
+   stamped `recoverable` server-side), `not-found` → `delivered-raw`, and every
+   other answer or a resolve failure → uncertain-keep. Reclaim exhaustion (the
+   4th `claim-lost`) follows the same mapping instead of a destructive settle:
+   exhaustion is not a proof of non-delivery, and no dispatch ever follows it.
 8. The store moves to `consulting` and `consultRuntime.startConsultation` runs
    with `runId` (the store's run id) and `expectedRuntimeKey`.
 9. The hold is re-asserted once more for the fan-out (the heartbeat keeps

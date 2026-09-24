@@ -2211,13 +2211,17 @@ describe('message queue runtime', () => {
       expect(result).toEqual({ status: 'resumable' });
       // No tail read and no marker fetch at all.
       expect(openCode.state.messageReadCalls).toBe(readsBefore);
-      // Nothing mutated: same revision, same queue, no broadcast, no hold.
-      expect(runtime.snapshot()).toEqual(before);
-      expect(broadcasts).toHaveLength(broadcastsBefore);
+      // The never-attempted proof stamps the item back into the normal
+      // recoverable state (one commit: the revision moves and the change
+      // broadcasts), so the Resume affordance exists without a restart.
+      expect(runtime.snapshot().revision).toBeGreaterThan(before.revision);
+      expect(broadcasts.length).toBeGreaterThan(broadcastsBefore);
+      expect(broadcasts.at(-1).properties.revision).toBe(runtime.snapshot().revision);
+      expect(broadcasts.at(-1).properties.session.items[0].recoverable).toBe(true);
       const snapshot = runtime.sessionSnapshot(SESSION).items;
       expect(snapshot).toHaveLength(1);
       expect(snapshot[0].claimed).toBeUndefined();
-      expect(snapshot[0].recoverable).toBeUndefined();
+      expect(snapshot[0].recoverable).toBe(true);
       expect(runtime.hasActiveConsultReservation(SESSION)).toBe(false);
     });
 

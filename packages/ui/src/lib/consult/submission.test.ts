@@ -151,6 +151,12 @@ type HarnessState = {
   dispatchConsultBusy: boolean;
   /** When set, the next dispatch answers this exact structured outcome. */
   dispatchConsultOutcome: ConsultDispatchOutcome | null;
+  /** When set, EVERY dispatch answers `claim-lost` until cleared (exhaustion scenarios). */
+  dispatchConsultClaimLost: boolean;
+  /** With `dispatchConsultClaimLost`: the claim was lost to this foreign owner, who also left a witness. */
+  foreignClaimOwner: string | null;
+  /** With `foreignClaimOwner`: the foreign owner also left a dispatch attempt on the item. */
+  foreignClaimWitness: boolean;
   /** When set, the next dispatch request waits on this gate. */
   dispatchConsultGate: { promise: Promise<ConsultDispatchOutcome> } | null;
   dispatchConsultFailure: Error | null;
@@ -226,6 +232,9 @@ const createHarness = (): Harness => {
     dispatchConsultCalls: 0,
     dispatchConsultBusy: false,
     dispatchConsultOutcome: null,
+    dispatchConsultClaimLost: false,
+    foreignClaimOwner: null,
+    foreignClaimWitness: false,
     dispatchConsultGate: null,
     dispatchConsultFailure: null,
     resolveConsultOutcome: null,
@@ -313,6 +322,17 @@ const createHarness = (): Harness => {
           return gate.promise;
         }
         if (state.dispatchConsultBusy) return { status: 'busy' };
+        if (state.dispatchConsultClaimLost) {
+          // Model the foreign takeover the claim loss means: the item's
+          // reservation moves to the foreign owner, who (with the witness
+          // flag) also left a dispatch attempt on it.
+          const lostItem = state.queueItems.find((entry) => entry.id === messageId);
+          if (lostItem && state.foreignClaimOwner) {
+            lostItem.claimed = { owner: state.foreignClaimOwner, claimedAt: state.now };
+            if (state.foreignClaimWitness) lostItem.consult = { ...lostItem.consult, textPartMetadata: { openchamberConsultReceipt: { runID: 'foreign-run' } } };
+          }
+          return { status: 'claim-lost' };
+        }
         if (state.dispatchConsultOutcome) {
           // One-shot: the retry paths must observe the next real outcome.
           const outcome = state.dispatchConsultOutcome;
@@ -1444,22 +1464,151 @@ describe('cancellation and failures', () => {
     expect(harness.state.queueItems).toEqual([]);
   });
 
-  test('a terminal re-claim refusal after claim-lost is a definite failure that removes the item', async () => {
+  test('a terminal re-claim refusal after claim-lost reconciles: the item stays queued and the outcome is decided by resolve', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
     await harness.flush();
     harness.state.dispatchConsultOutcome = { status: 'claim-lost' };
     harness.state.claimFailure = new Error('cannot claim queued message: not-consult');
+    // The reconcile resolve answers unknown: the delivery stays undecided.
+    harness.state.resolveConsultOutcome = { status: 'unresolved' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    // The re-claim refusal is not a proof of non-delivery: the run reconciles
+    // first, and only the resolve can decide. Nothing is removed here.
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(result.queueItemRestored).toBe(false);
+    expect(harness.state.resolveConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1' }]);
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-1']);
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    // The lease stays server-owned, like every other uncertain path.
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('a not-consult re-claim refusal with a resolve not-found answer settles delivered-raw without removal', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultOutcome = { status: 'claim-lost' };
+    harness.state.claimFailure = new Error('cannot claim queued message: not-consult');
+    harness.state.resolveConsultOutcome = { status: 'not-found' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    // The item left the queue without this run dispatching it: the
+    // established item-gone convention, no client removal.
+    expect(result.status).toBe('delivered-raw');
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.resolveConsultCalls).toHaveLength(1);
+  });
+
+  test('reclaim exhaustion reconciles: the never-attempted answer keeps the item recoverable and sends nothing', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    // Every dispatch loses the claim to a racing foreign owner who also
+    // leaves a witness on the item; the first three re-claims succeed, so
+    // the 4th answer is the exhaustion edge.
+    harness.state.dispatchConsultClaimLost = true;
+    harness.state.foreignClaimOwner = 'consult:foreign';
+    harness.state.foreignClaimWitness = true;
+    harness.state.resolveConsultOutcome = { status: 'resumable' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    const item = harness.state.queueItems[0];
+    // Exhaustion is not a proof of non-delivery: the reconcile round trip
+    // answered never-attempted, so the item stays queued (recoverable
+    // server-side), uncertain, with no client removal and no composer
+    // restore — and exactly one resolve.
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(result.error).toContain('never dispatched');
+    expect(result.error).toContain('recoverable');
+    expect(result.queueItemRestored).toBe(false);
+    expect(harness.state.dispatchConsultCalls).toBe(4);
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-1']);
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    // The foreign claim and witness the harness modeled survive untouched.
+    expect(item.claimed).toEqual({ owner: 'consult:foreign', claimedAt: harness.state.now });
+    expect(item.consult?.textPartMetadata).toEqual({ openchamberConsultReceipt: { runID: 'foreign-run' } });
+    expect(harness.state.dispatchConsultCalls).toBe(4);
+    expect(harness.state.resolveConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1' }]);
+    // The lease stays server-owned: the harness resolve never removes the
+    // item, so the foreign reservation it models survives.
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('reclaim exhaustion with a delivered reconcile reports the neutral delivered result with dispatch provenance', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultClaimLost = true;
+    harness.state.resolveConsultOutcome = { status: 'dispatched', delivered: 'confirmed' };
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    // The turn landed through another dispatch: the neutral delivered result
+    // with provenance, no client removal (resolve removed it server-side;
+    // the harness resolve does not mutate), and no extra dispatch calls.
+    expect(result).toEqual({ status: 'delivered', runId: 'run-1', resolvedDelivered: true, via: 'dispatch', queueItemRestored: false });
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.dispatchConsultCalls).toBe(4);
+    expect(harness.state.resolveConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1' }]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('reclaim exhaustion with a failing reconcile stays uncertain and removes nothing', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultClaimLost = true;
+    harness.state.resolveConsultFailure = new Error('resolve request failed');
+    harness.lastConsultation().resolve(consultationResult());
+    await harness.flush();
+    const result = await handle.result;
+
+    // The resolve could not be read, so it proved nothing: fail closed.
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(errorOf(result)).toContain('could not be read');
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-1']);
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.dispatchConsultCalls).toBe(4);
+    expect(harness.state.resolveConsultCalls).toHaveLength(1);
+    expect(harness.state.holds).toEqual([true, true]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('an already-claimed re-claim failure reconciles: an unresolved answer keeps the item', async () => {
+    const harness = createHarness();
+    const handle = harness.submit(baseInput());
+    await harness.flush();
+    harness.state.dispatchConsultOutcome = { status: 'claim-lost' };
+    harness.state.claimFailure = new Error('cannot claim queued message: already-claimed');
+    harness.state.resolveConsultOutcome = { status: 'unresolved' };
     harness.lastConsultation().resolve(consultationResult());
     await harness.flush();
     const result = await handle.result;
 
     expect(result.status).toBe('failed');
     if (result.status !== 'failed') throw new Error('expected a failure');
-    expect(result.uncertain).toBeUndefined();
-    expect(result.queueItemRestored).toBe(false);
-    expect(harness.state.queueItems).toEqual([]);
-    expect(harness.state.holds).toEqual([true, true, false]);
+    expect(result.uncertain).toBe(true);
+    expect(harness.state.queueItems.map((entry) => entry.id)).toEqual(['q-1']);
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.resolveConsultCalls).toHaveLength(1);
+    expect(harness.state.holds).toEqual([true, true]);
   });
 
   test('an attempt-recorded re-claim refusal after claim-lost is uncertain: the item stays queued and reserved', async () => {
@@ -2074,7 +2223,8 @@ describe('resume of a stranded consult item', () => {
     expect(result).toEqual({
       status: 'delivered',
       runId: 'run-1',
-      resumedResolvedDelivered: true,
+      resolvedDelivered: true,
+      via: 'resume',
       queueItemRestored: false,
     });
   });
@@ -2182,7 +2332,8 @@ describe('resume of a stranded consult item', () => {
     expect(second).toEqual({
       status: 'delivered',
       runId: 'run-2',
-      resumedResolvedDelivered: true,
+      resolvedDelivered: true,
+      via: 'resume',
       queueItemRestored: false,
     });
     expect(harness.state.claims).toBe(0);

@@ -364,12 +364,12 @@ turn after a staged revert.
 
 `resolveConsult(sessionId, itemId)` is the reconnect-time outcome check for an
 item stranded by an ambiguous dispatch (route
-`POST .../items/:itemId/resolve-consult`): it never prompts, never clears a
-witness, and never sets `recoverable`. The witness decides what is provable:
+`POST .../items/:itemId/resolve-consult`): it never prompts and never clears a
+witness. The witness decides what is provable:
 
 | Item state | Answer |
 |---|---|
-| no witness, unclaimed, not sending | `{ status: 'resumable' }`: no dispatch step ever ran, so no request can exist; nothing is mutated and clients may claim or resume. |
+| no witness, unclaimed, not sending | `{ status: 'resumable' }`: no dispatch step ever ran, so no request can exist; the item is stamped `recoverable: true` (same never-sent proof as the post-write cleanup) and committed, so clients may claim or resume. |
 | no witness, claimed | `{ status: 'unresolved' }` untouched (the owner is mid-flow). |
 | legacy witness, no receipt runId | `{ status: 'unresolved' }` — never `resumable`, never `recoverable`. |
 | legacy witness, marker found in the deeper tail (200) | `{ status: 'dispatched', delivered: 'confirmed', evidence: 'legacy-marker' }`; remove exactly once, release the claimed owner's hold (a non-empty owner only). |
@@ -442,7 +442,8 @@ message is either dispatched through its own route or deleted by the user.
 A consult item whose reservation is gone and which carries no dispatch
 witness — the hold lapsed, or a restart stripped the claim (a reservation
 never survives a restart) — becomes `recoverable: true` (set in the same sweep
-that clears the claim, and on restore in `load()` when the witness is absent).
+that clears the claim, on restore in `load()` when the witness is absent, and
+by resolve's resumable branch on the same never-sent proof).
 The marker is consult-only and rides snapshots, broadcasts, and persistence
 like the other item fields; it is a hint for clients, not a behavior switch:
 the item keeps blocking the head exactly as before and is never raw-sent. A
@@ -482,7 +483,7 @@ allowlists.
 | `POST .../sessions/:id/items/:itemId/claim` | `{ owner?, ttlMs? }`; reserve the head consult item; `409` reasons: `not found`, `not-consult`, `not-head`, `sending`, `attempt-recorded`, `already-claimed`, `not-idle` |
 | `POST .../sessions/:id/items/:itemId/payload` | `{ owner?, consult }`; merge the claimed item's consult payload (a client-supplied `attempt` is stripped); `409`: `not found`/`not-consult`/`not-claiming`/`sending`, `400` on size violations |
 | `POST .../sessions/:id/items/:itemId/dispatch-consult` | `{ owner? }`; dispatch the claimed consult item on its dedicated route; always `200` with a structured outcome (`dispatched`/`busy`/`claim-lost`/`not-found`/`not-consult`/`attempt-present`/`attempt-write-failed`/`sending`/`send-failed`), `400`/`500` only for malformed/unexpected errors |
-| `POST .../sessions/:id/items/:itemId/resolve-consult` | Reconnect-time outcome check for a stranded consult item; always `200` with a structured outcome (`dispatched` with `delivered: 'confirmed'` and an `evidence`, `resumable` (no witness, unclaimed, not sending: nothing mutated; clients may claim or resume), `unresolved`, `not-found`/`not-consult`/`sending`), `400`/`500` only for malformed/unexpected errors; never sends a prompt and never clears a witness |
+| `POST .../sessions/:id/items/:itemId/resolve-consult` | Reconnect-time outcome check for a stranded consult item; always `200` with a structured outcome (`dispatched` with `delivered: 'confirmed'` and an `evidence`, `resumable` (no witness, unclaimed, not sending: stamps the item `recoverable` and commits; clients may claim or resume), `unresolved`, `not-found`/`not-consult`/`sending`), `400`/`500` only for malformed/unexpected errors; never sends a prompt and never clears a witness |
 
 Every mutation broadcasts `openchamber:message-queue.updated` with
 `{ revision, session }` to all connected clients (SSE and WS), so several

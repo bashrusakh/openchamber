@@ -1755,14 +1755,17 @@ export function createMessageQueueRuntime({
    *   non-delivery: the A0 probe showed revert/delete operations make a landed
    *   message read 404, so anything other than 200 is unknown.
    *
-   * Resolve never clears a witness (only a proven dispatch rejection does) and
-   * never marks `recoverable` — a witnessed item's only exits are delivered or
-   * manual removal.
+   * Resolve never clears a witness (only a proven dispatch rejection does) —
+   * a witnessed item's only exits are delivered or manual removal. Its only
+   * recoverable stamp is the resumable one: unclaimed + witness-absent is the
+   * server's proof that nothing was sent.
    *
    * Outcomes, all evidence-based and all fail-closed:
    * - `not-found` / `not-consult` / `sending`: nothing is mutated.
    * - No witness + unclaimed → `{ status: 'resumable' }`: provably never
-   *   dispatched, nothing mutated, the client may resume it.
+   *   dispatched; the item is stamped `recoverable = true` (one commit, so
+   *   the revision moves and clients see the Resume affordance) and the
+   *   client may claim or resume it.
    * - No witness + claimed → `{ status: 'unresolved' }`: the owner is mid-flow
    *   and decides; nothing is mutated.
    * - Legacy witness + marker found in a deeper tail (200): delivered —
@@ -1791,7 +1794,14 @@ export function createMessageQueueRuntime({
     const attempt = readConsultAttempt(item);
     if (!attempt) {
       // No dispatch pre-send step ever ran (the witness precedes the request),
-      // so an unclaimed item is provably never-dispatched. Nothing is mutated.
+      // so an unclaimed item is provably never-dispatched: it is stamped back
+      // into the normal recoverable state (same proof as the post-write
+      // cleanup) so the Resume affordance exists without a restart. A claimed
+      // item still belongs to its owner and stays untouched.
+      if (!item.claimed) {
+        item.recoverable = true;
+        commit(sessionId);
+      }
       return item.claimed ? { status: 'unresolved' } : { status: 'resumable' };
     }
 

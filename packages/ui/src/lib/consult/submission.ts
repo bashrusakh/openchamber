@@ -139,6 +139,12 @@ const RESUME_UNCONFIRMED_DELIVERY_MESSAGE =
 /** A claim refused because a dispatch witness already exists: the delivery is undecided. */
 const ATTEMPT_RECORDED_MESSAGE =
   'The server reports a dispatch attempt already exists for this consult message, so the previous delivery is undecided; the message stays reserved and is never re-sent without a confirmed reconcile.';
+/** A reconcile resolve confirmed the turn already landed by another dispatch. */
+const RESOLVED_DELIVERED_MESSAGE =
+  'A reconcile check confirmed this consult message was already delivered by another dispatch; this run sent nothing.';
+/** The reconcile resolve proved the item was never dispatched: it stays queued, recoverable. */
+const RECONCILE_RESUMABLE_MESSAGE =
+  'A reconcile check proved this consult message was never dispatched (no attempt was recorded), so it stays queued and the server marked it recoverable; nothing was re-sent. Use Resume on the queued consult message, or remove it.';
 
 /**
  * The default refusal for an unverified live capability. The reason decides
@@ -258,15 +264,18 @@ export type ConsultSubmissionResult =
   }
   | {
     /**
-     * A resume's delivery-first resolve found the item's receipt marker: a
-     * previous run already delivered this exact message and the server removed
-     * the item exactly once. Nothing was claimed, fanned out, or dispatched,
-     * and the composer must not restore the capture. A neutral "already
-     * delivered" state, never a failure.
+     * A resolve (a resume's delivery-first check, or a submission's
+     * exhaustion/unknown-claim reconcile) found the item's receipt marker or
+     * address: a previous run already delivered this exact message and the
+     * server removed the item exactly once. Nothing was claimed, fanned out,
+     * or dispatched by THIS run, and the composer must not restore the
+     * capture. A neutral "already delivered" state, never a failure.
      */
     status: 'delivered';
     runId: string;
-    resumedResolvedDelivered: true;
+    resolvedDelivered: true;
+    /** Which flow's resolve proved the delivery: the resume's or a dispatch loop's. */
+    via: 'resume' | 'dispatch';
     queueItemRestored: false;
   };
 
@@ -1109,6 +1118,53 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     // claim is re-established and the payload re-set, and a definite failure
     // removes the item while an ambiguous one keeps it reserved.
     let reclaims = 0;
+
+    /**
+     * The reconcile round trip at the loop's destructive exits. Reclaim
+     * exhaustion and an unclassifiable re-claim failure are NOT proofs of
+     * non-delivery: another owner may be mid-dispatch or may have landed the
+     * turn. The never-prompting resolve route decides, and nothing is removed
+     * by this client on any answer.
+     */
+    const settleWithResolve = async (failurePrefix: string): Promise<ConsultSubmissionResult> => {
+      let resolution: ConsultResolveOutcome;
+      try {
+        resolution = await deps.queue.resolveConsultItem(target, itemId);
+      } catch (error) {
+        // The resolve could not be read, so it proved nothing: the previous
+        // delivery is undecided and nothing may be cleaned up or re-sent.
+        return settleUncertain(
+          `${failurePrefix}A reconcile check could not be read (${error instanceof Error ? error.message : String(error)}); the delivery is undecided and the message stays reserved.`,
+        );
+      }
+      if (resolution.status === 'dispatched') {
+        // The acting turn landed through another dispatch; resolve removed
+        // the item exactly once. This run's own owner-scoped hold has no
+        // reservation left to protect (and cannot touch another owner's
+        // lease), so it is released instead of stalling the queue until the
+        // TTL. Neutral delivered result — never a re-send, never a restore.
+        await releaseHold(capture);
+        deps.runs.finish(parentSessionId, runId, { phase: 'failed', error: RESOLVED_DELIVERED_MESSAGE });
+        return { status: 'delivered', runId, resolvedDelivered: true, via: 'dispatch', queueItemRestored: false };
+      }
+      if (resolution.status === 'resumable') {
+        // Server-proved never-attempted (witness absent, unclaimed, not
+        // sending; the resolve stamps the item recoverable): reconcile-keep.
+        // Nothing is removed and the composer is never restored — the
+        // resolve→remove race is exactly what this must avoid.
+        return settleUncertain(RECONCILE_RESUMABLE_MESSAGE);
+      }
+      if (resolution.status === 'not-found') {
+        // The item left the queue without this run dispatching it: the
+        // established item-gone convention (its hold, if any, lapses into
+        // the sweep; nothing to remove and nothing to re-send).
+        return finishDeliveredRawRun(capture);
+      }
+      return settleUncertain(
+        `${failurePrefix}A reconcile check answered ${resolution.status}; the delivery is undecided and the message stays reserved.`,
+      );
+    };
+
     for (;;) {
       // A cancel recorded while a dispatch request was in flight is applied
       // here, once that request has settled without reporting `dispatched`.
@@ -1155,13 +1211,10 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
       }
       if (outcome.status === 'claim-lost') {
         if (reclaims >= 3) {
-          return settleWithoutDispatch(
-            capture,
-            target,
-            itemId,
-            'The consult reservation could not be re-established; the message was not sent.',
-            null,
-          );
+          // Reclaim exhaustion is not a proof of non-delivery: another owner
+          // may hold the item or may have landed the turn. One reconcile
+          // round trip decides; no dispatch follows exhaustion.
+          return settleWithResolve('The consult reservation could not be re-established. ');
         }
         reclaims += 1;
         try {
@@ -1174,12 +1227,10 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
           if (/attempt-recorded/.test(error instanceof Error ? error.message : String(error))) {
             return settleUncertain(ATTEMPT_RECORDED_MESSAGE);
           }
-          return settleWithoutDispatch(
-            capture,
-            target,
-            itemId,
-            `The consult reservation could not be re-established: ${error instanceof Error ? error.message : String(error)}`,
-            null,
+          // Every other re-claim failure is equally unproven: the same
+          // resolve-first mapping decides instead of a destructive settle.
+          return settleWithResolve(
+            `The consult reservation could not be re-established (${error instanceof Error ? error.message : String(error)}). `,
           );
         }
         // The fresh claim needs the settled payload again before the retry.
@@ -1441,7 +1492,7 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         return refuseUnconfirmedResume();
       }
       if (resolution.status === 'dispatched') {
-        return { status: 'delivered', runId, resumedResolvedDelivered: true, queueItemRestored: false };
+        return { status: 'delivered', runId, resolvedDelivered: true, via: 'resume', queueItemRestored: false };
       }
       if (resolution.status !== 'resumable') {
         return refuseUnconfirmedResume();

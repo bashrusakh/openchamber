@@ -297,8 +297,9 @@ const serverConsultDispatchResponseSchema = z.discriminatedUnion('status', [
  * bodies; non-2xx is reserved for malformed/unexpected failures. `dispatched`
  * proves the prompt landed (the item was removed and the projection updated by
  * broadcast); `resumable` proves it never reached the acting payload, so a
- * resume cannot duplicate it; `unresolved` keeps the item queued (`recoverable`
- * offers Resume); `sending` means a delivery is still in flight.
+ * resume cannot duplicate it, and stamps the queued item `recoverable`;
+ * `unresolved` keeps the item queued (`recoverable` offers Resume); `sending`
+ * means a delivery is still in flight.
  */
 const serverConsultResolveResponseSchema = z.discriminatedUnion('status', [
   z.object({
@@ -306,7 +307,7 @@ const serverConsultResolveResponseSchema = z.discriminatedUnion('status', [
     delivered: z.literal('confirmed'),
     evidence: z.enum(['address', 'legacy-marker']).optional(),
   }),
-  z.object({ status: z.literal('resumable') }),
+  z.object({ status: z.literal('resumable'), recoverable: z.literal(true).optional() }),
   z.object({ status: z.literal('unresolved'), recoverable: z.literal(true).optional() }),
   z.object({ status: z.literal('not-found') }),
   z.object({ status: z.literal('not-consult') }),
@@ -340,7 +341,7 @@ export type ConsultDispatchOutcome =
  */
 export type ConsultResolveOutcome =
   | { status: 'dispatched'; delivered?: 'confirmed'; evidence?: 'address' | 'legacy-marker' }
-  | { status: 'resumable' }
+  | { status: 'resumable'; recoverable?: true }
   | { status: 'unresolved'; recoverable?: true }
   | { status: 'not-found' }
   | { status: 'not-consult' }
