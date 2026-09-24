@@ -237,6 +237,18 @@ export const killProcessTree = (
         'win32',
       ));
     }
+    // The root can close after the observer check but before taskkill starts.
+    // Recheck the terminal fields at the last possible moment so a PID-only
+    // tree kill cannot target a process that has already reused this PID.
+    if (hasChildClosed(child) || observation.isClosed()) {
+      return Promise.reject(processTreeTerminationError(
+        child.pid,
+        new Error('Owned Windows process closed before tree termination could start'),
+        null,
+        true,
+        'win32',
+      ));
+    }
     let taskkill;
     try {
       taskkill = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {

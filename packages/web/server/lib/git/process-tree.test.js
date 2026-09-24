@@ -106,6 +106,34 @@ describe('Git process-tree ownership', () => {
     expect(child.kill).not.toHaveBeenCalled();
   });
 
+  it('rechecks the Windows root before spawning taskkill', async () => {
+    const child = new EventEmitter();
+    child.pid = 1234;
+    let exitCodeReads = 0;
+    Object.defineProperty(child, 'exitCode', {
+      get: () => {
+        exitCodeReads += 1;
+        return exitCodeReads > 1 ? 0 : null;
+      },
+    });
+    child.signalCode = null;
+    child.kill = vi.fn();
+    const spawn = vi.fn();
+
+    await expect(killProcessTree(child, {
+      spawn,
+      platform: 'win32',
+      terminationTimeoutMs: 5,
+    })).rejects.toMatchObject({
+      code: 'ERR_PROCESS_TREE_TERMINATION',
+      cleanupBlocked: true,
+      descendantsTerminated: false,
+      rootClosed: true,
+    });
+    expect(spawn).not.toHaveBeenCalled();
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
   it('waits for an owned POSIX child to close before resolving', async () => {
     const child = new EventEmitter();
     child.pid = 987654;

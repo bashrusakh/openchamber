@@ -16,6 +16,7 @@ import {
 
 const EXEC_JOB_TTL_MS = 30 * 60 * 1000;
 const OUTSIDE_FILE_GRANT_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_GIT_OUTPUT_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 
 const outsideFileGrants = new Map();
 
@@ -101,7 +102,22 @@ const createGitCheckIgnoreTimeoutMs = () => {
   return 2500;
 };
 
-const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs, platform }) => new Promise((resolve, reject) => {
+const createCloneOutputLimitError = (stream, maxBuffer) => Object.assign(
+  new Error(`${stream} maxBuffer length exceeded`),
+  { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
+);
+
+const runGitCloneProcess = ({
+  spawn,
+  command,
+  args,
+  cwd,
+  env,
+  signal,
+  timeoutMs,
+  platform,
+  maxBuffer = DEFAULT_GIT_OUTPUT_MAX_BUFFER_BYTES,
+}) => new Promise((resolve, reject) => {
   let child;
   try {
     child = spawn(command, args, withProcessTreeOwnership({
@@ -122,6 +138,8 @@ const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs,
   let terminationRequested = false;
   let termination;
   let timeout;
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
 
   const cleanup = () => {
     if (timeout) clearTimeout(timeout);
@@ -133,7 +151,16 @@ const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs,
     cleanup();
     void Promise.resolve(termination).then(
       () => callback(value),
-      (terminationFailure) => reject(terminationFailure),
+      (terminationFailure) => {
+        if (terminationError) {
+          terminationFailure.operationError = terminationError;
+          terminationFailure.stdout = stdout;
+          terminationFailure.stderr = terminationError.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+            ? terminationError.message
+            : stderr;
+        }
+        reject(terminationFailure);
+      },
     );
   };
   const requestTermination = (error) => {
@@ -149,8 +176,35 @@ const runGitCloneProcess = ({ spawn, command, args, cwd, env, signal, timeoutMs,
   };
   const onAbort = () => requestTermination(new Error('Git clone was cancelled'));
 
-  child.stdout?.on('data', (data) => { stdout += data.toString(); });
-  child.stderr?.on('data', (data) => { stderr += data.toString(); });
+  const appendOutput = (stream, data) => {
+    if (terminationRequested) return;
+    const text = data.toString();
+    const bytes = Buffer.isBuffer(data) ? data.length : Buffer.byteLength(text);
+    if (stream === 'stdout') {
+      stdoutBytes += bytes;
+      if (stdoutBytes > maxBuffer) {
+        const error = createCloneOutputLimitError('stdout', maxBuffer);
+        error.stdout = stdout;
+        error.stderr = error.message;
+        requestTermination(error);
+        return;
+      }
+      stdout += text;
+      return;
+    }
+    stderrBytes += bytes;
+    if (stderrBytes > maxBuffer) {
+      const error = createCloneOutputLimitError('stderr', maxBuffer);
+      error.stdout = stdout;
+      error.stderr = error.message;
+      requestTermination(error);
+      return;
+    }
+    stderr += text;
+  };
+
+  child.stdout?.on('data', (data) => appendOutput('stdout', data));
+  child.stderr?.on('data', (data) => appendOutput('stderr', data));
   child.on('error', (error) => finish(reject, terminationError || error));
   child.on('close', (code) => {
     if (terminationError) {

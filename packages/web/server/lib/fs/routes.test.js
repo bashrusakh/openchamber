@@ -747,6 +747,26 @@ describe('fs clone', () => {
     }
   });
 
+  it.each(['stdout', 'stderr'])('rejects a clone that exceeds the %s output limit', async (stream) => {
+    const fsPromises = createCloneFs();
+    const deferred = createDeferredCloneSpawn();
+    const handler = registerClone({
+      fsPromises,
+      spawn: deferred.spawn,
+      resolveCloneGitIdentity: async () => null,
+    });
+    const request = beginClone(handler, cloneBody());
+    await waitForCloneSpawn(deferred);
+
+    deferred.pending[0].child[stream].emit('data', Buffer.alloc(4 * 1024 * 1024 + 1, 'x'));
+    deferred.pending[0].child.emit('close', 0, null);
+    await request.promise;
+
+    expect(request.res.statusCode).toBe(500);
+    expect(request.res.body).toEqual({ error: `${stream} maxBuffer length exceeded` });
+    expect(fsPromises.rm).toHaveBeenCalledWith('/tmp/repository', { recursive: true, force: true });
+  });
+
   it('does not remove a destination claimed by another process after the access check', async () => {
     const alreadyExists = Object.assign(new Error('destination created concurrently'), { code: 'EEXIST' });
     const fsPromises = createCloneFs();
