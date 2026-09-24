@@ -474,6 +474,100 @@ describe('GitContextResolver', () => {
     });
   });
 
+  it('keeps a cleanup-blocked discovery queued until process ownership reconciles', async () => {
+    const controller = new AbortController();
+    let releaseCleanup;
+    const cleanup = new Promise((resolve) => {
+      releaseCleanup = resolve;
+    });
+    let calls = 0;
+    let discoverySignal;
+    const resolver = createGitContextResolver({
+      realpath: async (value) => value,
+      pathExists: async () => true,
+      getPathFingerprint: async () => 'stable',
+      runGit: async (_cwd, _args, options = {}) => {
+        calls += 1;
+        discoverySignal = options.signal;
+        if (calls === 1) {
+          return new Promise((resolve) => {
+            options.signal?.addEventListener('abort', () => resolve({
+              success: false,
+              code: 'ERR_PROCESS_TREE_TERMINATION',
+              cleanupBlocked: true,
+              descendantsTerminated: false,
+              cleanupReconciliation: { promise: cleanup, retire: () => {} },
+            }), { once: true });
+          });
+        }
+        return { success: true, stdout: '/repo\n/repo/.git\n/repo/.git\n' };
+      },
+    });
+
+    const first = resolver.resolve('/repo', { signal: controller.signal });
+    await waitFor(() => resolver.getStats().inFlightAliases === 1);
+    controller.abort('client disconnected');
+    await expect(first).rejects.toMatchObject({ code: 'GIT_EXECUTION_CANCELLED' });
+    await waitFor(() => discoverySignal?.aborted === true);
+
+    const retry = resolver.resolve('/repo');
+    await tick();
+    expect(calls).toBe(1);
+    expect(resolver.getStats()).toMatchObject({
+      inFlightAliases: 1,
+      inFlightContexts: 1,
+      discovery: { active: 1, pending: 0 },
+    });
+
+    releaseCleanup();
+    await expect(retry).rejects.toMatchObject({
+      code: 'GIT_EXECUTION_CANCELLED',
+      cleanupBlocked: true,
+    });
+    await waitFor(() => resolver.getStats().inFlightAliases === 0);
+    await expect(resolver.resolve('/repo')).resolves.toMatchObject({ isRepository: true });
+    expect(calls).toBe(2);
+  });
+
+  it('does not restart a discovery whose cleanup is explicitly blocked without reconciliation', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    let discoverySignal;
+    const resolver = createGitContextResolver({
+      realpath: async (value) => value,
+      pathExists: async () => true,
+      runGit: async (_cwd, _args, options = {}) => {
+        calls += 1;
+        discoverySignal = options.signal;
+        return new Promise((resolve) => {
+          options.signal?.addEventListener('abort', () => resolve({
+            success: false,
+            code: 'ERR_PROCESS_TREE_TERMINATION',
+            cleanupBlocked: true,
+            descendantsTerminated: false,
+          }), { once: true });
+        });
+      },
+    });
+
+    const first = resolver.resolve('/repo', { signal: controller.signal });
+    await waitFor(() => resolver.getStats().inFlightAliases === 1);
+    controller.abort('client disconnected');
+    await expect(first).rejects.toMatchObject({ code: 'GIT_EXECUTION_CANCELLED' });
+    await waitFor(() => discoverySignal?.aborted === true);
+
+    await expect(resolver.resolve('/repo')).rejects.toMatchObject({
+      code: 'GIT_EXECUTION_CANCELLED',
+      cleanupBlocked: true,
+    });
+    expect(calls).toBe(1);
+    expect(resolver.getStats()).toMatchObject({
+      inFlightAliases: 1,
+      inFlightContexts: 1,
+      discovery: { active: 0, pending: 0 },
+    });
+  });
+
   it('bounds a hung discovery and releases its resolver and queue slots', async () => {
     let discoverySignal;
     const resolver = createGitContextResolver({

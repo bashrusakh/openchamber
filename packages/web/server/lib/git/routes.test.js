@@ -102,6 +102,14 @@ const createMockResponse = () => {
   };
 };
 
+const waitForMockCall = async (mock) => {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (mock.mock.calls.length > 0) return;
+    await Promise.resolve();
+  }
+  throw new Error('Timed out waiting for mock call');
+};
+
 describe('git routes index mutations', () => {
   beforeEach(() => {
     gitLibraries.stageFiles.mockReset();
@@ -363,6 +371,55 @@ describe('git collection routes', () => {
       false,
       { signal: expect.any(AbortSignal) },
     );
+  });
+
+  it.each([
+    ['commit files', '/api/git/commit-files', { directory: '/repo', hash: 'a'.repeat(40) }, 'getCommitFiles', { files: [] }],
+    ['commit diff', '/api/git/commit-diff', { directory: '/repo', hash: 'a'.repeat(40) }, 'getCommitDiff', 'patch'],
+    ['commit file diff', '/api/git/commit-file-diff', { directory: '/repo', hash: 'a'.repeat(40), path: 'file.ts' }, 'getCommitFileDiff', { original: '', modified: '', isBinary: false }],
+  ])('does not respond with a committed %s result after disconnect', async (_label, routePath, query, operation, result) => {
+    let release;
+    gitLibraries[operation].mockImplementation(() => new Promise((resolve) => {
+      release = resolve;
+    }));
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const request = Object.assign(new EventEmitter(), { query });
+    const response = createMockResponse();
+    const pending = getRoute('GET', routePath)(request, response);
+    await waitForMockCall(gitLibraries[operation]);
+
+    request.emit('aborted');
+    release(result);
+    await pending;
+
+    expect(response.body).toBeNull();
+  });
+
+  it.each([
+    ['commit files', '/api/git/commit-files', { directory: '/repo', hash: 'a'.repeat(40) }, 'getCommitFiles'],
+    ['commit diff', '/api/git/commit-diff', { directory: '/repo', hash: 'a'.repeat(40) }, 'getCommitDiff'],
+    ['commit file diff', '/api/git/commit-file-diff', { directory: '/repo', hash: 'a'.repeat(40), path: 'file.ts' }, 'getCommitFileDiff'],
+  ])('does not log or respond with a committed %s error after disconnect', async (_label, routePath, query, operation) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let rejectOperation;
+    gitLibraries[operation].mockImplementation(() => new Promise((_resolve, reject) => {
+      rejectOperation = reject;
+    }));
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const request = Object.assign(new EventEmitter(), { query });
+    const response = createMockResponse();
+    const pending = getRoute('GET', routePath)(request, response);
+    await waitForMockCall(gitLibraries[operation]);
+
+    request.emit('aborted');
+    rejectOperation(new Error('committed read failed'));
+    await pending;
+
+    expect(response.body).toBeNull();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 
   it('passes cancellation through range file collection too', async () => {

@@ -168,12 +168,12 @@ Bounded range and commit reads, plus context discovery, use the owned process-tr
 adapter so cancellation waits for descendant cleanup before releasing their lease.
 Gitignore checks and skills-catalog Git processes use the shared process-tree
 lifecycle rather than root-only termination.
-`checkoutBranch` admits its remote-name probe as a read. A configured remote
-name keeps the potentially remote checkout in common-write and network
-admission, rather than relying on a local-branch probe that could become stale
-before checkout and allow fetches or shared-ref updates to bypass coordination.
-Slash-named branches whose first component is not a configured remote remain
-worktree writes.
+`checkoutBranch` admits its remote-name and local-ref probes as a read. A
+configured remote, or a slash-named request with no confirmed local branch,
+keeps the potentially remote checkout in common-write and network admission.
+This closes the gap where a remote could appear after the probe and let the
+checkout fetch under a worktree-only lease. A confirmed local slash-named
+branch with no matching remote remains a worktree write.
 `validateWorktreeCreate` and `createWorktree` accept caller execution options
 (`signal`, `queueTimeoutMs`) on their admission. Abandoning a queued waiter
 cancels it before any worktree work starts; abandoning a running waiter rejects

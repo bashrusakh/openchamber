@@ -600,6 +600,82 @@ describe('fs clone', () => {
     }
   });
 
+  it('chains late destination cleanup before releasing the clone lease', async () => {
+    vi.useFakeTimers();
+    try {
+      const fsPromises = createCloneFs();
+      let releaseRemoval;
+      fsPromises.rm = vi.fn(() => new Promise((resolve) => {
+        releaseRemoval = resolve;
+      }));
+      const coordinator = createGitExecutionCoordinator({
+        globalConcurrency: 1,
+        globalNetworkConcurrency: 1,
+        canonicalizeCloneDestination: async (destination) => path.resolve(destination),
+      });
+      let gitChild;
+      let taskkill;
+      const spawn = vi.fn((command) => {
+        if (command === 'taskkill') {
+          taskkill = new EventEmitter();
+          return taskkill;
+        }
+        gitChild = new EventEmitter();
+        gitChild.pid = 1234;
+        gitChild.stdout = new EventEmitter();
+        gitChild.stderr = new EventEmitter();
+        gitChild.kill = vi.fn();
+        return gitChild;
+      });
+      const handler = registerClone({
+        fsPromises,
+        spawn,
+        platform: 'win32',
+        gitExecutionService: { coordinator },
+        resolveCloneGitIdentity: async () => null,
+      });
+      const request = beginClone(handler, cloneBody());
+      for (let attempt = 0; attempt < 20 && !gitChild; attempt += 1) {
+        await Promise.resolve();
+      }
+
+      request.req.emit('aborted');
+      taskkill.emit('close', 0, null);
+      vi.advanceTimersByTime(5_000);
+      await request.promise;
+
+      expect(fsPromises.rm).not.toHaveBeenCalled();
+      expect(coordinator.getStats()).toMatchObject({
+        active: 1,
+        activeNetwork: 1,
+        cloneDestinations: 1,
+      });
+
+      gitChild.emit('close', 137, null);
+      for (let attempt = 0; attempt < 20 && !fsPromises.rm.mock.calls.length; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(fsPromises.rm).toHaveBeenCalledWith('/tmp/repository', { recursive: true, force: true });
+      expect(coordinator.getStats()).toMatchObject({
+        active: 1,
+        activeNetwork: 1,
+        cloneDestinations: 1,
+      });
+
+      releaseRemoval();
+      for (let attempt = 0; attempt < 20 && coordinator.getStats().active !== 0; attempt += 1) {
+        await Promise.resolve();
+      }
+      expect(coordinator.getStats()).toMatchObject({
+        active: 0,
+        activeNetwork: 0,
+        cloneDestinations: 0,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('cancels clone descendants before removing the destination', { skip: process.platform === 'win32' }, async () => {
     const parent = await mkdtemp(path.join(tmpdir(), 'openchamber-clone-tree-'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
