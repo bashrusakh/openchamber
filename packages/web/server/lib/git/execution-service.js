@@ -200,6 +200,33 @@ const checkoutBranchMayUseNetwork = async (raw, directory, branchName, signal) =
     return false;
   }
 
+  // The checkout service gives an existing local branch precedence over a
+  // remote-looking name. Prove that branch exists before choosing a
+  // non-network lease; when it does not, a remote can be added after this
+  // admission probe and the service may fetch it, so the conservative answer
+  // is to reserve common/network capacity up front.
+  let localBranchExists = null;
+  if (raw.createGit instanceof Function) {
+    try {
+      const git = await raw.createGit(directory, {
+        envOverrides: GIT_READ_ONLY_ENV,
+        ownedProcessTree: true,
+        signal,
+      });
+      await git.raw(['show-ref', '--verify', '--quiet', `refs/heads/${requested}`]);
+      localBranchExists = true;
+    } catch (error) {
+      if (String(error?.code || '') === '1' || Number(error?.code) === 1) {
+        localBranchExists = false;
+      } else {
+        // A failed local-ref probe is not evidence that the checkout is local.
+        // Admit it as network work so a later remote lookup cannot fetch under
+        // a worktree-only lease.
+        localBranchExists = false;
+      }
+    }
+  }
+
   const remoteRef = requested.replace(/^refs\/remotes\//, '').replace(/^remotes\//, '');
   const remoteName = remoteRef.split('/', 1)[0];
   const localBranch = remoteRef.slice(remoteName.length + 1);
@@ -209,7 +236,7 @@ const checkoutBranchMayUseNetwork = async (raw, directory, branchName, signal) =
 
   const explicitRemoteRef = remoteRef !== requested;
   if (!raw.getRemotes) {
-    return true;
+    return localBranchExists === true ? false : true;
   }
 
   let configuredRemote = explicitRemoteRef;
@@ -222,16 +249,18 @@ const checkoutBranchMayUseNetwork = async (raw, directory, branchName, signal) =
     return true;
   }
 
-  if (!configuredRemote) {
-    return false;
+  if (configuredRemote) {
+    // checkoutBranch prefers a local branch, including one whose name contains
+    // slashes, before it considers a remote-tracking ref. Keep a configured
+    // remote network-coordinated anyway: the local ref can disappear between
+    // this probe and the checkout, after which the service may fetch.
+    return true;
   }
 
-  // checkoutBranch prefers a local branch, including one whose name contains
-  // slashes, before it considers a remote-tracking ref. Do not probe that
-  // local ref here: it can disappear before the checkout is admitted, after
-  // which the service may fetch or update shared refs. A configured remote
-  // therefore keeps this potentially remote checkout network-coordinated.
-  return true;
+  // Without a configured remote, a confirmed local branch is safe to keep in
+  // worktree admission. If no local ref was confirmed, a remote can be added
+  // before the service's own resolution and make the checkout fetch-capable.
+  return localBranchExists === true ? false : true;
 };
 
 const checkoutBranchClassification = async (

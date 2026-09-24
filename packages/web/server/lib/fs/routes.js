@@ -9,6 +9,10 @@ import {
   killProcessTree,
   withProcessTreeOwnership,
 } from '../git/process-tree.js';
+import {
+  chainGitProcessCleanupReconciliation,
+  getGitProcessCleanupReconciliation,
+} from '../git/execution-errors.js';
 
 const EXEC_JOB_TTL_MS = 30 * 60 * 1000;
 const OUTSIDE_FILE_GRANT_TTL_MS = 10 * 60 * 1000;
@@ -1015,14 +1019,24 @@ export const registerFsRoutes = (app, dependencies) => {
 
           return respond(() => res.json({ success: true, path: resolvedDestination, output }));
         } catch (error) {
+          const cleanupBlocked = isProcessTreeCleanupBlocked(error);
           try {
             if (destinationOwned) {
-              if (!isProcessTreeCleanupBlocked(error)) {
+              if (!cleanupBlocked) {
                 await Promise.resolve(fsPromises.rm?.(resolvedDestination, { recursive: true, force: true })).catch(() => {});
+              } else {
+                const reconciliation = getGitProcessCleanupReconciliation(error);
+                if (reconciliation) {
+                  error.cleanupReconciliation = chainGitProcessCleanupReconciliation(
+                    reconciliation,
+                    () => Promise.resolve(fsPromises.rm?.(resolvedDestination, { recursive: true, force: true }))
+                      .catch(() => undefined),
+                  );
+                }
               }
             }
           } finally {
-            if (!isProcessTreeCleanupBlocked(error)) lease.releaseNetwork();
+            if (!cleanupBlocked) lease.releaseNetwork();
           }
           throw error;
         }

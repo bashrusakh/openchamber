@@ -1431,8 +1431,10 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       }
 
       const result = await getCommitFiles(directory, hash, { signal: requestAbort.signal });
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json(result);
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       console.error('Failed to get commit files:', error);
       res.status(500).json({ error: error.message || 'Failed to get commit files' });
     } finally {
@@ -1455,8 +1457,10 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
         contextLines: Number.isFinite(context) ? context : 3,
         signal: requestAbort.signal,
       });
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json({ diff });
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.status(500).json({ error: error.message || 'Failed to get commit diff' });
     } finally {
       requestAbort.cleanup();
@@ -1485,8 +1489,10 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       const result = await getCommitFileDiff(directory, hash, filePath, isBinary, {
         signal: requestAbort.signal,
       });
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json(result);
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       console.error('Failed to get commit file diff:', error);
       res.status(500).json({ error: error.message || 'Failed to get commit file diff' });
     } finally {

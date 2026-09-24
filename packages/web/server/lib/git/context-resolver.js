@@ -4,6 +4,8 @@ import path from 'node:path';
 
 import {
   copyGitProcessMetadata,
+  getGitProcessCleanupReconciliation,
+  isGitProcessCleanupBlocked,
   GitExecutionCancelledError,
   GitExecutionOverloadedError,
 } from './execution-errors.js';
@@ -239,6 +241,22 @@ const abortError = (signal) => new GitExecutionCancelledError(
   { reason: signal?.reason },
 );
 
+const cancellationErrorWithProcessMetadata = (signal, source) => {
+  const cancellation = abortError(signal);
+  const code = cancellation.code;
+  copyGitProcessMetadata(cancellation, source);
+  cancellation.code = code;
+  return cancellation;
+};
+
+const waitForProcessCleanup = async (value) => {
+  const reconciliation = getGitProcessCleanupReconciliation(value);
+  if (!reconciliation) {
+    return;
+  }
+  await Promise.resolve(reconciliation.promise).catch(() => undefined);
+};
+
 const createQueue = (concurrency, maxPending) => {
   const pending = [];
   let active = 0;
@@ -401,15 +419,37 @@ export class GitContextResolver {
   async discover(directory, requestedDirectory, signal) {
     let result;
     try {
+      const runDiscovery = async () => {
+        try {
+          const value = await this.runGit(
+            directory,
+            ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'],
+            { signal },
+          );
+          const normalized = normalizeCommandResult(value);
+          if (isGitProcessCleanupBlocked(normalized)) {
+            await waitForProcessCleanup(normalized);
+          }
+          return normalized;
+        } catch (error) {
+          if (isGitProcessCleanupBlocked(error)) {
+            await waitForProcessCleanup(error);
+          }
+          throw error;
+        }
+      };
       result = normalizeCommandResult(await this.queue.enqueue(
-        () => this.runGit(
-          directory,
-          ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'],
-          { signal },
-        ),
+        runDiscovery,
         signal,
       ));
     } catch (error) {
+      if (isGitProcessCleanupBlocked(error)) {
+        const cancellation = signal?.aborted
+          ? cancellationErrorWithProcessMetadata(signal, error)
+          : createDiscoveryError(error, directory);
+        await waitForProcessCleanup(cancellation);
+        throw cancellation;
+      }
       if (signal?.aborted) {
         throw abortError(signal);
       }
@@ -422,13 +462,23 @@ export class GitContextResolver {
       throw createDiscoveryError(error, directory);
     }
     if (signal?.aborted) {
-      throw abortError(signal);
+      const cancellation = isGitProcessCleanupBlocked(result)
+        ? cancellationErrorWithProcessMetadata(signal, result)
+        : abortError(signal);
+      if (isGitProcessCleanupBlocked(result)) {
+        await waitForProcessCleanup(cancellation);
+      }
+      throw cancellation;
     }
     if (!result.success) {
       if (isConfirmedNonRepository(result)) {
         return { isRepository: false, requestedDirectory, reason: 'not-a-repository' };
       }
-      throw createDiscoveryError(result, directory);
+      const error = createDiscoveryError(result, directory);
+      if (isGitProcessCleanupBlocked(result)) {
+        await waitForProcessCleanup(error);
+      }
+      throw error;
     }
 
     const lines = result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -513,6 +563,8 @@ export class GitContextResolver {
       controller,
       consumers: 0,
       settled: false,
+      cleanupBlocked: false,
+      cleanupReconciliation: null,
       abortScheduled: false,
       abortTimer: undefined,
       timer: undefined,
@@ -521,6 +573,13 @@ export class GitContextResolver {
     const key = canonicalPathKey(canonicalDirectory, this.platform);
     this.inFlightContexts.add(key);
     entry.promise = this.discover(canonicalDirectory, requestedDirectory, controller.signal)
+      .catch((error) => {
+        if (isGitProcessCleanupBlocked(error)) {
+          entry.cleanupBlocked = true;
+          entry.cleanupReconciliation = getGitProcessCleanupReconciliation(error);
+        }
+        throw error;
+      })
       .finally(() => {
         entry.settled = true;
         if (entry.timer !== undefined) {
@@ -530,6 +589,12 @@ export class GitContextResolver {
         if (entry.abortTimer !== undefined) {
           this.clearTimer(entry.abortTimer);
           entry.abortTimer = undefined;
+        }
+        // A process-tree failure without a reconciliation promise is an
+        // explicit cleanup-blocked state. Keep the source entry visible so a
+        // retry cannot start another Git process while ownership is unknown.
+        if (entry.cleanupBlocked && !entry.cleanupReconciliation) {
+          return;
         }
         this.inFlightContexts.delete(key);
         if (this.inFlightAliases.get(key) === entry) {

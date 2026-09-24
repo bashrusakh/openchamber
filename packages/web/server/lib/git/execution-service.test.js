@@ -466,6 +466,12 @@ describe('Git execution service', () => {
     const service = createGitExecutionService({
       raw: {
         checkoutBranch: async () => 'checked-out',
+        createGit: async () => ({
+          raw: async (args) => {
+            if (args.at(-1) === 'refs/heads/feature/topic') return 'local-ref';
+            throw Object.assign(new Error('local branch is absent'), { code: 1 });
+          },
+        }),
         getRemotes: async () => [{ name: 'origin' }],
       },
       coordinator: {
@@ -654,6 +660,36 @@ describe('Git execution service', () => {
         network: true,
       }),
     ]);
+  });
+
+  it('admits a slash checkout to network work when a remote can appear after preflight', async () => {
+    const coordinator = createGitExecutionCoordinator({
+      globalConcurrency: 1,
+      globalNetworkConcurrency: 1,
+    });
+    let remoteAppeared = false;
+    const service = createGitExecutionService({
+      raw: {
+        createGit: async () => ({
+          raw: async () => {
+            throw Object.assign(new Error('local branch is absent'), { code: 1 });
+          },
+        }),
+        getRemotes: async () => {
+          remoteAppeared = true;
+          return [];
+        },
+        checkoutBranch: async () => {
+          expect(remoteAppeared).toBe(true);
+          expect(coordinator.getStats().activeNetwork).toBe(1);
+          return 'checked-out';
+        },
+      },
+      coordinator,
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+
+    await expect(service.checkoutBranch('/repo', 'feature/topic')).resolves.toBe('checked-out');
   });
 
   it('resolves integration operations from their repository input', async () => {
