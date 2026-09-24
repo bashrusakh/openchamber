@@ -25,6 +25,11 @@ requests keep one source call for concurrent polling while each HTTP request
 can cancel its own waiter. Cached reads remain ordinary successful responses
 and do not start new work.
 
+PR-status permission checks share one authenticated-user lookup per route-runtime
+generation. Each request owns its waiter signal, so one disconnect does not
+abort another request; a source is aborted only after its last waiter leaves,
+and a stale source cannot clear a newer generation.
+
 ## Public exports
 
 ### Auth

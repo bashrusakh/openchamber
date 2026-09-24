@@ -191,4 +191,111 @@ describe('GitHub PR status route cancellation', () => {
     await pending;
     expect(response.body).toBeNull();
   });
+
+  it('shares authenticated-user lookup across PR-status waiters without sharing cancellation', async () => {
+    mocks.getGitHubAuth.mockReturnValue({});
+    let resolveUser;
+    let userSignal;
+    const getAuthenticated = vi.fn((options) => {
+      userSignal = options.signal;
+      return new Promise((resolve) => { resolveUser = resolve; });
+    });
+    const octokit = {
+      rest: {
+        users: { getAuthenticated },
+        pulls: {
+          get: vi.fn(async () => ({ data: { number: 7, state: 'open', head: {}, base: {} } })),
+        },
+        repos: {
+          getCollaboratorPermissionLevel: vi.fn(async () => ({ data: { permission: 'write' } })),
+        },
+      },
+    };
+    mocks.getOctokitOrNull.mockReturnValue(octokit);
+
+    const { app, getRoute } = createRouteRegistry();
+    registerGitHubRoutes(app, {
+      getGitHubLibraries: async () => mocks,
+      resolveGitHubPrStatus: mocks.resolveGitHubPrStatus,
+    });
+    const handler = getRoute('GET', '/api/github/pr/status');
+    const firstRequest = createRequest({ directory: '/repo', branch: 'first', force: 'true' });
+    const secondRequest = createRequest({ directory: '/repo', branch: 'second', force: 'true' });
+    const firstResponse = createResponse();
+    const secondResponse = createResponse();
+    const first = handler(firstRequest, firstResponse);
+    const second = handler(secondRequest, secondResponse);
+
+    for (let attempt = 0; attempt < 20 && !userSignal; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(getAuthenticated).toHaveBeenCalledTimes(1);
+    firstRequest.emit('aborted');
+    await first;
+    expect(firstResponse.body).toBeNull();
+    expect(userSignal.aborted).toBe(false);
+
+    resolveUser({ data: { login: 'me' } });
+    await second;
+    expect(secondResponse.body).toMatchObject({ connected: true, canMerge: true });
+    expect(getAuthenticated).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let an aborted auth source clear a newer PR-status generation', async () => {
+    mocks.getGitHubAuth.mockReturnValue({});
+    const userRequests = [];
+    const octokit = {
+      rest: {
+        users: {
+          getAuthenticated: vi.fn((options) => new Promise((resolve, reject) => {
+            userRequests.push({ options, resolve, reject });
+          })),
+        },
+        pulls: {
+          get: vi.fn(async () => ({ data: { number: 7, state: 'open', head: {}, base: {} } })),
+        },
+        repos: {
+          getCollaboratorPermissionLevel: vi.fn(async () => ({ data: { permission: 'write' } })),
+        },
+      },
+    };
+    mocks.getOctokitOrNull.mockReturnValue(octokit);
+
+    const { app, getRoute } = createRouteRegistry();
+    registerGitHubRoutes(app, {
+      getGitHubLibraries: async () => mocks,
+      resolveGitHubPrStatus: mocks.resolveGitHubPrStatus,
+    });
+    const handler = getRoute('GET', '/api/github/pr/status');
+    const firstRequest = createRequest({ directory: '/repo', branch: 'first', force: 'true' });
+    const firstResponse = createResponse();
+    const first = handler(firstRequest, firstResponse);
+    for (let attempt = 0; attempt < 20 && userRequests.length < 1; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    firstRequest.emit('aborted');
+    await first;
+    expect(userRequests[0].options.signal.aborted).toBe(true);
+
+    const secondRequest = createRequest({ directory: '/repo', branch: 'second', force: 'true' });
+    const secondResponse = createResponse();
+    const second = handler(secondRequest, secondResponse);
+    for (let attempt = 0; attempt < 20 && userRequests.length < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(userRequests).toHaveLength(2);
+
+    userRequests[0].reject(new Error('stale source finished after reset'));
+    const thirdRequest = createRequest({ directory: '/repo', branch: 'third', force: 'true' });
+    const thirdResponse = createResponse();
+    const third = handler(thirdRequest, thirdResponse);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(userRequests).toHaveLength(2);
+
+    userRequests[1].resolve({ data: { login: 'me' } });
+    await Promise.all([second, third]);
+    expect(secondResponse.body).toMatchObject({ connected: true, canMerge: true });
+    expect(thirdResponse.body).toMatchObject({ connected: true, canMerge: true });
+  });
 });
