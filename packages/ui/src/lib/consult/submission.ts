@@ -7,6 +7,7 @@ import {
   createMessageQueueTarget,
   useMessageQueueStore,
   type ConsultDispatchOutcome,
+  type ConsultRemoveOutcome,
   type ConsultResolveOutcome,
   type MessageQueueTarget,
   type QueuedContextPart,
@@ -325,6 +326,19 @@ export type ConsultSubmissionQueue = {
    * turn already landed. Never sends; non-2xx throws.
    */
   resolveConsultItem: (target: MessageQueueTarget, messageId: string) => Promise<ConsultResolveOutcome>;
+  /**
+   * Ownership-safe conditional consult remove (invariant I13): the server
+   * removes only when this owner still holds exactly this reservation and no
+   * foreign attempt witness stands. A refusal is a structured
+   * `removed: false` outcome with zero mutation — never a throw; only a
+   * malformed/unexpected failure (non-2xx) throws.
+   */
+  removeConsultItem: (
+    target: MessageQueueTarget,
+    messageId: string,
+    owner?: string,
+    attemptId?: string,
+  ) => Promise<ConsultRemoveOutcome>;
   getQueueForTarget: (target: MessageQueueTarget) => readonly QueuedMessage[];
   /** `owner` scopes the hold so it never clears another feature's hold. */
   setServerHold: (sessionId: string, held: boolean, owner?: string) => Promise<void>;
@@ -528,43 +542,6 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     return { status: 'delivered-raw', runId: capture.runId, queueItemRestored: false };
   };
 
-  /**
-   * A refused or failed consultation after the claim does not re-queue the
-   * message: the consult item is removed (the caller restores the composer
-   * from its own captured payload on refused/failed), and the hold is
-   * released so the sweep never has to revert a stranded reservation.
-   */
-  const settleWithoutDispatch = async (
-    capture: SubmissionCapture,
-    target: MessageQueueTarget,
-    itemId: string,
-    error: string,
-    refusal: ConsultationRefusedError | null,
-  ): Promise<ConsultSubmissionResult> => {
-    const { parentSessionId, runId } = capture;
-    // A cancel that raced the failure wins: the claimed item is never put
-    // back for normal delivery, and the caller restores the composer.
-    if (capture.cancelled || deps.runs.currentPhase(parentSessionId, runId) === 'cancelled') {
-      if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
-      await releaseHold(capture);
-      return finishCancelledRun(capture);
-    }
-    if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
-    await releaseHold(capture);
-    deps.runs.finish(parentSessionId, runId, { phase: 'failed', error });
-    if (refusal) {
-      return {
-        status: 'refused',
-        runId,
-        code: refusal.code,
-        error,
-        rejections: refusal.rejections,
-        queueItemRestored: false,
-      };
-    }
-    return { status: 'failed', runId, error, queueItemRestored: false };
-  };
-
   /** Stop the hold heartbeat; the hold itself may still be live server-side. */
   const stopHoldHeartbeat = (capture: SubmissionCapture): void => {
     capture.heartbeatStop?.();
@@ -654,6 +631,230 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     capture.heartbeatStop = schedule(() => {
       void reassertHold(capture);
     }, intervalMs);
+  };
+
+  /**
+   * The reconcile round trip at every post-claim destructive exit (invariant
+   * I13). Reclaim exhaustion, an unclassifiable re-claim failure, and a
+   * refused guarded remove are all NOT proofs of non-delivery: another owner
+   * may be mid-dispatch or may have landed the turn. The never-prompting
+   * resolve route decides, and nothing is removed by this client on any
+   * answer.
+   *
+   * Hold-release (🟠 round-15): the `dispatched` branch releases this run's
+   * own owner-scoped hold — the item is gone server-side, so there is no
+   * reservation left to protect and releasing cannot touch another owner's
+   * lease; keeping it would stall the queue until the TTL. `resumable` and
+   * `not-found` release it for the same reason: the server has proven the
+   * item unclaimed (stamped recoverable) or gone, so re-claim or manual
+   * removal is the intended recovery, never a duplicate send. Every
+   * undecided answer keeps the server-owned lease exactly like
+   * `settleUncertain`.
+   */
+  const reconcileViaResolve = async (
+    capture: SubmissionCapture,
+    target: MessageQueueTarget,
+    itemId: string,
+    failurePrefix: string,
+  ): Promise<ConsultSubmissionResult> => {
+    let resolution: ConsultResolveOutcome;
+    try {
+      resolution = await deps.queue.resolveConsultItem(target, itemId);
+    } catch (error) {
+      // The resolve could not be read, so it proved nothing: the previous
+      // delivery is undecided and nothing may be cleaned up or re-sent.
+      return settleUncertainRun(
+        capture,
+        `${failurePrefix}A reconcile check could not be read (${error instanceof Error ? error.message : String(error)}); the delivery is undecided and the message stays reserved.`,
+      );
+    }
+    if (resolution.status === 'dispatched') {
+      // The acting turn landed through another dispatch; resolve removed
+      // the item exactly once. Neutral delivered result — never a re-send,
+      // never a composer restore.
+      await releaseHold(capture);
+      deps.runs.finish(capture.parentSessionId, capture.runId, { phase: 'failed', error: RESOLVED_DELIVERED_MESSAGE });
+      return { status: 'delivered', runId: capture.runId, resolvedDelivered: true, via: 'dispatch', queueItemRestored: false };
+    }
+    if (resolution.status === 'resumable') {
+      // Server-proved never-attempted (witness absent, unclaimed, not
+      // sending; the resolve stamps the item recoverable): reconcile-keep.
+      // Nothing is removed and the composer is never restored — the
+      // resolve→remove race is exactly what this must avoid. This run's
+      // own stale hold releases (never a foreign lease).
+      return settleUncertainKeepHoldReleased(capture, RECONCILE_RESUMABLE_MESSAGE);
+    }
+    if (resolution.status === 'not-found') {
+      // The item left the queue without this run dispatching it: the
+      // established item-gone convention. The stale own hold releases
+      // (nothing left to protect); `delivered-raw` never restores and never
+      // re-sends.
+      await releaseHold(capture);
+      return finishDeliveredRawRun(capture);
+    }
+    return settleUncertainRun(
+      capture,
+      `${failurePrefix}A reconcile check answered ${resolution.status}; the delivery is undecided and the message stays reserved.`,
+    );
+  };
+
+  /**
+   * The dispatch outcome is unconfirmed: the message may already be on its
+   * way, so the capture is never restored and the item is left to the
+   * server. The heartbeat stops, but the hold is deliberately NOT released:
+   * the server-owned lease (extended to the max TTL when the dispatch was
+   * entered) owns it until the server resolves or it expires. Releasing
+   * here would clear the owner hold that `hasActiveConsultReservation`
+   * needs, so the proxy prompt gate would stop protecting a parent whose
+   * send may still be running. The item + claim stay server-side and are
+   * never sent raw; manual removal clears the claim's own hold atomically.
+   */
+  const settleUncertainRun = (capture: SubmissionCapture, error: string): ConsultSubmissionResult => {
+    stopHoldHeartbeat(capture);
+    capture.holdRelease = Promise.resolve();
+    deps.runs.finish(capture.parentSessionId, capture.runId, { phase: 'failed', error });
+    return { status: 'failed', runId: capture.runId, error, queueItemRestored: false, uncertain: true };
+  };
+
+  /**
+   * The uncertain settle whose hold IS released: the server has proven the
+   * item never-attempted and recoverable, so this run's own reservation has
+   * nothing left to protect. Releasing it unblocks the queue (a fresh owner
+   * can claim the recoverable head) without touching any other owner's
+   * lease. Never removes, never restores the composer.
+   */
+  const settleUncertainKeepHoldReleased = (capture: SubmissionCapture, error: string): ConsultSubmissionResult => {
+    stopHoldHeartbeat(capture);
+    releaseHold(capture);
+    deps.runs.finish(capture.parentSessionId, capture.runId, { phase: 'failed', error });
+    return { status: 'failed', runId: capture.runId, error, queueItemRestored: false, uncertain: true };
+  };
+
+  /**
+   * A post-claim destructive exit (payload write, terminal dispatch failure)
+   * goes through the ownership guard instead of a blind removal (invariant
+   * I13): this run may no longer be the owner, and a foreign witness may
+   * stand. The guarded remove settles destructively only on a proven
+   * `removed` (or an idempotent `not-found` — the item is gone either way);
+   * every refusal reconciles instead of destroying the evidence another
+   * client's resolve needs. The composer restores only on a proven removal,
+   * exactly like the pre-15 destructive settle.
+   */
+
+  /**
+   * A post-claim CANCEL goes through the ownership guard instead of a blind
+   * removal (invariant I13): this run may no longer be the owner, and a
+   * foreign witness may stand. A cancel must never delete another owner's
+   * witnessed item: that would destroy the reconciliation evidence their
+   * resolve needs. On a proven removal (or the idempotent `not-found`) the
+   * cancel semantics are unchanged: release this run's own hold, record the
+   * cancelled run, and finish cancelled. On a refusal, or a remove transport
+   * failure, the run reconciles through `reconcileViaResolve` (uncertain-
+   * keep, no removal, no restore, no dispatch): the user's cancel intent
+   * cannot delete the item, and the reconcile outcome documents why it
+   * stays.
+   */
+  const settlePostClaimCancelled = async (
+    capture: SubmissionCapture,
+    target: MessageQueueTarget,
+    itemId: string,
+  ): Promise<ConsultSubmissionResult | void> => {
+    const { runId } = capture;
+    let removal: ConsultRemoveOutcome;
+    try {
+      removal = await deps.queue.removeConsultItem(target, itemId, consultHoldOwner(runId));
+    } catch (removalError) {
+      // The remove route itself failed: it proved nothing about delivery,
+      // so fail closed into the reconcile instead of guessing.
+      return reconcileViaResolve(
+        capture,
+        target,
+        itemId,
+        `The consultation was cancelled, but the guarded removal failed (${removalError instanceof Error ? removalError.message : String(removalError)}); `,
+      );
+    }
+    if (!removal.removed && removal.reason !== 'not-found') {
+      // The server refused this run's removal: the item belongs to another
+      // owner's live flow (or carries a foreign witness). Reconcile: the
+      // item stays queued and reserved, nothing is removed, and the composer
+      // is never restored.
+      return reconcileViaResolve(capture, target, itemId, 'The consultation was cancelled, but this run no longer owns the consult message; ');
+    }
+    await releaseHold(capture);
+  };
+
+  /**
+   * Run the guarded cancel and settle the run with it. A proven removal (or
+   * the idempotent `not-found`) keeps the pre-15 cancel semantics; a refusal
+   * or a remove transport failure propagates the reconcile outcome
+   * (uncertain-keep, capture kept — `consultCaptureDisposition` restores
+   * only when the run did NOT end uncertain), so a cancel can never restore
+   * the composer while the item may be mid-dispatch under another owner.
+   */
+  const settlePostClaimCancelledRun = async (
+    capture: SubmissionCapture,
+    target: MessageQueueTarget,
+    itemId: string,
+    consultation?: ConsultationResult,
+  ): Promise<ConsultSubmissionResult> => {
+    const reconciled = await settlePostClaimCancelled(capture, target, itemId);
+    if (reconciled) return reconciled;
+    return finishCancelledRun(capture, consultation);
+  };
+
+  const settlePostClaimFailure = async (
+    capture: SubmissionCapture,
+    target: MessageQueueTarget,
+    itemId: string,
+    error: string,
+    refusal: ConsultationRefusedError | null = null,
+  ): Promise<ConsultSubmissionResult> => {
+    const { parentSessionId, runId: captureRunId } = capture;
+    // A cancel that raced the failure wins: the claimed item is never put
+    // back for normal delivery, and the caller restores the composer. The
+    // removal itself goes through the ownership guard (I13); a refusal
+    // reconciles instead of destroying another client's reconcile evidence.
+    if (capture.cancelled || deps.runs.currentPhase(parentSessionId, captureRunId) === 'cancelled') {
+      return settlePostClaimCancelledRun(capture, target, itemId);
+    }
+    let removal: ConsultRemoveOutcome;
+    try {
+      removal = await deps.queue.removeConsultItem(target, itemId, consultHoldOwner(captureRunId));
+    } catch (removalError) {
+      // The remove route itself failed (a transport-level or unexpected
+      // failure): it proved nothing about delivery, so the run takes the
+      // reconcile path instead of guessing. Never restore, never re-send.
+      return reconcileViaResolve(
+        capture,
+        target,
+        itemId,
+        `${error} The guarded removal failed (${removalError instanceof Error ? removalError.message : String(removalError)}); `,
+      );
+    }
+    if (!removal.removed && removal.reason !== 'not-found') {
+      // The server refused this run's removal: the item is (or may be)
+      // another owner's live flow. Reconcile first — nothing is removed, the
+      // composer is never restored, no dispatch follows.
+      return reconcileViaResolve(capture, target, itemId, `${error} `);
+    }
+    // Proven removal (`removed: true`) or the idempotent `not-found` (the
+    // item already left the queue): the pre-15 destructive semantics are
+    // safe — release, plain failure, the caller restores the composer. The
+    // heartbeat stops so no later beat can land after the release.
+    stopHoldHeartbeat(capture);
+    await releaseHold(capture);
+    deps.runs.finish(parentSessionId, captureRunId, { phase: 'failed', error });
+    if (refusal) {
+      return {
+        status: 'refused',
+        runId: captureRunId,
+        code: refusal.code,
+        error,
+        rejections: refusal.rejections,
+        queueItemRestored: false,
+      };
+    }
+    return { status: 'failed', runId: captureRunId, error, queueItemRestored: false };
   };
 
   const waitForAdmission = async (
@@ -943,10 +1144,12 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
 
     if (capture.cancelled || deps.runs.currentPhase(parentSessionId, runId) === 'cancelled') {
       // Cancelled between admission and the fan-out: the item is claimed, so
-      // the sweep cannot revert it — remove it directly.
-      if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
-      await releaseHold(capture);
-      return finishCancelled();
+      // the removal goes through the ownership guard (I13) — the
+      // reservation may have been taken over, and a foreign witness may
+      // stand. The cancel intent is preserved: a proven removal cancels
+      // exactly as before; a refusal reconciles instead of destroying the
+      // evidence another client's resolve needs.
+      return settlePostClaimCancelledRun(capture, target, itemId);
     }
 
     return runClaimedConsult(input, target, capture, claimedItem);
@@ -1024,13 +1227,10 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         },
       });
     } catch (error) {
-      return settleWithoutDispatch(
-        capture,
-        target,
-        itemId,
-        `Could not start the consultation: ${error instanceof Error ? error.message : String(error)}`,
-        null,
-      );
+      // A start failure after the claim is a post-claim destructive exit:
+      // the guarded remove decides (invariant I13) — the reservation may
+      // have been taken over, and a foreign witness may stand.
+      return settlePostClaimFailure(capture, target, itemId, `Could not start the consultation: ${error instanceof Error ? error.message : String(error)}`);
     }
     capture.runtimeStarted = true;
     await reassertHold(capture);
@@ -1039,7 +1239,8 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     try {
       consultation = await handle.result;
     } catch (error) {
-      return settleWithoutDispatch(
+      // Same guarded exit for an advisor-transport failure after the claim.
+      return settlePostClaimFailure(
         capture,
         target,
         itemId,
@@ -1050,17 +1251,15 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
 
     if (!runtimeMatches(capture, deps)) return finishRuntimeChangedRun(capture, consultation);
     if (consultation.status === 'cancelled') {
-      // The claimed item must never survive a cancel: remove it so it cannot
-      // be dispatched later; a consult item is never delivered as a normal
-      // send.
-      if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
-      await releaseHold(capture);
-      return finishCancelledRun(capture, consultation);
+      // The claimed item must never survive a cancel as a raw-send candidate:
+      // the removal goes through the ownership guard (I13) so a foreign
+      // witness is never destroyed by this run's cancel. A proven removal
+      // cancels exactly as before; a refusal reconciles (the item stays
+      // queued and reserved for the owning client's own flow).
+      return settlePostClaimCancelledRun(capture, target, itemId, consultation);
     }
     if (capture.cancelled || deps.runs.currentPhase(parentSessionId, runId) === 'cancelled') {
-      if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
-      await releaseHold(capture);
-      return finishCancelledRun(capture, consultation);
+      return settlePostClaimCancelledRun(capture, target, itemId, consultation);
     }
 
     deps.runs.setPhase(parentSessionId, runId, 'settling');
@@ -1084,32 +1283,18 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     try {
       await deps.queue.setConsultItemPayload(target, itemId, consultHoldOwner(capture.runId), consultPayload);
     } catch (error) {
-      return settleWithoutDispatch(
-        capture,
-        target,
-        itemId,
-        `The consult payload could not be updated: ${error instanceof Error ? error.message : String(error)}`,
-        null,
-      );
+      // First payload write after the claim: the guarded remove decides
+      // (invariant I13) — this run may no longer be the owner, and a foreign
+      // witness may stand. Only a proven removal settles destructively; a
+      // refusal reconciles.
+      return settlePostClaimFailure(capture, target, itemId, `The consult payload could not be updated: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     /**
      * The dispatch outcome is unconfirmed: the message may already be on its
      * way, so the capture is never restored and the item is left to the
-     * server. The heartbeat stops, but the hold is deliberately NOT released:
-     * the server-owned lease (extended to the max TTL when the dispatch was
-     * entered) owns it until the server resolves or it expires. Releasing
-     * here would clear the owner hold that `hasActiveConsultReservation`
-     * needs, so the proxy prompt gate would stop protecting a parent whose
-     * send may still be running. The item + claim stay server-side and are
-     * never sent raw; manual removal clears the claim's own hold atomically.
+     * server (shared `settleUncertainRun`).
      */
-    const settleUncertain = async (error: string): Promise<ConsultSubmissionResult> => {
-      stopHoldHeartbeat(capture);
-      capture.holdRelease = Promise.resolve();
-      deps.runs.finish(parentSessionId, runId, { phase: 'failed', error });
-      return { status: 'failed', runId, error, queueItemRestored: false, uncertain: true };
-    };
 
     // The acting turn goes through the consult item's own dispatch route: the
     // server verifies the claim, waits for idleness, sends the item with its
@@ -1118,52 +1303,6 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
     // claim is re-established and the payload re-set, and a definite failure
     // removes the item while an ambiguous one keeps it reserved.
     let reclaims = 0;
-
-    /**
-     * The reconcile round trip at the loop's destructive exits. Reclaim
-     * exhaustion and an unclassifiable re-claim failure are NOT proofs of
-     * non-delivery: another owner may be mid-dispatch or may have landed the
-     * turn. The never-prompting resolve route decides, and nothing is removed
-     * by this client on any answer.
-     */
-    const settleWithResolve = async (failurePrefix: string): Promise<ConsultSubmissionResult> => {
-      let resolution: ConsultResolveOutcome;
-      try {
-        resolution = await deps.queue.resolveConsultItem(target, itemId);
-      } catch (error) {
-        // The resolve could not be read, so it proved nothing: the previous
-        // delivery is undecided and nothing may be cleaned up or re-sent.
-        return settleUncertain(
-          `${failurePrefix}A reconcile check could not be read (${error instanceof Error ? error.message : String(error)}); the delivery is undecided and the message stays reserved.`,
-        );
-      }
-      if (resolution.status === 'dispatched') {
-        // The acting turn landed through another dispatch; resolve removed
-        // the item exactly once. This run's own owner-scoped hold has no
-        // reservation left to protect (and cannot touch another owner's
-        // lease), so it is released instead of stalling the queue until the
-        // TTL. Neutral delivered result — never a re-send, never a restore.
-        await releaseHold(capture);
-        deps.runs.finish(parentSessionId, runId, { phase: 'failed', error: RESOLVED_DELIVERED_MESSAGE });
-        return { status: 'delivered', runId, resolvedDelivered: true, via: 'dispatch', queueItemRestored: false };
-      }
-      if (resolution.status === 'resumable') {
-        // Server-proved never-attempted (witness absent, unclaimed, not
-        // sending; the resolve stamps the item recoverable): reconcile-keep.
-        // Nothing is removed and the composer is never restored — the
-        // resolve→remove race is exactly what this must avoid.
-        return settleUncertain(RECONCILE_RESUMABLE_MESSAGE);
-      }
-      if (resolution.status === 'not-found') {
-        // The item left the queue without this run dispatching it: the
-        // established item-gone convention (its hold, if any, lapses into
-        // the sweep; nothing to remove and nothing to re-send).
-        return finishDeliveredRawRun(capture);
-      }
-      return settleUncertain(
-        `${failurePrefix}A reconcile check answered ${resolution.status}; the delivery is undecided and the message stays reserved.`,
-      );
-    };
 
     for (;;) {
       // A cancel recorded while a dispatch request was in flight is applied
@@ -1177,15 +1316,15 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         }
       }
       if (capture.cancelled || deps.runs.currentPhase(parentSessionId, runId) === 'cancelled') {
-        if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
-        await releaseHold(capture);
-        return finishCancelledRun(capture, consultation);
+        // A cancel after the claim removes through the ownership guard (I13):
+        // the reservation may have been taken over, and a foreign witness may
+        // stand. A proven removal cancels exactly as before; a refusal
+        // reconciles (uncertain-keep, no removal, no restore, no dispatch).
+        return settlePostClaimCancelledRun(capture, target, itemId, consultation);
       }
       if (!runtimeMatches(capture, deps)) return finishRuntimeChangedRun(capture, consultation);
       if (deps.isAutoReviewRunning(parentSessionId)) {
-        if (runtimeMatches(capture, deps)) deps.queue.removeFromQueue(target, itemId);
-        await releaseHold(capture);
-        return finishCancelledRun(capture, consultation);
+        return settlePostClaimCancelledRun(capture, target, itemId, consultation);
       }
 
       let outcome: ConsultDispatchOutcome;
@@ -1196,7 +1335,8 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         outcome = await deps.queue.dispatchConsultItem(target, itemId, consultHoldOwner(capture.runId));
       } catch (error) {
         capture.dispatching = false;
-        return settleUncertain(
+        return settleUncertainRun(
+          capture,
           `The acting message could not be sent: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -1214,7 +1354,7 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
           // Reclaim exhaustion is not a proof of non-delivery: another owner
           // may hold the item or may have landed the turn. One reconcile
           // round trip decides; no dispatch follows exhaustion.
-          return settleWithResolve('The consult reservation could not be re-established. ');
+          return reconcileViaResolve(capture, target, itemId, 'The consult reservation could not be re-established. ');
         }
         reclaims += 1;
         try {
@@ -1225,11 +1365,14 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
           // outcome, not a failure to clean up: the item stays queued and
           // reserved, nothing is removed, and the composer is never restored.
           if (/attempt-recorded/.test(error instanceof Error ? error.message : String(error))) {
-            return settleUncertain(ATTEMPT_RECORDED_MESSAGE);
+            return settleUncertainRun(capture, ATTEMPT_RECORDED_MESSAGE);
           }
           // Every other re-claim failure is equally unproven: the same
           // resolve-first mapping decides instead of a destructive settle.
-          return settleWithResolve(
+          return reconcileViaResolve(
+            capture,
+            target,
+            itemId,
             `The consult reservation could not be re-established (${error instanceof Error ? error.message : String(error)}). `,
           );
         }
@@ -1237,18 +1380,17 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         try {
           await deps.queue.setConsultItemPayload(target, itemId, consultHoldOwner(capture.runId), consultPayload);
         } catch (error) {
-          return settleWithoutDispatch(
-            capture,
-            target,
-            itemId,
-            `The consult payload could not be updated: ${error instanceof Error ? error.message : String(error)}`,
-            null,
-          );
+          // A failed payload re-set is a post-claim destructive exit: the
+          // guarded remove decides (invariant I13) — this run may no longer
+          // be the owner, and a foreign witness may stand. Only a proven
+          // removal settles destructively; a refusal reconciles.
+          return settlePostClaimFailure(capture, target, itemId, `The consult payload could not be updated: ${error instanceof Error ? error.message : String(error)}`);
         }
         continue;
       }
       if (outcome.status === 'sending') {
-        return settleUncertain(
+        return settleUncertainRun(
+          capture,
           'Another dispatch is already in flight for this consult message, so the outcome is unconfirmed; check the session before retrying.',
         );
       }
@@ -1257,29 +1399,34 @@ export const createConsultSubmission = (deps: ConsultSubmissionDeps) => {
         // may exist, and a same-id re-issue could replace a turn after a
         // staged revert, so nothing is retried. The item and the claim stay
         // server-side; only a resolve (or manual removal) can settle it.
-        return settleUncertain(
+        return settleUncertainRun(
+          capture,
           'The server reports a dispatch attempt already exists for this consult message, so the outcome is unconfirmed; the message stays reserved and is never re-sent. Check the session, or remove the queued consult item.',
         );
       }
       if (outcome.status === 'attempt-write-failed') {
         // Fail-closed: the server could not record the attempt durably, so it
         // issued no request at all. The claim is still live server-side.
-        return settleUncertain(
+        return settleUncertainRun(
+          capture,
           'The server could not record the dispatch attempt, so nothing was sent; the message stays reserved. Check the server log before retrying.',
         );
       }
       if (outcome.status === 'send-failed' && outcome.delivered === 'unknown') {
-        return settleUncertain(
+        return settleUncertainRun(
+          capture,
           'The consult message could not be confirmed as sent. It stays in the session queue and keeps the session held until the server lease resolves or expires; it will never be sent without a new consultation. Removing the queued consult item releases the session.',
         );
       }
       // not-found / not-consult / send-failed 'no': the message was not sent
       // and (where the server removed it) is no longer queued — a definite
-      // failure the caller restores.
+      // failure, but this run has ever held a claim, so the removal goes
+      // through the ownership guard (I13): a refusal reconciles instead of
+      // destroying evidence another client's resolve needs.
       const detail = outcome.status === 'send-failed'
         ? `the server reported it was not delivered (${outcome.delivered})`
         : `the server answered ${outcome.status}`;
-      return settleWithoutDispatch(capture, target, itemId, `The acting message could not be sent: ${detail}.`, null);
+      return settlePostClaimFailure(capture, target, itemId, `The acting message could not be sent: ${detail}.`);
     }
 
     // The server already removed the item and released this owner's hold on a
@@ -1671,6 +1818,8 @@ const defaultDeps = (): ConsultSubmissionDeps => ({
       useMessageQueueStore.getState().dispatchConsultItem(target, messageId, owner),
     resolveConsultItem: (target, messageId) =>
       useMessageQueueStore.getState().resolveConsultItem(target, messageId),
+    removeConsultItem: (target, messageId, owner, attemptId) =>
+      useMessageQueueStore.getState().removeConsultItem(target, messageId, owner, attemptId),
     getQueueForTarget: (target) => useMessageQueueStore.getState().getQueueForTarget(target),
     setServerHold: (sessionId, held, owner) => useMessageQueueStore.getState().setServerHold(sessionId, held, owner),
   },

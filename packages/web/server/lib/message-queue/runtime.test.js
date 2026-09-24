@@ -2235,6 +2235,238 @@ describe('message queue runtime', () => {
     });
   });
 
+  describe('removeConsult (ownership-safe conditional remove)', () => {
+    const consultItem = (overrides = {}) => item({ kind: 'consult', consult: { system: 'be terse' }, ...overrides });
+
+    it('removes when the owner matches and no witness stands, exactly like remove', async () => {
+      const { runtime } = createRuntime();
+      runtime.start();
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      const before = runtime.snapshot();
+
+      const result = await runtime.removeConsult(SESSION, itemId, { owner: 'consult:run-1' });
+      expect(result).toEqual({ removed: true });
+      // Same mutation shape as remove(): the revision moved and the removal
+      // broadcast carries the emptied session.
+      expect(runtime.snapshot().revision).toBeGreaterThan(before.revision);
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      // The claim owner's hold was released with the item.
+      expect(runtime.setHold(SESSION, false, undefined, 'consult:run-1')).toMatchObject({ held: false });
+    });
+
+    it('refuses a foreign owner with zero mutation: no commit, no revision bump, no broadcast', async () => {
+      const { runtime } = createRuntime();
+      runtime.start();
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      const before = runtime.snapshot();
+
+      const result = await runtime.removeConsult(SESSION, itemId, { owner: 'consult:other' });
+      expect(result).toEqual({ removed: false, reason: 'not-owner' });
+      // Zero mutation: same revision, same queue, no broadcast at all.
+      expect(runtime.snapshot()).toEqual(before);
+      expect(runtime.sessionSnapshot(SESSION).items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      expect(runtime.hasActiveConsultReservation(SESSION)).toBe(true);
+    });
+
+    it('refuses on a foreign witness even when the owner matches, keeping the witness intact', async () => {
+      const dataDir = makeDataDir();
+      const attempt = { attemptId: 'att_foreign01', messageId: 'msg_foreign01', at: 1_500 };
+      seedQueueFile(dataDir, {
+        version: 2,
+        items: [storedConsultItem({ consult: { system: 'be terse', attempt } })],
+      });
+      const { runtime } = createRuntime({ dataDir });
+      runtime.start();
+      await runtime.load();
+      const before = runtime.snapshot();
+
+      // The item is unclaimed in the file: the owner half passes, the witness
+      // half refuses — a foreign attempt may have been sent already.
+      const result = await runtime.removeConsult(SESSION, 'queued-legacy-1', { owner: 'consult:run-1' });
+      expect(result).toEqual({ removed: false, reason: 'witnessed' });
+      expect(runtime.snapshot()).toEqual(before);
+      expect(readStoredAttempt(dataDir, 'queued-legacy-1')).toEqual(attempt);
+      expect(runtime.sessionSnapshot(SESSION).items[0].attempted).toBe(true);
+    });
+
+    it('the owner guard wins over the witness guard: a foreign owner on a claimed witnessed item answers not-owner', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // An ambiguous failure leaves the item claimed AND witnessed in memory.
+      openCode.state.failPromptStatusOnce = 500;
+      expect(await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1')).toEqual({ status: 'send-failed', delivered: 'unknown' });
+      const before = runtime.snapshot();
+
+      // Foreign owner AND a witness standing: the guard order answers
+      // `not-owner` first, and nothing is cleared or stamped by the refusal.
+      const result = await runtime.removeConsult(SESSION, itemId, { owner: 'consult:other' });
+      expect(result).toEqual({ removed: false, reason: 'not-owner' });
+      expect(runtime.snapshot()).toEqual(before);
+      expect(runtime.sessionSnapshot(SESSION).items[0].claimed).toMatchObject({ owner: 'consult:run-1' });
+      expect(runtime.sessionSnapshot(SESSION).items[0].attempted).toBe(true);
+    });
+
+    it('a legacy witness is refused even with the owner matching (unknown is not proven)', async () => {
+      // A version-1 file restores every consult item with a legacy witness
+      // (no addressable id): "no attempt recorded" there is NOT proof that
+      // none was made, so the guard must fail closed.
+      const dataDir = seedQueueFile(makeDataDir(), {
+        version: 1,
+        items: [storedConsultItem()],
+      });
+      const { runtime } = createRuntime({ dataDir });
+      runtime.start();
+      await runtime.load();
+      const before = runtime.snapshot();
+
+      // Owner matches (the item is unclaimed after restore) and no attemptId
+      // is offered: the legacy witness must refuse anyway.
+      const result = await runtime.removeConsult(SESSION, 'queued-legacy-1', { owner: 'consult:run-1' });
+      expect(result).toEqual({ removed: false, reason: 'witnessed' });
+      // Zero mutation: the possibly-dispatched item and its witness survive
+      // in memory (the file write is async and the refusal never commits).
+      expect(runtime.snapshot()).toEqual(before);
+      expect(runtime.sessionSnapshot(SESSION).items[0].attempted).toBe(true);
+    });
+
+    it('a modern witness with a missing attemptId is refused (undefined never matches)', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // An ambiguous failure leaves the modern witness standing.
+      openCode.state.failPromptStatusOnce = 500;
+      expect(await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1')).toEqual({ status: 'send-failed', delivered: 'unknown' });
+      const before = runtime.snapshot();
+
+      // Same owner but no attemptId offered: the witness cannot be proven
+      // this caller's own, so the removal is refused.
+      const result = await runtime.removeConsult(SESSION, itemId, { owner: 'consult:run-1' });
+      expect(result).toEqual({ removed: false, reason: 'witnessed' });
+      expect(runtime.snapshot()).toEqual(before);
+      expect(runtime.sessionSnapshot(SESSION).items[0].attempted).toBe(true);
+    });
+
+    it('unwinds its own witness (same attemptId) with the owner matching: the exception', async () => {
+      const dataDir = makeDataDir();
+      const { runtime, openCode } = createRuntime({ dataDir });
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      // An ambiguous failure leaves THIS dispatch's witness and its live claim
+      // server-side: the exact state the client-side reconcile must unwind.
+      openCode.state.failPromptStatusOnce = 500;
+      expect(await runtime.dispatchConsult(SESSION, itemId, 'consult:run-1')).toEqual({ status: 'send-failed', delivered: 'unknown' });
+      const attempt = readStoredAttempt(dataDir, itemId);
+
+      // The own-attempt exception: same owner, same attemptId removes, though
+      // a witness stands.
+      const result = await runtime.removeConsult(SESSION, itemId, {
+        owner: 'consult:run-1',
+        attemptId: attempt.attemptId,
+      });
+      expect(result).toEqual({ removed: true });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+    });
+
+    it('a foreign attemptId on a witnessed item is refused even with the right owner', async () => {
+      const dataDir = makeDataDir();
+      const attempt = { attemptId: 'att_foreign02', messageId: 'msg_foreign02', at: 1_500 };
+      seedQueueFile(dataDir, {
+        version: 2,
+        items: [storedConsultItem({
+          consult: { system: 'be terse', attempt },
+          claimed: { owner: 'consult:run-1', claimedAt: 5 },
+        })],
+      });
+      const { runtime } = createRuntime({ dataDir });
+      runtime.start();
+      await runtime.load();
+
+      // Right owner, wrong attemptId: the witness is not this caller's to unwind.
+      const wrongAttempt = await runtime.removeConsult(SESSION, 'queued-legacy-1', {
+        owner: 'consult:run-1',
+        attemptId: 'att_other',
+      });
+      expect(wrongAttempt).toEqual({ removed: false, reason: 'witnessed' });
+      expect(readStoredAttempt(dataDir, 'queued-legacy-1')).toEqual(attempt);
+    });
+
+    it('a sending item refuses with `sending` winning over every other guard', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      openCode.state.parkNext = {
+        pathname: `/session/${SESSION}/prompt_async`,
+        promise: new Promise(() => undefined),
+      };
+      const pending = runtime.dispatchConsult(SESSION, itemId, 'consult:run-1');
+      await waitFor(() => runtime.sessionSnapshot(SESSION).sendingId === itemId);
+      const before = runtime.snapshot();
+
+      // Foreign owner AND sending: `sending` answers first.
+      expect(await runtime.removeConsult(SESSION, itemId, { owner: 'consult:foreign' })).toEqual({ removed: false, reason: 'sending' });
+      // Right owner: still `sending` — an in-flight send is never interrupted.
+      expect(await runtime.removeConsult(SESSION, itemId, { owner: 'consult:run-1' })).toEqual({ removed: false, reason: 'sending' });
+      expect(runtime.snapshot()).toEqual(before);
+      expect(runtime.sessionSnapshot(SESSION).sendingId).toBe(itemId);
+      pending.catch(() => undefined);
+    });
+
+    it('is idempotent: a repeat call on a removed item answers not-found with zero mutation', async () => {
+      const { runtime } = createRuntime();
+      runtime.start();
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+      expect(await runtime.removeConsult(SESSION, itemId, { owner: 'consult:run-1' })).toEqual({ removed: true });
+
+      const before = runtime.snapshot();
+      expect(await runtime.removeConsult(SESSION, itemId, { owner: 'consult:run-1' })).toEqual({ removed: false, reason: 'not-found' });
+      expect(await runtime.removeConsult(SESSION, itemId, { owner: 'consult:other' })).toEqual({ removed: false, reason: 'not-found' });
+      expect(runtime.snapshot()).toEqual(before);
+    });
+
+    it('a not-consult item is refused (the legacy remove path stays for normal items)', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const normal = await runtime.enqueue(SESSION, DIRECTORY, item({ content: 'plain', text: 'plain' }));
+      const before = runtime.snapshot();
+
+      expect(await runtime.removeConsult(SESSION, normal.itemId, { owner: 'consult:run-1' })).toEqual({ removed: false, reason: 'not-consult' });
+      expect(runtime.snapshot()).toEqual(before);
+      // The legacy path is untouched: a normal item still removes.
+      await runtime.remove(SESSION, normal.itemId);
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+    });
+
+    it('an unset owner routes to the legacy remove semantics, never through the guard', async () => {
+      const { runtime, openCode } = createRuntime();
+      runtime.start();
+      openCode.state.statuses = {};
+      const { itemId } = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, itemId, 'consult:run-1');
+
+      // No owner given: the legacy path removes a claimed item as before.
+      expect(await runtime.remove(SESSION, itemId)).toMatchObject({ session: { sessionId: SESSION } });
+      expect(runtime.sessionSnapshot(SESSION).items).toEqual([]);
+      // `removeConsult` requires an owner to pass the guard at all.
+      const guarded = await runtime.enqueue(SESSION, DIRECTORY, consultItem());
+      await runtime.claim(SESSION, guarded.itemId, 'consult:run-1');
+      expect(await runtime.removeConsult(SESSION, guarded.itemId)).toEqual({ removed: false, reason: 'not-owner' });
+      expect(runtime.sessionSnapshot(SESSION).items).toHaveLength(1);
+    });
+  });
+
   describe('expiry sweep and restart revert', () => {
     const consultItem = (overrides = {}) => item({ kind: 'consult', consult: { system: 'be terse' }, ...overrides });
 

@@ -432,10 +432,32 @@ likewise never tick-delivered. A version-1 file restores every consult item
 with a legacy witness (`{ legacy: true, at: createdAt }`): the old build
 persisted payloads fire-and-forget, so "no attempt recorded" there is not
 proof that none was made. A stuck consult item is removed only by an explicit
-user action (`remove`/`clear`); `take` refuses consult items with a 409
+user action (`remove`/`clear`) or a guarded run's own
+`remove-consult` (below); `take` refuses consult items with a 409
 `consult-item` reason and `takeAll` skips them, so a raw-send client can never
 lose the consult intent. This is the no-raw-delivery guarantee: a consult
 message is either dispatched through its own route or deleted by the user.
+
+### Conditional consult remove (`remove-consult`)
+
+A run that once held a claim must not delete a consult item unguarded: a lost
+claim is not a proof of non-delivery, and a witnessed item's removal would
+destroy the reconciliation evidence another client's resolve needs
+(invariant I13). `removeConsult(sessionId, itemId, { owner, attemptId? })`
+route `POST .../items/:id/remove-consult`) removes only when the server
+confirms, at removal time, that the requesting owner still holds exactly this
+reservation and no foreign attempt witness stands. Guard order: `sending` →
+`not-found` → `not-consult` → owner → witness. The only witness-bearing
+removal is the same-owner/same-`attemptId` exception (the dispatcher's own
+prep-phase unwind). A legacy witness has no addressable id, so it is always
+refused — "unknown" is not a proof of never-sent — and a modern witness
+matches only a defined `attemptId`. Every refusal answers `200 { removed: false, reason:
+'sending' | 'not-found' | 'not-consult' | 'not-owner' | 'witnessed' }` with
+zero mutation — no removal, no commit, no revision bump, no broadcast; success
+removes, releases the claim owner's hold, and commits exactly like `remove`,
+and a repeat call answers `not-found` idempotently. The legacy
+`DELETE .../items/:id` (owner-less) path is unchanged for manual removals and
+normal items.
 
 ### Recovery (`recoverable`)
 
@@ -478,6 +500,7 @@ allowlists.
 | `POST .../sessions/:id/items/:itemId/take` | Remove and return the full item (payloads included); `404`/`409` (consult items refuse with `consult-item`) |
 | `POST .../sessions/:id/take` | Remove and return every normal item not in flight, in order (consult items are skipped) |
 | `PUT .../sessions/:id/order` | `{ itemIds }` must be a complete permutation |
+| `POST .../sessions/:id/items/:itemId/remove-consult` | Ownership-safe conditional remove: `200 { removed: true }`, or `{ removed: false, reason: 'sending' | 'not-found' | 'not-consult' | 'not-owner' | 'witnessed' }` with zero mutation; success removes, releases the claim owner's hold, and commits like the legacy remove. Never sends a prompt. |
 | `DELETE .../sessions/:id` | Clear; the in-flight item stays |
 | `PUT .../sessions/:id/hold` | `{ held, ttlMs?, owner? }`; per-owner TTL, held while any owner is live |
 | `POST .../sessions/:id/items/:itemId/claim` | `{ owner?, ttlMs? }`; reserve the head consult item; `409` reasons: `not found`, `not-consult`, `not-head`, `sending`, `attempt-recorded`, `already-claimed`, `not-idle` |

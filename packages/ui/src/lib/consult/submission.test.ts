@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { ConsultDispatchOutcome, ConsultResolveOutcome, MessageQueueTarget, QueuedContextPart, QueuedMessage } from '@/stores/messageQueueStore';
+import type { ConsultDispatchOutcome, ConsultRemoveOutcome, ConsultResolveOutcome, MessageQueueTarget, QueuedContextPart, QueuedMessage } from '@/stores/messageQueueStore';
 import type { AttachedFile } from '@/stores/types/sessionTypes';
 import type { ConsultRunFinish, ConsultRunPhase, ConsultRunStartInput } from '@/stores/useConsultStore';
 import { createContextPart } from '@/lib/messages/contextParts';
@@ -166,6 +166,18 @@ type HarnessState = {
   resolveConsultFailure: Error | null;
   /** Every `resolveConsultItem` call in order. */
   resolveConsultCalls: Array<{ sessionId: string; messageId: string }>;
+  /** When set, `removeConsultItem` answers this exact structured outcome. */
+  removeConsultOutcome: ConsultRemoveOutcome | null;
+  /** When set, `removeConsultItem` throws (the guarded remove must reconcile). */
+  removeConsultFailure: Error | null;
+  /** Every `removeConsultItem` call in order. */
+  removeConsultCalls: Array<{ sessionId: string; messageId: string; owner: string | undefined }>;
+  /** With a removal refusal: the item's reservation was taken over by this foreign owner. */
+  removeConsultForeignOwner: string | null;
+  /** With `removeConsultForeignOwner`: the foreign owner also left a dispatch attempt on the item. */
+  removeConsultForeignWitness: boolean;
+  /** The projected item shape at the time of each guarded remove (owner/attempted). */
+  removeConsultSnapshots: Array<{ claimedOwner: string | undefined; attempted: boolean }>;
   prevalidations: Array<{ parentSessionId: string; directory: string }>;
   prevalidationRefusal: Error | null;
   /** When set, verifyCapability answers this refusal. */
@@ -187,6 +199,8 @@ type HarnessState = {
   knowledgeCalls: Array<{ directory: string; sessionId: string }>;
   startInputs: StartConsultationInput[];
   consultations: Array<Deferred<ConsultationResult>>;
+  /** One-shot: the next `startConsultation` throws (post-claim destructive exits). */
+  startFailure: Error | null;
   runtimeCancels: string[];
   runs: Map<string, { runId: string; phase: ConsultRunPhase }>;
   phaseLog: string[];
@@ -240,6 +254,12 @@ const createHarness = (): Harness => {
     resolveConsultOutcome: null,
     resolveConsultFailure: null,
     resolveConsultCalls: [],
+    removeConsultOutcome: null,
+    removeConsultForeignOwner: null,
+    removeConsultForeignWitness: false,
+    removeConsultFailure: null,
+    removeConsultCalls: [],
+    removeConsultSnapshots: [],
     prevalidations: [],
     prevalidationRefusal: null,
     capabilityRefusal: null,
@@ -256,6 +276,7 @@ const createHarness = (): Harness => {
     knowledgeCalls: [],
     startInputs: [],
     consultations: [],
+    startFailure: null,
     runtimeCancels: [],
     runs: new Map(),
     phaseLog: [],
@@ -351,6 +372,34 @@ const createHarness = (): Harness => {
         if (state.resolveConsultFailure) throw state.resolveConsultFailure;
         return state.resolveConsultOutcome ?? { status: 'unresolved', recoverable: true };
       },
+      removeConsultItem: async (target, messageId, owner) => {
+        state.events.push(`queue:remove-consult:${messageId}`);
+        state.removeConsultCalls.push({ sessionId: target.sessionId, messageId, owner });
+        const item = state.queueItems.find((entry) => entry.id === messageId);
+        // Model the A/B race the refusal means: a foreign owner took the
+        // reservation over and (with the witness flag) left a dispatch
+        // attempt on it between this run's claim and its cancel/remove.
+        if (item && state.removeConsultForeignOwner) {
+          item.claimed = { owner: state.removeConsultForeignOwner, claimedAt: state.now };
+          if (state.removeConsultForeignWitness) {
+            item.consult = { ...item.consult, textPartMetadata: { openchamberConsultReceipt: { runID: 'foreign-run' } } };
+          }
+        }
+        state.removeConsultSnapshots.push({
+          claimedOwner: item?.claimed?.owner,
+          attempted: item?.consult !== undefined && item.consult !== null && 'attempt' in item.consult && item.consult.attempt !== undefined,
+        });
+        if (state.removeConsultFailure) throw state.removeConsultFailure;
+        if (state.removeConsultOutcome) {
+          // One-shot: the retry paths must observe the next real outcome.
+          const outcome = state.removeConsultOutcome;
+          state.removeConsultOutcome = null;
+          return outcome;
+        }
+        // Default success removes the item like the server's proven removal.
+        state.queueItems = state.queueItems.filter((entry) => entry.id !== messageId);
+        return { removed: true };
+      },
       getQueueForTarget: (target) => {
         state.events.push(`queue:read:${target.sessionId}`);
         return [...state.queueItems];
@@ -419,6 +468,11 @@ const createHarness = (): Harness => {
       startConsultation: (input): ConsultationHandle => {
         state.events.push(`runtime:start:${input.runId}`);
         state.startInputs.push(input);
+        if (state.startFailure) {
+          const failure = state.startFailure;
+          state.startFailure = null;
+          throw failure;
+        }
         const gate = deferred<ConsultationResult>();
         state.consultations.push(gate);
         return { runId: input.runId ?? 'unknown', result: gate.promise };
@@ -1347,10 +1401,13 @@ describe('cancellation and failures', () => {
     const result = await handle.result;
 
     expect(result.status).toBe('cancelled');
-    // The claimed item is removed so it can never be dispatched or revert to
-    // a normal send; the hold is released (the caller restores the composer).
+    // The claimed item is removed through the ownership guard (I13) so it
+    // can never be dispatched or revert to a normal send; the hold is
+    // released (the caller restores the composer).
     expect(harness.state.queueItems).toEqual([]);
-    expect(harness.state.events).toContain('queue:remove:q-1');
+    expect(harness.state.events).toContain('queue:remove-consult:q-1');
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.removeConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1', owner: 'consult:run-1' }]);
     expect(harness.state.holds).toEqual([true, true, false]);
   });
 
@@ -1415,8 +1472,11 @@ describe('cancellation and failures', () => {
     const result = await handle.result;
 
     expect(result.status).toBe('cancelled');
+    // Round 15: the claimed item is removed through the ownership guard
+    // (I13), never a raw optimistic DELETE.
     expect(harness.state.queueItems).toEqual([]);
-    expect(harness.state.events).toContain('queue:remove:q-1');
+    expect(harness.state.events).toContain('queue:remove-consult:q-1');
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
     expect(harness.state.holds.at(-1)).toBe(false);
     expect(harness.state.heartbeatActive).toBe(false);
   });
@@ -1542,9 +1602,10 @@ describe('cancellation and failures', () => {
     expect(item.consult?.textPartMetadata).toEqual({ openchamberConsultReceipt: { runID: 'foreign-run' } });
     expect(harness.state.dispatchConsultCalls).toBe(4);
     expect(harness.state.resolveConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1' }]);
-    // The lease stays server-owned: the harness resolve never removes the
-    // item, so the foreign reservation it models survives.
-    expect(harness.state.holds).toEqual([true, true]);
+    // 🟠 Round 15: the server-proven recoverable state has nothing left for
+    // this run's own hold to protect, so it releases (never a foreign lease)
+    // and the queue unblocks for a fresh claim.
+    expect(harness.state.holds).toEqual([true, true, false]);
     expect(harness.state.heartbeatActive).toBe(false);
   });
 
@@ -1661,7 +1722,7 @@ describe('cancellation and failures', () => {
     expect(harness.state.heartbeatActive).toBe(false);
   });
 
-  test('a definite send failure removes the item and restores the composer contract', async () => {
+  test('a definite send failure removes the item through the guarded route and restores the composer contract', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
     await harness.flush();
@@ -1703,14 +1764,12 @@ describe('cancellation and failures', () => {
 
   test('an unexpected error reaching the outer catch releases the hold and stays terminal', async () => {
     const harness = createHarness();
-    const handle = harness.submit(baseInput());
-    await harness.flush();
-    // Force a pre-dispatch failure whose terminal bookkeeping call then
-    // throws once; the submission's outer catch must still finish the run and
-    // release its own hold (the dispatch never started).
-    harness.state.payloadFailure = new Error('payload exploded');
+    // A post-claim failure whose terminal bookkeeping call then throws once:
+    // the guarded remove already succeeded (owner match, no witness), so the
+    // outer catch must still finish the run and release its own hold.
+    harness.state.startFailure = new Error('start exploded');
     harness.state.finishFailureOnce = new Error('run store exploded');
-    harness.lastConsultation().resolve(consultationResult());
+    const handle = harness.submit(baseInput());
     await harness.flush();
     const result = await handle.result;
 
@@ -1718,7 +1777,9 @@ describe('cancellation and failures', () => {
     if (result.status !== 'failed') throw new Error('expected a failure');
     expect(errorOf(result)).toContain('run store exploded');
     expect(result.uncertain).toBeUndefined();
-    expect(harness.state.holds).toEqual([true, true, false]);
+    // The guarded remove + settlePostClaimFailure released this run's own
+    // hold; the outer catch's release is idempotent (no second release).
+    expect(harness.state.holds).toEqual([true, false]);
   });
 
   test('a thrown dispatch error is uncertain and never restores the capture', async () => {
@@ -1784,7 +1845,7 @@ describe('cancellation and failures', () => {
     expect(harness.state.heartbeatActive).toBe(false);
   });
 
-  test('a not-found outcome is a definite failure', async () => {
+  test('a not-found outcome removes through the guarded route as a definite failure', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
     await harness.flush();
@@ -1796,6 +1857,10 @@ describe('cancellation and failures', () => {
     expect(result.status).toBe('failed');
     if (result.status !== 'failed') throw new Error('expected a failure');
     expect(result.uncertain).toBeUndefined();
+    // The guarded remove succeeds (owner match, no witness) and returns the
+    // structured removed outcome; the item leaves the queue.
+    expect(harness.state.events).toContain('queue:remove-consult:q-1');
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
     expect(harness.state.queueItems).toEqual([]);
   });
 
@@ -1863,15 +1928,16 @@ describe('cancellation and failures', () => {
     expect(harness.state.holds).toEqual([true, true]);
   });
 
-  test('a non-degraded consultation failure after the claim removes the item and releases the hold', async () => {
+  test('a non-degraded consultation failure after the claim removes the item through the guarded route and releases the hold', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
     await harness.flush();
     expect(harness.state.claims).toBe(1);
 
     // A consultation error that is neither a refusal nor a cancel: the run
-    // failed, the consult item is removed (never delivered as a normal send),
-    // and the hold is released.
+    // failed, the consult item is removed through the ownership guard (I13)
+    // and the hold is released. No foreign owner and no witness stand here,
+    // so the guard proves the removal.
     harness.lastConsultation().reject(new Error('advisor transport collapsed'));
     const result = await handle.result;
 
@@ -1879,12 +1945,14 @@ describe('cancellation and failures', () => {
     expect(errorOf(result)).toContain('advisor transport collapsed');
     expect(result).toMatchObject({ queueItemRestored: false });
     expect(harness.state.queueItems).toEqual([]);
-    expect(harness.state.events).toContain('queue:remove:q-1');
+    expect(harness.state.events).toContain('queue:remove-consult:q-1');
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.removeConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1', owner: 'consult:run-1' }]);
     expect(harness.state.holds).toEqual([true, true, false]);
     expect(harness.state.phaseLog).toContain('run-1:finish:failed');
   });
 
-  test('a start refusal removes the claimed consult item and releases the hold', async () => {
+  test('a start refusal removes the claimed consult item through the guarded route and releases the hold', async () => {
     const harness = createHarness();
     const handle = harness.submit(baseInput());
     await harness.flush();
@@ -1910,10 +1978,106 @@ describe('cancellation and failures', () => {
     // re-queueing it; the caller restores the composer.
     expect(result.queueItemRestored).toBe(false);
 
+    // Round 15: the removal goes through the ownership-safe guarded route,
+    // never the raw optimistic DELETE. The run still owns the reservation
+    // and no witness stands, so the guard proves the removal.
     expect(harness.state.queueItems).toEqual([]);
-    expect(harness.state.events).toContain('queue:remove:q-1');
+    expect(harness.state.events).toContain('queue:remove-consult:q-1');
+    expect(harness.state.removeConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1', owner: 'consult:run-1' }]);
+    expect(harness.state.removeConsultSnapshots[0]).toEqual({ claimedOwner: 'consult:run-1', attempted: false });
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
     expect(harness.state.holds).toEqual([true, true, false]);
     expect(harness.state.phaseLog).toContain('run-1:finish:failed');
+  });
+
+  test('a guarded removal refusal after the claim reconciles: the item stays queued and the run ends uncertain', async () => {
+    const harness = createHarness();
+    // The fan-out start itself fails (the runtime start throws): this
+    // exercises the guarded remove before any dispatch request is issued.
+    // The remove is refused `not-owner` (a foreign owner took the item over
+    // and wrote a witness), so the run reconciles instead of destroying the
+    // reconciliation evidence.
+    harness.state.startFailure = new Error('start exploded');
+    harness.state.removeConsultOutcome = { removed: false, reason: 'not-owner' };
+    harness.state.resolveConsultOutcome = { status: 'unresolved' };
+    const handle = harness.submit(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(result.queueItemRestored).toBe(false);
+    // The refusal is the exact mechanism the maintainer described: no
+    // DELETE, the item + witness intact, no composer restore, no dispatch.
+    expect(harness.state.queueItems).toHaveLength(1);
+    expect(harness.state.events).toContain('queue:remove-consult:q-1');
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.resolveConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1' }]);
+    expect(harness.state.dispatchConsultCalls).toBe(0);
+    // The unresolved reconcile keeps the server-owned lease (the existing
+    // uncertain semantics); only this run's own hold was asserted.
+    expect(harness.state.holds).toEqual([true]);
+    expect(harness.state.heartbeatActive).toBe(false);
+  });
+
+  test('a remove-consult transport failure reconciles instead of guessing', async () => {
+    const harness = createHarness();
+    // The fan-out start itself fails (the runtime start throws) so the
+    // guarded remove runs before any dispatch request is issued.
+    harness.state.startFailure = new Error('start exploded');
+    harness.state.removeConsultFailure = new Error('remove request failed');
+    harness.state.resolveConsultOutcome = { status: 'sending' };
+    const handle = harness.submit(baseInput());
+    const result = await handle.result;
+
+    // The guarded remove could not be read: it proved nothing about
+    // delivery, so fail closed into the reconcile.
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(errorOf(result)).toContain('The guarded removal failed');
+    expect(harness.state.queueItems).toHaveLength(1);
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.holds).toEqual([true]);
+  });
+
+  test('a witnessed item refuses the guarded remove and reconciles (witnessed reason)', async () => {
+    const harness = createHarness();
+    // The fan-out start itself fails (the runtime start throws): the guarded
+    // remove runs, and a foreign witness standing on the item refuses it.
+    harness.state.startFailure = new Error('start exploded');
+    harness.state.removeConsultOutcome = { removed: false, reason: 'witnessed' };
+    harness.state.resolveConsultOutcome = { status: 'unresolved' };
+    const handle = harness.submit(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected a failure');
+    expect(result.uncertain).toBe(true);
+    expect(harness.state.queueItems).toHaveLength(1);
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.holds).toEqual([true]);
+  });
+
+  test('an idempotent not-found guarded remove settles destructively like a proven removal', async () => {
+    const harness = createHarness();
+    // The fan-out start itself fails (the runtime start throws) so the
+    // guarded remove runs before any dispatch request is issued. The item
+    // already left the queue (another client's resolve removed it):
+    // `removed: false, reason: 'not-found'` is the item-gone convention, and
+    // the pre-15 destructive settle is safe.
+    harness.state.startFailure = new Error('start exploded');
+    harness.state.removeConsultOutcome = { removed: false, reason: 'not-found' };
+    const handle = harness.submit(baseInput());
+    const result = await handle.result;
+
+    expect(result.status).toBe('failed');
+    expect(errorOf(result)).toContain('start exploded');
+    expect(result).toMatchObject({ queueItemRestored: false });
+    // The server-side item is gone; the harness projection is not the server
+    // truth. No raw DELETE ran, and the stale own hold released.
+    expect(harness.state.events).not.toContain('queue:remove:q-1');
+    expect(harness.state.holds).toEqual([true, false]);
   });
 
   test('a cancel wins over a refusal that lands after it', async () => {
@@ -1929,9 +2093,118 @@ describe('cancellation and failures', () => {
     const result = await handle.result;
 
     expect(result.status).toBe('cancelled');
-    // The claimed message is removed, never restored for normal delivery.
+    // The claimed message is removed through the guarded route (I13), never
+    // restored for normal delivery.
     expect(harness.state.queueItems).toEqual([]);
+    expect(harness.state.events).toContain('queue:remove-consult:q-1');
     expect(harness.state.holds).toEqual([true, true, false]);
+  });
+
+  // --- Round 15 WP15-B follow-up: post-claim CANCEL goes through the
+  // ownership guard (I13). The A/B race shape: this run's claim lapsed and a
+  // foreign owner re-claimed the item with a witness before this run's cancel
+  // lands — the guarded remove is refused, the reconcile outcome propagates
+  // (uncertain-keep, capture kept), and the reconciliation evidence survives.
+  describe('a post-claim cancel reconciles through the guarded remove', () => {
+    test('a cancelled consultation on a foreign-owned witnessed item is refused `not-owner` and reconciles', async () => {
+      const harness = createHarness();
+      const handle = harness.submit(baseInput());
+      await harness.flush();
+      // B takes the reservation over and writes a witness while A is
+      // mid-consultation; A's consultation then reports cancelled.
+      harness.state.removeConsultOutcome = { removed: false, reason: 'not-owner' };
+      harness.state.removeConsultForeignOwner = 'consult:foreign';
+      harness.state.removeConsultForeignWitness = true;
+      harness.state.resolveConsultOutcome = { status: 'unresolved' };
+      harness.lastConsultation().resolve(consultationResult({ status: 'cancelled' }));
+      const result = await handle.result;
+
+      // The refusal is the exact maintainer race: the reconcile outcome
+      // propagates (uncertain-keep, capture kept), so a cancel can never
+      // restore the composer while the item may be mid-dispatch under
+      // another owner. No raw DELETE; the item + witness stay intact.
+      expect(result.status).toBe('failed');
+      if (result.status !== 'failed') throw new Error('expected a failure');
+      expect(result.uncertain).toBe(true);
+      expect(result.queueItemRestored).toBe(false);
+      expect(harness.state.events).toContain('queue:remove-consult:q-1');
+      expect(harness.state.events).not.toContain('queue:remove:q-1');
+      expect(harness.state.removeConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1', owner: 'consult:run-1' }]);
+      expect(harness.state.resolveConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1' }]);
+      expect(harness.state.queueItems).toHaveLength(1);
+      expect(harness.state.queueItems[0].claimed).toMatchObject({ owner: 'consult:foreign' });
+      // The foreign witness is server-only state; its client-visible stand-in
+      // is the receipt metadata the harness models it with.
+      expect(harness.state.queueItems[0].consult?.textPartMetadata).toEqual({ openchamberConsultReceipt: { runID: 'foreign-run' } });
+      expect(harness.state.dispatchConsultCalls).toBe(0);
+    });
+
+    test('a cancelled consultation whose guarded remove fails reconciles (fail-closed)', async () => {
+      const harness = createHarness();
+      const handle = harness.submit(baseInput());
+      await harness.flush();
+      harness.state.removeConsultFailure = new Error('remove request failed');
+      harness.state.resolveConsultOutcome = { status: 'unresolved' };
+      harness.lastConsultation().resolve(consultationResult({ status: 'cancelled' }));
+      const result = await handle.result;
+
+      // The remove could not be read, so it proved nothing: the run settles
+      // uncertain-keep (capture kept), nothing is removed or restored.
+      expect(result.status).toBe('failed');
+      if (result.status !== 'failed') throw new Error('expected a failure');
+      expect(result.uncertain).toBe(true);
+      expect(result.queueItemRestored).toBe(false);
+      expect(harness.state.events).toContain('queue:remove-consult:q-1');
+      expect(harness.state.events).not.toContain('queue:remove:q-1');
+      expect(harness.state.queueItems).toHaveLength(1);
+      expect(harness.state.resolveConsultCalls).toHaveLength(1);
+    });
+
+    test('a cancelled consultation on a foreign-owned witnessed item is refused `witnessed` and reconciles', async () => {
+      const harness = createHarness();
+      const handle = harness.submit(baseInput());
+      await harness.flush();
+      // A foreign witness stands on the item while this run still holds the
+      // claim in its own view: the remove is refused `witnessed` (the
+      // harness's foreign-owner modeling keeps a claim; the server's reason
+      // is the witness).
+      harness.state.removeConsultOutcome = { removed: false, reason: 'witnessed' };
+      harness.state.removeConsultForeignOwner = 'consult:foreign';
+      harness.state.removeConsultForeignWitness = true;
+      harness.state.resolveConsultOutcome = { status: 'unresolved' };
+      harness.lastConsultation().resolve(consultationResult({ status: 'cancelled' }));
+      const result = await handle.result;
+
+      // Same propagation as the not-owner race: the reconcile outcome keeps
+      // the capture; no DELETE, no composer restore, the item stays.
+      expect(result.status).toBe('failed');
+      if (result.status !== 'failed') throw new Error('expected a failure');
+      expect(result.uncertain).toBe(true);
+      expect(result.queueItemRestored).toBe(false);
+      expect(harness.state.events).toContain('queue:remove-consult:q-1');
+      expect(harness.state.events).not.toContain('queue:remove:q-1');
+      expect(harness.state.queueItems).toHaveLength(1);
+      expect(harness.state.queueItems[0].claimed).toMatchObject({ owner: 'consult:foreign' });
+      expect(harness.state.queueItems[0].consult?.textPartMetadata).toEqual({ openchamberConsultReceipt: { runID: 'foreign-run' } });
+    });
+
+    test('a cancelled consultation on a still-owned unwitnessed item removes through the guard and cancels as before', async () => {
+      const harness = createHarness();
+      const handle = harness.submit(baseInput());
+      await harness.flush();
+      // The run still owns the reservation and no witness stands: the guard
+      // proves the removal, and the cancel semantics are exactly pre-15.
+      harness.lastConsultation().resolve(consultationResult({ status: 'cancelled' }));
+      const result = await handle.result;
+
+      expect(result.status).toBe('cancelled');
+      expect(harness.state.events).toContain('queue:remove-consult:q-1');
+      expect(harness.state.events).not.toContain('queue:remove:q-1');
+      expect(harness.state.removeConsultCalls).toEqual([{ sessionId: 'parent', messageId: 'q-1', owner: 'consult:run-1' }]);
+      expect(harness.state.queueItems).toEqual([]);
+      // This run's own hold released with the proven removal.
+      expect(harness.state.holds).toEqual([true, true, false]);
+    });
   });
 
   test('a failed take leaves the item queued and releases the hold', async () => {

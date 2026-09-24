@@ -430,6 +430,29 @@ in-flight per item; `dispatched` removes the chip through the server's own
 broadcast, `unresolved` keeps it (Resume when `recoverable`), and a failed
 check is swallowed so hydration never breaks.
 
+**Post-claim destructive exits are guarded (I13, round 15).** Once a run has
+held a claim, its destructive exits (start failure, advisor-transport error,
+payload write or re-set failure, terminal dispatch failure) remove the item
+through the server's ownership-safe `removeConsultItem` dep
+(`POST .../items/:id/remove-consult`) instead of a raw optimistic delete. The
+server removes only when the requesting owner still holds exactly this
+reservation and no foreign attempt witness stands; every refusal is a
+structured `{ removed: false, reason }` with zero mutation, and the run then
+reconciles through `reconcileViaResolve` (resolve-first, uncertain-keep, no
+removal, no composer restore, no dispatch). The composer restores only on a
+proven `removed` (or the idempotent `not-found` — the item is gone either
+way). Pre-claim exits (enqueue failure, admission item-removed, initial-claim
+catch) keep the pre-15 semantics, and the chip's manual remove stays on the
+legacy unguarded path.
+
+**Hold release on proven states (round 15).** The reconcile helper releases
+this run's own owner-scoped hold on the `dispatched`, `resumable`, and
+`not-found` answers — the server has proven the item gone or recoverable, so
+the reservation has nothing left to protect and keeping it would stall the
+queue until the TTL. It never touches another owner's lease. Every undecided
+answer (`unresolved`, `sending`, a resolve failure) keeps the server-owned
+lease exactly like the other uncertain paths.
+
 **Pending string.** A witnessed or legacy item that cannot offer Resume has no
 dedicated user-facing line yet: the key (e.g.
 `chat.consult.queue.resumeUnavailable`) is not in the dictionaries and is left

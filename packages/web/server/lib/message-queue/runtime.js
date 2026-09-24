@@ -1183,6 +1183,59 @@ export function createMessageQueueRuntime({
     return commit(sessionId);
   };
 
+  /**
+   * The ownership guard a conditional consult removal must pass: the session
+   * must not have that item in flight, the item must still be queued, and —
+   * the round-15 core — the requesting owner must still hold exactly this
+   * reservation, with no foreign attempt witness standing. The own-witness
+   * exception (same attemptId) is the dispatcher's prep-phase unwind: the
+   * proven pre-request failure that may clear its own record.
+   *
+   * Every refusal answers a structured reason with ZERO mutation: no removal,
+   * no commit, no revision bump, no broadcast — a refused remove must not
+   * clear or stamp anything.
+   */
+  const authorizeConsultRemove = (sessionId, itemId, owner, attemptId) => {
+    if (sending.get(sessionId) === itemId) return { reason: 'sending' };
+    const queue = queues.get(sessionId);
+    const item = queue?.items.find((entry) => entry.id === itemId) ?? null;
+    if (!queue || !item) return { reason: 'not-found' };
+    if (item.kind !== CONSULT_ITEM_KIND) return { reason: 'not-consult' };
+    if (item.claimed && item.claimed.owner !== owner) return { reason: 'not-owner' };
+    const witness = readConsultAttempt(item);
+    if (witness) {
+      // A legacy witness has no addressable id: "unknown" is not a proof of
+      // never-sent, so it is never removable through the guard. A modern
+      // witness matches only a DEFINED attemptId — undefined-vs-undefined
+      // must never authorize a witnessed removal.
+      if (witness.legacy) return { reason: 'witnessed' };
+      if (attemptId === undefined || witness.attemptId !== attemptId) return { reason: 'witnessed' };
+    }
+    return { item };
+  };
+
+  /**
+   * Ownership-safe consult removal (invariant I13): the caller must still own
+   * exactly this reservation and no foreign attempt witness may exist — the
+   * only witness-bearing removal is the dispatcher's own-witness unwind (same
+   * attemptId), which the dispatch loop itself performs. Unlike the legacy
+   * `remove`, a refused removal mutates nothing: reclaim exhaustion or a lost
+   * claim is not a proof of non-delivery, and deleting a witnessed item could
+   * destroy the reconciliation evidence another client's resolve needs. The
+   * legacy path stays for owner-less callers (manual UI removal).
+   */
+  const removeConsult = async (sessionIdInput, itemId, { owner, attemptId } = {}) => {
+    const sessionId = requireSessionId(sessionIdInput);
+    await load();
+    const decision = authorizeConsultRemove(sessionId, itemId, owner, attemptId);
+    if (decision.reason) return { removed: false, reason: decision.reason };
+    const queue = queues.get(sessionId);
+    setQueueItems(sessionId, queue.directory, queue.items.filter((entry) => entry.id !== itemId));
+    releaseClaimsOfRemovedItems(sessionId, [decision.item]);
+    commit(sessionId);
+    return { removed: true };
+  };
+
   /** Removes the item and hands its full payload (attachments included) back. */
   const take = async (sessionIdInput, itemId) => {
     const sessionId = requireSessionId(sessionIdInput);
@@ -1935,6 +1988,7 @@ export function createMessageQueueRuntime({
     sessionSnapshot,
     enqueue,
     remove,
+    removeConsult,
     take,
     takeAll,
     reorder,
@@ -2062,6 +2116,22 @@ export function registerMessageQueueRoutes(app, runtime) {
       res.json(await runtime.remove(req.params.sessionId, req.params.itemId));
     } catch (error) {
       respondError(res, error, 'Failed to remove queued message');
+    }
+  });
+
+  app.post('/api/message-queue/sessions/:sessionId/items/:itemId/remove-consult', async (req, res) => {
+    try {
+      await runtime.load();
+      // Same structured-outcome contract as the other consult routes: a
+      // refused removal is a 200 `{ removed: false, reason }` — zero mutation,
+      // never a transport error — while malformed/unexpected failures stay
+      // 400/500.
+      res.json(await runtime.removeConsult(req.params.sessionId, req.params.itemId, {
+        owner: req.body?.owner,
+        attemptId: req.body?.attemptId,
+      }));
+    } catch (error) {
+      respondError(res, error, 'Failed to remove consult message');
     }
   });
 }

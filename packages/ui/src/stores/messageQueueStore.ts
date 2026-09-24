@@ -314,6 +314,22 @@ const serverConsultResolveResponseSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('sending') }),
 ]);
 
+/**
+ * The guarded consult remove (`POST .../items/:id/remove-consult`) is a
+ * control-flow route: a refused removal is a 200 structured body with zero
+ * server-side mutation — never a transport error. Success removes the item
+ * exactly like the legacy delete.
+ */
+const serverConsultRemoveResponseSchema = z.union([
+  z.object({ removed: z.literal(true) }),
+  z.object({
+    removed: z.literal(false),
+    reason: z.enum(['sending', 'not-found', 'not-consult', 'not-owner', 'witnessed']),
+  }),
+]);
+
+export type ConsultRemoveOutcome = z.infer<typeof serverConsultRemoveResponseSchema>;
+
 /** The store-facing dispatch outcome: the server body with the item projected. */
 export type ConsultDispatchOutcome =
   | {
@@ -439,7 +455,13 @@ type ServerQueueRequestBody =
     | { itemIds: string[] }
     | { held: boolean; owner?: string }
     | { owner?: string; ttlMs?: number }
-    | { owner?: string; consult: ConsultPayload };
+    | { owner?: string; consult: ConsultPayload }
+    | { owner?: string; attemptId?: string };
+
+/** Owner-scoped consult route bodies (claim/payload/dispatch/remove). */
+type ConsultClaimRequestBody = { owner?: string; ttlMs?: number };
+type ConsultPayloadRequestBody = { owner?: string; consult: ConsultPayload };
+type ConsultRemoveRequestBody = { owner?: string; attemptId?: string };
 
 const toServerAttachment = (attachment: AttachedFile): ServerQueueAttachmentInput => {
     const input: ServerQueueAttachmentInput = {
@@ -585,6 +607,13 @@ interface MessageQueueActions {
      * failures); every control-flow case is a structured outcome.
      */
     resolveConsultItem: (target: MessageQueueTarget, messageId: string) => Promise<ConsultResolveOutcome>;
+    /**
+     * Server-owned queue: ownership-safe conditional consult remove
+     * (invariant I13). A refused removal is a structured `removed: false`
+     * outcome with zero server-side mutation — never a throw — while
+     * non-2xx is reserved for malformed/unexpected failures.
+     */
+    removeConsultItem: (target: MessageQueueTarget, messageId: string, owner?: string, attemptId?: string) => Promise<ConsultRemoveOutcome>;
     resetForRuntimeSwitch: (previousRuntimeKey: string | null | undefined) => void;
 }
 
@@ -1074,7 +1103,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
 
                     claimConsultItem: async (target, messageId, owner, ttlMs) => {
                         if (!isServerOwnedMessageQueue()) throw new Error('The consult queue is only available on a server-owned message queue.');
-                        const body: Extract<ServerQueueRequestBody, { owner?: string; ttlMs?: number }> = {};
+                        const body: ConsultClaimRequestBody = {};
                         if (owner) body.owner = owner;
                         if (ttlMs !== undefined) body.ttlMs = ttlMs;
                         const response = await runtimeFetch(
@@ -1088,7 +1117,7 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
 
                     setConsultItemPayload: async (target, messageId, owner, consult) => {
                         if (!isServerOwnedMessageQueue()) throw new Error('The consult queue is only available on a server-owned message queue.');
-                        const body: Extract<ServerQueueRequestBody, { owner?: string; consult: ConsultPayload }> = { consult };
+                        const body: ConsultPayloadRequestBody = { consult };
                         if (owner) body.owner = owner;
                         const response = await runtimeFetch(
                             `${sessionPath(target.sessionId)}/items/${encodeURIComponent(messageId)}/payload`,
@@ -1128,6 +1157,22 @@ export const useMessageQueueStore = create<MessageQueueStore>()(
                         );
                         if (!response.ok) throw consultReasonError(response.status, await response.json().then((raw) => serverConsultErrorSchema.safeParse(raw)).then((parsed) => parsed.success ? parsed.data : null).catch(() => null));
                         return serverConsultResolveResponseSchema.parse(await response.json());
+                    },
+
+                    removeConsultItem: async (target, messageId, owner, attemptId) => {
+                        if (!isServerOwnedMessageQueue()) return { removed: false, reason: 'not-found' };
+                        // Same structured-outcome contract as the other consult
+                        // routes: a refused removal is a 200 body — zero mutation,
+                        // never a transport error.
+                        const body: ConsultRemoveRequestBody = {};
+                        if (owner) body.owner = owner;
+                        if (attemptId) body.attemptId = attemptId;
+                        const response = await runtimeFetch(
+                            `${sessionPath(target.sessionId)}/items/${encodeURIComponent(messageId)}/remove-consult`,
+                            jsonInit('POST', body),
+                        );
+                        if (!response.ok) throw consultReasonError(response.status, await response.json().then((raw) => serverConsultErrorSchema.safeParse(raw)).then((parsed) => parsed.success ? parsed.data : null).catch(() => null));
+                        return serverConsultRemoveResponseSchema.parse(await response.json());
                     },
 
                     resetForRuntimeSwitch: (previousRuntimeKey) => {
