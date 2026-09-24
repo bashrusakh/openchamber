@@ -41,6 +41,7 @@ export const createSharedRequest = (execute, { cancellationMessage = 'Request wa
 
   entry.wait = (signal) => {
     if (signal?.aborted) {
+      abortWhenUnused(signal.reason);
       return Promise.reject(cancellationError(signal, cancellationMessage));
     }
     if (entry.sourceAbortRequested) {

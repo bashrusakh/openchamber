@@ -1,4 +1,5 @@
 import { canRespondToRequest, createRequestAbortSignal } from '../request-abort.js';
+import { createSharedRequest } from '../request-sharing.js';
 
 const PR_STATUS_CACHE_TTL_MS = 90_000;
 const PR_STATUS_CACHE_MAX_ENTRIES = 200;
@@ -9,7 +10,6 @@ const PR_STATUS_CACHE_MAX_ENTRIES = 200;
 // status on error, and a later poll fills it in.
 const PR_STATUS_RESOLVE_TIMEOUT_MS = 12_000;
 const prStatusCache = new Map();
-let resolvedAuthLoginPromise = null;
 const PR_CONTEXT_CACHE_TTL_MS = 30_000;
 const PR_CONTEXT_CACHE_MAX_ENTRIES = 50;
 const prContextCache = new Map();
@@ -159,6 +159,8 @@ function setPrStatusCache(key, data, fetchedAt) {
 
 export function registerGitHubRoutes(app, dependencies = {}) {
   let githubLibraries = null;
+  let authLoginGeneration = 0;
+  let resolvedAuthLogin = null;
   const getGitHubLibraries = dependencies.getGitHubLibraries || (async () => {
     if (!githubLibraries) {
       githubLibraries = await import('./index.js');
@@ -168,6 +170,32 @@ export function registerGitHubRoutes(app, dependencies = {}) {
   const loadPrStatus = dependencies.resolveGitHubPrStatus
     ? async () => ({ resolveGitHubPrStatus: dependencies.resolveGitHubPrStatus })
     : async () => import('./pr-status.js');
+
+  const getResolvedAuthLogin = (octokit, signal) => {
+    if (resolvedAuthLogin && !resolvedAuthLogin.shared.sourceAbortRequested) {
+      return resolvedAuthLogin.shared.wait(signal);
+    }
+
+    const generation = authLoginGeneration + 1;
+    authLoginGeneration = generation;
+    let entry;
+    const shared = createSharedRequest(async (sourceSignal) => {
+      const response = await octokit.rest.users.getAuthenticated({ signal: sourceSignal });
+      return response?.data?.login || null;
+    }, { cancellationMessage: 'GitHub authenticated-user lookup was cancelled' });
+    entry = { generation, shared };
+    resolvedAuthLogin = entry;
+
+    // A source can finish after its last waiter has caused a newer generation
+    // to start. Only the current source may clear the shared slot.
+    void shared.promise.catch(() => {
+      if (resolvedAuthLogin?.generation === generation) {
+        resolvedAuthLogin = null;
+      }
+    });
+
+    return shared.wait(signal);
+  };
 
   const getGitHubUserSummary = async (octokit, { signal = undefined } = {}) => {
     const me = signal
@@ -673,16 +701,7 @@ export function registerGitHubRoutes(app, dependencies = {}) {
           // the API once (memoized) so permissions still resolve for them.
           let username = auth?.user?.login;
           if (!username) {
-            if (!resolvedAuthLoginPromise) {
-              resolvedAuthLoginPromise = octokit.rest.users.getAuthenticated({ signal: requestAbort.signal })
-                .then((resp) => resp?.data?.login || null)
-                .catch((error) => {
-                  resolvedAuthLoginPromise = null;
-                  if (requestAbort.signal.aborted) throw error;
-                  return null;
-                });
-            }
-            username = await resolvedAuthLoginPromise;
+            username = await getResolvedAuthLogin(octokit, requestAbort.signal);
           }
           if (username) {
             const perm = await octokit.rest.repos.getCollaboratorPermissionLevel({

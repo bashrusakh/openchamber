@@ -18,6 +18,11 @@ type OwnedProcessDependencies = {
   terminationGraceMs?: number;
 };
 
+const hasTerminalExit = (child: { exitCode?: number | null; signalCode?: NodeJS.Signals | null }) => (
+  (child.exitCode !== null && child.exitCode !== undefined)
+  || (child.signalCode !== null && child.signalCode !== undefined)
+);
+
 const terminationFailure = (
   pid: number,
   cause: unknown,
@@ -95,7 +100,7 @@ export function spawnOwnedProcess(
     detached: platform !== 'win32',
   });
   let spawnError: Error | null = null;
-  let childClosed = false;
+  let childClosed = hasTerminalExit(child);
   const closed = new Promise<ProcessExit>((resolve) => {
     child.once('error', (error) => { spawnError = error; });
     child.once('close', (code, signal) => {
@@ -149,7 +154,11 @@ export function spawnOwnedProcess(
         return;
       }
       if (platform === 'win32') {
-        if (childClosed) {
+        // Node reports exitCode/signalCode before the close event. A closed
+        // stdio stream is therefore not the only point at which the PID stops
+        // identifying the owned root. Do not hand a terminal PID to taskkill:
+        // Windows may have already reused it while close is still pending.
+        if (childClosed || hasTerminalExit(child)) {
           throw terminationFailure(
             child.pid,
             new Error('Owned Windows process closed before tree termination could start'),
@@ -173,13 +182,13 @@ export function spawnOwnedProcess(
           taskkillError = error instanceof Error ? error : new Error(String(error));
         }
         if (taskkillError) {
-          const rootError = killRoot();
+          const rootError = hasTerminalExit(child) ? null : killRoot();
           const rootClosed = await waitForClose(WINDOWS_TERMINATION_TIMEOUT_MS);
           throw terminationFailure(
             child.pid,
             taskkillError,
             rootError,
-            rootClosed,
+            rootClosed || hasTerminalExit(child),
             undefined,
           );
         }

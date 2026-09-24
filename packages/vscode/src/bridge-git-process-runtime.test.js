@@ -139,6 +139,36 @@ describe('VS Code Git process runtime executable selection', () => {
     }
   });
 
+  it('does not taskkill a Windows PID after exit is observed but close is late', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      const childProcess = new EventEmitter();
+      childProcess.stdout = new EventEmitter();
+      childProcess.stderr = new EventEmitter();
+      childProcess.pid = 1233;
+      childProcess.exitCode = null;
+      childProcess.signalCode = null;
+      childProcess.kill = mock();
+      spawn.mockImplementationOnce(() => childProcess);
+
+      const owned = spawnOwnedProcess('git', ['status'], { cwd: '/repo', env: process.env });
+      childProcess.exitCode = 0;
+
+      await expect(owned.terminate()).rejects.toMatchObject({
+        code: 'ERR_PROCESS_TREE_TERMINATION',
+        cleanupBlocked: true,
+        rootClosed: true,
+      });
+      expect(execFile).not.toHaveBeenCalled();
+      expect(childProcess.kill).not.toHaveBeenCalled();
+
+      childProcess.emit('close', 0);
+    } finally {
+      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+    }
+  });
+
   it('rejects a command when either output stream exceeds its buffer limit', async () => {
     const childProcess = new EventEmitter();
     childProcess.stdout = new EventEmitter();
@@ -287,6 +317,50 @@ describe('VS Code Git process runtime executable selection', () => {
       });
       expect(spawnCalls).toHaveLength(blockedSpawnCount);
       expect(taskkillCalls).toBe(1);
+    } finally {
+      Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
+    }
+  });
+
+  it('keeps the Git runtime blocked when Windows exit precedes the late close event', async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      const childProcess = new EventEmitter();
+      childProcess.stdout = new EventEmitter();
+      childProcess.stderr = new EventEmitter();
+      childProcess.pid = 1239;
+      childProcess.exitCode = null;
+      childProcess.signalCode = null;
+      childProcess.kill = mock();
+      spawn.mockImplementationOnce(() => childProcess);
+
+      const controller = new AbortController();
+      const runtime = createGitProcessRuntime();
+      const pending = runtime.execGit(['status'], '/repo', { signal: controller.signal });
+      for (let attempt = 0; attempt < 5 && spawnCalls.length === 0; attempt += 1) {
+        await Promise.resolve();
+      }
+
+      childProcess.exitCode = 0;
+      controller.abort();
+
+      await expect(pending).resolves.toMatchObject({
+        exitCode: 1,
+        cleanupBlocked: true,
+        descendantsTerminated: false,
+        rootClosed: true,
+      });
+      expect(execFile).not.toHaveBeenCalled();
+      expect(childProcess.kill).not.toHaveBeenCalled();
+      await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
+      await expect(runtime.execGit(['status'], '/repo')).resolves.toMatchObject({
+        exitCode: 1,
+        cleanupBlocked: true,
+      });
+
+      childProcess.emit('close', 0);
+      await expect(runtime.resetGitProcesses()).rejects.toThrow('Cannot reset the Git runtime');
     } finally {
       Object.defineProperty(process, 'platform', { configurable: true, value: originalPlatform });
     }
