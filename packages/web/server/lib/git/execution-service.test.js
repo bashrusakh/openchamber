@@ -566,7 +566,7 @@ describe('Git execution service', () => {
     ]);
   });
 
-  it('forwards worktree execution options to admission without leaking them into raw arguments', async () => {
+  it('forwards worktree execution options to admission and cancellation-capable raw operations', async () => {
     const controller = new AbortController();
     const admissions = [];
     const rawCalls = [];
@@ -610,9 +610,38 @@ describe('Git execution service', () => {
       }),
     ]);
     expect(rawCalls).toEqual([
-      ['/repo', input],
+      ['/repo', input, { signal: controller.signal }],
       ['/repo', input, { scheduleBackground: expect.any(Function), signal: controller.signal }],
     ]);
+  });
+
+  it('forwards preview cancellation through the common-write facade', async () => {
+    const controller = new AbortController();
+    const admissions = [];
+    const raw = { previewWorktreeCreate: vi.fn(async () => 'preview') };
+    const service = createGitExecutionService({
+      raw,
+      coordinator: {
+        run: async (options, task) => {
+          admissions.push(options);
+          return task({ active: true });
+        },
+      },
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+
+    await expect(service.previewWorktreeCreate('/repo', { name: 'feature' }, { signal: controller.signal }))
+      .resolves.toBe('preview');
+
+    expect(admissions).toEqual([expect.objectContaining({
+      label: 'previewWorktreeCreate',
+      signal: controller.signal,
+    })]);
+    expect(raw.previewWorktreeCreate).toHaveBeenCalledWith(
+      '/repo',
+      { name: 'feature' },
+      { signal: controller.signal },
+    );
   });
 
   it('keeps configured remote slash checkout network-coordinated across a local-branch race', async () => {

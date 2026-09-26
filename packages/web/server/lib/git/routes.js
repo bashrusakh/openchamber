@@ -1233,17 +1233,22 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       return res.status(501).json({ error: 'Worktree validation is not available' });
     }
 
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = req.query.directory;
       if (!directory || typeof directory !== 'string') {
         return res.status(400).json({ error: 'directory parameter is required' });
       }
 
-      const result = await validateWorktreeCreate(directory, req.body || {});
+      const result = await validateWorktreeCreate(directory, req.body || {}, { signal: requestAbort.signal });
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json(result);
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       console.error('Failed to validate worktree creation:', error);
       res.status(500).json({ error: error.message || 'Failed to validate worktree creation' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 
@@ -1278,17 +1283,22 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       return res.status(501).json({ error: 'Worktree preview is not available' });
     }
 
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = req.query.directory;
       if (!directory || typeof directory !== 'string') {
         return res.status(400).json({ error: 'directory parameter is required' });
       }
 
-      const preview = await previewWorktreeCreate(directory, req.body || {});
+      const preview = await previewWorktreeCreate(directory, req.body || {}, { signal: requestAbort.signal });
+      if (!canRespondToRequest(res, requestAbort)) return;
       res.json(preview);
     } catch (error) {
+      if (!canRespondToRequest(res, requestAbort)) return;
       console.error('Failed to preview worktree:', error);
       res.status(500).json({ error: error.message || 'Failed to preview worktree' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 

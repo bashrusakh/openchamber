@@ -565,6 +565,7 @@ export class GitContextResolver {
       settled: false,
       cleanupBlocked: false,
       cleanupReconciliation: null,
+      released: false,
       abortScheduled: false,
       abortTimer: undefined,
       timer: undefined,
@@ -590,16 +591,31 @@ export class GitContextResolver {
           this.clearTimer(entry.abortTimer);
           entry.abortTimer = undefined;
         }
+        const release = () => {
+          if (entry.released) return;
+          entry.released = true;
+          this.inFlightContexts.delete(key);
+          if (this.inFlightAliases.get(key) === entry) {
+            this.inFlightAliases.delete(key);
+          }
+        };
+
         // A process-tree failure without a reconciliation promise is an
         // explicit cleanup-blocked state. Keep the source entry visible so a
         // retry cannot start another Git process while ownership is unknown.
-        if (entry.cleanupBlocked && !entry.cleanupReconciliation) {
+        if (entry.cleanupBlocked) {
+          if (entry.cleanupReconciliation) {
+            // The discovery task can settle before the owned process tree has
+            // confirmed cleanup. Its aliases remain the ownership fence until
+            // that reconciliation finishes, so a new resolve cannot launch a
+            // competing discovery in the gap.
+            void Promise.resolve(entry.cleanupReconciliation.promise)
+              .catch(() => undefined)
+              .then(release);
+          }
           return;
         }
-        this.inFlightContexts.delete(key);
-        if (this.inFlightAliases.get(key) === entry) {
-          this.inFlightAliases.delete(key);
-        }
+        release();
       });
     this.inFlightAliases.set(key, entry);
     entry.timer = this.setTimer(() => {
