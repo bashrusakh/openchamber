@@ -133,6 +133,7 @@ describe('VS Code Git execution service discovery fallback', () => {
       worktreeId: '/repo',
     };
     const calls = [];
+    const internalOptions = [];
     let finishCreate = null;
     let releaseAttachment;
     let attachmentStarted = false;
@@ -169,11 +170,15 @@ describe('VS Code Git execution service discovery fallback', () => {
         targetWorktree: true,
         network: options.network,
         lease: options.lease,
-      }, task),
+      }, () => {
+        internalOptions.push(options);
+        return task();
+      }),
     };
     const service = createGitExecutionService({ core: { ...core, createWorktree: raw.createWorktree }, runtime });
 
-    const created = service.createWorktree('/repo', { startRef: 'origin/main' });
+    const controller = new AbortController();
+    const created = service.createWorktree('/repo', { startRef: 'origin/main' }, { signal: controller.signal });
     await waitFor(() => finishCreate !== null);
 
     let competingStarted = false;
@@ -198,6 +203,7 @@ describe('VS Code Git execution service discovery fallback', () => {
     await expect(createdResult.attachment).resolves.toBeUndefined();
     await expect(competing).resolves.toBe('competing');
     expect(calls).toEqual(['attachment-start', 'attachment-end', 'competing-start']);
+    expect(internalOptions).toContainEqual(expect.objectContaining({ signal: controller.signal }));
   });
 
   it('keeps worktree metadata initialization out of the read classification', () => {

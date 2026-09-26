@@ -313,7 +313,7 @@ export const createGitExecutionService = (dependencies = {}) => {
     runGit: dependencies.runGit || createDiscoveryRunner(raw),
   });
 
-  const createBackgroundScheduler = (outerContext, outerNetwork) => async (request, task) => {
+  const createBackgroundScheduler = (outerContext, outerNetwork, outerSignal) => async (request, task) => {
     const context = request.operation === 'worktreeAttachment'
       ? outerContext
       : await resolver.resolve(request.contextDirectory);
@@ -324,7 +324,7 @@ export const createGitExecutionService = (dependencies = {}) => {
       network: request.network === true
         || (request.operation === 'worktreeAttachment' && outerNetwork === true),
       label: request.operation,
-      signal: request.signal,
+      signal: request.signal || outerSignal,
       queueTimeoutMs: request.queueTimeoutMs,
     }, () => runWithGitExecutionScope(false, task));
   };
@@ -369,7 +369,10 @@ export const createGitExecutionService = (dependencies = {}) => {
       () => raw[name](
         ...args,
         ...(name === 'createWorktree'
-           ? [{ scheduleBackground: createBackgroundScheduler(context, options.network) }]
+           ? [{
+             scheduleBackground: createBackgroundScheduler(context, options.network, options.signal),
+             signal: options.signal,
+           }]
           : []),
       ),
     ));

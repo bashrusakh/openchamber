@@ -68,6 +68,7 @@ const createBackgroundScheduler = (
   runtime: typeof gitExecutionRuntime,
   outerContext: GitExecutionContext,
   outerNetwork: boolean,
+  outerSignal?: AbortSignal,
 ): NonNullable<core.GitWorktreeExecutionOptions['scheduleBackground']> => (
   request,
   task,
@@ -79,7 +80,7 @@ const createBackgroundScheduler = (
       request.operation,
       outerContext,
       runTask,
-      { network: request.network || outerNetwork },
+      { network: request.network || outerNetwork, signal: request.signal || outerSignal },
     );
   }
   return runtime.runInternalOperationWithCommonFallback(
@@ -87,7 +88,7 @@ const createBackgroundScheduler = (
     request.contextDirectory,
     outerContext.commonId,
     runTask,
-    { network: request.network || classification.network === 'required' },
+    { network: request.network || classification.network === 'required', signal: request.signal || outerSignal },
   );
 };
 
@@ -193,16 +194,18 @@ export const createGitExecutionService = ({
   const previewWorktreeCreate: typeof core.previewWorktreeCreate = (directory, input) => (
     runCore('previewWorktreeCreate', directory, () => coreImpl.previewWorktreeCreate(directory, input))
   );
-  const createWorktree: typeof core.createWorktree = (directory, input) => {
+  const createWorktree: typeof core.createWorktree = (directory, input, options = {}) => {
     const network = worktreeMayUseNetwork(input);
     return runCore('createWorktree', directory, (lease) => coreImpl.createWorktree(directory, input, {
       scheduleBackground: createBackgroundScheduler(runtime, {
         isRepository: true,
         commonId: lease.commonId,
         worktreeId: lease.worktreeId,
-      }, network),
+      }, network, options.signal),
+      signal: options.signal,
     }), {
       network,
+      signal: options.signal,
     });
   };
   const getWorktreeBootstrapStatus: typeof core.getWorktreeBootstrapStatus = (directory) => (

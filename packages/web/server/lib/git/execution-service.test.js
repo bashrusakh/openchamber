@@ -611,7 +611,7 @@ describe('Git execution service', () => {
     ]);
     expect(rawCalls).toEqual([
       ['/repo', input],
-      ['/repo', input, { scheduleBackground: expect.any(Function) }],
+      ['/repo', input, { scheduleBackground: expect.any(Function), signal: controller.signal }],
     ]);
   });
 

@@ -36,6 +36,7 @@ afterAll(() => {
 
 const {
   checkIsGitRepository,
+  getWorktreeBootstrapStateKey,
   getGitExecutablePath,
   getWorktreeBootstrapStatus,
 } = await import('./gitService.ts?worktree-bootstrap-test');
@@ -47,6 +48,18 @@ describe('VS Code worktree bootstrap phases', () => {
       phase: 'setup-ready',
       error: null,
     });
+  });
+
+  it('folds Windows path casing for internal bootstrap task keys', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      expect(getWorktreeBootstrapStateKey('/Worktrees/Feature')).toBe(
+        getWorktreeBootstrapStateKey('/worktrees/feature'),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
   });
 
   it('exposes the Git executable selected by VS Code', async () => {

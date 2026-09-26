@@ -106,6 +106,32 @@ describe('findBranchPrCandidates', () => {
     expect(listMock).toHaveBeenCalledTimes(1);
   });
 
+  test('does not cache a pull source that completed after every waiter cancelled', async () => {
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    let releaseFirst;
+    listMock.mockImplementation(async () => {
+      if (listMock.mock.calls.length === 1) {
+        return new Promise((resolve) => { releaseFirst = () => resolve({ data: [openPr] }); });
+      }
+      return { data: [openPr] };
+    });
+
+    const first = call({ force: false, signal: firstController.signal });
+    const second = call({ force: false, signal: secondController.signal });
+    await flush();
+    firstController.abort('first disconnected');
+    const firstCancelled = expect(first).rejects.toBe('first disconnected');
+    secondController.abort('second disconnected');
+    const secondCancelled = expect(second).rejects.toBe('second disconnected');
+    await Promise.all([firstCancelled, secondCancelled]);
+
+    releaseFirst();
+    await flush();
+    await expect(call({ force: false })).resolves.toMatchObject({ open: { number: 15 } });
+    expect(listMock).toHaveBeenCalledTimes(2);
+  });
+
   test('returns the branch history when no open PR exists', async () => {
     listMock.mockImplementation(async ({ head }) => (
       head ? { data: [olderMergedPr, mergedPr] } : { data: [] }
