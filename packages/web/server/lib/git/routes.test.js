@@ -26,6 +26,8 @@ const gitLibraries = {
   resolveWorktreeTopLevel: vi.fn(),
   getPathDiff: vi.fn(),
   getFileDiff: vi.fn(),
+  validateWorktreeCreate: vi.fn(),
+  previewWorktreeCreate: vi.fn(),
 };
 
 vi.mock('./index.js', () => ({
@@ -53,6 +55,8 @@ vi.mock('./index.js', () => ({
   resolveWorktreeTopLevel: gitLibraries.resolveWorktreeTopLevel,
   getPathDiff: gitLibraries.getPathDiff,
   getFileDiff: gitLibraries.getFileDiff,
+  validateWorktreeCreate: gitLibraries.validateWorktreeCreate,
+  previewWorktreeCreate: gitLibraries.previewWorktreeCreate,
 }));
 
 const { registerGitRoutes } = await import('./routes.js');
@@ -517,6 +521,55 @@ describe('remaining git read route cancellation', () => {
       ['main'],
       { signal: expect.any(AbortSignal) },
     );
+  });
+});
+
+describe('git worktree preflight route cancellation', () => {
+  beforeEach(() => {
+    gitLibraries.validateWorktreeCreate.mockReset();
+    gitLibraries.previewWorktreeCreate.mockReset();
+  });
+
+  it.each([
+    ['validate', '/api/git/worktrees/validate', 'validateWorktreeCreate'],
+    ['preview', '/api/git/worktrees/preview', 'previewWorktreeCreate'],
+  ])('cancels %s without a late response or error log after disconnect', async (_label, routePath, operation) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    gitLibraries[operation].mockImplementation((_directory, _input, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
+    }));
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const request = Object.assign(new EventEmitter(), { query: { directory: '/repo' }, body: {} });
+    const response = createMockResponse();
+
+    const pending = getRoute('POST', routePath)(request, response);
+    await waitForMockCall(gitLibraries[operation]);
+    request.emit('aborted');
+    await pending;
+
+    expect(gitLibraries[operation]).toHaveBeenCalledWith('/repo', {}, { signal: expect.any(AbortSignal) });
+    expect(response.body).toBeNull();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it.each([
+    ['validate', '/api/git/worktrees/validate', 'validateWorktreeCreate'],
+    ['preview', '/api/git/worktrees/preview', 'previewWorktreeCreate'],
+  ])('preserves the %s error response while the client remains connected', async (_label, routePath, operation) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    gitLibraries[operation].mockRejectedValue(new Error('preflight failed'));
+    const { app, getRoute } = createRouteRegistry();
+    registerGitRoutes(app);
+    const response = createMockResponse();
+
+    await getRoute('POST', routePath)({ query: { directory: '/repo' }, body: {} }, response);
+
+    expect(response.statusCode).toBe(500);
+    expect(response.body).toEqual({ error: 'preflight failed' });
+    expect(errorSpy).toHaveBeenCalledOnce();
+    errorSpy.mockRestore();
   });
 });
 

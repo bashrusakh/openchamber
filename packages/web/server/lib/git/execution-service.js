@@ -335,11 +335,22 @@ export const createGitExecutionService = (dependencies = {}) => {
       throw new TypeError(`Unclassified Git service operation: ${name}`);
     }
     const context = await resolver.resolve(directory, { signal: options.signal });
+    const rawArgs = () => [
+      ...args,
+      ...((name === 'validateWorktreeCreate' || name === 'previewWorktreeCreate')
+        ? [{ signal: options.signal }]
+        : (name === 'createWorktree'
+          ? [{
+            scheduleBackground: createBackgroundScheduler(context, options.network, options.signal),
+            signal: options.signal,
+          }]
+          : [])),
+    ];
     if (!context.isRepository) {
       if (isUnsupportedRepositoryContext(context)) {
         throw unsupportedRepositoryError(context);
       }
-      return runWithGitExecutionScope(kind === GIT_OPERATION_KIND.READ, () => raw[name](...args));
+      return runWithGitExecutionScope(kind === GIT_OPERATION_KIND.READ, () => raw[name](...rawArgs()));
     }
     let network = options.network ?? networkOperations.has(name);
     if (name === 'checkoutBranch') {
@@ -366,15 +377,7 @@ export const createGitExecutionService = (dependencies = {}) => {
       waitForCleanup: options.waitForCleanup === true,
     }, () => runWithGitExecutionScope(
       kind === GIT_OPERATION_KIND.READ,
-      () => raw[name](
-        ...args,
-        ...(name === 'createWorktree'
-           ? [{
-             scheduleBackground: createBackgroundScheduler(context, options.network, options.signal),
-             signal: options.signal,
-           }]
-          : []),
-      ),
+      () => raw[name](...rawArgs()),
     ));
   };
 
@@ -455,6 +458,15 @@ export const createGitExecutionService = (dependencies = {}) => {
           ...executionOptions,
           network: worktreeMayUseNetwork(input),
         },
+      );
+      continue;
+    }
+    if (name === 'previewWorktreeCreate') {
+      wrapped[name] = (directory, input, executionOptions = {}) => runOperation(
+        name,
+        directory,
+        [directory, input],
+        executionOptions,
       );
       continue;
     }

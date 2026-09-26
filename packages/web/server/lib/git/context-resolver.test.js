@@ -529,6 +529,58 @@ describe('GitContextResolver', () => {
     expect(calls).toBe(2);
   });
 
+  it('retains settled discovery aliases until cleanup reconciliation releases ownership', async () => {
+    let releaseCleanup;
+    const cleanup = new Promise((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const cleanupError = Object.assign(new Error('process ownership is unresolved'), {
+      cleanupBlocked: true,
+      cleanupReconciliation: { promise: cleanup, retire: () => {} },
+    });
+    const resolver = createGitContextResolver({
+      realpath: async (value) => value,
+      pathExists: async () => true,
+      runGit: async () => ({ success: true, stdout: '' }),
+    });
+    let discoveries = 0;
+    vi.spyOn(resolver, 'discover').mockImplementation(async () => {
+      discoveries += 1;
+      if (discoveries === 1) throw cleanupError;
+      return {
+        isRepository: true,
+        requestedDirectory: '/repo',
+        topLevel: '/repo',
+        gitDir: '/repo/.git',
+        commonDir: '/repo/.git',
+        commonId: '/repo/.git',
+        worktreeId: '/repo',
+      };
+    });
+    const aliasDelete = vi.spyOn(resolver.inFlightAliases, 'delete');
+    const contextDelete = vi.spyOn(resolver.inFlightContexts, 'delete');
+
+    await expect(resolver.resolve('/repo')).rejects.toBe(cleanupError);
+    expect(resolver.getStats()).toMatchObject({
+      inFlightAliases: 1,
+      inFlightContexts: 1,
+      discovery: { active: 0, pending: 0 },
+    });
+
+    await expect(resolver.resolve('/repo')).rejects.toBe(cleanupError);
+    expect(discoveries).toBe(1);
+    expect(aliasDelete).not.toHaveBeenCalled();
+    expect(contextDelete).not.toHaveBeenCalled();
+
+    releaseCleanup();
+    await waitFor(() => resolver.getStats().inFlightAliases === 0);
+    expect(aliasDelete).toHaveBeenCalledTimes(1);
+    expect(contextDelete).toHaveBeenCalledTimes(1);
+
+    await expect(resolver.resolve('/repo')).resolves.toMatchObject({ isRepository: true });
+    expect(discoveries).toBe(2);
+  });
+
   it('does not restart a discovery whose cleanup is explicitly blocked without reconciliation', async () => {
     const controller = new AbortController();
     let calls = 0;
