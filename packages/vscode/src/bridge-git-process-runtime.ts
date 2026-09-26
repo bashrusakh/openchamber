@@ -21,6 +21,7 @@ export type GitProcessRuntimeOptions = {
 export type GitProcessExecutionOptions = {
   signal?: AbortSignal;
   binary?: string;
+  env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   maxBuffer?: number;
 };
@@ -190,7 +191,7 @@ export const createGitProcessRuntime = ({
 
     const process = spawnOwnedProcess(options.binary?.trim() || configuredPath?.trim() || 'git', args, {
       cwd,
-      env: { ...env, ...getGitExecutionEnv() },
+      env: { ...env, ...options.env, ...getGitExecutionEnv() },
     });
     activeProcesses.add(process);
     let processReleased = false;

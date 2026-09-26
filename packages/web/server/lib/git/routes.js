@@ -1253,17 +1253,22 @@ export function registerGitRoutes(app, { emitWorktreeChanged } = {}) {
       return res.status(501).json({ error: 'Worktree creation is not available' });
     }
 
+    const requestAbort = createRequestAbortSignal(req, res);
     try {
       const directory = req.query.directory;
       if (!directory || typeof directory !== 'string') {
         return res.status(400).json({ error: 'directory parameter is required' });
       }
 
-      const created = await createWorktree(directory, req.body || {});
+      const created = await createWorktree(directory, req.body || {}, { signal: requestAbort.signal });
+      if (requestAbort.signal.aborted) return;
       res.json(created);
     } catch (error) {
+      if (requestAbort.signal.aborted) return;
       console.error('Failed to create worktree:', error);
       res.status(500).json({ error: error.message || 'Failed to create worktree' });
+    } finally {
+      requestAbort.cleanup();
     }
   });
 

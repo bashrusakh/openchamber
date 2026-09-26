@@ -14,6 +14,9 @@ const createGitRunner = ({
   cloneFailure = null,
   sparse = true,
   listFailure = null,
+  skillDirs = ['example'],
+  missingSkillDirs = [],
+  showResultFor = null,
   events = [],
   isReservationActive = () => false,
 } = {}) => {
@@ -29,17 +32,19 @@ const createGitRunner = ({
 
     if (args[0] === 'clone') {
       tempBase = args.at(-1);
-      await fs.mkdir(path.join(tempBase, 'skills', 'example'), { recursive: true });
+      await Promise.all(skillDirs.map((skillDir) => fs.mkdir(path.join(tempBase, skillDir), { recursive: true })));
       if (args.includes('--filter=blob:none') && preferredClone === 'fallback') {
         return { ok: false, stdout: '', stderr: 'filter unsupported', message: 'filter unsupported', code: 128 };
       }
       if (cloneFailure?.at === 'clone') {
         return { ok: false, stdout: '', stderr: cloneFailure.message, message: cloneFailure.message, code: cloneFailure.code };
       }
-      await fs.writeFile(
-        path.join(tempBase, 'skills', 'example', 'SKILL.md'),
-        '---\nname: Example\ndescription: Example skill\n---\nBody\n',
-      );
+      await Promise.all(skillDirs
+        .filter((skillDir) => !missingSkillDirs.includes(skillDir))
+        .map((skillDir) => fs.writeFile(
+          path.join(tempBase, skillDir, 'SKILL.md'),
+          '---\nname: Example\ndescription: Example skill\n---\nBody\n',
+        )));
       return { ok: true, stdout: '', stderr: '' };
     }
 
@@ -58,7 +63,7 @@ const createGitRunner = ({
     }
 
     if (args.includes('ls-files')) {
-      return { ok: true, stdout: 'skills/example/SKILL.md\n', stderr: '' };
+      return { ok: true, stdout: skillDirs.map((skillDir) => `${skillDir}/SKILL.md`).join('\n') + '\n', stderr: '' };
     }
 
     if (args.includes('ls-tree')) {
@@ -66,10 +71,12 @@ const createGitRunner = ({
       if (listFailure) {
         return { ok: false, stdout: '', stderr: listFailure.message, message: listFailure.message, code: listFailure.code };
       }
-      return { ok: true, stdout: 'skills/example/SKILL.md\n', stderr: '' };
+      return { ok: true, stdout: skillDirs.map((skillDir) => `${skillDir}/SKILL.md`).join('\n') + '\n', stderr: '' };
     }
 
     if (args.includes('show')) {
+      const configured = showResultFor?.(args.at(-1));
+      if (configured) return configured;
       return { ok: true, stdout: '---\ndescription: Example skill\n---\n', stderr: '' };
     }
 
@@ -360,5 +367,39 @@ describe('skills catalog repository scanning', () => {
     })).resolves.toMatchObject({ ok: false, error: { kind: 'networkError' } });
     expect(runner.calls.filter(({ args }) => args[0] === 'clone')).toHaveLength(1);
     await expect(fs.stat(runner.getTempBase())).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('waits for a late sibling read before releasing a cleanup-blocked scan lease', async () => {
+    let releaseSibling;
+    let siblingStarted;
+    const siblingStartedPromise = new Promise((resolve) => { siblingStarted = resolve; });
+    const cleanupReconciliation = { promise: Promise.resolve(), retire: () => undefined };
+    const runner = createGitRunner({
+      sparse: false,
+      skillDirs: ['skills/blocked', 'skills/slow'],
+      missingSkillDirs: ['skills/blocked', 'skills/slow'],
+      showResultFor: (ref) => {
+        if (ref.endsWith('blocked/SKILL.md')) {
+          return { ok: false, cleanupBlocked: true, descendantsTerminated: false, cleanupReconciliation };
+        }
+        siblingStarted();
+        return new Promise((resolve) => { releaseSibling = () => resolve({ ok: true, stdout: '---\ndescription: Slow\n---\n', stderr: '' }); });
+      },
+    });
+    const events = [];
+    const reservation = createReservation(events);
+
+    const pending = scanSkillsRepository({
+      source: 'owner/repository',
+      gitExecutionService: reservation,
+      runGit: runner.runGit,
+    });
+    await siblingStartedPromise;
+    await Promise.resolve();
+    expect(events).not.toContainEqual({ event: 'task-finished', reservationActive: true });
+
+    releaseSibling();
+    await expect(pending).resolves.toMatchObject({ ok: false, cleanupBlocked: true });
+    expect(events).toContainEqual({ event: 'task-finished', reservationActive: true });
   });
 });

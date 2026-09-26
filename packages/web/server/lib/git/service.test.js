@@ -14,6 +14,7 @@ import {
   cherryPick,
   createWorktree,
   getWorktreeBootstrapStatus,
+  getWorktreeBootstrapStateKey,
   getBranches,
   getUnpushedBranchCounts,
   getRangeDiff,
@@ -1086,6 +1087,18 @@ describe('getWorktrees', () => {
 // ---------------------------------------------------------------------------
 
 describe('createWorktree', () => {
+  it('folds Windows path casing for internal bootstrap task keys', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      expect(getWorktreeBootstrapStateKey('/Worktrees/Feature')).toBe(
+        getWorktreeBootstrapStateKey('/worktrees/feature'),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
+  });
+
   it('returns ready/setup-ready when no bootstrap state is recorded', async () => {
     const directory = path.join(createTempDir(), 'missing-worktree');
 

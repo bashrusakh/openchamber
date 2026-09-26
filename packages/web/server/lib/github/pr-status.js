@@ -427,7 +427,7 @@ const getRepoPulls = (octokit, repo, state, { force = false, signal = undefined 
     // `complete` means the first page held everything, so a miss is
     // authoritative: this repo has no PR in this state for any branch.
     const result = { fetchedAt: Date.now(), prs, complete: prs.length < 100 };
-    if (repoPullsCache.get(key) === entry) {
+    if (repoPullsCache.get(key) === entry && !shared.sourceAbortRequested) {
       repoPullsCache.set(key, result);
     }
     return result;

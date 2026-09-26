@@ -322,10 +322,17 @@ export async function scanSkillsRepository({
         }
       };
 
-      const workerResults = await Promise.all(
+      const workerResults = await Promise.allSettled(
         Array.from({ length: Math.min(maxParallel, uniqueSkillDirs.length || 1) }, () => worker()),
       );
-      const blockedResult = workerResults.find((result) => result?.cleanupBlocked);
+      const failedWorker = workerResults.find((result) => result.status === 'rejected');
+      if (failedWorker) {
+        throw failedWorker.reason;
+      }
+      const blockedResult = workerResults
+        .filter((result) => result.status === 'fulfilled')
+        .map((result) => result.value)
+        .find((result) => result?.cleanupBlocked);
       if (blockedResult) return blockedResult;
 
       // Stable ordering for UX
