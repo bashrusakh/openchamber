@@ -1,7 +1,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { describe, expect, test } from 'bun:test';
-import type { Message } from '@opencode-ai/sdk/v2/client';
+import type { Message } from '@/lib/opencode/model';
 
 import {
     isOlderHistoryPrependCommit,
@@ -95,15 +95,10 @@ describe('useChatTimelineController identity lifecycle', () => {
         const dom = installMinimalDom();
         const root = createRoot(dom.container);
         const pending = deferred();
-        const user: Message = {
-            id: 'user', sessionID: 'session', role: 'user', time: { created: 100 },
-            agent: 'build', model: { providerID: 'test', modelID: 'test' },
-        };
+        const user: Message = { id: 'user', sessionID: 'session', role: 'user', time: { created: 100 } };
         const older: Message = {
-            id: 'older-step', sessionID: 'session', role: 'assistant', parentID: 'unloaded-user',
-            time: { created: 99, completed: 100 }, providerID: 'test', modelID: 'test',
-            mode: 'build', agent: 'build', path: { cwd: '/repo', root: '/repo' }, cost: 0,
-            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            id: 'older-step', sessionID: 'session', role: 'assistant',
+            time: { created: 99, completed: 100 }, providerID: 'test', modelID: 'test', agent: 'build',
         };
         let messages: ChatMessageEntry[] = [{ info: user, parts: [] }];
         let calls = 0;

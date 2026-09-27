@@ -1,21 +1,23 @@
 import { expect, test } from 'bun:test'
-import { createOpencodeClient } from '@opencode-ai/sdk/v2/client'
+import type { MessagePage } from '@/lib/opencode/client'
 
 import { SessionMessageLoader } from './session-message-loader'
 import { ChildStoreManager } from './child-store'
 
+const emptyPage: MessagePage = { items: [], cursor: {} }
+
 test('loads messages after a Strict Mode cleanup and effect setup', async () => {
   const childStores = new ChildStoreManager()
   let messageRequests = 0
-  let resolveFirstRequest!: (value: Response) => void
+  let resolveFirstRequest!: (value: MessagePage) => void
   let markStarted!: () => void
   const started = new Promise<void>((resolve) => { markStarted = resolve })
-  const firstResponse = new Promise<Response>((resolve) => { resolveFirstRequest = resolve })
-  const sdk = createOpencodeClient({ baseUrl: 'http://lifecycle.test', fetch: async () => {
+  const firstResponse = new Promise<MessagePage>((resolve) => { resolveFirstRequest = resolve })
+  const sdk = { getSessionMessages: async () => {
     messageRequests += 1
     if (messageRequests === 1) { markStarted(); return firstResponse }
-    return Response.json([])
-  } })
+    return emptyPage
+  } }
   const loader = new SessionMessageLoader(childStores, { sdk, runtimeKey: 'runtime' })
   const target = { directory: '/project', sessionID: 'session-1' }
   try {
@@ -24,7 +26,7 @@ test('loads messages after a Strict Mode cleanup and effect setup', async () => 
     loader.dispose()
     loader.activate()
     await loader.ensure(target)
-    resolveFirstRequest(Response.json([]))
+    resolveFirstRequest(emptyPage)
     await firstLoad
     expect(messageRequests).toBe(2)
     expect(loader.getSnapshot(target).status).toBe('ready')

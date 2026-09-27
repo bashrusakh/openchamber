@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildSpaceLabels,
+  buildToolsLabels,
   createSpaceId,
   hashProjectDirectory,
   isSpaceId,
@@ -9,7 +10,11 @@ import {
   labelFilterArgs,
   normalizeSpaceName,
   parseSpaceLabels,
+  parseToolsLabels,
   spaceResourceName,
+  toolsKeyFromVolumeName,
+  toolsLabelFilterArgs,
+  toolsResourceName,
 } from './labels.js';
 
 const ID = 'a1b2c3d4e5f6';
@@ -130,5 +135,85 @@ describe('parseSpaceLabels', () => {
   it('keeps a resource whose display labels are missing', () => {
     const parsed = parseSpaceLabels({ 'openchamber.space': 'true', 'openchamber.space.id': ID, 'openchamber.space.role': 'volume', 'openchamber.space.owner': 'install-a' });
     expect(parsed).toEqual({ id: ID, role: 'volume', owner: 'install-a', project: '', name: '', created: '' });
+  });
+});
+
+describe('tools labels and names', () => {
+  const KEY = '0123456789abcdef';
+  const TOOLS_FIELDS = { role: 'tools', owner: 'install-a', key: KEY, description: 'web 1.24.2, opencode 1.18.31', created: '2026-09-20T08:00:00.000Z' };
+
+  it('names the volume after the owner and the key, and a one-shot after the volume', () => {
+    expect(toolsResourceName('install-a', KEY)).toBe(`openchamber-tools-install-a-${KEY}`);
+    expect(toolsResourceName('install-a', KEY, 'tools-fill')).toBe(`openchamber-tools-install-a-${KEY}-fill`);
+    expect(toolsResourceName('install-a', KEY, 'tools-check')).toBe(`openchamber-tools-install-a-${KEY}-check`);
+  });
+
+  it('rejects a bad owner, key or role in a name', () => {
+    expect(() => toolsResourceName('a b', KEY)).toThrow(expect.objectContaining({ code: 'invalid_owner' }));
+    expect(() => toolsResourceName('install-a', '../x')).toThrow(expect.objectContaining({ code: 'invalid_tools_key' }));
+    expect(() => toolsResourceName('install-a', KEY, 'space')).toThrow(expect.objectContaining({ code: 'invalid_role' }));
+  });
+
+  it('reads the key back from a volume name of this owner only', () => {
+    expect(toolsKeyFromVolumeName(`openchamber-tools-install-a-${KEY}`, 'install-a')).toBe(KEY);
+    // An owner whose id is the start of another owner's id must not match that owner's volumes.
+    expect(toolsKeyFromVolumeName(`openchamber-tools-install-a-${KEY}`, 'install')).toBeNull();
+    expect(toolsKeyFromVolumeName(`openchamber-tools-install-b-${KEY}`, 'install-a')).toBeNull();
+    expect(toolsKeyFromVolumeName(`openchamber-tools-install-a-${KEY}-fill`, 'install-a')).toBeNull();
+    expect(toolsKeyFromVolumeName(`openchamber-space-${ID}-volume-work`, 'install-a')).toBeNull();
+    expect(toolsKeyFromVolumeName(undefined, 'install-a')).toBeNull();
+  });
+
+  it('builds the marker, the owner, the role, the key, a description and the time, and no space id', () => {
+    expect(buildToolsLabels(TOOLS_FIELDS)).toEqual({
+      'openchamber.space': 'true',
+      'openchamber.space.role': 'tools',
+      'openchamber.space.owner': 'install-a',
+      'openchamber.space.tools.key': KEY,
+      'openchamber.space.tools.description': 'web 1.24.2, opencode 1.18.31',
+      'openchamber.space.created': '2026-09-20T08:00:00.000Z',
+    });
+  });
+
+  it.each([
+    ['invalid_role', { role: 'volume' }],
+    ['invalid_owner', { owner: 'a,b' }],
+    ['invalid_tools_key', { key: 'ABCDEF0123456789' }],
+    ['invalid_tools_description', { description: 'two\nlines' }],
+    ['invalid_tools_description', { description: '' }],
+    ['invalid_created', { created: 'soon' }],
+  ])('rejects with %s', (code, change) => {
+    expect(() => buildToolsLabels({ ...TOOLS_FIELDS, ...change })).toThrow(expect.objectContaining({ code }));
+  });
+
+  it('is invisible to the space label parser, so `list` and `remove` pass a tools volume by', () => {
+    expect(parseSpaceLabels(buildToolsLabels(TOOLS_FIELDS))).toBeNull();
+    expect(parseToolsLabels(buildSpaceLabels(FIELDS))).toBeNull();
+  });
+
+  it('round-trips through the tools label parser', () => {
+    expect(parseToolsLabels(buildToolsLabels(TOOLS_FIELDS))).toEqual(TOOLS_FIELDS);
+  });
+
+  it.each([
+    ['no labels', null],
+    ['no marker', { ...buildToolsLabels(TOOLS_FIELDS), 'openchamber.space': undefined }],
+    ['a malformed key', { ...buildToolsLabels(TOOLS_FIELDS), 'openchamber.space.tools.key': 'latest' }],
+    ['no owner', { ...buildToolsLabels(TOOLS_FIELDS), 'openchamber.space.owner': undefined }],
+  ])('returns null for %s', (title, labels) => {
+    expect(parseToolsLabels(labels)).toBeNull();
+  });
+
+  it('filters by owner, and by role and key when asked', () => {
+    expect(toolsLabelFilterArgs({ owner: 'install-a', role: 'tools' })).toEqual([
+      '--filter', 'label=openchamber.space=true',
+      '--filter', 'label=openchamber.space.owner=install-a',
+      '--filter', 'label=openchamber.space.role=tools',
+    ]);
+    expect(toolsLabelFilterArgs({ owner: 'install-a', key: KEY })).toEqual([
+      '--filter', 'label=openchamber.space=true',
+      '--filter', 'label=openchamber.space.owner=install-a',
+      '--filter', `label=openchamber.space.tools.key=${KEY}`,
+    ]);
   });
 });

@@ -1019,11 +1019,11 @@ const isMissingDirectoryError = (error) => {
   return /directory that does not exist|does not exist|no such file or directory/i.test(text);
 };
 
-const runGitCommand = async (cwd, args, { timeoutMs = 0 } = {}) => {
+const runGitCommand = async (cwd, args, { timeoutMs = 0, env: extraEnv } = {}) => {
   try {
     const { stdout, stderr } = await execFileAsync(getGitBinary(), args, {
       cwd,
-      env: await buildGitEnv(),
+      env: { ...(await buildGitEnv()), ...extraEnv },
       windowsHide: true,
       maxBuffer: 20 * 1024 * 1024,
       // Only short probes pass a timeout; commands that legitimately run long
@@ -2501,6 +2501,18 @@ export async function getTrackingBranch(directory) {
   return tracking || null;
 }
 
+// Whether `sha` is reachable from the checked-out HEAD. An object git has never
+// fetched fails the same way an unrelated commit does: not an ancestor.
+export async function isAncestorOfHead(directory, sha) {
+  const normalizedDirectory = normalizeDirectoryPath(directory);
+  const normalizedSha = typeof sha === 'string' ? sha.trim() : '';
+  if (!normalizedDirectory || !/^[0-9a-f]{7,64}$/i.test(normalizedSha)) {
+    return false;
+  }
+  const result = await runGitCommand(normalizedDirectory, ['merge-base', '--is-ancestor', normalizedSha, 'HEAD']);
+  return result.success;
+}
+
 async function readStatus(normalizedDirectory, lightMode) {
   try {
     // Prefer an explicit non-repo check before simple-git status so a missing
@@ -3085,6 +3097,21 @@ export function parseBranchCreationSource(reflogText) {
   return null;
 }
 
+async function isOwnRemoteCopy(git, source, branchName) {
+  const fullName = await git
+    .raw(['rev-parse', '--symbolic-full-name', source])
+    .then((value) => String(value || '').trim())
+    .catch(() => '');
+  if (!fullName.startsWith('refs/remotes/')) return false;
+  const upstream = await git
+    .raw(['rev-parse', '--symbolic-full-name', `refs/heads/${branchName}@{upstream}`])
+    .then((value) => String(value || '').trim())
+    .catch(() => '');
+  if (upstream && fullName === upstream) return true;
+  // Upstream may be unset; a remote ref with the branch's own name is still its copy.
+  return fullName.slice('refs/remotes/'.length).split('/').slice(1).join('/') === branchName;
+}
+
 /**
  * Resolve the branch the given branch was created from, from its reflog.
  * Returns { base: null } when git has no authoritative record (clone, detached
@@ -3115,6 +3142,13 @@ export async function getBranchBase(directory, branch) {
     .then((value) => Boolean(String(value || '').trim()))
     .catch(() => false);
   if (!resolves) {
+    return { base: null };
+  }
+
+  // `git switch feat` from a remote branch records "Created from
+  // refs/remotes/origin/feat": the branch's own remote copy, not a parent.
+  // Comparing against it hides every pushed commit.
+  if (await isOwnRemoteCopy(git, source, branchName)) {
     return { base: null };
   }
 
@@ -5103,6 +5137,63 @@ export async function removeWorktree(directory, input = {}) {
   clearWorktreeBootstrapState(matchedEntry.worktree);
 
   return true;
+}
+
+// Run snapshots live under a private namespace so they never show up as
+// branches or tags, yet stay reachable (and safe from gc) until deleted.
+const RUN_SNAPSHOT_REF_PATTERN = /^refs\/openchamber\/runs\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+const assertRunSnapshotRef = (ref) => {
+  const value = typeof ref === 'string' ? ref.trim() : '';
+  if (!RUN_SNAPSHOT_REF_PATTERN.test(value) || value.includes('..')) {
+    throw new Error('Invalid snapshot ref');
+  }
+  return value;
+};
+
+const SNAPSHOT_IDENTITY_ENV = {
+  GIT_AUTHOR_NAME: 'OpenChamber',
+  GIT_AUTHOR_EMAIL: 'snapshot@openchamber.local',
+  GIT_COMMITTER_NAME: 'OpenChamber',
+  GIT_COMMITTER_EMAIL: 'snapshot@openchamber.local',
+};
+
+/**
+ * Records the complete state of a worktree (committed, staged, unstaged and
+ * untracked-but-not-ignored files) as a commit under `ref`. A throwaway index
+ * is used, so the worktree's real index, HEAD, branch and files are untouched.
+ */
+export async function snapshotWorktree(directory, input = {}) {
+  const worktreeDirectory = normalizeDirectoryPath(directory);
+  if (!worktreeDirectory) {
+    throw new Error('Worktree directory is required');
+  }
+  const ref = assertRunSnapshotRef(input?.ref);
+  const head = (await runGitCommandOrThrow(worktreeDirectory, ['rev-parse', '--verify', 'HEAD'], 'Worktree has no HEAD commit')).stdout.trim();
+
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'openchamber-snapshot-'));
+  const indexEnv = { GIT_INDEX_FILE: path.join(tempDir, 'index') };
+  try {
+    const run = async (args, message, env = indexEnv) => {
+      const result = await runGitCommand(worktreeDirectory, args, { env });
+      if (!result.success) {
+        throw new Error(result.message || message);
+      }
+      return result.stdout.trim();
+    };
+    await run(['read-tree', head], 'Failed to prepare snapshot index');
+    await run(['add', '-A'], 'Failed to collect worktree changes');
+    const tree = await run(['write-tree'], 'Failed to write snapshot tree');
+    const commit = await run(
+      ['commit-tree', tree, '-p', head, '-m', 'OpenChamber run snapshot'],
+      'Failed to write snapshot commit',
+      { ...indexEnv, ...SNAPSHOT_IDENTITY_ENV },
+    );
+    await run(['update-ref', ref, commit], 'Failed to store snapshot ref', {});
+    return { ref, commit, head };
+  } finally {
+    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export async function deleteBranch(directory, branch, options = {}) {
