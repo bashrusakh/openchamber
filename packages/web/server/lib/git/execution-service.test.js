@@ -364,12 +364,13 @@ describe('Git execution service', () => {
     await expect(service.isGitRepository('/repo')).rejects.toBe(failure);
   });
 
-  it('classifies branch and commit checkout as worktree-scoped writes', async () => {
+  it('keeps local-only branch and commit checkout worktree-scoped', async () => {
     const kinds = [];
     const raw = {
       checkoutBranch: async () => 'branch',
       checkoutCommit: async () => 'commit',
       createGit: async () => ({ raw: async () => 'local-ref' }),
+      getRemotes: async () => [],
     };
     const service = createGitExecutionService({
       raw,
@@ -576,6 +577,88 @@ describe('Git execution service', () => {
     } finally {
       for (const release of releases.values()) release('cleanup');
       await Promise.allSettled([first, second]);
+    }
+  });
+
+  it('keeps a short checkout behind the common barrier when a local branch disappears after preflight', async () => {
+    const coordinator = createGitExecutionCoordinator({ globalConcurrency: 4 });
+    const admissions = [];
+    const events = [];
+    let localBranchExists = true;
+    let trackingConfigCreated = false;
+    let deleteStarted = false;
+    let deleteFinished = false;
+    let releaseDelete;
+    let deleteBranch;
+    let service;
+    const raw = {
+      createGit: async () => ({
+        raw: async (args) => {
+          const ref = args.at(-1);
+          if (ref === 'refs/heads/feature' && localBranchExists) return 'local-ref';
+          if (ref === 'refs/remotes/origin/feature') return 'remote-ref';
+          throw Object.assign(new Error(`${ref} is absent`), { code: 1 });
+        },
+      }),
+      getRemotes: async () => [{ name: 'origin' }],
+      deleteBranch: async () => {
+        deleteStarted = true;
+        localBranchExists = false;
+        events.push('delete-start');
+        await new Promise((resolve) => { releaseDelete = resolve; });
+        deleteFinished = true;
+        events.push('delete-end');
+      },
+      checkoutBranch: async () => {
+        expect(deleteFinished).toBe(true);
+        expect(localBranchExists).toBe(false);
+        trackingConfigCreated = true;
+        events.push('checkout-created-tracking-branch');
+        return 'feature';
+      },
+    };
+    const admissionCoordinator = {
+      run: async (options, task) => {
+        const result = await coordinator.run(options, task);
+        admissions.push({ label: options.label, kind: options.kind });
+        if (options.label === 'checkout-branch-preflight') {
+          deleteBranch = service.deleteBranch('/repo/two', 'feature');
+          await waitFor(() => deleteStarted);
+        }
+        return result;
+      },
+    };
+    service = createGitExecutionService({
+      raw,
+      coordinator: admissionCoordinator,
+      resolver: { resolve: async (directory) => contextFor(directory) },
+    });
+
+    const checkout = service.checkoutBranch('/repo/one', 'feature');
+    try {
+      await waitFor(() => deleteStarted);
+      await tick();
+
+      expect(trackingConfigCreated).toBe(false);
+      expect(coordinator.getStats()).toMatchObject({ active: 1, pending: 1 });
+
+      releaseDelete();
+      await expect(deleteBranch).resolves.toBeUndefined();
+      await expect(checkout).resolves.toBe('feature');
+      expect(admissions).toEqual([
+        { label: 'checkout-branch-preflight', kind: GIT_OPERATION_KIND.READ },
+        { label: 'deleteBranch', kind: GIT_OPERATION_KIND.COMMON_WRITE },
+        { label: 'checkoutBranch', kind: GIT_OPERATION_KIND.COMMON_WRITE },
+      ]);
+      expect(events).toEqual([
+        'delete-start',
+        'delete-end',
+        'checkout-created-tracking-branch',
+      ]);
+      expect(trackingConfigCreated).toBe(true);
+    } finally {
+      releaseDelete?.();
+      await Promise.allSettled([checkout, deleteBranch]);
     }
   });
 

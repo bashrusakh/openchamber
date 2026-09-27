@@ -230,13 +230,11 @@ const checkoutBranchPreflight = async (raw, directory, branchName, signal) => {
 
   const explicitRemoteRef = requested.startsWith('refs/remotes/') || requested.startsWith('remotes/');
   if (!requested.includes('/')) {
-    if (localBranchExists) {
-      return { commonWrite: false, network: false };
-    }
-
     // `git checkout feature` DWIMs to a matching remote-tracking branch and
-    // creates refs/heads/feature plus branch.* tracking config. That mutates
-    // shared state even though no fetch is needed.
+    // creates refs/heads/feature plus branch.* tracking config when the local
+    // branch disappears before checkout. A local-ref probe is not an atomic
+    // proof, so a matching remote ref must reserve shared-write admission even
+    // when that probe found a local branch. This mutation needs no fetch.
     if (!git || !raw.getRemotes) {
       return { commonWrite: true, network: false };
     }
@@ -253,7 +251,7 @@ const checkoutBranchPreflight = async (raw, directory, branchName, signal) => {
           }
         }
       }
-      return { commonWrite: false, network: false };
+      return { commonWrite: !localBranchExists, network: false };
     } catch {
       // A failed probe is not authority to let a potentially common mutation
       // run under a worktree-only lease.
