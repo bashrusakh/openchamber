@@ -97,7 +97,7 @@ describe('findBranchPrCandidates', () => {
     await flush();
     expect(listMock.mock.calls).toHaveLength(1);
 
-    expect(listMock.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal);
+    expect(listMock.mock.calls[0][0].request.signal).toBeInstanceOf(AbortSignal);
     firstController.abort('first PR poll disconnected');
     await expect(first).rejects.toBe('first PR poll disconnected');
 

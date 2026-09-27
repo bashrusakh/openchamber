@@ -66,14 +66,14 @@ describe('getPullRequestDiff', () => {
       repo: 'openchamber',
       pull_number: 2122,
       headers: { accept: 'application/vnd.github.v3.diff' },
-      signal: controller.signal,
+      request: { signal: controller.signal },
     });
   });
 
   it('settles a canceled GitHub diff request instead of accepting a late response', async () => {
     const controller = new AbortController();
     request.mockImplementationOnce((_route, options) => new Promise((_resolve, reject) => {
-      options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+      options.request.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
     }));
 
     const pending = getPullRequestDiff('/repo', 2122, undefined, { signal: controller.signal });

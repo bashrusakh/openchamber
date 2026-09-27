@@ -1,4 +1,4 @@
-import { getOctokitOrNull } from '../github/octokit.js';
+import { getOctokitOrNull, withOctokitRequestSignal } from '../github/octokit.js';
 import assert from 'node:assert/strict';
 import { resolveGitHubRepoFromDirectory } from '../github/repo/index.js';
 
@@ -64,8 +64,10 @@ export const createPullRequestDiff = ({
     pull_number: number,
     headers: { accept: 'application/vnd.github.v3.diff' },
   };
-  if (signal) requestOptions.signal = signal;
-  const response = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', requestOptions);
+  const response = await octokit.request(
+    'GET /repos/{owner}/{repo}/pulls/{pull_number}',
+    withOctokitRequestSignal(requestOptions, signal),
+  );
 
   if (signal?.aborted) {
     throw signal.reason || new Error('Pull request diff request was cancelled');
@@ -114,8 +116,10 @@ export const createPullRequestFileContents = ({
     repo: repo.repo,
     pull_number: number,
   };
-  if (signal) pullOptions.signal = signal;
-  const pull = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', pullOptions);
+  const pull = await octokit.request(
+    'GET /repos/{owner}/{repo}/pulls/{pull_number}',
+    withOctokitRequestSignal(pullOptions, signal),
+  );
   const headSha = pull.data?.head?.sha;
   const baseSha = pull.data?.base?.sha;
   assert.match(String(headSha), /^[0-9a-f]{40}$/, 'GitHub returned an invalid pull request head');
@@ -126,8 +130,10 @@ export const createPullRequestFileContents = ({
     repo: repo.repo,
     basehead: `${baseSha}...${headSha}`,
   };
-  if (signal) compareOptions.signal = signal;
-  const compare = await octokit.request('GET /repos/{owner}/{repo}/compare/{basehead}', compareOptions);
+  const compare = await octokit.request(
+    'GET /repos/{owner}/{repo}/compare/{basehead}',
+    withOctokitRequestSignal(compareOptions, signal),
+  );
   const mergeBaseSha = compare.data?.merge_base_commit?.sha;
   assert.match(String(mergeBaseSha), /^[0-9a-f]{40}$/, 'GitHub returned an invalid merge base');
 
@@ -139,8 +145,10 @@ export const createPullRequestFileContents = ({
       ref,
       headers: { accept: 'application/vnd.github.raw+json' },
     };
-    if (signal) requestOptions.signal = signal;
-    const response = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', requestOptions);
+    const response = await octokit.request(
+      'GET /repos/{owner}/{repo}/contents/{path}',
+      withOctokitRequestSignal(requestOptions, signal),
+    );
     const content = response.data;
     assert.ok(
       Object.prototype.toString.call(content) === '[object String]' && Object.is(content.valueOf(), content),

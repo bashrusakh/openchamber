@@ -9,6 +9,19 @@ import { getGhCliToken } from './gh-cli-credential.js';
 // caller fail fast and fall back to cached state instead.
 const OCTOKIT_REQUEST_TIMEOUT_MS = 8000;
 
+// @octokit/request@10 reads per-call cancellation from options.request.signal.
+// Keep caller-supplied request options (notably custom fetch settings) intact.
+export const withOctokitRequestSignal = (options, signal) => {
+  if (!signal) return options;
+  return {
+    ...options,
+    request: {
+      ...options.request,
+      signal,
+    },
+  };
+};
+
 const timeoutFetch = (url, options = {}) => {
   // Respect a caller-provided signal if present; otherwise attach our timeout.
   if (options.signal) {

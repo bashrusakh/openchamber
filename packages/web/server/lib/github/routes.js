@@ -1,5 +1,6 @@
 import { canRespondToRequest, createRequestAbortSignal } from '../request-abort.js';
 import { createSharedRequest } from '../request-sharing.js';
+import { withOctokitRequestSignal } from './octokit.js';
 
 const PR_STATUS_CACHE_TTL_MS = 90_000;
 const PR_STATUS_CACHE_MAX_ENTRIES = 200;
@@ -180,7 +181,7 @@ export function registerGitHubRoutes(app, dependencies = {}) {
     authLoginGeneration = generation;
     let entry;
     const shared = createSharedRequest(async (sourceSignal) => {
-      const response = await octokit.rest.users.getAuthenticated({ signal: sourceSignal });
+      const response = await octokit.rest.users.getAuthenticated(withOctokitRequestSignal({}, sourceSignal));
       return response?.data?.login || null;
     }, { cancellationMessage: 'GitHub authenticated-user lookup was cancelled' });
     entry = { generation, shared };
@@ -199,15 +200,14 @@ export function registerGitHubRoutes(app, dependencies = {}) {
 
   const getGitHubUserSummary = async (octokit, { signal = undefined } = {}) => {
     const me = signal
-      ? await octokit.rest.users.getAuthenticated({ signal })
+      ? await octokit.rest.users.getAuthenticated(withOctokitRequestSignal({}, signal))
       : await octokit.rest.users.getAuthenticated();
 
     let email = typeof me.data.email === 'string' ? me.data.email : null;
     if (!email) {
       try {
         const emailOptions = { per_page: 100 };
-        if (signal) emailOptions.signal = signal;
-        const emails = await octokit.rest.users.listEmailsForAuthenticatedUser(emailOptions);
+        const emails = await octokit.rest.users.listEmailsForAuthenticatedUser(withOctokitRequestSignal(emailOptions, signal));
         const list = Array.isArray(emails?.data) ? emails.data : [];
         const primaryVerified = list.find((e) => e && e.primary && e.verified && typeof e.email === 'string');
         const anyVerified = list.find((e) => e && e.verified && typeof e.email === 'string');
@@ -636,12 +636,11 @@ export function registerGitHubRoutes(app, dependencies = {}) {
       }
 
       // Enrich with mergeability fields
-      const prFull = await octokit.rest.pulls.get({
+      const prFull = await octokit.rest.pulls.get(withOctokitRequestSignal({
         owner: searchRepo.owner,
         repo: searchRepo.repo,
         pull_number: first.number,
-        signal: requestAbort.signal,
-      });
+      }, requestAbort.signal));
       const prData = prFull?.data;
       if (!prData) {
         return sendStatus({ connected: true, repo: searchRepo, branch, pr: null, checks: null, canMerge: false });
@@ -659,13 +658,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
       const sha = prData.head?.sha;
       if (sha && !isHistorical) {
         try {
-          const runs = await octokit.rest.checks.listForRef({
+          const runs = await octokit.rest.checks.listForRef(withOctokitRequestSignal({
             owner: searchRepo.owner,
             repo: searchRepo.repo,
             ref: sha,
             per_page: 100,
-            signal: requestAbort.signal,
-          });
+          }, requestAbort.signal));
           const checkRuns = dedupeCheckRuns(Array.isArray(runs?.data?.check_runs) ? runs.data.check_runs : []);
           if (checkRuns.length > 0) {
             checks = summarizeCheckRuns(checkRuns);
@@ -677,12 +675,11 @@ export function registerGitHubRoutes(app, dependencies = {}) {
 
         if (!checks) {
           try {
-            const combined = await octokit.rest.repos.getCombinedStatusForRef({
+            const combined = await octokit.rest.repos.getCombinedStatusForRef(withOctokitRequestSignal({
               owner: searchRepo.owner,
               repo: searchRepo.repo,
               ref: sha,
-              signal: requestAbort.signal,
-            });
+            }, requestAbort.signal));
             const statuses = Array.isArray(combined?.data?.statuses) ? combined.data.statuses : [];
             checks = summarizeCombinedStatuses(statuses);
           } catch (error) {
@@ -704,12 +701,11 @@ export function registerGitHubRoutes(app, dependencies = {}) {
             username = await getResolvedAuthLogin(octokit, requestAbort.signal);
           }
           if (username) {
-            const perm = await octokit.rest.repos.getCollaboratorPermissionLevel({
+            const perm = await octokit.rest.repos.getCollaboratorPermissionLevel(withOctokitRequestSignal({
               owner: searchRepo.owner,
               repo: searchRepo.repo,
               username,
-              signal: requestAbort.signal,
-            });
+            }, requestAbort.signal));
             const level = perm?.data?.permission;
             canMerge = level === 'admin' || level === 'maintain' || level === 'write';
           }
@@ -1196,18 +1192,16 @@ export function registerGitHubRoutes(app, dependencies = {}) {
       let defaultBranchSha = null;
       if (upstream) {
         try {
-          const metadata = await octokit.rest.repos.get({
+          const metadata = await octokit.rest.repos.get(withOctokitRequestSignal({
             owner: upstream.owner,
             repo: upstream.repo,
-            signal: requestAbort.signal,
-          });
+          }, requestAbort.signal));
           defaultBranch = metadata?.data?.default_branch || 'main';
-          const ref = await octokit.rest.git.getRef({
+          const ref = await octokit.rest.git.getRef(withOctokitRequestSignal({
             owner: upstream.owner,
             repo: upstream.repo,
             ref: `heads/${defaultBranch}`,
-            signal: requestAbort.signal,
-          });
+          }, requestAbort.signal));
           defaultBranchSha = ref?.data?.object?.sha || null;
         } catch (error) {
           if (requestAbort.signal.aborted) throw error;
@@ -1272,13 +1266,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
       const branches = [];
       let page = 1;
       while (true) {
-        const response = await octokit.rest.repos.listBranches({
+        const response = await octokit.rest.repos.listBranches(withOctokitRequestSignal({
           owner,
           repo,
           per_page: 100,
           page,
-          signal: requestAbort.signal,
-        });
+        }, requestAbort.signal));
         if (!response.data || response.data.length === 0) break;
         for (const branch of response.data) {
           branches.push(branch.name);
@@ -1352,12 +1345,11 @@ export function registerGitHubRoutes(app, dependencies = {}) {
           .join(' ');
         const q = `${repoQualifiers} ${searchQuery} type:issue state:open`;
         try {
-           const searchResult = await octokit.rest.search.issuesAndPullRequests({
+            const searchResult = await octokit.rest.search.issuesAndPullRequests(withOctokitRequestSignal({
              q,
              per_page: 50,
              page: effectivePage,
-             signal: requestAbort.signal,
-           });
+            }, requestAbort.signal));
           const totalCount = searchResult.data.total_count;
           const items = Array.isArray(searchResult.data.items) ? searchResult.data.items : [];
           const issues = items
@@ -1379,14 +1371,13 @@ export function registerGitHubRoutes(app, dependencies = {}) {
 
       const queryRepo = async (repoRef) => {
         try {
-           const list = await octokit.rest.issues.listForRepo({
+            const list = await octokit.rest.issues.listForRepo(withOctokitRequestSignal({
              owner: repoRef.owner,
              repo: repoRef.repo,
              state: 'open',
              per_page: 50,
              page: effectivePage,
-             signal: requestAbort.signal,
-           });
+            }, requestAbort.signal));
           const link = typeof list?.headers?.link === 'string' ? list.headers.link : '';
           const hasMore = /rel="next"/.test(link);
           const issues = (Array.isArray(list?.data) ? list.data : [])
@@ -1435,12 +1426,11 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         return res.json({ connected: true, repo: null, issue: null });
       }
 
-       const result = await octokit.rest.issues.get({
+        const result = await octokit.rest.issues.get(withOctokitRequestSignal({
          owner: repo.owner,
          repo: repo.repo,
          issue_number: number,
-         signal: requestAbort.signal,
-       });
+        }, requestAbort.signal));
       const issue = result?.data;
       if (!issue || issue.pull_request) {
         return res.status(400).json({ error: 'Not a GitHub issue' });
@@ -1505,13 +1495,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         return res.json({ connected: true, repo: null, comments: [] });
       }
 
-       const result = await octokit.rest.issues.listComments({
+        const result = await octokit.rest.issues.listComments(withOctokitRequestSignal({
          owner: repo.owner,
          repo: repo.repo,
          issue_number: number,
          per_page: 100,
-         signal: requestAbort.signal,
-       });
+        }, requestAbort.signal));
       const comments = (Array.isArray(result?.data) ? result.data : [])
         .map((comment) => ({
           id: comment.id,
@@ -1599,12 +1588,11 @@ export function registerGitHubRoutes(app, dependencies = {}) {
           .join(' ');
         const q = `${repoQualifiers} ${searchQuery} type:pr state:open`;
         try {
-           const searchResult = await octokit.rest.search.issuesAndPullRequests({
+           const searchResult = await octokit.rest.search.issuesAndPullRequests(withOctokitRequestSignal({
              q,
              per_page: 50,
              page: effectivePage,
-             signal: requestAbort.signal,
-           });
+            }, requestAbort.signal));
           const totalCount = searchResult.data.total_count;
           const items = Array.isArray(searchResult.data.items) ? searchResult.data.items : [];
           const findRepoForSearchItem = (item) => {
@@ -1622,12 +1610,11 @@ export function registerGitHubRoutes(app, dependencies = {}) {
           } else {
             const results = await Promise.all(prRefs.map(async ({ number, repoRef }) => {
               try {
-                 const pr = await octokit.rest.pulls.get({
+                 const pr = await octokit.rest.pulls.get(withOctokitRequestSignal({
                    owner: repoRef.owner,
                    repo: repoRef.repo,
                    pull_number: number,
-                   signal: requestAbort.signal,
-                 });
+                  }, requestAbort.signal));
                 return mapPrSummary(pr.data, repoRef);
                } catch (error) {
                  if (requestAbort.signal.aborted) throw error;
@@ -1648,14 +1635,13 @@ export function registerGitHubRoutes(app, dependencies = {}) {
 
       const queryRepo = async (repoRef) => {
         try {
-           const list = await octokit.rest.pulls.list({
+           const list = await octokit.rest.pulls.list(withOctokitRequestSignal({
              owner: repoRef.owner,
              repo: repoRef.repo,
              state: 'open',
              per_page: 50,
              page: effectivePage,
-             signal: requestAbort.signal,
-           });
+            }, requestAbort.signal));
           const link = typeof list?.headers?.link === 'string' ? list.headers.link : '';
           const hasMore = /rel="next"/.test(link);
           const prs = (Array.isArray(list?.data) ? list.data : []).map((pr) => mapPrSummary(pr, repoRef));
@@ -1744,12 +1730,11 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         return res.json({ connected: true, repo: null, pr: null });
       }
 
-       const prResp = await octokit.rest.pulls.get({
+       const prResp = await octokit.rest.pulls.get(withOctokitRequestSignal({
          owner: repo.owner,
          repo: repo.repo,
          pull_number: number,
-         signal: requestAbort.signal,
-       });
+        }, requestAbort.signal));
       const prData = prResp?.data;
       if (!prData) {
         return res.status(404).json({ error: 'PR not found' });
@@ -1785,13 +1770,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         updatedAt: prData.updated_at,
       };
 
-       const issueCommentsResp = await octokit.rest.issues.listComments({
+       const issueCommentsResp = await octokit.rest.issues.listComments(withOctokitRequestSignal({
          owner: repo.owner,
          repo: repo.repo,
          issue_number: number,
          per_page: 100,
-         signal: requestAbort.signal,
-       });
+        }, requestAbort.signal));
       const issueComments = (Array.isArray(issueCommentsResp?.data) ? issueCommentsResp.data : []).map((comment) => ({
         id: comment.id,
         url: comment.html_url,
@@ -1801,13 +1785,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         author: comment.user ? { login: comment.user.login, id: comment.user.id, avatarUrl: comment.user.avatar_url } : null,
       }));
 
-       const reviewCommentsResp = await octokit.rest.pulls.listReviewComments({
+       const reviewCommentsResp = await octokit.rest.pulls.listReviewComments(withOctokitRequestSignal({
          owner: repo.owner,
          repo: repo.repo,
          pull_number: number,
          per_page: 100,
-         signal: requestAbort.signal,
-       });
+        }, requestAbort.signal));
       const reviewComments = (Array.isArray(reviewCommentsResp?.data) ? reviewCommentsResp.data : []).map((comment) => ({
         id: comment.id,
         url: comment.html_url,
@@ -1820,13 +1803,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         author: comment.user ? { login: comment.user.login, id: comment.user.id, avatarUrl: comment.user.avatar_url } : null,
       }));
 
-       const filesResp = await octokit.rest.pulls.listFiles({
+       const filesResp = await octokit.rest.pulls.listFiles(withOctokitRequestSignal({
          owner: repo.owner,
          repo: repo.repo,
          pull_number: number,
          per_page: 100,
-         signal: requestAbort.signal,
-       });
+        }, requestAbort.signal));
       const files = (Array.isArray(filesResp?.data) ? filesResp.data : []).map((f) => ({
         filename: f.filename,
         status: f.status,
@@ -1842,13 +1824,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
       const sha = prData.head?.sha;
       if (sha) {
         try {
-           const runs = await octokit.rest.checks.listForRef({
+           const runs = await octokit.rest.checks.listForRef(withOctokitRequestSignal({
              owner: repo.owner,
              repo: repo.repo,
              ref: sha,
              per_page: 100,
-             signal: requestAbort.signal,
-           });
+            }, requestAbort.signal));
           const checkRuns = dedupeCheckRuns(Array.isArray(runs?.data?.check_runs) ? runs.data.check_runs : []);
           if (checkRuns.length > 0) {
             const parsedJobs = new Map();
@@ -1876,13 +1857,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
 
               for (const runId of runIds) {
                 try {
-                   const jobsResp = await octokit.rest.actions.listJobsForWorkflowRun({
+                   const jobsResp = await octokit.rest.actions.listJobsForWorkflowRun(withOctokitRequestSignal({
                      owner: repo.owner,
                      repo: repo.repo,
                      run_id: runId,
                      per_page: 100,
-                     signal: requestAbort.signal,
-                   });
+                    }, requestAbort.signal));
                   const jobs = Array.isArray(jobsResp?.data?.jobs) ? jobsResp.data.jobs : [];
                   parsedJobs.set(runId, jobs);
                  } catch (error) {
@@ -1910,14 +1890,13 @@ export function registerGitHubRoutes(app, dependencies = {}) {
                 const annotations = [];
                 for (let page = 1; page <= 3; page += 1) {
                   try {
-                     const annotationsResp = await octokit.rest.checks.listAnnotations({
+                     const annotationsResp = await octokit.rest.checks.listAnnotations(withOctokitRequestSignal({
                        owner: repo.owner,
                        repo: repo.repo,
                        check_run_id: checkRunId,
                        per_page: 50,
                        page,
-                       signal: requestAbort.signal,
-                     });
+                      }, requestAbort.signal));
                     const chunk = Array.isArray(annotationsResp?.data) ? annotationsResp.data : [];
                     annotations.push(...chunk);
                     if (chunk.length < 50) {
@@ -2018,12 +1997,11 @@ export function registerGitHubRoutes(app, dependencies = {}) {
         }
         if (!checks) {
           try {
-             const combined = await octokit.rest.repos.getCombinedStatusForRef({
+             const combined = await octokit.rest.repos.getCombinedStatusForRef(withOctokitRequestSignal({
                owner: repo.owner,
                repo: repo.repo,
                ref: sha,
-               signal: requestAbort.signal,
-             });
+              }, requestAbort.signal));
             const statuses = Array.isArray(combined?.data?.statuses) ? combined.data.statuses : [];
             checks = summarizeCombinedStatuses(statuses);
            } catch (error) {
@@ -2035,13 +2013,12 @@ export function registerGitHubRoutes(app, dependencies = {}) {
 
       let diff = undefined;
       if (includeDiff) {
-         const diffResp = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+         const diffResp = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', withOctokitRequestSignal({
            owner: repo.owner,
            repo: repo.repo,
            pull_number: number,
            headers: { accept: 'application/vnd.github.v3.diff' },
-           signal: requestAbort.signal,
-         });
+          }, requestAbort.signal));
         diff = typeof diffResp?.data === 'string' ? diffResp.data : undefined;
       }
 

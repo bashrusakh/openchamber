@@ -32,7 +32,10 @@ export const GIT_SERVICE_OPERATION_CLASSIFICATION = Object.freeze({
   getGitStatus: operation(GIT_OPERATION_PROFILE.READ),
   getGitBranches: operation(GIT_OPERATION_PROFILE.READ),
   getGitUnpushedBranchCounts: operation(GIT_OPERATION_PROFILE.READ),
-  checkoutBranch: operation(GIT_OPERATION_PROFILE.WORKTREE_WRITE),
+  // Git's short-name DWIM may create refs/heads/<name> and branch tracking
+  // from a remote-tracking ref. The VS Code Git API does not expose an
+  // authoritative local-ref probe before checkout, so admit conservatively.
+  checkoutBranch: operation(GIT_OPERATION_PROFILE.COMMON_WRITE),
   createBranch: operation(GIT_OPERATION_PROFILE.COMMON_WORKTREE_WRITE),
   deleteGitBranch: operation(GIT_OPERATION_PROFILE.COMMON_WRITE),
   deleteRemoteBranch: operation(GIT_OPERATION_PROFILE.COMMON_WRITE, GIT_NETWORK_USAGE.REQUIRED),

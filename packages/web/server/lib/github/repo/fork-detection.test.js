@@ -23,8 +23,8 @@ describe('GitHub fork network discovery', () => {
     const octokit = {
       rest: {
         repos: {
-          get: vi.fn(async ({ signal }) => {
-            expect(signal).toBe(controller.signal);
+          get: vi.fn(async ({ request }) => {
+            expect(request.signal).toBe(controller.signal);
             return {
               data: {
                 parent: {

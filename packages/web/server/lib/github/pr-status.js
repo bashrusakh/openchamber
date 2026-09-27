@@ -3,6 +3,7 @@ import { getRemotes, getTrackingBranch, isAncestorOfHead } from '../git/index.js
 import { resolveGitHubRepoFromDirectory } from './repo/index.js';
 import { noteIfGitHubRateLimit } from './rate-limit.js';
 import { createSharedRequest } from '../request-sharing.js';
+import { withOctokitRequestSignal } from './octokit.js';
 
 const directoryExists = async (dir) => {
   if (!dir) return false;
@@ -27,10 +28,6 @@ const normalizeRepoKey = (owner, repo) => {
     return '';
   }
   return `${normalizedOwner}/${normalizedRepo}`;
-};
-const withSignal = (options, signal) => {
-  if (!signal) return options;
-  return Object.assign({}, options, { signal });
 };
 const throwIfAborted = (signal) => {
   if (signal?.aborted) throw signal.reason || new Error('GitHub PR status request was cancelled');
@@ -193,7 +190,7 @@ const getRepoDefaultBranch = async (octokit, repo, { signal = undefined } = {}) 
   }
 
   try {
-    const response = await octokit.rest.repos.get(withSignal({
+    const response = await octokit.rest.repos.get(withOctokitRequestSignal({
       owner: repo.owner,
       repo: repo.repo,
     }, signal));
@@ -223,7 +220,7 @@ const getRepoMetadata = async (octokit, repo, { signal = undefined } = {}) => {
   }
 
   try {
-    const response = await octokit.rest.repos.get(withSignal({
+    const response = await octokit.rest.repos.get(withOctokitRequestSignal({
       owner: repo.owner,
       repo: repo.repo,
     }, signal));
@@ -330,7 +327,7 @@ const expandRepoNetwork = async (octokit, candidates, { signal = undefined } = {
 const safeListPulls = async (octokit, options, { signal = undefined } = {}) => {
   throwIfAborted(signal);
   try {
-    const response = await octokit.rest.pulls.list(withSignal(options, signal));
+    const response = await octokit.rest.pulls.list(withOctokitRequestSignal(options, signal));
     return Array.isArray(response?.data) ? response.data : [];
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -509,7 +506,7 @@ const searchFallbackPr = async ({ octokit, branch, repoNames, signal = undefined
   // Closed/merged history is resolved by the cheaper per-head repo queries.
   let response;
   try {
-    response = await octokit.rest.search.issuesAndPullRequests(withSignal({
+    response = await octokit.rest.search.issuesAndPullRequests(withOctokitRequestSignal({
       q: `is:pr state:open head:${branch}`,
       per_page: 20,
     }, signal));
@@ -539,7 +536,7 @@ const searchFallbackPr = async ({ octokit, branch, repoNames, signal = undefined
       continue;
     }
     try {
-      const prResponse = await octokit.rest.pulls.get(withSignal({
+      const prResponse = await octokit.rest.pulls.get(withOctokitRequestSignal({
         owner: repo.owner,
         repo: repo.repo,
         pull_number: item.number,

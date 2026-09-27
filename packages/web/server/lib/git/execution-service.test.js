@@ -369,6 +369,7 @@ describe('Git execution service', () => {
     const raw = {
       checkoutBranch: async () => 'branch',
       checkoutCommit: async () => 'commit',
+      createGit: async () => ({ raw: async () => 'local-ref' }),
     };
     const service = createGitExecutionService({
       raw,
@@ -384,6 +385,7 @@ describe('Git execution service', () => {
     await expect(service.checkoutBranch('/repo', 'feature')).resolves.toBe('branch');
     await expect(service.checkoutCommit('/repo', '0123456789abcdef')).resolves.toBe('commit');
     expect(kinds).toEqual([
+      GIT_OPERATION_KIND.READ,
       GIT_OPERATION_KIND.WORKTREE_WRITE,
       GIT_OPERATION_KIND.WORKTREE_WRITE,
     ]);
@@ -399,6 +401,7 @@ describe('Git execution service', () => {
     const releases = new Map();
     const raw = {
       getRemotes: async () => [],
+      createGit: async () => ({ raw: async () => 'local-ref' }),
       checkoutBranch: async (directory) => new Promise((resolve) => {
         started.push(directory);
         releases.set(directory, resolve);
@@ -519,6 +522,51 @@ describe('Git execution service', () => {
       await waitFor(() => started.length === 1);
       expect(started).toEqual(['/repo/one']);
       expect(coordinator.getStats()).toMatchObject({ active: 1, activeNetwork: 1, pending: 1 });
+
+      releases.get('/repo/one')('first');
+      await expect(first).resolves.toBe('first');
+      await waitFor(() => started.length === 2);
+      releases.get('/repo/two')('second');
+      await expect(second).resolves.toBe('second');
+    } finally {
+      for (const release of releases.values()) release('cleanup');
+      await Promise.allSettled([first, second]);
+    }
+  });
+
+  it('serializes short-name remote DWIM checkout across linked worktrees', async () => {
+    const coordinator = createGitExecutionCoordinator({ globalConcurrency: 4 });
+    const started = [];
+    const releases = new Map();
+    const raw = {
+      createGit: async () => ({
+        raw: async (args) => {
+          if (args.at(-1) === 'refs/remotes/origin/feature') return 'remote-ref';
+          throw Object.assign(new Error('local branch is absent'), { code: 1 });
+        },
+      }),
+      getRemotes: async () => [{ name: 'origin' }],
+      checkoutBranch: async (directory) => new Promise((resolve) => {
+        started.push(directory);
+        releases.set(directory, resolve);
+      }),
+    };
+    const service = createGitExecutionService({
+      raw,
+      coordinator,
+      resolver: { resolve: async (directory) => ({
+        isRepository: true,
+        commonId: '/repo/.git',
+        worktreeId: directory,
+      }) },
+    });
+
+    const first = service.checkoutBranch('/repo/one', 'feature');
+    const second = service.checkoutBranch('/repo/two', 'feature');
+    try {
+      await waitFor(() => started.length === 1);
+      expect(started).toEqual(['/repo/one']);
+      expect(coordinator.getStats()).toMatchObject({ active: 1, pending: 1 });
 
       releases.get('/repo/one')('first');
       await expect(first).resolves.toBe('first');

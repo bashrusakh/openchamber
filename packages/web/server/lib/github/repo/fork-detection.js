@@ -1,4 +1,5 @@
 import { resolveGitHubRepoFromDirectory } from './index.js';
+import { withOctokitRequestSignal } from '../octokit.js';
 
 const REPO_METADATA_TTL_MS = 5 * 60_000;
 const REPO_METADATA_CACHE_MAX_ENTRIES = 200;
@@ -35,11 +36,10 @@ const getRepoMetadata = async (octokit, repo, { signal = undefined } = {}) => {
   }
 
   try {
-    const request = {
+    const request = withOctokitRequestSignal({
       owner: repo.owner,
       repo: repo.repo,
-    };
-    if (signal) request.signal = signal;
+    }, signal);
     const response = await octokit.rest.repos.get(request);
     const data = response?.data ?? null;
     setRepoMetadataCache(repoKey, data);

@@ -194,10 +194,10 @@ const worktreeMayUseNetwork = (input) => Boolean(
   || String(input?.startRef || '').includes('/'),
 );
 
-const checkoutBranchMayUseNetwork = async (raw, directory, branchName, signal) => {
+const checkoutBranchPreflight = async (raw, directory, branchName, signal) => {
   const requested = String(branchName || '').trim();
-  if (!requested || !requested.includes('/')) {
-    return false;
+  if (!requested) {
+    return { commonWrite: false, network: false };
   }
 
   // The checkout service gives an existing local branch precedence over a
@@ -205,10 +205,11 @@ const checkoutBranchMayUseNetwork = async (raw, directory, branchName, signal) =
   // non-network lease; when it does not, a remote can be added after this
   // admission probe and the service may fetch it, so the conservative answer
   // is to reserve common/network capacity up front.
-  let localBranchExists = null;
+  let git = null;
+  let localBranchExists = false;
   if (raw.createGit instanceof Function) {
     try {
-      const git = await raw.createGit(directory, {
+      git = await raw.createGit(directory, {
         envOverrides: GIT_READ_ONLY_ENV,
         ownedProcessTree: true,
         signal,
@@ -227,16 +228,48 @@ const checkoutBranchMayUseNetwork = async (raw, directory, branchName, signal) =
     }
   }
 
+  const explicitRemoteRef = requested.startsWith('refs/remotes/') || requested.startsWith('remotes/');
+  if (!requested.includes('/')) {
+    if (localBranchExists) {
+      return { commonWrite: false, network: false };
+    }
+
+    // `git checkout feature` DWIMs to a matching remote-tracking branch and
+    // creates refs/heads/feature plus branch.* tracking config. That mutates
+    // shared state even though no fetch is needed.
+    if (!git || !raw.getRemotes) {
+      return { commonWrite: true, network: false };
+    }
+    try {
+      const remotes = await raw.getRemotes(directory, signal ? { signal } : {});
+      for (const remote of remotes || []) {
+        if (!remote?.name) continue;
+        try {
+          await git.raw(['show-ref', '--verify', '--quiet', `refs/remotes/${remote.name}/${requested}`]);
+          return { commonWrite: true, network: false };
+        } catch (error) {
+          if (String(error?.code || '') !== '1' && Number(error?.code) !== 1) {
+            return { commonWrite: true, network: false };
+          }
+        }
+      }
+      return { commonWrite: false, network: false };
+    } catch {
+      // A failed probe is not authority to let a potentially common mutation
+      // run under a worktree-only lease.
+      return { commonWrite: true, network: false };
+    }
+  }
+
   const remoteRef = requested.replace(/^refs\/remotes\//, '').replace(/^remotes\//, '');
   const remoteName = remoteRef.split('/', 1)[0];
   const localBranch = remoteRef.slice(remoteName.length + 1);
   if (!remoteName || !localBranch || localBranch === 'HEAD') {
-    return false;
+    return { commonWrite: false, network: false };
   }
 
-  const explicitRemoteRef = remoteRef !== requested;
   if (!raw.getRemotes) {
-    return localBranchExists === true ? false : true;
+    return { commonWrite: localBranchExists !== true, network: localBranchExists !== true };
   }
 
   let configuredRemote = explicitRemoteRef;
@@ -246,7 +279,7 @@ const checkoutBranchMayUseNetwork = async (raw, directory, branchName, signal) =
   } catch {
     // Let the checkout operation report the underlying Git error, but do not
     // allow a failed remote lookup to bypass network admission.
-    return true;
+    return { commonWrite: true, network: true };
   }
 
   if (configuredRemote) {
@@ -254,13 +287,13 @@ const checkoutBranchMayUseNetwork = async (raw, directory, branchName, signal) =
     // slashes, before it considers a remote-tracking ref. Keep a configured
     // remote network-coordinated anyway: the local ref can disappear between
     // this probe and the checkout, after which the service may fetch.
-    return true;
+    return { commonWrite: true, network: true };
   }
 
   // Without a configured remote, a confirmed local branch is safe to keep in
   // worktree admission. If no local ref was confirmed, a remote can be added
   // before the service's own resolution and make the checkout fetch-capable.
-  return localBranchExists === true ? false : true;
+  return { commonWrite: localBranchExists !== true, network: localBranchExists !== true };
 };
 
 const checkoutBranchClassification = async (
@@ -274,8 +307,8 @@ const checkoutBranchClassification = async (
   const requested = String(branchName || '').trim();
   const explicitRemoteRef = requested.startsWith('remotes/')
     || requested.startsWith('refs/remotes/');
-  if (explicitRemoteRef || !requested.includes('/')) {
-    const network = explicitRemoteRef;
+  if (explicitRemoteRef) {
+    const network = true;
     return {
       kind: network ? GIT_OPERATION_KIND.COMMON_WRITE : GIT_OPERATION_KIND.WORKTREE_WRITE,
       network,
@@ -286,7 +319,7 @@ const checkoutBranchClassification = async (
   // coordinator admission too. It is a local read; the checkout is upgraded
   // to a common/network mutation when the lookup shows that Git may fetch or
   // update shared refs.
-  const network = await coordinator.run({
+  const preflight = await coordinator.run({
     context,
     kind: GIT_OPERATION_KIND.READ,
     targetWorktree: true,
@@ -294,15 +327,15 @@ const checkoutBranchClassification = async (
     label: 'checkout-branch-preflight',
     signal: options.signal,
     queueTimeoutMs: options.queueTimeoutMs,
-  }, () => runWithGitExecutionScope(true, () => checkoutBranchMayUseNetwork(
+  }, () => runWithGitExecutionScope(true, () => checkoutBranchPreflight(
     raw,
     directory,
     branchName,
     options.signal,
   )));
   return {
-    kind: network ? GIT_OPERATION_KIND.COMMON_WRITE : GIT_OPERATION_KIND.WORKTREE_WRITE,
-    network,
+    kind: preflight.commonWrite ? GIT_OPERATION_KIND.COMMON_WRITE : GIT_OPERATION_KIND.WORKTREE_WRITE,
+    network: preflight.network,
   };
 };
 

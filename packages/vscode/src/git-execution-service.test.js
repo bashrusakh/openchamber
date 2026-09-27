@@ -79,9 +79,9 @@ describe('VS Code Git execution service discovery fallback', () => {
     expect(core.checkIsGitRepository).toHaveBeenCalledWith('/repo');
   });
 
-  it('classifies branch and commit checkout as worktree-scoped writes', () => {
+  it('keeps commit checkout worktree-scoped while serializing branch DWIM', () => {
     expect(getGitServiceOperationClassification('checkoutBranch'))
-      .toEqual({ profile: GIT_OPERATION_PROFILE.WORKTREE_WRITE, network: GIT_NETWORK_USAGE.NONE });
+      .toEqual({ profile: GIT_OPERATION_PROFILE.COMMON_WRITE, network: GIT_NETWORK_USAGE.NONE });
     expect(getGitServiceOperationClassification('checkoutCommit').profile)
       .toBe(GIT_OPERATION_PROFILE.WORKTREE_WRITE);
     expect(getGitServiceOperationClassification('getGitBranches').network)

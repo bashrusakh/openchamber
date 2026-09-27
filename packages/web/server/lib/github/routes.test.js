@@ -108,11 +108,11 @@ describe('GitHub PR status route cancellation', () => {
       response,
     );
 
-    const signal = calls.pull.signal;
+    const signal = calls.pull.request.signal;
     expect(signal).toBeInstanceOf(AbortSignal);
-    expect(calls.checks.signal).toBe(signal);
-    expect(calls.combined.signal).toBe(signal);
-    expect(calls.permission.signal).toBe(signal);
+    expect(calls.checks.request.signal).toBe(signal);
+    expect(calls.combined.request.signal).toBe(signal);
+    expect(calls.permission.request.signal).toBe(signal);
     expect(response.body).toMatchObject({ connected: true, pr: { number: 7 }, canMerge: true });
   });
 
@@ -129,7 +129,7 @@ describe('GitHub PR status route cancellation', () => {
             pullOptions = options;
             return new Promise((_resolve, reject) => {
               rejectPull = reject;
-              options.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
+              options.request.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
             });
           }),
         },
@@ -148,10 +148,10 @@ describe('GitHub PR status route cancellation', () => {
     for (let attempt = 0; attempt < 20 && !pullOptions; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    expect(pullOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect(pullOptions?.request.signal).toBeInstanceOf(AbortSignal);
 
     request.emit('aborted');
-    expect(pullOptions.signal.aborted).toBe(true);
+    expect(pullOptions.request.signal.aborted).toBe(true);
     rejectPull?.(new Error('request aborted'));
     await pending;
 
@@ -170,7 +170,7 @@ describe('GitHub PR status route cancellation', () => {
           listBranches: vi.fn((options) => {
             branchOptions = options;
             return new Promise((_resolve, reject) => {
-              options.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
+              options.request.signal.addEventListener('abort', () => reject(new Error('request aborted')), { once: true });
             });
           }),
         },
@@ -184,10 +184,10 @@ describe('GitHub PR status route cancellation', () => {
     for (let attempt = 0; attempt < 20 && !branchOptions; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    expect(branchOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect(branchOptions?.request.signal).toBeInstanceOf(AbortSignal);
 
     request.emit('aborted');
-    expect(branchOptions.signal.aborted).toBe(true);
+    expect(branchOptions.request.signal.aborted).toBe(true);
     await pending;
     expect(response.body).toBeNull();
   });
@@ -197,7 +197,7 @@ describe('GitHub PR status route cancellation', () => {
     let resolveUser;
     let userSignal;
     const getAuthenticated = vi.fn((options) => {
-      userSignal = options.signal;
+      userSignal = options.request.signal;
       return new Promise((resolve) => { resolveUser = resolve; });
     });
     const octokit = {
@@ -276,7 +276,7 @@ describe('GitHub PR status route cancellation', () => {
 
     firstRequest.emit('aborted');
     await first;
-    expect(userRequests[0].options.signal.aborted).toBe(true);
+    expect(userRequests[0].options.request.signal.aborted).toBe(true);
 
     const secondRequest = createRequest({ directory: '/repo', branch: 'second', force: 'true' });
     const secondResponse = createResponse();
