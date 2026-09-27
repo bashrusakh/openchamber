@@ -26,10 +26,10 @@ Use this doc when you ask an agent to change tool/header/description behavior.
   - If you want to change expandable tool layout, edit here.
 
 - `taskToolModel.ts`
-  - Owns subagent metadata parsing and child-session summary projection.
+  - Owns subagent metadata parsing, child-session summary projection, and task-output preparation. `prepareTaskToolOutput` unwraps complete legacy `<task><task_result>` results and newline-wrapped completed V2 `<subagent sessionID="…" state="completed">` output before Markdown rendering; incomplete or non-completed subagent output stays wrapped.
   - `part.state.metadata.sessionID` is the only live identity contract between a `subagent` call and its child session.
   - A running subagent may briefly have no session id; render it as waiting until the authoritative part update arrives. Never match parallel children by order, title, timestamp, or status.
-  - Part-level metadata and output parsing exist only for older persisted records and never override state metadata.
+  - Part-level metadata and session-id parsing from legacy task output exist only for older persisted records and never override state metadata.
 
 - `toolPresentation.tsx`
   - Shared icon mapping for tool names (`getToolIcon`).

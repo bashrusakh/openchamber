@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { Message, Part, Session } from '@/lib/opencode/model';
+import { marked } from 'marked';
 
 import {
     buildTaskSummaryEntriesFromSession,
@@ -78,6 +79,31 @@ describe('taskToolModel', () => {
         ].join('\n');
 
         expect(prepareTaskToolOutput(output)).toBe(result);
+    });
+
+    test('unwraps the newline-wrapped completed V2 subagent output before Markdown parsing', async () => {
+        const output = [
+            '<subagent sessionID="child-1" state="completed">',
+            '**MERGE**',
+            '</subagent>',
+        ].join('\n');
+        const prepared = prepareTaskToolOutput(output);
+
+        expect(prepared).toBe('**MERGE**');
+        expect(await marked.parse(prepared)).toContain('<strong>MERGE</strong>');
+    });
+
+    test('keeps same-line and non-completed subagent output unchanged', async () => {
+        const sameLineOutput = '<subagent sessionID="child-1" state="completed">**MERGE**</subagent>';
+        expect(prepareTaskToolOutput(sameLineOutput)).toBe(sameLineOutput);
+        expect(await marked.parse(sameLineOutput)).toContain('<strong>MERGE</strong>');
+
+        const failedOutput = [
+            '<subagent sessionID="child-1" state="failed">',
+            'failure details',
+            '</subagent>',
+        ].join('\n');
+        expect(prepareTaskToolOutput(failedOutput)).toBe(failedOutput);
     });
 
     test('unwraps a same-line task result envelope', () => {

@@ -6,12 +6,15 @@ import { createRoot } from 'react-dom/client';
 import { Window } from 'happy-dom';
 import { OpenCode } from '@opencode/client';
 import type { ToolPart as ToolPartData } from '@/lib/opencode/model';
+import { RuntimeAPIContext } from '@/contexts/runtimeAPIContext';
+import type { RuntimeAPIs } from '@/lib/api/types';
 import { SyncProvider, useChildStoreManager } from '@/sync/sync-context';
 import { I18nProvider } from '@/lib/i18n';
 import { ThemeSystemContext, type ThemeContextValue } from '@/contexts/theme-system-context';
 import { getDefaultTheme } from '@/lib/theme/themes';
 import { useGuestsStore } from '@/lib/guests/store';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
+import { loadMarkdownRendererModule } from '../../markdownRendererLoader';
 
 // Bun does not implement Vite's worker asset-query imports.
 plugin({
@@ -25,6 +28,17 @@ plugin({
 });
 
 const { default: ToolPart } = await import('./ToolPart');
+
+const unexpectedRuntimeCall = (): never => { throw new Error('Markdown rendering must not call runtime APIs'); };
+const runtimeApis: RuntimeAPIs = {
+  runtime: { platform: 'web', isDesktop: false, isVSCode: false },
+  get terminal() { return unexpectedRuntimeCall(); },
+  get git() { return unexpectedRuntimeCall(); },
+  get files() { return unexpectedRuntimeCall(); },
+  get settings() { return unexpectedRuntimeCall(); },
+  get permissions() { return unexpectedRuntimeCall(); },
+  get notifications() { return unexpectedRuntimeCall(); },
+};
 
 const unexpectedThemeChange = (): never => { throw new Error('Rendering must not change the theme'); };
 const theme = getDefaultTheme(false);
@@ -79,6 +93,7 @@ const withHarness = async (
     navigator: happyWindow.navigator,
     localStorage: happyWindow.localStorage,
     customElements: happyWindow.customElements,
+    HTMLAnchorElement: happyWindow.HTMLAnchorElement,
     Node: happyWindow.Node,
     Text: happyWindow.Text,
     NodeList: happyWindow.NodeList,
@@ -114,14 +129,16 @@ const withHarness = async (
     useGuestsStore.setState({ status: 'ready', guests: [], runtimeKey: 'test' });
     await act(async () => {
       root.render(
-        <SyncProvider sdk={sdk} directory="/workspace">
-          <CaptureManager />
-          <I18nProvider>
-            <ThemeSystemContext.Provider value={themeContext}>
-              <ToolPart part={toolPart} isExpanded isMobile={false} onToggle={() => {}} />
-            </ThemeSystemContext.Provider>
-          </I18nProvider>
-        </SyncProvider>,
+        <RuntimeAPIContext.Provider value={runtimeApis}>
+          <SyncProvider sdk={sdk} directory="/workspace">
+            <CaptureManager />
+            <I18nProvider>
+              <ThemeSystemContext.Provider value={themeContext}>
+                <ToolPart part={toolPart} isExpanded isMobile={false} onToggle={() => {}} />
+              </ThemeSystemContext.Provider>
+            </I18nProvider>
+          </SyncProvider>
+        </RuntimeAPIContext.Provider>,
       );
     });
 
@@ -167,6 +184,37 @@ test('subagent patch summaries show file names and update when the same call cha
 
   await renderPatch(['src/single.ts']);
   expect(container.textContent).toContain('single.ts');
+  });
+});
+
+test('renders completed V2 subagent output as Markdown', async () => {
+  const completedOutput: ToolPartData = {
+    ...parent,
+    state: {
+      status: 'completed',
+      input: { description: 'Update files' },
+      output: [
+        '<subagent sessionID="child" state="completed">',
+        '**MERGE**',
+        '</subagent>',
+      ].join('\n'),
+      metadata: { sessionID: 'child' },
+      time: { start: 1, end: 2 },
+    },
+  };
+
+  await withHarness(completedOutput, async (_store, container) => {
+    await loadMarkdownRendererModule();
+    const outputButton = Array.from(container.querySelectorAll('button'))
+      .find((button) => button.textContent?.trim() === 'Output');
+    if (!outputButton) throw new Error('Task output disclosure did not render');
+
+    await act(async () => {
+      outputButton.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(container.querySelector('[data-markdown-content] strong')?.textContent).toBe('MERGE');
   });
 });
 

@@ -185,6 +185,7 @@ export const stripTaskMetadataFromOutput = (output: string): string => {
 
 const TASK_ENVELOPE_OPEN_TAG_PATTERN = /^\s*<task(?:\s[^>]*)?>/i;
 const TASK_RESULT_BLOCK_PATTERN = /<task_result>\s*([\s\S]*?)\s*<\/task_result>/i;
+const COMPLETED_SUBAGENT_ENVELOPE_PATTERN = /^\s*<subagent\b(?=[^>]*\ssessionID=(?:"[^"]+"|'[^']+'))(?=[^>]*\sstate=(?:"completed"|'completed'))[^>]*>\r?\n([\s\S]*?)\r?\n<\/subagent>\s*$/i;
 
 // OpenCode wraps a completed task result in an envelope:
 //   <task id="ses_…" state="completed">
@@ -194,11 +195,18 @@ const TASK_RESULT_BLOCK_PATTERN = /<task_result>\s*([\s\S]*?)\s*<\/task_result>/
 // below it stays literal (issue #3238). Only unwrap when the output actually
 // starts with the envelope tag and carries a complete result block; other
 // outputs pass through untouched.
-const unwrapTaskResultEnvelope = (output: string): string => {
-    if (!TASK_ENVELOPE_OPEN_TAG_PATTERN.test(output)) return output;
-    const resultBlock = output.match(TASK_RESULT_BLOCK_PATTERN);
-    if (!resultBlock) return output;
-    return resultBlock[1];
+const unwrapTaskOutputEnvelope = (output: string): string => {
+    if (TASK_ENVELOPE_OPEN_TAG_PATTERN.test(output)) {
+        const resultBlock = output.match(TASK_RESULT_BLOCK_PATTERN);
+        return resultBlock?.[1] ?? output;
+    }
+
+    // OpenCode 2.x wraps completed foreground subagent output in a
+    // newline-wrapped <subagent sessionID="…" state="completed"> element.
+    // Markdown inside that raw-HTML block stays literal, so unwrap only a
+    // complete envelope with the canonical attributes and line boundaries.
+    const subagentResult = output.match(COMPLETED_SUBAGENT_ENVELOPE_PATTERN);
+    return subagentResult?.[1] ?? output;
 };
 
 // The task tool renders its output through the markdown parser instead of the
@@ -207,5 +215,5 @@ const unwrapTaskResultEnvelope = (output: string): string => {
 // parser can exhaust V8's Zone allocator and crash the renderer.
 export const prepareTaskToolOutput = (output: string | undefined): string => {
     if (!output) return '';
-    return capToolOutputText(stripTaskMetadataFromOutput(unwrapTaskResultEnvelope(output)));
+    return capToolOutputText(stripTaskMetadataFromOutput(unwrapTaskOutputEnvelope(output)));
 };
