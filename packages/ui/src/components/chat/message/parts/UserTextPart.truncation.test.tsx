@@ -1,7 +1,7 @@
 import React, { act } from 'react';
 import { describe, expect, test } from 'bun:test';
 import { createRoot } from 'react-dom/client';
-import { createOpencodeClient } from '@opencode-ai/sdk/v2';
+import { OpenCode } from '@opencode/client';
 import { Window } from 'happy-dom';
 
 import { I18nProvider } from '@/lib/i18n';
@@ -9,14 +9,14 @@ import { SyncProvider } from '@/sync/sync-context';
 import { useUIStore } from '@/stores/useUIStore';
 
 import UserTextPart from './UserTextPart';
-import type { Part } from '@opencode-ai/sdk/v2';
+import type { Part } from '@/lib/opencode/model';
 import { CONTEXT_METADATA_KEY } from '@/lib/messages/contextParts';
 
 // Plain rendering keeps the lazy markdown module (and its shiki worker asset
 // import) out of the test graph; the expand affordance is mode-independent.
 useUIStore.setState({ userMessageRenderingMode: 'plain' });
 
-const sdk = createOpencodeClient({
+const sdk = OpenCode.make({
     baseUrl: 'http://localhost',
     fetch: async () => new Response('[]', { headers: { 'Content-Type': 'application/json' } }),
 });
@@ -65,7 +65,6 @@ const makeChatQuotePart = (): ChatQuotePartFixture => ({
     messageID: 'msg_3742',
     type: 'text',
     text: 'Comment on this fragment of an earlier message in this conversation:\n> Quoted line\n\nBecause it settles the question.',
-    synthetic: true,
     metadata: {
         [CONTEXT_METADATA_KEY]: {
             kind: 'chat-quote',

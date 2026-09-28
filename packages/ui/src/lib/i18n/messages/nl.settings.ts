@@ -2211,6 +2211,7 @@ export const settingsDict = {
   'settings.openchamber.visual.option.userMessageRendering.plain.label': 'Platte tekst',
   'settings.openchamber.visual.option.userMessageRendering.plain.description': 'Gebruikerstekst weergeven met behoud van witruimte en links.',
   'chat.message.userText.collapseAria': 'Gebruikersbericht samenvouwen',
+  'chat.message.userText.expandAria': 'Gebruikersbericht uitvouwen',
   'settings.openchamber.visual.option.chatRenderMode.sorted.label': 'Gesorteerd',
   'settings.openchamber.visual.option.chatRenderMode.sorted.description': 'Afgeronde assistentberichten weergeven zonder live streaming.',
   'settings.openchamber.visual.option.chatRenderMode.live.label': 'Live',
