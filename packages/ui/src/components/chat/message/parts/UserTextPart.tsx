@@ -1,6 +1,6 @@
 import React from 'react';
 import { cn } from '@/lib/utils';
-import type { Part } from '@opencode-ai/sdk/v2';
+import type { Part } from '@/lib/opencode/model';
 import type { AgentMentionInfo } from '../types';
 import { SimpleMarkdownRenderer } from '../../MarkdownRenderer';
 import { useUIStore } from '@/stores/useUIStore';
@@ -208,7 +208,8 @@ const UserTextPart: React.FC<UserTextPartProps> = ({ part, messageId, agentMenti
                 <button
                     key={`skill-${slashIndex}-${skillName}`}
                     type="button"
-                    className="text-primary hover:underline"
+                    dir="ltr"
+                    className="text-primary hover:underline [unicode-bidi:isolate]"
                     onClick={(event) => {
                         event.stopPropagation();
                         openSkill(skillName);
@@ -237,7 +238,8 @@ const UserTextPart: React.FC<UserTextPartProps> = ({ part, messageId, agentMenti
                 <a
                     key={`agent-${index}`}
                     href={buildAgentMentionUrl(agentMention.name)}
-                    className="text-primary hover:underline"
+                    dir="ltr"
+                    className="text-primary hover:underline [unicode-bidi:isolate]"
                     target="_blank"
                     rel="noopener noreferrer"
                     onClick={(event) => event.stopPropagation()}
@@ -292,7 +294,7 @@ const UserTextPart: React.FC<UserTextPartProps> = ({ part, messageId, agentMenti
                 className={cn(
                     "break-words font-sans typography-markdown-body",
                     !isControlled && isExpanded && "pb-3",
-                    normalizedRenderingMode === 'plain' && 'whitespace-pre-wrap',
+                    normalizedRenderingMode === 'plain' && 'whitespace-pre-wrap [unicode-bidi:plaintext] text-start',
                     isCollapsed && "line-clamp-2",
                     collapsibleUserMessages && isTruncated && !effectiveExpanded && "cursor-pointer"
                 )}

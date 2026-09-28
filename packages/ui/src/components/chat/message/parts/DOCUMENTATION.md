@@ -21,20 +21,22 @@ Use this doc when you ask an agent to change tool/header/description behavior.
   - If you want to change how `read/grep/perplexity/webfetch/...` look in compact/grouped mode, edit here.
 
 - `ToolPart.tsx`
-  - Renders expandable tool rows (bash/edit/write/question/task + fallback).
+  - Renders expandable tool rows (shell/edit/write/question/subagent + fallback).
   - Controls expandable header title/description/diff stats/timer and expanded output body.
   - If you want to change expandable tool layout, edit here.
 
 - `taskToolModel.ts`
-  - Owns Task metadata parsing and child-session summary projection.
-  - `part.state.metadata.sessionId` is the only live identity contract between a Task and its child session.
-  - A running Task may briefly have no `sessionId`; render it as waiting until the authoritative part update arrives. Never match parallel children by order, title, timestamp, or status.
+  - Owns subagent metadata parsing and child-session summary projection.
+  - `part.state.metadata.sessionID` is the only live identity contract between a `subagent` call and its child session.
+  - A running subagent may briefly have no session id; render it as waiting until the authoritative part update arrives. Never match parallel children by order, title, timestamp, or status.
   - Part-level metadata and output parsing exist only for older persisted records and never override state metadata.
 
 - `toolPresentation.tsx`
   - Shared icon mapping for tool names (`getToolIcon`).
   - Used by `ProgressiveGroup.tsx`, `ToolPart.tsx`, and `ToolOutputDialog.tsx`.
   - Takes an optional extension rule (below) whose `icon` wins when the sprite carries it.
+
+- Tool names, per-tool input/metadata fields, and the row description are owned by `@/lib/opencode/tools`. Branch on its predicates (`isShellTool`, `isSubagentTool`, `isFileChangeTool`, ...) instead of comparing tool names here; v2 has no `state.title`, so a row's description comes from `toolDescription(tool, input, metadata)`. Every v2 built-in answers from its own input before its result lands: `patch` from the `*** Update File:` headers of its text until `metadata.files` arrives, `skill` from its `id`, and the `opencode.*` namespace tools (`session_rename`, `session_move`, `models`) from their title, directory or search; `getToolMetadata` resolves a namespaced name by its last segment.
 
 - Extension tool presentations (`contributes.tools` in a guest manifest)
   - The registry is `lib/guests/tool-presentation.ts`: `useGuestToolPresentation(part.tool)` / `resolveGuestToolPresentation` return the first matching rule of an active guest (exact `match` beats a suffix wildcard; first extension wins) or `null`. Rules are compiled once per catalog array; each part does one linear scan.
@@ -67,6 +69,21 @@ Use this doc when you ask an agent to change tool/header/description behavior.
   - Justification block wrapper over `ReasoningTimelineBlock`.
 
 ## Current important behavior
+
+### Bidirectional prose
+
+Shared chat CSS applies `unicode-bidi: plaintext` to prose blocks, including
+nested paragraphs, headings and table cells. Plain user text uses the same
+behavior across newlines. The message root does not select one direction for
+all its children. Code widgets, diagrams, math and technical references remain
+LTR isolates, including their controls.
+
+`markdown/decorate.ts` gives list items and blockquotes `dir="auto"` for marker
+and border placement. Paragraphs use CSS rather than their own `dir` attribute,
+so their text still participates in that parent direction. Each list item owns
+its logical gutter, allowing adjacent Arabic and English items. Inline code
+and code widgets have explicit LTR attributes so they do not choose the
+containing item's direction. Direction changes preserve source and copy text.
 
 ### Optional live history disclosure
 
@@ -125,27 +142,25 @@ the line total rather than presenting a partial total as complete. Write input
 content is not evidence of added lines. Repeated records of one call count once.
 
 The completed-turn file pills under the final answer (the "show changed files"
-setting) use the same tool-result file identities, in first-touch order, with
-paths relative to the message's project root. The user message's
-`summary.diffs` is a working-tree snapshot between turn start and end, so it
-also lists edits made by other sessions or by hand in the same directory; it
-never decides which files belong to the turn on its own. It supplies a touched
-file's line counts, because those match the turn diff a pill opens; a file the
-snapshot does not list falls back to its tool patch and renders as a plain
-chip, since the turn diff has nothing to open for it. A file with no
-recoverable counts, or a snapshot entry without line changes, shows its name
-alone. One exception: edits delegated to `task` subagents live in child
-sessions the projection cannot see, so when a turn ran subagents the snapshot
-entries no own tool call touched are appended after the turn's own files. The
-list is projected once the last assistant message finished with `stop`, so no
-tool patch is parsed while the turn streams.
+setting) use the tool-result file identities, in first-touch order, with paths
+as the tools reported them (v2 assistant messages carry no working directory).
+Line counts come from each call's patch; a file with no recoverable counts
+shows its name alone. Every pill opens the turn diff: OpenCode 2 computes it on
+request (`GET /api/session/:id/diff`, `DiffView`'s "Last turn" scope) from the
+turn's start and end snapshots, merged per file, so it also covers a `write`
+result and the edits a `subagent` made in its child session, which the pills
+themselves cannot list. The list is projected once the last assistant message
+finished with `stop`, so no tool patch is parsed while the turn streams.
 
 ### Message parts
 
 - Assistant markdown treats raw HTML as inert visible text. The final generated
   HTML is sanitized as defense in depth, with script and style elements
   forbidden, so message content cannot inject active DOM or application-wide
-  CSS into any runtime surface. Safe custom application links go through the
+  CSS into any runtime surface. Link text goes through the same inline
+  renderer, so raw HTML inside `[...]` stays text too. Only the Files
+  Markdown preview opts into rendering raw HTML (`allowRawHtml`, see
+  `components/views/files/DOCUMENTATION.md`). Safe custom application links go through the
   app-link confirmation flow in every supported renderer, including VS Code.
 - Final assistant Markdown rendering is independent from image gallery
   extraction: gallery presence never changes the chat body. Assistant image
@@ -180,7 +195,22 @@ tool patch is parsed while the turn streams.
 - `ToolPart` defers expanded content after a user toggle, preventing large tool input/output payloads from mounting during the initial chat render.
 - The rich tool diff preview lives in `ToolPartDiffPreview.tsx` and is lazy-loaded from `ToolPart`. It is the only tool-card piece that imports the `@pierre/diffs` + Shiki rendering stack, keeping that stack out of the eager chat startup graph. While its chunk loads (first rendered diff only) the plain-text patch from `PlainDiffFallback.tsx` renders as the Suspense fallback, mirroring the preview's error fallback. Patches over 256 KiB or 2,000 lines skip rich parsing and use a bounded plain-text preview; navigation keeps the original patch. `ToolPart` itself must not statically import `@pierre/diffs` runtime modules or `@/lib/shiki/appThemeRegistry`.
 - The `@pierre/diffs` stack is knowingly unprotected against the JS/TS `template-call` backtracking that OOM'd the renderer in openchamber/openchamber#2587. Our own markdown Shiki worker sanitizes every grammar it loads (`@/lib/shiki/sanitizeTemplateCallGrammar`), but the diff worker pool runs `preferredHighlighter: 'shiki-wasm'` (`DiffWorkerProvider.tsx`) and resolves its languages by id through `@pierre/diffs`' own registry — `langs` accepts `SupportedLanguages` strings only, so there is no seam to hand it a pre-sanitized `LanguageRegistration`. A pathological template literal inside a rendered diff can therefore still hang that pool's Oniguruma engine. The available levers are upstream (a `langs` overload accepting grammar objects) or switching that pool to the JS regex engine; neither is done.
-- Running bash output falls back to `state.metadata.output` until canonical `state.output` arrives. Its output viewport grows with the content up to `46vh`, then scrolls and follows new output until the user scrolls up; following resumes when the user returns to the bottom. Live output appends or replaces rewritten snapshots as plain text without worker highlighting; finalized output normalizes ANSI terminal controls with a bounded synthetic-cell budget, bypasses the throttle, and receives the normal one-time highlighted rendering.
+- OpenCode 2 Code Mode arrives as one tool, `execute`, whose input is a short
+  JS script (`input.code`) calling the MCP and integration tools as functions.
+  The row is named **Script** (`toolHelpers.ts`), uses the `braces` icon, and is
+  described by `metadata.toolCalls`: the called tool names deduplicated in
+  first-seen order with a `×N` repeat count, at most four named and the rest
+  counted as `+N more`. That is the `tools` description kind in
+  `@/lib/opencode/tools`; while the script is running, or if it called nothing,
+  the row falls back to the script's first line, capped like a shell command.
+  The expanded body replaces the generic input preview with the script as
+  highlighted JavaScript, then the call list (tool name, its arguments as
+  one-line JSON, error calls in the error colour), then the normal output
+  section. `metadata.truncated` adds a plain note with `metadata.outputPath` as
+  text: the app has no open-file affordance for a path outside the project.
+  The status pill says `running a script`, or `calling <tool>` once
+  `metadata.toolCalls` names one (`hooks/useAssistantStatus.ts`).
+- Running `shell` output falls back to `state.metadata.output` until canonical `state.output` arrives. Its output viewport grows with the content up to `46vh`, then scrolls and follows new output until the user scrolls up; following resumes when the user returns to the bottom. Live output appends or replaces rewritten snapshots as plain text without worker highlighting; finalized output normalizes ANSI terminal controls with a bounded synthetic-cell budget, bypasses the throttle, and receives the normal one-time highlighted rendering.
 - Thinking/Justification duration is hidden in `sorted` mode (handled in `ReasoningPart.tsx` + `JustificationBlock.tsx`).
 - Reasoning streaming presentation derives from the live stream phase (`streaming`/`cooldown`), never from missing persisted timing: a cached part without `time.end` is not live, and a part whose `time.end` is set never streams (issue #2020).
 

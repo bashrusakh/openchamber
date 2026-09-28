@@ -114,6 +114,14 @@
     "permissionAutoAccept": {
       "scope": "instance"
     },
+    "permissionDefaultMode": {
+      "scope": "instance",
+      "surfaces": [
+        "web",
+        "desktop",
+        "mobile"
+      ]
+    },
     "agentControlToolEnabled": {
       "scope": "instance"
     },
@@ -123,7 +131,16 @@
     "browserProvider": {
       "scope": "instance"
     },
+    "agentNotifyToolEnabled": {
+      "scope": "instance"
+    },
     "agentMemoryToolEnabled": {
+      "scope": "instance"
+    },
+    "isolatedSpacesEnabled": {
+      "scope": "instance"
+    },
+    "isolatedSpacesIdleStop": {
       "scope": "instance"
     },
     "agentMemoryFeatureAvailable": {
@@ -215,14 +232,19 @@
     "sidebarProjectDisplayMode": {
       "scope": "profile"
     },
-    "sidebarSessionGroupingMode": {
-      "scope": "profile"
+    "sidebarViewMode": {
+      "scope": "profile",
+      "perSurface": true
     },
     "sidebarProjectSortOrder": {
       "scope": "profile"
     },
-    "sidebarShowRecentSection": {
+    "sidebarWorktreeSortOrder": {
       "scope": "profile"
+    },
+    "sidebarShowRecentSection": {
+      "scope": "profile",
+      "perSurface": true
     },
     "workStatusSectionOrder": {
       "scope": "profile"
@@ -344,9 +366,6 @@
         "vscode"
       ]
     },
-    "showOpenCodeRestartConfirm": {
-      "scope": "profile"
-    },
     "allowPromptingSubagentSessions": {
       "scope": "profile"
     },
@@ -466,8 +485,27 @@
     "sessionSuggestionEnabled": {
       "scope": "profile"
     },
+    "sessionWorkEnabled": {
+      "scope": "profile"
+    },
+    "sessionWorkAutoOpen": {
+      "scope": "profile",
+      "surfaces": [
+        "web",
+        "desktop",
+        "mobile"
+      ]
+    },
     "sessionGoalEnabled": {
       "scope": "profile"
+    },
+    "sessionGoalChecker": {
+      "scope": "profile",
+      "surfaces": [
+        "web",
+        "desktop",
+        "mobile"
+      ]
     },
     "sessionGoalDefaultBudgetEnabled": {
       "scope": "profile"
@@ -545,9 +583,6 @@
       "scope": "profile"
     },
     "responseStyleCustomInstructions": {
-      "scope": "profile"
-    },
-    "optimizeSystemPrompt": {
       "scope": "profile"
     },
     "pwaAppName": {
@@ -676,6 +711,14 @@
       "local": true
     },
     "walkthroughTocWidth": {
+      "scope": "device",
+      "local": true
+    },
+    "diffFileListMode": {
+      "scope": "device",
+      "local": true
+    },
+    "diffFileTreeWidth": {
       "scope": "device",
       "local": true
     },

@@ -41,7 +41,7 @@
     font-size: var(--text-code) !important;
   }
 
-  :root.mobile-pointer:not(.desktop-runtime) .question-markdown > .markdown-content.markdown-tool {
+  :root.mobile-pointer:not(.desktop-runtime) .form-markdown > .markdown-content.markdown-tool {
     font-size: inherit !important;
   }
 
@@ -771,6 +771,7 @@
    the morphing shape), but its content stays hidden until the shape has mostly
    finished growing, then fades in — no clipped controls mid-morph. Timings
    follow the 340ms wrapper morph in ChatInput. */
-.oc-composer-morph-content-fade > * {
+/* The glass layer is the background, so it is exempt from the fade. */
+.oc-composer-morph-content-fade > :not([data-dictation-glass]) {
   animation: oc-composer-morph-fade 0.18s ease-out 0.26s both;
 }

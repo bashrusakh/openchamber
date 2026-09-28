@@ -76,6 +76,36 @@ button,
   line-height: round(1.625em, 1px);
 }
 
+/* Resolve prose per paragraph, including plain-text fallbacks. Keep direction
+   off the message root: it also contains code, tables and their controls. */
+.markdown-content,
+.markdown-content :where(p, h1, h2, h3, h4, h5, h6, li, blockquote, td:not([align]), th:not([align]), div.whitespace-pre-wrap),
+.markdown-content details[data-md-details] > summary > span:last-child {
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+
+/* Markdown's explicit column alignment still wins over automatic alignment. */
+.markdown-content :where(td[align], th[align]) {
+  unicode-bidi: plaintext;
+}
+
+/* A technical fragment is one LTR run, even inside an RTL list or quote. */
+.markdown-content :where(
+  pre, code, kbd, samp,
+  [data-component="markdown-code"],
+  [data-markdown="table-wrapper"],
+  [data-markdown="mermaid-block"],
+  .katex,
+  [data-openchamber-file-link="true"],
+  [data-openchamber-agent-mention="true"],
+  [data-skill-name]
+) {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: start;
+}
+
 /* Native selection uses the theme's selection pair. */
 .message-content-text::selection,
 .message-content-text ::selection,
@@ -90,9 +120,17 @@ button,
   color: var(--interactive-selection-foreground);
 }
 
-/* Keep the quoted fragment highlighted while the comment input owns focus. */
+/* These rectangles sit above glyphs, so the fill must remain translucent. */
 .oc-chat-comment-rect {
-  background-color: var(--interactive-selection);
+  background-color: color-mix(in srgb, var(--interactive-selection) 35%, transparent);
+}
+
+/* Chat quotes waiting in the composer stay marked in their message, tinted
+   like a text selection. The hovered or just-revealed one is painted in both
+   layers, so the translucent fills stack into a stronger mark. */
+::highlight(oc-chat-quote),
+::highlight(oc-chat-quote-focus) {
+  background-color: var(--oc-text-selection);
 }
 
 .pierre-diff-wrapper {
@@ -425,8 +463,8 @@ button svg,
  * value only WebKit parses, which keeps the rule where it was written for.
  */
 @supports (font: -apple-system-body) {
-  button svg:not(.animate-spin),
-  [role="button"] svg:not(.animate-spin) {
+  button svg:not(.animate-spin):not(.activity-spinner),
+  [role="button"] svg:not(.animate-spin):not(.activity-spinner) {
     transform: translateZ(0);
     -webkit-transform: translateZ(0);
   }
@@ -501,6 +539,12 @@ svg.animate-spin {
 
 .app-region-drag {
   -webkit-app-region: drag;
+}
+
+/* Native drag regions still intercept pointer input beneath portal dialogs.
+   Restore them when the last dialog closes. */
+.oc-dialog-open .app-region-drag {
+  -webkit-app-region: no-drag;
 }
 
 .app-region-no-drag {
@@ -635,12 +679,6 @@ html:not(.dark) .chat-scroll {
   scrollbar-gutter: unset !important;
 }
 
-/* Extensions can cross the overflow threshold as cards expand or the catalog loads. */
-.overlay-scrollbar-target:has(> .extensions-settings-page),
-.extensions-settings-page > .overlay-scrollbar-target {
-  scrollbar-gutter: stable !important;
-}
-
 .overlay-scrollbar-target::-webkit-scrollbar {
   width: 0 !important;
   height: 0 !important;
@@ -671,6 +709,13 @@ html:not(.dark) .chat-scroll {
    Follow overflow, not hover visibility, so showing the thumb never shifts text.
    Direct-child matching prevents nested scrollers from reserving space twice. */
 .overlay-scrollbar-wrapper:has(> .overlay-scrollbar > .overlay-scrollbar__thumb--vertical:not([hidden])) {
+  padding-right: 6px;
+}
+
+/* Settings pages cross the overflow threshold all the time (collapsible
+   sections, catalogs loading), so they reserve the thumb's space up front
+   instead of shifting content the moment a scrollbar appears. */
+.overlay-scrollbar-wrapper--stable-gutter {
   padding-right: 6px;
 }
 
@@ -1048,6 +1093,13 @@ html:not(.dark) .chat-scroll {
   line-height: inherit;
 }
 
+/* Documents rendered with their raw HTML (the Files preview) lay images out
+   the way GitHub does: inline beside text and other badges, not one block per
+   line as Tailwind preflight makes them. */
+.markdown-content[data-markdown-html] img {
+  display: inline;
+}
+
 /* Block rhythm: every block carries the same margin on both sides, so the
    gap between any two neighbours is one paragraph spacing (margins collapse)
    and the first/last block of a message adds nothing. Tailwind preflight
@@ -1065,13 +1117,16 @@ html:not(.dark) .chat-scroll {
    element, so the message-level [&_.markdown-content>*:first-child]:mt-0 /
    [&_.markdown-content>*:last-child]:mb-0 nullifiers target the wrapper
    (where margin is ignored), not the block. Trim the outer blocks directly so
-   messages gain no extra space at the top or bottom. */
+   messages gain no extra space at the top or bottom. The last block is found
+   by the renderer's [data-md-last] marker, not [data-md-block]:last-child: a
+   structural pseudo-class in that position makes every append to <body> (each
+   tooltip and menu portal) restyle the whole app. */
 .markdown-content > [data-md-block]:first-child > :first-child,
 .markdown-content > :first-child:not([data-md-block]) {
   margin-top: 0;
 }
 
-.markdown-content > [data-md-block]:last-child > :last-child,
+.markdown-content > [data-md-last] > :last-child,
 .markdown-content > :last-child:not([data-md-block]) {
   margin-bottom: 0;
 }
@@ -1088,15 +1143,15 @@ html:not(.dark) .chat-scroll {
   font-size: var(--text-code) !important;
 }
 
-.question-markdown > .markdown-content.markdown-tool {
+.form-markdown > .markdown-content.markdown-tool {
   font-size: inherit !important;
 }
 
-.question-markdown > .markdown-content > [data-md-block]:first-child > :first-child {
+.form-markdown > .markdown-content > [data-md-block]:first-child > :first-child {
   margin-top: 0;
 }
 
-.question-markdown > .markdown-content > [data-md-block]:last-child > :last-child {
+.form-markdown > .markdown-content > [data-md-last] > :last-child {
   margin-bottom: 0;
 }
 
@@ -1249,8 +1304,8 @@ html:not(.dark) .chat-scroll {
 
 /* Markdown blockquote - use theme colors */
 .markdown-content blockquote {
-  border-left: 2px solid var(--markdown-blockquote-border, var(--border));
-  padding-left: 0.8rem;
+  border-inline-start: 2px solid var(--markdown-blockquote-border, var(--border));
+  padding-inline-start: 0.8rem;
   color: var(--markdown-blockquote, var(--muted-foreground));
 }
 
@@ -1803,6 +1858,21 @@ textarea[data-terminal-hidden-input="true"]::placeholder {
 
 .animate-status-logo {
   animation: oc-status-logo 4s steps(10, jump-none) infinite;
+}
+
+@keyframes activity-spin {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* Running-session spinner (opt-in). steps() limits rotation changes to 20 per
+   second. This still adds compositor work while a running indicator is visible.
+   Technique from VS Code's codicon-modifier-spin. */
+.activity-spinner {
+  animation: activity-spin 1.5s steps(30) infinite;
+  transform-box: fill-box;
+  transform-origin: center center;
 }
 
 @keyframes navrail-dot-wave {
