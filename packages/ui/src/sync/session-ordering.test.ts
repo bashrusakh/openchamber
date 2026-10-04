@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
-import type { Session } from '@opencode-ai/sdk/v2';
+import type { Session } from '@/lib/opencode/model';
 import {
   compareSessionsByLifecycleOrder,
   observeSessionActivityEvent,
@@ -204,5 +204,17 @@ describe('session lifecycle ordering', () => {
     useSessionOrderingStore.setState({ rankById: new Map([['stale', 15]]) });
     raiseSessionOrderingBaselines([session('stale', 40)]);
     expect(useSessionOrderingStore.getState().rankById.get('stale')).toBe(40);
+  });
+
+  test('a metadata write that bumps updated does not lift a session past its last turn', () => {
+    const touched = { ...session('touched', 100), time: { created: 1, updated: 100, idle: 10 } } as Session;
+    const talked = { ...session('talked', 20), time: { created: 2, updated: 20, idle: 20 } } as Session;
+    raiseSessionOrderingBaselines([touched, talked]);
+    expect(compareSessionsByLifecycleOrder(touched, talked, new Set(), new Map())).toBeGreaterThan(0);
+  });
+
+  test('a migrated session without idle still orders by updated', () => {
+    raiseSessionOrderingBaselines([session('migrated', 50), session('fresh', 20)]);
+    expect(compareSessionsByLifecycleOrder(session('migrated', 50), session('fresh', 20), new Set(), new Map())).toBeLessThan(0);
   });
 });

@@ -12,13 +12,17 @@
  * the pill; otherwise nothing sits beside it.
  */
 
-import type React from 'react';
+import React, { useState } from 'react';
+import type { SourceControlProvider } from '@/lib/api/types';
 import { Button } from '@/components/ui/button';
 import { Icon } from '@/components/icon/Icon';
 import { StopIcon } from '@/components/icons/StopIcon';
 import { SessionGoalRow } from '@/components/chat/SessionGoalRow';
 import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { useConfigStore } from '@/stores/useConfigStore';
+import { isVSCodeRuntime } from '@/lib/desktop';
+import { isDictationCaptureSupported } from '@/lib/dictation/use-dictation-audio-source';
 import { ComposerAttachmentControls } from './ComposerAttachmentControls';
 
 export interface MobilePillComposerProps {
@@ -44,8 +48,9 @@ export interface MobilePillComposerProps {
     /** While a turn runs, the trailing action queues, as the expanded composer does. */
     onQueueMessage: () => void;
     onPickLocalFiles: () => void;
-    onOpenIssuePicker: () => void;
-    onOpenPrPicker: () => void;
+    onOpenGitHubPicker: () => void;
+    /** The host the project's issues and change requests come from. */
+    repositoryProvider?: SourceControlProvider;
     showLinearPicker?: boolean;
     onOpenLinearPicker?: () => void;
     onOpenAttachSheet: () => void;
@@ -74,8 +79,8 @@ export function MobilePillComposer(props: MobilePillComposerProps) {
         onPrimaryAction,
         onQueueMessage,
         onPickLocalFiles,
-        onOpenIssuePicker,
-        onOpenPrPicker,
+        onOpenGitHubPicker,
+        repositoryProvider,
         showLinearPicker,
         onOpenLinearPicker,
         onOpenAttachSheet,
@@ -84,6 +89,9 @@ export function MobilePillComposer(props: MobilePillComposerProps) {
     } = props;
     const canPrimaryAction = hasContent && Boolean(currentSessionId || newSessionDraftOpen);
     const showTrailingSendAction = canPrimaryAction && canAbort;
+    const dictationEnabled = useConfigStore((state) => state.dictationEnabled);
+    const [dictationSupported] = useState(() => !isVSCodeRuntime() && isDictationCaptureSupported());
+    const showDictation = dictationEnabled && dictationSupported;
 
     return (
         <div className="flex flex-col">
@@ -93,12 +101,21 @@ export function MobilePillComposer(props: MobilePillComposerProps) {
             className="mb-1.5"
         />
         <div className="flex items-center">
+            {/* Shadow on the wrapper, never on the glass: see "Floating
+                composer" in composer/DOCUMENTATION.md. The wrapper hugs the
+                box, so the shadow follows the morph's height tween. */}
+            <div
+                className={cn(
+                    'flex min-w-0 flex-1 flex-col shadow-[0_4px_16px_-4px_rgb(0_0_0_/_0.12)]',
+                    topRow || bottomRow ? 'rounded-[1.5rem]' : 'rounded-full',
+                )}
+            >
             <div
                 data-mobile-composer-pill="true"
                 // The morph measures and animates this box (see mobileComposerMorph).
                 data-composer-box="true"
                 className={cn(
-                    'oc-glass-composer flex min-w-0 flex-1 flex-col border border-border/80 shadow-[0_4px_16px_-4px_rgb(0_0_0_/_0.12)]',
+                    'oc-glass-composer flex min-w-0 flex-col border border-border/80',
                     topRow || bottomRow ? 'rounded-[1.5rem]' : 'rounded-full',
                 )}
             >
@@ -114,8 +131,8 @@ export function MobilePillComposer(props: MobilePillComposerProps) {
                     footerIconButtonClass={footerIconButtonClass}
                     iconSizeClass={iconSizeClass}
                     handlePickLocalFiles={onPickLocalFiles}
-                    openIssuePicker={onOpenIssuePicker}
-                    openPrPicker={onOpenPrPicker}
+                    openGitHubPicker={onOpenGitHubPicker}
+                    repositoryProvider={repositoryProvider}
                     showLinearPicker={showLinearPicker}
                     openLinearPicker={onOpenLinearPicker}
                     onOpenMobileSheet={onOpenAttachSheet}
@@ -140,17 +157,19 @@ export function MobilePillComposer(props: MobilePillComposerProps) {
                                 : t('chat.chatInput.placeholder.selectSession')}
                     </span>
                 </button>
-                <button
-                    type="button"
-                    className={footerIconButtonClass}
-                    // Starts recording in place; the composer morphs into the
-                    // voice variant once dictation actually goes live.
-                    onClick={onStartDictation}
-                    title={t('chat.dictation.start')}
-                    aria-label={t('chat.dictation.start')}
-                >
-                    <Icon name="mic" className={cn(iconSizeClass, 'text-current')} />
-                </button>
+                {showDictation ? (
+                    <button
+                        type="button"
+                        className={footerIconButtonClass}
+                        // Starts recording in place; the composer morphs into the
+                        // voice variant once dictation actually goes live.
+                        onClick={onStartDictation}
+                        title={t('chat.dictation.start')}
+                        aria-label={t('chat.dictation.start')}
+                    >
+                        <Icon name="mic" className={cn(iconSizeClass, 'text-current')} />
+                    </button>
+                ) : null}
                 {/* Same visibility rule as the full composer's stop control:
                     while a turn is running the stop button takes the mic's
                     end slot and the mic shifts one slot left. Instant swap —
@@ -193,6 +212,7 @@ export function MobilePillComposer(props: MobilePillComposerProps) {
             </div>
             {bottomRow}
             </div>
+            </div>
             {/* While running, Abort owns the pill's end slot and this outer
                 button queues the draft, with the same rotated icon and label
                 the expanded composer uses for that state. Collapsed otherwise. */}
@@ -202,11 +222,13 @@ export function MobilePillComposer(props: MobilePillComposerProps) {
                     // The gap lives on the slot, so a collapsed slot leaves
                     // the pill exactly as wide as the expanded box.
                     showTrailingSendAction ? 'ml-2 w-11 opacity-100' : 'w-0 opacity-0 overflow-hidden',
+                    // The glass button's shadow, kept off its backdrop-filter.
+                    'rounded-full shadow-[0_4px_16px_-4px_rgb(0_0_0_/_0.12)]',
                 )}
             >
                 <button
                     type="button"
-                    className="oc-glass-composer flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-border/80 text-primary shadow-[0_4px_16px_-4px_rgb(0_0_0_/_0.12)] hover:text-primary"
+                    className="oc-glass-composer flex h-11 w-11 cursor-pointer items-center justify-center rounded-full border border-border/80 text-primary hover:text-primary"
                     onClick={onQueueMessage}
                     disabled={!showTrailingSendAction}
                     tabIndex={showTrailingSendAction ? undefined : -1}

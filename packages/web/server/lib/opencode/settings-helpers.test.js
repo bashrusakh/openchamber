@@ -69,6 +69,13 @@ const createTestHelpersWithRealSanitizers = () => {
 };
 
 describe('settings helpers', () => {
+  it('sanitizes the optional GitLab OAuth client ID', () => {
+    const helpers = createTestHelpers();
+    expect(helpers.sanitizeSettingsUpdate({ gitlabClientId: ' client-id ' })).toEqual({ gitlabClientId: 'client-id' });
+    expect(helpers.sanitizeSettingsUpdate({ gitlabClientId: '' })).toEqual({});
+    expect(helpers.sanitizeSettingsUpdate({ gitlabClientId: 42 })).toEqual({});
+  });
+
   it('round-trips section order and preserves it across unrelated writes', () => {
     const helpers = createTestHelpers();
     const changes = helpers.sanitizeSettingsUpdate({ workStatusSectionOrder: ['mcp', 'session', 'mcp', null, ''] });
@@ -408,14 +415,21 @@ describe('settings helpers', () => {
 
     expect(helpers.sanitizeSettingsUpdate({
       permissionAutoAccept: {
-        sessions: { root: true, child: false, invalid: 'true' },
+        sessions: { root: true, child: false, guarded: 'safety', open: 'auto', manual: 'ask', invalid: 'true' },
       },
     })).toEqual({
       permissionAutoAccept: {
-        sessions: { root: true, child: false },
+        sessions: { root: true, child: false, guarded: 'safety', open: 'auto', manual: 'ask' },
         revision: 0,
       },
     });
+  });
+
+  it('accepts only a known default permission mode', () => {
+    const helpers = createTestHelpers();
+
+    expect(helpers.sanitizeSettingsUpdate({ permissionDefaultMode: 'safety' })).toEqual({ permissionDefaultMode: 'safety' });
+    expect(helpers.sanitizeSettingsUpdate({ permissionDefaultMode: 'always' })).toEqual({});
   });
 
   it('accepts desktopUiPassword as a persisted shared setting', () => {
@@ -600,6 +614,13 @@ describe('settings helpers', () => {
       expect(hiddenResult.hiddenModels).toEqual(favoriteResult.favoriteModels);
     });
 
+    it('keeps custom provider icons it knows and drops the rest entry by entry', () => {
+      const helpers = createTestHelpersWithRealSanitizers();
+      expect(helpers.sanitizeSettingsUpdate({
+        customProviderIcons: { 'campus-llm': 'cloud', other: 'rocket', '': 'server', local: 'ai' },
+      })).toEqual({ customProviderIcons: { 'campus-llm': 'cloud', local: 'ai' } });
+    });
+
     it('round-trips collapsedModelProviders and recentAgents as string arrays', () => {
       const helpers = createTestHelpersWithRealSanitizers();
 
@@ -667,9 +688,6 @@ describe('settings helpers', () => {
     it('persists only boolean system prompt optimization values', () => {
       const helpers = createTestHelpersWithRealSanitizers();
 
-      expect(helpers.sanitizeSettingsUpdate({ optimizeSystemPrompt: true })).toEqual({ optimizeSystemPrompt: true });
-      expect(helpers.sanitizeSettingsUpdate({ optimizeSystemPrompt: false })).toEqual({ optimizeSystemPrompt: false });
-      expect(helpers.sanitizeSettingsUpdate({ optimizeSystemPrompt: 'true' })).toEqual({});
     });
 
     it('survives a full settings.json payload containing all four previously-dropped fields (regression)', () => {
@@ -765,15 +783,15 @@ describe('settings registry gate', () => {
     projects: [{ id: 'p', path: '/home/testuser/project' }], activeProjectId: 'p',
     securityScopedBookmarks: ['bookmark'], pinnedDirectories: ['/home/testuser/project'],
     desktopLanAccessEnabled: true, desktopKeepAwakeEnabled: true, desktopMinimizeToTrayEnabled: true, desktopMacMenuBarEnabled: true,
-    desktopUiPassword: 'secret', githubClientId: 'client', githubScopes: 'repo', skillCatalogs: [{ id: 'c', label: 'C', source: 'https://x' }],
-    defaultGitIdentityId: 'global', permissionAutoAccept: { sessions: { s: true }, revision: 1 },
-    agentControlToolEnabled: true, agentWebToolEnabled: true, browserProvider: 'builtin', agentMemoryToolEnabled: true, openCodeUpdateToastDismissedVersion: '1.0.0',
-    autoDeleteEnabled: true, autoDeleteAfterDays: 30, sessionRetentionOnlyArchived: false, sessionRetentionAction: 'archive', terminalShell: 'zsh', terminalLoginShells: ['zsh'],
+    desktopUiPassword: 'secret', githubClientId: 'client', githubScopes: 'repo', gitlabClientId: 'gitlab-client', skillCatalogs: [{ id: 'c', label: 'C', source: 'https://x' }],
+    defaultGitIdentityId: 'global', permissionAutoAccept: { sessions: { s: true }, revision: 1 }, permissionDefaultMode: 'safety', messageSearchEnabled: true, messageSearchReasoningEnabled: true,
+    agentControlToolEnabled: true, agentWebToolEnabled: true, browserProvider: 'builtin', agentMemoryToolEnabled: true, agentNotifyToolEnabled: true, agentToolsCodeMode: true, isolatedSpacesEnabled: true, isolatedSpacesIdleStop: { enabled: true, hours: 4 }, openCodeUpdateToastDismissedVersion: '1.0.0',
+    autoDeleteEnabled: true, autoDeleteAfterDays: 30, sessionRetentionOnlyArchived: false, sessionRetentionAction: 'archive', mergedWorktreeCleanupEnabled: true, terminalShell: 'zsh', terminalLoginShells: ['zsh'],
     openInAppId: 'vscode', dictationEnabled: true, sttProvider: 'local', sttServerUrl: 'http://localhost:8001/v1', sttModel: 'm', sttLocalModel: 'm', sttLanguage: 'en',
     tunnelProvider: 'cloudflare', tunnelMode: 'quick', tunnelBootstrapTtlMs: 600000, tunnelSessionTtlMs: 86400000, managedLocalTunnelConfigPath: '/tmp/x',
     managedRemoteTunnelHostname: 'x.example', managedRemoteTunnelToken: 'token', managedRemoteTunnelPresets: [{ id: 'a', name: 'A', hostname: 'a.example' }],
     managedRemoteTunnelSelectedPresetId: 'a', managedRemoteTunnelPresetTokens: { a: 'token' },
-    sidebarProjectDisplayMode: 'all', sidebarViewMode: 'timeline', sidebarProjectSortOrder: 'manual', sidebarShowRecentSection: true,
+    sidebarProjectDisplayMode: 'all', sidebarViewMode: 'timeline', sidebarProjectSortOrder: 'manual', sidebarWorktreeSortOrder: 'recent', sidebarShowRecentSection: true,
     workStatusPanelEnabled: true, workStatusHiddenSections: ['mcp'], workStatusHiddenSectionsExplicit: true, workStatusSectionOrder: ['mcp', 'session'],
     showReasoningTraces: true, streamingAutoFollowEnabled: true, collapsibleThinkingBlocks: true, showTextJustificationActivity: true,
     chatRenderMode: 'live', activityRenderMode: 'summary', mermaidRenderingMode: 'svg', userMessageRenderingMode: 'markdown', collapsibleUserMessages: true,
@@ -781,7 +799,7 @@ describe('settings registry gate', () => {
     codeBlockLineWrap: true, showTurnChangedFiles: true, showExpandedBashTools: true, showExpandedEditTools: true, toolJsonViewMode: 'raw',
     timeFormatPreference: '24h', weekStartPreference: 'monday', messageStreamTransport: 'ws', diffLayoutPreference: 'inline', diffWrapLines: true,
     gitChangesViewMode: 'tree', gitmojiEnabled: true, defaultFileViewerPreview: true, directoryShowHidden: true, filesViewShowGitignored: true,
-    fileEditorKeymap: 'vim', autoSaveEnabled: true, autoCreateWorktree: true, sessionTabsEnabled: true, showOpenCodeRestartConfirm: true,
+    fileEditorKeymap: 'vim', autoSaveEnabled: true, autoCreateWorktree: true, sessionTabsEnabled: true,
     allowPromptingSubagentSessions: true, inputSpellcheckEnabled: true, enterToSend: true, enterToSendConfigured: true, persistChatDraft: true,
     largeTextPasteBehavior: 'attach', followUpBehavior: 'steer', queueModeEnabled: true, inputHistoryScope: 'global', inputHistoryLimit: 40,
     draftStarters: [{ type: 'command', name: 'plan-feature' }], draftStartersVisible: true, draftStartersCraftGoalAdded: true, draftStartersScheduleTaskAdded: true,
@@ -791,15 +809,16 @@ describe('settings registry gate', () => {
     walkthroughModelOverride: 'anthropic/claude', zenModel: 'zen/model',
     favoriteModels: [{ providerID: 'anthropic', modelID: 'claude' }], hiddenModels: [{ providerID: 'openai', modelID: 'gpt' }], collapsedModelProviders: ['openai'],
     recentModels: [{ providerID: 'anthropic', modelID: 'claude' }], recentAgents: ['build'], recentEfforts: { 'anthropic/claude': ['high'] }, providerOrder: ['anthropic'],
-    sessionRecapEnabled: true, sessionSuggestionEnabled: true, sessionGoalEnabled: true, sessionGoalDefaultBudgetEnabled: true, sessionGoalDefaultBudget: 5,
+    sessionRecapEnabled: true, sessionSuggestionEnabled: true, sessionWorkEnabled: true, sessionWorkAutoOpen: true, sessionGoalEnabled: true, sessionGoalChecker: 'small-model', sessionGoalMaxAutoTurns: 50, sessionGoalDefaultBudgetEnabled: true, sessionGoalDefaultBudget: 5,
     summarizeLastMessage: true, summaryThreshold: 100, summaryLength: 50, maxLastMessageLength: 200, showDeletionDialog: true,
     nativeNotificationsEnabled: true, notificationMode: 'always', notifyOnSubtasks: true, notifyOnCompletion: true, notifyOnError: true, notifyOnQuestion: true,
     notificationTemplates: { completion: { title: 't', message: 'm' } }, showOpenCodeUpdateNotifications: true, reportUsage: true,
     usageDisplayMode: 'usage', usageDropdownProviders: ['anthropic'], usageSelectedModels: { anthropic: ['claude'] }, usageCollapsedFamilies: { anthropic: ['f'] },
     usageExpandedFamilies: { anthropic: ['f'] }, usageModelGroups: { anthropic: { customGroups: [{ id: 'g', label: 'G', models: ['claude'], order: 0 }] } },
-    globalBehaviorPrompt: 'Be brief.', responseStyleEnabled: true, responseStylePreset: 'concise', responseStyleCustomInstructions: 'x', optimizeSystemPrompt: true,
+    globalBehaviorPrompt: 'Be brief.', responseStyleEnabled: true, responseStylePreset: 'concise', responseStyleCustomInstructions: 'x',
     pwaAppName: 'OpenChamber', pwaOrientation: 'portrait', mobileKeyboardMode: 'native', desktopWindowControlsPosition: 'left', desktopWindowControlsStyle: 'classic',
     inputBarOffset: 10,
+    customProviderIcons: { 'campus-llm': 'cloud' },
   };
 
   it('accepts a valid value for every persistable registry key (no server-side drift)', () => {
@@ -872,6 +891,11 @@ describe('settings registry gate', () => {
 
   it('accepts the newly shared profile fields', () => {
     const helpers = createTestHelpersWithRealSanitizers();
+    for (const mode of ['ask', 'attach', 'inline', 'inline-double-paste']) {
+      const accepted = helpers.sanitizeSettingsUpdate({ largeTextPasteBehavior: mode });
+      expect(accepted).toEqual({ largeTextPasteBehavior: mode });
+      expect(helpers.formatSettingsResponse(helpers.mergePersistedSettings({}, accepted))).toMatchObject({ largeTextPasteBehavior: mode });
+    }
     expect(helpers.sanitizeSettingsUpdate({
       providerOrder: ['b', 'a', 'a'],
       diffWrapLines: true,
@@ -879,7 +903,6 @@ describe('settings registry gate', () => {
       largeTextPasteBehavior: 'inline',
       fileEditorKeymap: 'vim',
       allowPromptingSubagentSessions: true,
-      showOpenCodeRestartConfirm: false,
       codeBlockLineWrap: true,
       streamingAutoFollowEnabled: false,
       autoSaveEnabled: false,
@@ -890,7 +913,6 @@ describe('settings registry gate', () => {
       largeTextPasteBehavior: 'inline',
       fileEditorKeymap: 'vim',
       allowPromptingSubagentSessions: true,
-      showOpenCodeRestartConfirm: false,
       codeBlockLineWrap: true,
       streamingAutoFollowEnabled: false,
       autoSaveEnabled: false,

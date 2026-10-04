@@ -1,21 +1,12 @@
-import type {
-  Message,
-  Part,
-  PermissionRequest,
-  QuestionRequest,
-  SessionStatus,
-  Todo,
-} from "@opencode-ai/sdk/v2/client"
-import type { FileDiff } from "./types"
+import type { FormRequest, Message, Part, PermissionRequest, SessionStatus } from "@/lib/opencode/model"
+import { getLastConversationMessage, isIncompleteAssistantTurn } from "@/lib/opencode/model"
 
 type SessionCache = {
   session_status: Record<string, SessionStatus | undefined>
-  session_diff: Record<string, FileDiff[] | undefined>
-  todo: Record<string, Todo[] | undefined>
   message: Record<string, Message[] | undefined>
   part: Record<string, Part[] | undefined>
   permission: Record<string, PermissionRequest[] | undefined>
-  question: Record<string, QuestionRequest[] | undefined>
+  form: Record<string, FormRequest[] | undefined>
 }
 
 export function getProtectedSessionCacheIds(store: SessionCache): Set<string> {
@@ -33,18 +24,19 @@ export function getProtectedSessionCacheIds(store: SessionCache): Set<string> {
     }
   }
 
-  for (const [sessionID, questions] of Object.entries(store.question ?? {})) {
-    if ((questions?.length ?? 0) > 0) {
+  for (const [sessionID, forms] of Object.entries(store.form ?? {})) {
+    if ((forms?.length ?? 0) > 0) {
       protectedIds.add(sessionID)
     }
   }
 
   for (const [sessionID, messages] of Object.entries(store.message ?? {})) {
-    const lastMessage = messages?.[messages.length - 1]
+    // Plumbing roles can land after the assistant message that is still
+    // streaming, so protection follows the last conversation message. An idle
+    // session is settled even when its last assistant step never completed.
     if (
-      lastMessage?.role === "assistant"
-      && store.session_status[sessionID]?.type !== "idle"
-      && typeof (lastMessage as { time?: { completed?: number } }).time?.completed !== "number"
+      store.session_status[sessionID]?.type !== "idle"
+      && isIncompleteAssistantTurn(getLastConversationMessage(messages))
     ) {
       protectedIds.add(sessionID)
     }
@@ -70,18 +62,15 @@ export function dropSessionCaches(store: SessionCache, sessionIDs: Iterable<stri
 
   for (const key of Object.keys(store.part ?? {})) {
     const parts = store.part[key]
-    if (!parts?.some((part) => stale.has((part as { sessionID?: string })?.sessionID ?? "")))
-      continue
+    if (!parts?.some((part) => stale.has(part.sessionID))) continue
     delete store.part[key]
   }
 
   for (const sessionID of stale) {
     delete store.message[sessionID]
-    delete store.todo[sessionID]
-    delete store.session_diff[sessionID]
     delete store.session_status[sessionID]
     delete store.permission[sessionID]
-    delete store.question[sessionID]
+    delete store.form[sessionID]
   }
 }
 

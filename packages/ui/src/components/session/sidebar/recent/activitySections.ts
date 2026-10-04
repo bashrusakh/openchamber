@@ -1,4 +1,4 @@
-import type { Session } from '@opencode-ai/sdk/v2';
+import type { Session } from '@/lib/opencode/model';
 import type { SessionNode } from '../types';
 import type { SidebarSessionLocation } from './sessionLocation';
 
@@ -9,6 +9,7 @@ type SidebarActivityItem = {
   projectId: string | null;
   groupDirectory: string | null;
   secondaryMeta: { projectLabel?: string | null; branchLabel?: string | null } | null;
+  getSecondaryMeta?: (sessionId: string) => SidebarActivityItem['secondaryMeta'];
 };
 
 type RecentActivitySection = {
@@ -25,6 +26,23 @@ const matchesSidebarSessionQuery = (session: Session, query: string): boolean =>
   const title = typeof session.title === 'string' ? session.title.toLowerCase() : '';
   return title.includes(query);
 };
+
+/**
+ * Whether a session tree answers a sidebar query: its root or any session
+ * below it. A zone that lists whole trees and takes them out of every other
+ * projection (In work) must keep a root whose subsession is the match, or the
+ * match disappears from the sidebar entirely.
+ */
+export const sessionTreeMatchesSidebarQuery = (node: SessionNode, query: string): boolean => (
+  matchesSidebarSessionQuery(node.session, query)
+  || node.children.some((child) => sessionTreeMatchesSidebarQuery(child, query))
+);
+
+/** Sessions in a tree that answer the query themselves, ancestors kept only as context excluded. */
+export const countSessionTreeQueryMatches = (node: SessionNode, query: string): number => (
+  (matchesSidebarSessionQuery(node.session, query) ? 1 : 0)
+  + node.children.reduce((total, child) => total + countSessionTreeQueryMatches(child, query), 0)
+);
 
 const RECENT_SESSION_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
@@ -66,6 +84,18 @@ export const deriveRecentSessions = (
   });
 };
 
+const attachRecentWorktrees = (
+  node: SessionNode,
+  getSessionLocation: (sessionId: string) => RecentSessionLocation | null,
+): SessionNode => {
+  const worktree = getSessionLocation(node.session.id)?.worktree ?? null;
+  const children = node.children.map((child) => attachRecentWorktrees(child, getSessionLocation));
+  if (worktree === node.worktree && children.every((child, index) => child === node.children[index])) {
+    return node;
+  }
+  return { ...node, worktree, children };
+};
+
 export const deriveRecentActivitySections = ({
   sessions,
   getSessionLocation,
@@ -81,14 +111,22 @@ export const deriveRecentActivitySections = ({
   items: sessions.flatMap((session) => {
     if (!matchesSidebarSessionQuery(session, query)) return [];
     const location = getSessionLocation(session.id);
+    const node = getSessionNode?.(session) ?? { session, children: [], worktree: null };
     return [{
-      node: getSessionNode?.(session) ?? { session, children: [], worktree: null },
+      node: attachRecentWorktrees(node, getSessionLocation),
       projectId: location?.projectId ?? null,
       groupDirectory: location?.groupDirectory ?? session.directory ?? null,
       secondaryMeta: location ? {
         projectLabel: location.projectLabel,
         branchLabel: location.branchLabel,
       } : null,
+      getSecondaryMeta: (sessionId: string) => {
+        const childLocation = getSessionLocation(sessionId);
+        return childLocation ? {
+          projectLabel: childLocation.projectLabel,
+          branchLabel: childLocation.branchLabel,
+        } : null;
+      },
     }];
   }),
 }];

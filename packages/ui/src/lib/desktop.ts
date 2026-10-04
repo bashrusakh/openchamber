@@ -17,6 +17,8 @@ export type UpdateInfo = {
   // Web-specific fields
   packageManager?: string;
   updateCommand?: string;
+  /** The server cannot install this update itself; `updateCommand` must be run by hand. */
+  installBlocked?: 'service-manager';
 };
 
 export type UpdateProgress = {
@@ -139,6 +141,19 @@ export const invokeDesktop = async <T = unknown>(command: string, args?: Record<
   const bridge = getDesktopBridge();
   if (typeof bridge?.invoke !== 'function') return null;
   return bridge.invoke(command, args ?? {}) as Promise<T>;
+};
+
+// This reads the current native CLI preflight, never a persisted boot hint. Compare the
+// endpoint again after IPC so a runtime switch cannot reuse another host's state.
+export const hasCompatibleManagedDesktopOpenCode = async (): Promise<boolean> => {
+  if (!isDesktopShell() || !isDesktopLocalOriginActive()) return false;
+  const apiBaseUrl = getRuntimeApiBaseUrl();
+  try {
+    const result = z.boolean().safeParse(await invokeDesktop('desktop_managed_opencode_compatible', { apiBaseUrl }));
+    return result.success && result.data && apiBaseUrl === getRuntimeApiBaseUrl();
+  } catch {
+    return false;
+  }
 };
 
 type LaunchAtLoginStatus = {
@@ -378,6 +393,32 @@ export const focusDesktopWindow = async (): Promise<boolean> => {
 export const canRequestNativeDirectoryAccess = (): boolean => (
   isDesktopShell() && hasDesktopInvoke() && isDesktopLocalOriginActive()
 );
+
+const pendingSessionLinksSchema = z.array(z.object({
+  sessionId: z.string().min(1),
+  messageId: z.string().min(1).optional(),
+}));
+
+type PendingDesktopSessionLink = { sessionId: string; messageId: string | null };
+
+/**
+ * Session links (`openchamber://session/...`) that reached the desktop app
+ * before this window could listen for them — the link that launched the app,
+ * or "open in main window" from a closed main window. Taking them removes
+ * them; outside the desktop local page there are none.
+ */
+export const takePendingDesktopSessionLinks = async (): Promise<PendingDesktopSessionLink[]> => {
+  if (!isDesktopShell() || !isDesktopLocalOriginActive()) return [];
+  try {
+    const parsed = pendingSessionLinksSchema.safeParse(await invokeDesktop('desktop_take_pending_session_links'));
+    return parsed.success
+      ? parsed.data.map((link) => ({ sessionId: link.sessionId, messageId: link.messageId ?? null }))
+      : [];
+  } catch (error) {
+    console.warn('Failed to read pending session links', error);
+    return [];
+  }
+};
 
 /**
  * On-disk path of a File dropped from the OS onto the desktop app.

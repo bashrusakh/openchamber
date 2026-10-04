@@ -9,7 +9,7 @@ edge (`components/layout/ContextPanelRail.tsx`) and rendered by
 
 ## Model
 
-Full-screen extension pages are separate from this rail registry. `contributes.page` appears in one sidebar-header menu and uses `useUIStore.openGuestPageId`, the same mutually exclusive main-page lifecycle as Archive and Scheduled tasks. It mounts `PluginPane` with `surface="page"`, closes on runtime switch/uninstall/disable, and is not persisted. `openContextSurface` and the guest's `openSurface` cannot open a full-screen page. The entry-point restrictions below describe context-rail surfaces only.
+Full-screen extension pages are separate from this rail registry. `contributes.page` appears in one sidebar-header menu and uses `useUIStore.openGuestPageId`, the same mutually exclusive main-page lifecycle as Archive and Scheduled tasks. It mounts `PluginPane` with `surface="page"`, closes on runtime switch/uninstall/disable, and is not persisted. `openContextSurface` and the guest's `openSurface` cannot open a full-screen page. Work Status sections (`contributes.statusSection`) are not rail surfaces either: they mount `PluginPane` with `surface="status"` inside the chat's Work Status panel and never open a tab. The entry-point restrictions below describe context-rail surfaces only.
 
 - A surface maps 1:1 to a `ContextPanelMode` tab mode in `useUIStore`.
   Built-in modes stay a closed list. Installed guests add `plugin:${id}`
@@ -78,9 +78,9 @@ chat/palette go through the `openContext*` actions in `useUIStore`.
 - Multi-instance and session-holding surfaces (file/editor, diff, browser,
   terminal) are keep-alive panes in `ContextPanel.tsx`. Switching these
   surfaces must not reset their state (open tabs, xterm session, scroll
-  positions). Chat tab records stay open, but only the active chat iframe is
-  mounted while the panel is open. A selected chat restores its state from
-  the session stores. A closed panel mounts no chat iframe.
+  positions). Chat tab records stay open, but only the active chat tab's
+  pinned chat column is mounted while the panel is open. A selected chat
+  restores its state from the session stores. A closed panel mounts no chat.
   Singleton surfaces (git, pr, linear, notes, plan, context) remount on switch. These
   surfaces must restore their state from stores or snapshots.
 - Portalled menus and dialogs handle their own Escape key. The panel's capture

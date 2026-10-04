@@ -50,10 +50,10 @@ describe.skipIf(process.platform === 'win32')('FILLER_PROGRAM, run', () => {
   const FAKE_NPM = `#!/bin/sh
 echo "$@" > npm-args.txt
 [ -f fail-npm ] && exit 3
-mkdir -p node_modules/.bin node_modules/@opencode-ai/plugin node_modules/opencode-ai
+mkdir -p node_modules/.bin node_modules/@opencode/plugin node_modules/@opencode/cli
 touch node_modules/.bin/openchamber node_modules/.bin/opencode
-[ -f skip-plugin ] || echo '{}' > node_modules/@opencode-ai/plugin/package.json
-echo "import fs from 'node:fs'; fs.writeFileSync('postinstall-ran', 'yes');" > node_modules/opencode-ai/postinstall.mjs
+[ -f skip-plugin ] || echo '{}' > node_modules/@opencode/plugin/package.json
+echo "import fs from 'node:fs'; fs.writeFileSync('postinstall-ran', 'yes');" > node_modules/@opencode/cli/postinstall.mjs
 `;
   let root;
   let tools;
@@ -95,7 +95,7 @@ echo "import fs from 'node:fs'; fs.writeFileSync('postinstall-ran', 'yes');" > n
     expect(fs.existsSync(path.join(tools, 'openchamber-web.tgz'))).toBe(false);
     expect(fs.readFileSync(path.join(tools, 'npm-args.txt'), 'utf8').trim()).toBe(`install --ignore-scripts --no-audit --no-fund --cache ${path.join(staging, 'npm-cache')}`);
     // The one install script that runs: the OpenCode launcher needs its binary linked.
-    expect(fs.readFileSync(path.join(tools, 'node_modules', 'opencode-ai', 'postinstall-ran'), 'utf8')).toBe('yes');
+    expect(fs.readFileSync(path.join(tools, 'node_modules', '@opencode/cli', 'postinstall-ran'), 'utf8')).toBe('yes');
     expect(fs.readFileSync(path.join(tools, '.filled'), 'utf8')).toBe(KEY);
     // The marker arrives through a rename, so a marker that exists is never half written.
     expect(fs.existsSync(path.join(tools, '.filled.new'))).toBe(false);
@@ -115,7 +115,7 @@ echo "import fs from 'node:fs'; fs.writeFileSync('postinstall-ran', 'yes');" > n
     const result = await fill(buildFillInput({ key: KEY, packageJson: '{}' }));
 
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain('node_modules/@opencode-ai/plugin/package.json is missing');
+    expect(result.stderr).toContain('node_modules/@opencode/plugin/package.json is missing');
     expect(fs.existsSync(path.join(tools, '.filled'))).toBe(false);
   });
 

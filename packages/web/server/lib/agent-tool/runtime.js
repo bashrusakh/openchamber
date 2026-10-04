@@ -1,24 +1,32 @@
-import { pathToFileURL } from 'node:url';
-import { appendManagedPlugin } from '../opencode/managed-plugin-config.js';
 import {
   OPENCHAMBER_AGENT_TOOL_ACTION_DEFINITIONS,
   OPENCHAMBER_AGENT_TOOL_ACTIONS,
   OPENCHAMBER_MEMORY_ACTION_DEFINITIONS,
   OPENCHAMBER_MEMORY_ACTIONS,
+  OPENCHAMBER_NOTIFY_ACTION_DEFINITIONS,
+  OPENCHAMBER_NOTIFY_ACTIONS,
   resolveAgentToolAction,
   OPENCHAMBER_WEB_ACTION_DEFINITIONS,
   OPENCHAMBER_WEB_ACTIONS,
 } from '../openchamber-control/actions.js';
+import { createCallbackAddress } from './callback-address.js';
 
 const TOOL_SCHEMA_VERSION = 1;
+const PLUGIN_ID = 'openchamber-agent-tool';
 // Everything either managed tool may ask for; the agent allowlist stays
 // narrower than the full control surface.
-const ACTIONS = new Set([...OPENCHAMBER_AGENT_TOOL_ACTIONS, ...OPENCHAMBER_WEB_ACTIONS, ...OPENCHAMBER_MEMORY_ACTIONS]);
+const ACTIONS = new Set([
+  ...OPENCHAMBER_AGENT_TOOL_ACTIONS,
+  ...OPENCHAMBER_WEB_ACTIONS,
+  ...OPENCHAMBER_MEMORY_ACTIONS,
+  ...OPENCHAMBER_NOTIFY_ACTIONS,
+]);
 const AGENT_TOOL_ACTION_TITLES = Object.fromEntries(
   [
     ...OPENCHAMBER_AGENT_TOOL_ACTION_DEFINITIONS,
     ...OPENCHAMBER_WEB_ACTION_DEFINITIONS,
     ...OPENCHAMBER_MEMORY_ACTION_DEFINITIONS,
+    ...OPENCHAMBER_NOTIFY_ACTION_DEFINITIONS,
   ].map(({ action, title }) => [action, title]),
 );
 
@@ -29,7 +37,7 @@ const AGENT_TOOL_ACTION_TITLES = Object.fromEntries(
  * in the other tool's schema, which is both misleading and paid for in context
  * on every call.
  */
-const WEB_PARAMETER_NAMES = ['url', 'selector', 'text', 'value', 'submit', 'direction', 'viewport', 'label'];
+const WEB_PARAMETER_NAMES = ['url', 'selector', 'text', 'value', 'submit', 'direction', 'viewport', 'label', 'tabId'];
 // `title` is shared with the control tool, so it is not listed here — only the
 // names memory alone introduces are kept out of the other schemas.
 const MEMORY_ONLY_PARAMETER_NAMES = ['body', 'scope', 'memoryId', 'type'];
@@ -51,6 +59,18 @@ const ALL_PARAMETER_PROPERTIES = {
   directory: { type: 'string', description: 'Absolute checkout or session directory; defaults to the current session directory' },
   sessionId: { type: 'string' },
   messageId: { type: 'string', description: 'Optional fork boundary message ID' },
+  link: {
+    type: 'object',
+    description: 'What session.link records, on any service',
+    properties: {
+      url: { type: 'string', description: 'Its web address' },
+      title: { type: 'string' },
+      kind: { type: 'string', enum: ['change', 'issue'], description: 'change is a code change under review (pull, merge or change request); issue is a task or ticket' },
+      identifier: { type: 'string', description: 'Its short label on that service, such as !42 or OPS-7; optional' },
+    },
+    required: ['url', 'title', 'kind'],
+    additionalProperties: false,
+  },
   taskId: { type: 'string' },
   title: { type: 'string' },
   prompt: { type: 'string' },
@@ -63,9 +83,8 @@ const ALL_PARAMETER_PROPERTIES = {
   setUpstream: { type: 'boolean', description: 'Make the new worktree branch track its upstream' },
   goal: { type: 'boolean', description: 'Run the dispatched prompt in Goal Mode; use only when the user explicitly requests it' },
   goalTokenBudget: { type: 'integer', minimum: 1000, maximum: 100_000_000, description: 'Goal token budget; requires goal' },
-  wait: { type: 'boolean', description: 'Wait for current session activity to become idle. Omit by default; use only when the user asks or the next step requires the completed result' },
-  timeout: { type: 'integer', minimum: 1, maximum: 86_400, description: 'Wait timeout in seconds (default 600); requires wait' },
-  lastAssistant: { type: 'boolean', description: 'Return the last assistant text; create/send/fork require wait' },
+  returnResult: { type: 'boolean', description: 'For session.create, send and fork with a prompt: deliver the session\'s final answer back to you as a message when it finishes, waking you to continue. The call still returns at once. Set only when the user wants the outcome back or your next step needs it' },
+  lastAssistant: { type: 'boolean', description: 'session.messages: return only the last assistant message' },
   limit: { type: 'integer', minimum: 1, description: 'Maximum sessions or messages to return (default 10)' },
   all: { type: 'boolean', description: 'Include archived sessions or all messages, depending on the action' },
   last: { type: 'boolean', description: 'Return only the last matching session message' },
@@ -79,6 +98,7 @@ const ALL_PARAMETER_PROPERTIES = {
   cron: { type: 'string', description: 'Cron expression' },
   timezone: { type: 'string', description: 'IANA timezone' },
   disabled: { type: 'boolean', description: 'true disables and false enables; required for schedule.toggle' },
+  path: { type: 'string', description: 'File to show for file.open; absolute, or relative to the session directory' },
   url: { type: 'string', description: 'http(s) URL for browser.open' },
   selector: { type: 'string', description: 'CSS selector from a browser.snapshot result' },
   text: { type: 'string', description: 'Visible label to match when no selector is given' },
@@ -87,7 +107,8 @@ const ALL_PARAMETER_PROPERTIES = {
   direction: { type: 'string', enum: ['up', 'down', 'top', 'bottom'], description: 'Scroll direction for browser.scroll' },
   viewport: { type: 'string', enum: ['mobile', 'tablet', 'desktop', 'fill'], description: 'Page layout size; snapshots report which one is in effect' },
   label: { type: 'string', description: 'Short name for a browser.capture image, such as before-fix' },
-  body: { type: 'string', description: 'Full text of the memory; state it so it still makes sense in a session that has none of this conversation' },
+  tabId: { type: 'string', description: 'Browser tab to act on, an id from the tabs a browser.snapshot lists. Omit to use the tab the user is looking at' },
+  body: { type: 'string', description: 'Full text of the memory, at most 2000 characters; a longer body is rejected rather than trimmed. State it so it still makes sense in a session that has none of this conversation' },
   scope: { type: 'string', enum: ['global', 'project', 'both'], description: 'global is about the user and applies everywhere; project is about this codebase. both is only valid for memory.list' },
   memoryId: { type: 'string', description: 'Memory ID from a memory.list or memory.read result' },
   type: { type: 'string', enum: ['fact', 'preference', 'reference'], description: 'fact is something true, preference is how the user wants work done, reference points at a resource that is hard to find again' },
@@ -108,11 +129,46 @@ const MEMORY_PARAMETER_PROPERTIES = {
   ...MEMORY_PARAMETER_OVERRIDES,
 };
 
-const CONTROL_TOOL_DESCRIPTION = "Control OpenChamber projects, sessions, and scheduled tasks on the user's behalf. Sessions and scheduled tasks you create are for the user to follow and interact with; never use this tool to delegate parts of your own current task. Use one action per call. Scope with projectId or directory; omit both to use the current session directory. Session dispatches return immediately by default and you receive no notification when a dispatched session finishes, so never promise to report back on it; the user follows it in OpenChamber; a dispatched session needs no follow-up from you. If the user later asks how it went, use session.messages (add wait to block until it is idle, lastAssistant for just the final answer) — session.send always sends a NEW prompt and never just waits. Set wait only when the user asks or the next step requires the completed result. Session and worktree deletion are unavailable.";
+// Its own names, not the shared map: `title` and `body` mean something else in
+// the control and memory tools.
+const NOTIFY_PARAMETER_PROPERTIES = {
+  title: { type: 'string', description: 'Short headline the user reads first, up to 120 characters' },
+  body: { type: 'string', description: 'One or two sentences of detail, up to 500 characters' },
+  showWhenFocused: { type: 'boolean', description: 'Show it even while the user is looking at OpenChamber. Only for something that cannot wait' },
+};
+
+// The linking rule leads: stated only inside the session.link action, an
+// agent handed an issue to investigate never opened this tool and never
+// linked it. SESSION_LINK_GUIDANCE in ../session-knowledge/runtime.js states
+// the same rule in every session's context; change both together.
+const CONTROL_TOOL_DESCRIPTION = "When the user gives you an issue or a change under review (a pull or merge request) to work on, fix, investigate or review, when you open one for this work, and when the work resolves one, link it to this session with session.link as soon as you know it, so the user sees it with the session. Not one merely mentioned in passing. The tool also runs OpenChamber projects, sessions and scheduled tasks for the user. A session you create, send to or fork belongs to the user: they follow it in OpenChamber and talk to it themselves. Dispatch one when the user asks for it, even when the work relates to your current task; any agent, optionally in a new worktree. To delegate part of your own task and get the answer yourself, use the subagent tool instead. A dispatch returns at once. Set returnResult when the user wants the outcome back or your next step needs it: the session's final answer then arrives in this session as a message when it finishes, and you continue from there. Without it, the session is the user's to follow and you move on. To see how a session went, read it with session.messages (lastAssistant for the final answer); session.send always starts a new prompt. One action per call; scope with projectId or directory, or leave both out for this session's directory. Deleting sessions and worktrees is not available.";
 
 const WEB_TOOL_DESCRIPTION = "Look at and interact with a web page in OpenChamber's browser panel, so you can check your own work rather than describing what you expect. Use one action per call. Open a page, snapshot it to read its text and its interactive elements, then click, type or scroll using the selectors the snapshot returned; snapshots also report any errors the page logged. Pass a selector to browser.snapshot to read one part of a long page. browser.inspect returns computed styles when the question is how something renders. Set viewport to check a layout at mobile, tablet or desktop size. The page runs with the user's real logins, so treat what you see as their live session.";
 
-const MEMORY_TOOL_DESCRIPTION = "Keep what you learn across sessions, so the user does not have to explain the same thing twice. Use one action per call. The session already lists the titles of what is stored. A title is an abbreviation, not the memory: read the entry with memory.read before acting on it, because titles leave out the conditions and exceptions that decide how the memory applies, and the ones that look self-explanatory hide them most often. Save something only when it will still be true in a later session — a stable preference, a project convention, a decision and its reason, or a hard-won pointer. Do not save one-off task state, anything you can read from the code, secrets or credentials, or anything the user asked you not to keep. Choose the scope deliberately: global is about the user and reaches every project, so put a project's conventions in project scope. What you save is shown to the user as unreviewed until they confirm it, so save plainly and say what you saved when it matters.";
+const MEMORY_TOOL_DESCRIPTION = "Keep what you learn across sessions, so the user does not have to explain the same thing twice. Use one action per call. The session already lists the titles of what is stored. A title is an abbreviation, not the memory: read the entry with memory.read once before acting on it (it then stays in your context; do not re-read it on later turns), because titles leave out the conditions and exceptions that decide how the memory applies, and the ones that look self-explanatory hide them most often. Save something only when it will still be true in a later session — a stable preference, a project convention, a decision and its reason, or a hard-won pointer. Do not save one-off task state, anything you can read from the code, secrets or credentials, or anything the user asked you not to keep; when the user explicitly asks you to remember something, save it, unless it is a secret or credential. Choose the scope deliberately: global is about the user and reaches every project, so put a project's conventions in project scope. Save in the moment, without asking first, when the user corrects how you work or states a preference, confirms that a non-obvious approach worked, or when you learn a project fact that took real effort to find. One fact per entry. The user can review and remove what you save, so save when it fits and mention it briefly.";
+
+const NOTIFY_TOOL_DESCRIPTION = "Send the user a notification through OpenChamber, so they learn about something without watching the session. Use it when you finish work that took long enough for the user to step away, when you are blocked on something only the user can resolve, or when the user asked to be told about something. Do not use it for routine progress, for every finished step, or to repeat what your reply already says to a user who is present. Keep the title short and put detail in the body.";
+
+const DISPATCH_ACTIONS = new Set(['session.create', 'session.send', 'session.fork']);
+
+/**
+ * The control service still waits for the CLI, whose user sits at a terminal
+ * with no session to deliver into. An agent never waits: a blocked tool call
+ * holds its whole turn open, and `returnResult` brings the answer back
+ * instead. A stale habit of sending `wait` gets the way that replaced it.
+ */
+const agentOnlyUsageError = (action, input) => {
+  if (!action.startsWith('session.')) return null;
+  if (input.wait === true || input.timeout !== undefined) {
+    return action === 'session.messages'
+      ? 'session.messages does not wait: it returns the current messages and sessionStatus. To get a session\'s answer when it finishes, dispatch the prompt with returnResult'
+      : 'wait is not available to agents: a dispatch returns at once. Set returnResult to have the session\'s final answer delivered to you when it finishes';
+  }
+  if (input.lastAssistant === true && DISPATCH_ACTIONS.has(action)) {
+    return 'lastAssistant belongs to session.messages. To get a dispatched session\'s answer when it finishes, set returnResult';
+  }
+  return null;
+};
 
 const asNonEmptyString = (value) => {
   if (typeof value !== 'string') return null;
@@ -129,26 +185,6 @@ const createResult = ({ ok, action, data, error, exitCode }) => ({
   ...(Number.isInteger(exitCode) ? { exitCode } : {}),
 });
 
-// Node reports an IPv4 peer on a dual-stack socket as `::ffff:<ipv4>`.
-const normalizeAddress = (value) => {
-  const address = (asNonEmptyString(value) || '').toLowerCase();
-  return address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
-};
-
-const isLoopbackAddress = (value) => {
-  const address = normalizeAddress(value);
-  return address === '127.0.0.1' || address === '::1';
-};
-
-const WILDCARD_ADDRESSES = new Set(['0.0.0.0', '::']);
-
-// A wildcard listener answers on loopback. A listener bound to one concrete
-// address answers only there, so that address is the only way back in.
-const resolveConcreteBoundAddress = (value) => {
-  const address = normalizeAddress(value);
-  return address && !WILDCARD_ADDRESSES.has(address) ? address : null;
-};
-
 /**
  * One template, one entry per enabled capability.
  *
@@ -157,16 +193,34 @@ const resolveConcreteBoundAddress = (value) => {
  * keeps the transport, metadata and failure handling identical, which is what
  * the caller depends on.
  *
+ * OpenCode 2 takes a tool's `input` as plain JSON Schema, so the generated file
+ * needs no imports at all — which it must not have, because OpenCode loads the
+ * entrypoint with a bare dynamic import and nothing resolves from the generated
+ * directory.
+ *
  * The action schema carries `oneOf` only. A node combining `enum` and `oneOf`
  * is valid JSON Schema, but some OpenAI-compatible gateways reject it and
  * answer with an empty completion instead of an error, and the `oneOf` branches
  * are what carry the per-action descriptions the model reads.
  */
-const createToolEntry = ({ name, description, definitions, parameters }) => String.raw`    ${name}: {
+const createToolEntry = ({ name, description, definitions, parameters, codeMode }) => String.raw`    tools.add({
+      name: ${JSON.stringify(name)},
       description: ${JSON.stringify(description)},
-      args: {
-        action: { type: "string", oneOf: ${JSON.stringify(definitions.map((entry) => ({ const: entry.action, description: entry.description })))}, description: "OpenChamber action to perform" },
-        parameters: { type: "object", properties: ${JSON.stringify(parameters)}, additionalProperties: false, description: "Inputs for the action; use an empty object when none are needed" },
+      // OpenCode 2 puts a plugin tool behind its Code Mode execute tool
+      // unless told otherwise. There the model sees only a size-limited
+      // catalog, and with a few large MCP servers ours dropped out of it, so
+      // agents concluded the tool did not exist. Direct is the default.
+      options: { codemode: ${codeMode ? 'true' : 'false'} },
+      input: {
+        type: "object",
+        properties: {
+          action: { type: "string", oneOf: ${JSON.stringify(definitions.map((entry) => ({ const: entry.action, description: entry.description })))}, description: "OpenChamber action to perform" },
+          parameters: { type: "object", properties: ${JSON.stringify(parameters)}, additionalProperties: false, description: "Inputs for the action; use an empty object when none are needed" },
+        },
+        required: ["action"],
+        // Models routinely put the inputs next to the action; the schema has to
+        // let that reach execute() instead of rejecting the call.
+        additionalProperties: true,
       },
       async execute(input, context) {
         // Models routinely put the inputs next to the action instead of inside
@@ -177,21 +231,22 @@ const createToolEntry = ({ name, description, definitions, parameters }) => Stri
         const args = { ...flattened, ...(parameters ?? {}), action: requestedAction }
         const actionTitles = ${JSON.stringify(AGENT_TOOL_ACTION_TITLES)}
         const title = Object.hasOwn(actionTitles, args.action) ? actionTitles[args.action] : args.action
-        context.metadata({
-          title,
-          metadata: {
-            ${name}: {
-              schemaVersion: ${TOOL_SCHEMA_VERSION},
-              action: args.action,
-              description: title,
-            },
+        const progress = (extra) => context.progress({
+          ${name}: {
+            schemaVersion: ${TOOL_SCHEMA_VERSION},
+            action: args.action,
+            description: title,
+            ...extra,
           },
         })
+        await progress()
         const endpoint = process.env.OPENCHAMBER_AGENT_TOOL_URL
         const token = process.env.OPENCHAMBER_AGENT_TOOL_TOKEN
+        // No output schema is declared, so a result must never carry an output
+        // field: OpenCode rejects that with "Tool result declared output
+        // without an output schema". The envelope travels as text content.
         const failure = (payload) => ({
-          title,
-          output: JSON.stringify(payload),
+          content: JSON.stringify(payload),
           metadata: { openchamber: { schemaVersion: ${TOOL_SCHEMA_VERSION}, action: args.action, description: title, ok: false } },
         })
         if (!endpoint || !token) {
@@ -205,35 +260,28 @@ const createToolEntry = ({ name, description, definitions, parameters }) => Stri
               authorization: "Bearer " + token,
               "content-type": "application/json",
             },
-            body: JSON.stringify({ input: args, contextDirectory: context.directory, contextSessionId: context.sessionID, tool: ${JSON.stringify(name)} }),
-            signal: context.abort,
+            // OpenCode 2 no longer hands a tool its session directory, so the
+            // session id goes over instead and OpenChamber resolves the
+            // directory on its own side. The signal fires when the session is
+            // aborted, so the OpenChamber side stops the action too.
+            body: JSON.stringify({ input: args, sessionID: context.sessionID, tool: ${JSON.stringify(name)} }),
+            signal: context.signal,
           })
-          const output = await response.text()
+          const content = await response.text()
           let result = null
-          try { result = JSON.parse(output) } catch {}
+          try { result = JSON.parse(content) } catch {}
           const valid = result?.schemaVersion === ${TOOL_SCHEMA_VERSION} && typeof result?.ok === "boolean" && typeof result?.action === "string"
-          context.metadata({
-            title,
-            metadata: {
-              ${name}: {
-                schemaVersion: ${TOOL_SCHEMA_VERSION},
-                action: args.action,
-                description: title,
-                ok: valid && result.ok === true,
-              },
-            },
-          })
-          if (valid) return { title, output, metadata: { openchamber: { schemaVersion: ${TOOL_SCHEMA_VERSION}, action: args.action, description: title, ok: result.ok === true } } }
+          await progress({ ok: valid && result.ok === true })
+          if (valid) return { content, metadata: { openchamber: { schemaVersion: ${TOOL_SCHEMA_VERSION}, action: args.action, description: title, ok: result.ok === true } } }
           return failure({ schemaVersion: ${TOOL_SCHEMA_VERSION}, ok: false, action: args.action, error: { message: "OpenChamber returned an invalid response", kind: "runtime", status: response.status } })
         } catch (error) {
-          if (context.abort.aborted) throw error
           return failure({ schemaVersion: ${TOOL_SCHEMA_VERSION}, ok: false, action: args.action, error: { message: error instanceof Error ? error.message : String(error), kind: "runtime" } })
         }
       },
-    },
+    })
 `;
 
-const createPluginSource = ({ includeControl, includeWeb, includeMemory }) => {
+const createPluginSource = ({ includeControl, includeWeb, includeMemory, includeNotify, codeMode }) => {
   const entries = [];
   if (includeControl) {
     entries.push(createToolEntry({
@@ -241,6 +289,7 @@ const createPluginSource = ({ includeControl, includeWeb, includeMemory }) => {
       description: CONTROL_TOOL_DESCRIPTION,
       definitions: OPENCHAMBER_AGENT_TOOL_ACTION_DEFINITIONS,
       parameters: CONTROL_PARAMETER_PROPERTIES,
+      codeMode,
     }));
   }
   if (includeWeb) {
@@ -249,6 +298,7 @@ const createPluginSource = ({ includeControl, includeWeb, includeMemory }) => {
       description: WEB_TOOL_DESCRIPTION,
       definitions: OPENCHAMBER_WEB_ACTION_DEFINITIONS,
       parameters: WEB_PARAMETER_PROPERTIES,
+      codeMode,
     }));
   }
   if (includeMemory) {
@@ -257,6 +307,16 @@ const createPluginSource = ({ includeControl, includeWeb, includeMemory }) => {
       description: MEMORY_TOOL_DESCRIPTION,
       definitions: OPENCHAMBER_MEMORY_ACTION_DEFINITIONS,
       parameters: MEMORY_PARAMETER_PROPERTIES,
+      codeMode,
+    }));
+  }
+  if (includeNotify) {
+    entries.push(createToolEntry({
+      name: 'openchamber_notify',
+      description: NOTIFY_TOOL_DESCRIPTION,
+      definitions: OPENCHAMBER_NOTIFY_ACTION_DEFINITIONS,
+      parameters: NOTIFY_PARAMETER_PROPERTIES,
+      codeMode,
     }));
   }
 
@@ -275,15 +335,26 @@ const createPluginSource = ({ includeControl, includeWeb, includeMemory }) => {
   }
 }
 
-export const OpenChamberPlugin = async () => {
-  exemptCallbackFromProxy()
-  return {
-    tool: {
-${entries.join('')}    },
-  }
+export default {
+  id: ${JSON.stringify(PLUGIN_ID)},
+  setup: async (ctx) => {
+    exemptCallbackFromProxy()
+    await ctx.tool.transform((tools) => {
+${entries.join('')}    })
+  },
 }
 `;
 };
+
+// A configured plugin has to be a directory carrying a package.json that
+// resolves an entrypoint; OpenCode skips a plain .js path.
+const PLUGIN_PACKAGE_JSON = `${JSON.stringify({
+  name: 'openchamber-agent-tool',
+  version: '0.0.0',
+  private: true,
+  type: 'module',
+  exports: { '.': './index.js' },
+}, null, 2)}\n`;
 
 export const createAgentToolRuntime = (dependencies) => {
   const {
@@ -294,42 +365,50 @@ export const createAgentToolRuntime = (dependencies) => {
     getActivePort,
     getActiveHost = () => null,
     executeAction,
-    env = process.env,
+    resolveSessionDirectory,
   } = dependencies;
-  const pluginDirectory = path.join(dataDir, 'agent-tool');
-  const pluginPath = path.join(pluginDirectory, 'openchamber-plugin.js');
+  const pluginRoot = path.join(dataDir, 'agent-tool');
+  const pluginDirectory = path.join(pluginRoot, PLUGIN_ID);
+  const pluginPath = path.join(pluginDirectory, 'index.js');
+  const pluginManifestPath = path.join(pluginDirectory, 'package.json');
   let activeToken = null;
 
-  const getConcreteBoundAddress = () => resolveConcreteBoundAddress(getActiveHost());
+  const { callbackHost, isSameMachineAddress } = createCallbackAddress(getActiveHost);
 
-  const prepareManagedOpenCodeEnv = async ({ includeControl = true, includeWeb = true, includeMemory = true } = {}) => {
+  /**
+   * Write the plugin for the requested tool set and return its directory.
+   *
+   * Called both before a managed child starts and whenever the tool settings
+   * change while it runs, so the source on disk always matches the settings —
+   * the running OpenCode reloads the directory it already has configured.
+   */
+  const materializePlugin = async ({ includeControl = true, includeWeb = true, includeMemory = true, includeNotify = false, codeMode = false } = {}) => {
+    if (!includeControl && !includeWeb && !includeMemory && !includeNotify) {
+      throw new Error('At least one OpenChamber managed tool must be enabled to inject the plugin');
+    }
+    await fsPromises.mkdir(pluginDirectory, { recursive: true });
+    await fsPromises.writeFile(pluginManifestPath, PLUGIN_PACKAGE_JSON, { mode: 0o600 });
+    await fsPromises.writeFile(pluginPath, createPluginSource({ includeControl, includeWeb, includeMemory, includeNotify, codeMode }), { mode: 0o600 });
+    return pluginDirectory;
+  };
+
+  /**
+   * Callback URL and a fresh per-child token for a managed OpenCode process.
+   *
+   * These are always part of the child environment, including when every tool
+   * is currently off: a tool switched on later reaches a process that already
+   * knows where and how to call back, so the toggle needs no restart.
+   */
+  const createChildEnv = () => {
     const port = getActivePort();
     if (!Number.isInteger(port) || port <= 0) {
       throw new Error('OpenChamber listener port is unavailable for managed tool injection');
     }
-    if (!includeControl && !includeWeb && !includeMemory) {
-      throw new Error('At least one OpenChamber managed tool must be enabled to inject the plugin');
-    }
-    await fsPromises.mkdir(pluginDirectory, { recursive: true });
-    await fsPromises.writeFile(pluginPath, createPluginSource({ includeControl, includeWeb, includeMemory }), { mode: 0o600 });
     activeToken = crypto.randomBytes(32).toString('base64url');
-    const pluginUrl = pathToFileURL(pluginPath).href;
-    const callbackAddress = getConcreteBoundAddress() || '127.0.0.1';
-    const callbackHost = callbackAddress.includes(':') ? `[${callbackAddress}]` : callbackAddress;
     return {
-      OPENCODE_CONFIG_CONTENT: appendManagedPlugin(env.OPENCODE_CONFIG_CONTENT, pluginUrl, 'managed tool'),
-      OPENCHAMBER_AGENT_TOOL_URL: `http://${callbackHost}:${port}/api/openchamber/agent-tool`,
+      OPENCHAMBER_AGENT_TOOL_URL: `http://${callbackHost()}:${port}/api/openchamber/agent-tool`,
       OPENCHAMBER_AGENT_TOOL_TOKEN: activeToken,
     };
-  };
-
-  // The managed child runs on this machine. Reaching a listener bound to one
-  // concrete address makes the OS source the connection from that same address,
-  // so it stands in for loopback there; any other machine arrives as itself.
-  const isSameMachineAddress = (value) => {
-    if (isLoopbackAddress(value)) return true;
-    const boundAddress = getConcreteBoundAddress();
-    return boundAddress !== null && normalizeAddress(value) === boundAddress;
   };
 
   const authorize = (req) => {
@@ -354,12 +433,27 @@ export const createAgentToolRuntime = (dependencies) => {
     if (!ACTIONS.has(action)) {
       return createResult({ ok: false, action, error: { message: `Unsupported OpenChamber action: ${action}`, kind: 'usage' } });
     }
+    const usageError = agentOnlyUsageError(action, payload.input ?? {});
+    if (usageError) {
+      return createResult({ ok: false, action, error: { message: usageError, kind: 'usage' } });
+    }
     if (typeof executeAction !== 'function') {
       return createResult({ ok: false, action, error: { message: 'OpenChamber control service is unavailable', kind: 'runtime' } });
     }
+    // OpenCode 2 tools no longer receive a directory, so the plugin sends the
+    // session id and the directory is resolved here. An unresolvable session
+    // falls through with no directory, exactly like the old "no directory" path.
+    let contextDirectory = asNonEmptyString(payload.contextDirectory) ?? undefined;
+    const sessionID = asNonEmptyString(payload.sessionID);
+    if (!contextDirectory && sessionID && typeof resolveSessionDirectory === 'function') {
+      contextDirectory = await Promise.resolve(resolveSessionDirectory(sessionID))
+        .then((value) => asNonEmptyString(value) ?? undefined)
+        .catch(() => undefined);
+    }
     try {
-      const contextSessionId = asNonEmptyString(payload.contextSessionId);
-      const data = await executeAction(action, { ...payload.input, action }, payload.contextDirectory, contextSessionId
+      // The calling session scopes browser actions to that session's page.
+      const contextSessionId = asNonEmptyString(payload.contextSessionId) ?? sessionID;
+      const data = await executeAction(action, { ...payload.input, action }, contextDirectory, contextSessionId
         ? { ...options, contextSessionId }
         : options);
       return createResult({ ok: true, action, data });
@@ -381,6 +475,29 @@ export const createAgentToolRuntime = (dependencies) => {
     }
   };
 
+  // In-flight actions per session. The plugin forwards OpenCode's abort
+  // signal (2.0.12+), which closes its request and aborts the action here.
+  // Before that release the request stayed open after the user cancelled the
+  // turn, so the server also listens for the cancel on the event stream
+  // (`session.idle` with `aborted: true`) and aborts the actions itself.
+  const inflightBySession = new Map();
+  const trackInflight = (sessionID, controller) => {
+    if (!sessionID) return () => {};
+    const set = inflightBySession.get(sessionID) ?? new Set();
+    set.add(controller);
+    inflightBySession.set(sessionID, set);
+    return () => {
+      set.delete(controller);
+      if (set.size === 0) inflightBySession.delete(sessionID);
+    };
+  };
+  const abortSession = (sessionID) => {
+    const set = inflightBySession.get(asNonEmptyString(sessionID));
+    if (!set) return 0;
+    for (const controller of set) controller.abort();
+    return set.size;
+  };
+
   const registerRoutes = (app, express) => {
     app.post('/api/openchamber/agent-tool', express.json({ limit: '1mb' }), async (req, res) => {
       if (!authorize(req)) return res.status(401).json({ error: 'Unauthorized' });
@@ -390,6 +507,7 @@ export const createAgentToolRuntime = (dependencies) => {
       };
       req.once('aborted', abortOnDisconnect);
       res.once('close', abortOnDisconnect);
+      const untrack = trackInflight(asNonEmptyString(req.body?.sessionID), controller);
       try {
         return res.json(await execute(req.body, { signal: controller.signal }));
       } catch (error) {
@@ -399,6 +517,7 @@ export const createAgentToolRuntime = (dependencies) => {
           error: { message: error instanceof Error ? error.message : String(error), kind: 'runtime' },
         }));
       } finally {
+        untrack();
         req.off('aborted', abortOnDisconnect);
         res.off('close', abortOnDisconnect);
       }
@@ -406,8 +525,12 @@ export const createAgentToolRuntime = (dependencies) => {
   };
 
   return {
-    prepareManagedOpenCodeEnv,
+    pluginDirectory,
+    materializePlugin,
+    createChildEnv,
+    authorizeRequest: authorize,
     registerRoutes,
     execute,
+    abortSession,
   };
 };

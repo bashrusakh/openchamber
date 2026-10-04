@@ -105,6 +105,9 @@
     "githubScopes": {
       "scope": "instance"
     },
+    "gitlabClientId": {
+      "scope": "instance"
+    },
     "skillCatalogs": {
       "scope": "instance"
     },
@@ -113,6 +116,30 @@
     },
     "permissionAutoAccept": {
       "scope": "instance"
+    },
+    "permissionDefaultMode": {
+      "scope": "instance",
+      "surfaces": [
+        "web",
+        "desktop",
+        "mobile"
+      ]
+    },
+    "messageSearchEnabled": {
+      "scope": "instance",
+      "surfaces": [
+        "web",
+        "desktop",
+        "mobile"
+      ]
+    },
+    "messageSearchReasoningEnabled": {
+      "scope": "instance",
+      "surfaces": [
+        "web",
+        "desktop",
+        "mobile"
+      ]
     },
     "agentControlToolEnabled": {
       "scope": "instance"
@@ -123,7 +150,19 @@
     "browserProvider": {
       "scope": "instance"
     },
+    "agentNotifyToolEnabled": {
+      "scope": "instance"
+    },
+    "agentToolsCodeMode": {
+      "scope": "instance"
+    },
     "agentMemoryToolEnabled": {
+      "scope": "instance"
+    },
+    "isolatedSpacesEnabled": {
+      "scope": "instance"
+    },
+    "isolatedSpacesIdleStop": {
       "scope": "instance"
     },
     "agentMemoryFeatureAvailable": {
@@ -147,6 +186,9 @@
       "scope": "instance"
     },
     "sessionRetentionAction": {
+      "scope": "instance"
+    },
+    "mergedWorktreeCleanupEnabled": {
       "scope": "instance"
     },
     "terminalShell": {
@@ -222,8 +264,12 @@
     "sidebarProjectSortOrder": {
       "scope": "profile"
     },
-    "sidebarShowRecentSection": {
+    "sidebarWorktreeSortOrder": {
       "scope": "profile"
+    },
+    "sidebarShowRecentSection": {
+      "scope": "profile",
+      "perSurface": true
     },
     "workStatusSectionOrder": {
       "scope": "profile"
@@ -345,9 +391,6 @@
         "vscode"
       ]
     },
-    "showOpenCodeRestartConfirm": {
-      "scope": "profile"
-    },
     "allowPromptingSubagentSessions": {
       "scope": "profile"
     },
@@ -449,6 +492,9 @@
     "collapsedModelProviders": {
       "scope": "profile"
     },
+    "customProviderIcons": {
+      "scope": "profile"
+    },
     "recentModels": {
       "scope": "profile"
     },
@@ -467,8 +513,35 @@
     "sessionSuggestionEnabled": {
       "scope": "profile"
     },
+    "sessionWorkEnabled": {
+      "scope": "profile"
+    },
+    "sessionWorkAutoOpen": {
+      "scope": "profile",
+      "surfaces": [
+        "web",
+        "desktop",
+        "mobile"
+      ]
+    },
     "sessionGoalEnabled": {
       "scope": "profile"
+    },
+    "sessionGoalChecker": {
+      "scope": "profile",
+      "surfaces": [
+        "web",
+        "desktop",
+        "mobile"
+      ]
+    },
+    "sessionGoalMaxAutoTurns": {
+      "scope": "profile",
+      "surfaces": [
+        "web",
+        "desktop",
+        "mobile"
+      ]
     },
     "sessionGoalDefaultBudgetEnabled": {
       "scope": "profile"
@@ -546,9 +619,6 @@
       "scope": "profile"
     },
     "responseStyleCustomInstructions": {
-      "scope": "profile"
-    },
-    "optimizeSystemPrompt": {
       "scope": "profile"
     },
     "pwaAppName": {
@@ -677,6 +747,14 @@
       "local": true
     },
     "walkthroughTocWidth": {
+      "scope": "device",
+      "local": true
+    },
+    "diffFileListMode": {
+      "scope": "device",
+      "local": true
+    },
+    "diffFileTreeWidth": {
       "scope": "device",
       "local": true
     },

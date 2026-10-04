@@ -1,4 +1,5 @@
 import type { OpenChamberManifestApiVersion } from './api-version.ts';
+import type { FileEditorContribution } from './file-editor.ts';
 
 export const PANEL_ID = /^[a-z][a-z0-9-]*$/;
 
@@ -53,6 +54,24 @@ export type AttachContribution = boolean | AttachMode | AttachContributionObject
 
 /** A user-opened full-screen page, optionally with its own HTML and title. */
 export type PageContribution = true | { entry: string; title?: string };
+
+/**
+ * A section inside the chat's Work Status panel. `true` reuses `panel.entry`;
+ * the object form names its own package HTML, so an extension can ship only
+ * this section and no rail panel. `title` replaces `panel.name` on the section
+ * header; `height` is the starting frame height in CSS px before the guest
+ * reports its own through `setHeight`.
+ */
+export type StatusSectionContribution = true | { entry: string; title?: string; height?: number };
+
+/** Characters in a status section title. */
+export const GUEST_STATUS_SECTION_TITLE_MAX = 60;
+/** Smallest frame height the host gives a status section, in CSS px. */
+export const GUEST_STATUS_SECTION_HEIGHT_MIN = 24;
+/** Tallest frame height the host gives a status section; taller content scrolls inside the frame. */
+export const GUEST_STATUS_SECTION_HEIGHT_MAX = 320;
+/** Frame height before the manifest or the guest says otherwise. */
+export const GUEST_STATUS_SECTION_HEIGHT_DEFAULT = 120;
 
 export type GuestActionWhere = 'message' | 'session';
 export type GuestActionRole = 'user' | 'assistant';
@@ -334,12 +353,12 @@ export const serviceProvides = (
  * What a guest may do beyond drawing its own panel. The user approves the
  * full list once, when the package is installed; a later package that asks
  * for more is re-approved. `prompt`, `sessions`, `files`, and `model` are
- * declared under `contributes.capabilities`; `service`, `network`, and
- * `filesystem` follow from `contributes.service`, `contributes.integration`,
- * and `contributes.filesystem`. `model` is one-off text generation with the
+ * declared under `contributes.capabilities`; `service`, `network`,
+ * `filesystem` and `origins` follow from `contributes.service`,
+ * `contributes.integration`, `contributes.filesystem` and `contributes.origins`. `model` is one-off text generation with the
  * user's Small Model (`host.generate`), outside any session.
  */
-export const GUEST_CAPABILITIES = ['prompt', 'sessions', 'files', 'model', 'conversation', 'service', 'network', 'filesystem'] as const;
+export const GUEST_CAPABILITIES = ['prompt', 'sessions', 'files', 'model', 'conversation', 'service', 'network', 'filesystem', 'origins'] as const;
 
 export type GuestCapability = (typeof GUEST_CAPABILITIES)[number];
 
@@ -347,6 +366,9 @@ export const DECLARED_GUEST_CAPABILITIES = ['prompt', 'sessions', 'files', 'mode
 
 /** The capabilities a manifest may ask for directly. */
 export type DeclaredGuestCapability = (typeof DECLARED_GUEST_CAPABILITIES)[number];
+
+/** How many `contributes.origins` a package may declare. */
+export const GUEST_ORIGINS_MAX = 8;
 
 /** How many `contributes.filesystem` patterns a package may declare. */
 export const GUEST_FILESYSTEM_PATTERNS_MAX = 16;
@@ -377,17 +399,26 @@ export type OpenChamberContributes = {
   background?: BackgroundContribution;
   attach?: AttachContribution;
   page?: PageContribution;
+  /** A section in the chat's Work Status panel. */
+  statusSection?: StatusSectionContribution;
   capabilities?: DeclaredGuestCapability[];
   integration?: IntegrationContribution;
   service?: ServiceContribution;
   /** Paths outside the project the panel may read and write. Grants `filesystem`. */
   filesystem?: string[];
+  /**
+   * https origins the frame may exchange data with directly: fetch, images,
+   * fonts, styles and media, never scripts. Grants `origins`, approved per list.
+   */
+  origins?: string[];
   /** Menu entries on messages and sessions. */
   actions?: GuestActionContribution[];
   /** Composer slash commands that attach a chip. */
   commands?: GuestCommandContribution[];
   /** How the extension's tool calls look in the chat. */
   tools?: GuestToolContribution[];
+  /** Editors the Files view opens matching files in. */
+  fileEditors?: FileEditorContribution[];
 };
 
 /** Whether any declared action asks for a session's messages, which needs `conversation`. */
@@ -402,13 +433,14 @@ export type PublicGuestCapabilities = {
 };
 
 export const requestedGuestCapabilities = (
-  contributes: Pick<OpenChamberContributes, 'capabilities' | 'integration' | 'service' | 'filesystem' | 'actions'>,
+  contributes: Pick<OpenChamberContributes, 'capabilities' | 'integration' | 'service' | 'filesystem' | 'actions' | 'origins'>,
 ): GuestCapability[] => {
   const declared = new Set<GuestCapability>(contributes.capabilities ?? []);
   if (guestActionsNeedConversation(contributes.actions)) declared.add('conversation');
   if (contributes.service) declared.add('service');
   if (contributes.integration) declared.add('network');
   if (contributes.filesystem && contributes.filesystem.length > 0) declared.add('filesystem');
+  if (contributes.origins && contributes.origins.length > 0) declared.add('origins');
   return GUEST_CAPABILITIES.filter((capability) => declared.has(capability));
 };
 
@@ -459,6 +491,25 @@ export const resolvePageEntry = (contributes: Pick<OpenChamberContributes, 'pane
   return contributes.page === true ? contributes.panel.entry : contributes.page.entry;
 };
 
+/**
+ * The HTML the Work Status section loads: `panel.entry` for `true`, the
+ * object's own `entry` otherwise, `null` when nothing is declared or `true`
+ * has no panel page to reuse.
+ */
+export const resolveStatusSectionEntry = (
+  contributes: Pick<OpenChamberContributes, 'panel' | 'statusSection'>,
+): string | null => {
+  const section = contributes.statusSection;
+  if (!section) return null;
+  return section === true ? contributes.panel.entry ?? null : section.entry;
+};
+
+/** Clamp a requested status section height to what the host allows. */
+export const clampStatusSectionHeight = (height: number): number => {
+  if (!Number.isFinite(height)) return GUEST_STATUS_SECTION_HEIGHT_DEFAULT;
+  return Math.min(GUEST_STATUS_SECTION_HEIGHT_MAX, Math.max(GUEST_STATUS_SECTION_HEIGHT_MIN, Math.round(height)));
+};
+
 export type OpenChamberEngines = {
   openchamber: string;
 };
@@ -484,13 +535,16 @@ export type ParseManifestErrorCode =
   | 'invalid-background'
   | 'invalid-attach'
   | 'invalid-page'
+  | 'invalid-status-section'
   | 'invalid-capabilities'
   | 'invalid-integration'
   | 'invalid-service'
   | 'invalid-filesystem'
+  | 'invalid-origins'
   | 'invalid-actions'
   | 'invalid-commands'
-  | 'invalid-tools';
+  | 'invalid-tools'
+  | 'invalid-file-editors';
 
 export type ParseManifestFailure = {
   ok: false;

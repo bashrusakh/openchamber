@@ -1,5 +1,6 @@
 
 import * as gitHttp from './gitApiHttp';
+import { mapWithConcurrency } from './concurrency';
 import { opencodeClient } from './opencode/client';
 import { renderMagicPrompt } from './magicPrompts';
 import { requestSmallModel } from './smallModelRequest';
@@ -59,23 +60,6 @@ const extractJsonObject = (value: string): Record<string, unknown> | null => {
   }
 
   return null;
-};
-
-const extractAssistantText = (response: unknown): string => {
-  const data = (response as { data?: { parts?: Array<unknown> } } | null)?.data;
-  const parts = Array.isArray(data?.parts) ? data.parts : [];
-  return parts
-    .map((part) => {
-      const item = part as { type?: unknown; text?: unknown; content?: unknown; value?: unknown };
-      if (item.type !== 'text') return '';
-      if (typeof item.text === 'string') return item.text;
-      if (typeof item.content === 'string') return item.content;
-      if (typeof item.value === 'string') return item.value;
-      return '';
-    })
-    .filter((text) => text.trim().length > 0)
-    .join('\n')
-    .trim();
 };
 
 export async function checkIsGitRepository(directory: string): Promise<boolean> {
@@ -226,18 +210,16 @@ export async function deleteGitBranch(directory: string, payload: import('./api/
   return gitHttp.deleteGitBranch(directory, payload);
 }
 
-export async function deleteRemoteBranch(directory: string, payload: import('./api/types').GitDeleteRemoteBranchPayload): Promise<{ success: boolean }> {
-  const runtime = getRuntimeGit();
-  if (runtime) return runtimeStatusMutation(directory, runtime.deleteRemoteBranch(directory, payload));
-  return gitHttp.deleteRemoteBranch(directory, payload);
-}
-
 const COMMIT_DIFF_FILE_LIMIT = 30;
 const COMMIT_DIFF_TOTAL_CHAR_LIMIT = 120_000;
+// Each in-flight file issues a staged + unstaged pair, so the peak request
+// count here is twice this value. Two matches the store's diff-prefetch
+// concurrency and keeps the browser connection pool able to serve the UI.
+const COMMIT_DIFF_CONCURRENCY = 2;
 
 const collectSelectedFileDiffs = async (directory: string, files: string[]): Promise<string> => {
   const limited = files.slice(0, COMMIT_DIFF_FILE_LIMIT);
-  const chunks = await Promise.all(limited.map(async (path) => {
+  const chunks = await mapWithConcurrency(limited, COMMIT_DIFF_CONCURRENCY, async (path) => {
     try {
       const [staged, unstaged] = await Promise.all([
         gitHttp.getGitDiff(directory, { path, staged: true }).catch(() => null),
@@ -250,7 +232,7 @@ const collectSelectedFileDiffs = async (directory: string, files: string[]): Pro
     } catch {
       return `--- ${path} (diff unavailable)`;
     }
-  }));
+  });
 
   let total = '';
   for (const chunk of chunks) {
@@ -356,7 +338,7 @@ export async function generateCommitMessage(
         ...(currentProviderId ? { preferredProviderID: currentProviderId } : {}),
         ...(currentModelId ? { preferredModelID: currentModelId } : {}),
       }),
-    }, { silentStatuses: [404] });
+    }, { notifyOnError: false });
 
     if (response.status === 404) {
       // No authenticated provider has a small model — fall back to the
@@ -551,7 +533,7 @@ export async function generatePullRequestDescription(
         ...(currentProviderId ? { preferredProviderID: currentProviderId } : {}),
         ...(currentModelId ? { preferredModelID: currentModelId } : {}),
       }),
-    }, { silentStatuses: [404] });
+    }, { notifyOnError: false });
 
     if (response.status === 404) {
       // No authenticated provider has a small model — fall back to the
@@ -725,54 +707,28 @@ const runStructuredGenerationInActiveSession = async ({
   const trimmedDirectory = typeof directory === 'string' ? directory.trim() : '';
   const visiblePromptText = typeof visiblePrompt === 'string' ? visiblePrompt.trim() : '';
   const hiddenPromptText = typeof hiddenPrompt === 'string' ? hiddenPrompt.trim() : '';
-  const promptParts: Array<{ type: 'text'; text: string; synthetic?: boolean }> = [];
-  if (visiblePromptText) {
-    promptParts.push({
-      type: 'text',
-      text: hiddenPromptText ? `${visiblePromptText}\n\n` : visiblePromptText,
-      synthetic: false,
-    });
-  }
-  if (hiddenPromptText) {
-    promptParts.push({ type: 'text', text: hiddenPromptText, synthetic: true });
-  }
-  if (promptParts.length === 0) {
+  const prompt = [visiblePromptText, hiddenPromptText].filter(Boolean).join('\n\n');
+  if (!prompt) {
     throw new Error('Generation prompts are empty');
   }
 
   requestChatForceScrollBottom(generationSession.sessionId);
 
-  const response = await opencodeClient.withDirectory(directory, async () => {
-    return opencodeClient.getApiClient().session.prompt({
-      sessionID: generationSession.sessionId,
-      ...(trimmedDirectory.length > 0 ? { directory: trimmedDirectory } : {}),
-      model: {
-        providerID: generationSession.providerID,
-        modelID: generationSession.modelID,
-      },
-      ...(generationSession.agent ? { agent: generationSession.agent } : {}),
-      ...(generationSession.variant ? { variant: generationSession.variant } : {}),
-      parts: promptParts,
-    });
-  });
+  // v2 generates in the session's own context and answers with the text, so
+  // the generation no longer lands in the transcript as a prompt/reply pair.
+  const assistantText = await opencodeClient.generateSessionText(
+    generationSession.sessionId,
+    prompt,
+    trimmedDirectory.length > 0 ? trimmedDirectory : undefined,
+  );
 
-  const responseError = response?.error as { message?: string } | undefined;
-  if (!response?.data) {
-    throw new Error(responseError?.message || `Failed to generate ${kind} output`);
-  }
-
-  const info = response.data.info as { finish?: string; error?: unknown };
-  const assistantText = extractAssistantText(response);
   const parsedOutput = extractJsonObject(assistantText);
   if (!parsedOutput) {
     console.error('[git-generation][browser] invalid JSON output', {
       kind,
       sessionId: generationSession.sessionId,
       elapsedMs: Date.now() - requestStartedAt,
-      finish: info?.finish,
       assistantText,
-      messageInfo: response.data.info,
-      messageParts: response.data.parts,
     });
     throw new Error('No JSON output returned by session');
   }
@@ -858,12 +814,24 @@ export async function deleteGitWorktree(
   return gitHttp.deleteGitWorktree(directory, payload);
 }
 
+export async function snapshotGitWorktree(
+  directory: string,
+  payload: import('./api/types').GitWorktreeSnapshotPayload
+): Promise<import('./api/types').GitWorktreeSnapshotResult> {
+  const runtime = getRuntimeGit();
+  if (runtime?.worktree?.snapshot) {
+    return runtime.worktree.snapshot(directory, payload);
+  }
+  return gitHttp.snapshotGitWorktree(directory, payload);
+}
+
 export const git = {
   worktree: {
     list: listGitWorktrees,
     validate: validateGitWorktree,
     create: createGitWorktree,
     remove: deleteGitWorktree,
+    snapshot: snapshotGitWorktree,
   },
 };
 
@@ -1043,28 +1011,16 @@ export async function hasLocalIdentity(directory: string): Promise<boolean> {
 export async function setGitIdentity(
   directory: string,
   profileId: string
-): Promise<{ success: boolean; profile: import('./api/types').GitIdentityProfile }> {
+): Promise<{ success: boolean; profile: import('./api/types').GitIdentityProfile | null }> {
   const runtime = getRuntimeGit();
   if (runtime) return runtime.setGitIdentity(directory, profileId);
   return gitHttp.setGitIdentity(directory, profileId);
-}
-
-export async function discoverGitCredentials(): Promise<import('./api/types').DiscoveredGitCredential[]> {
-  const runtime = getRuntimeGit();
-  if (runtime?.discoverGitCredentials) return runtime.discoverGitCredentials();
-  return gitHttp.discoverGitCredentials();
 }
 
 export async function getGlobalGitIdentity(): Promise<import('./api/types').GitIdentitySummary | null> {
   const runtime = getRuntimeGit();
   if (runtime?.getGlobalGitIdentity) return runtime.getGlobalGitIdentity();
   return gitHttp.getGlobalGitIdentity();
-}
-
-export async function getRemoteUrl(directory: string, remote?: string): Promise<string | null> {
-  const runtime = getRuntimeGit();
-  if (runtime?.getRemoteUrl) return runtime.getRemoteUrl(directory, remote);
-  return gitHttp.getRemoteUrl(directory, remote);
 }
 
 export async function getRemotes(directory: string): Promise<import('./api/types').GitRemote[]> {

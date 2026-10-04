@@ -204,6 +204,17 @@ export const resolveQueuedSessionStatusType = (
   if (statusType === 'busy' || statusType === 'retry') {
     return statusType;
   }
+  // A queued message waits for the whole turn: a parent idles while a
+  // background subagent works and runs again when OpenCode hands the result
+  // back. Mirrors the server queue's subagent gate.
+  const subagentRunning = (state?.session ?? []).some((session) => {
+    if (session.parentID !== sessionId) return false;
+    const childStatus = state?.session_status?.[session.id]?.type;
+    return childStatus === 'busy' || childStatus === 'retry';
+  });
+  if (subagentRunning) {
+    return 'busy';
+  }
   const sessionMessages = state?.message?.[sessionId];
   const lastMessage = sessionMessages && sessionMessages.length > 0
     ? sessionMessages[sessionMessages.length - 1]

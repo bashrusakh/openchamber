@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { findHardeningViolations, requireMemoryBytes } from './hardening.js';
+import { findGatekeeperHardeningViolations, findHardeningViolations, requireMemoryBytes } from './hardening.js';
 import { buildSpaceLabels, buildToolsLabels, hashProjectDirectory } from './labels.js';
-import { hardenedContainerEntry, internalNetworkEntry } from './places/fake-docker.js';
+import { SPACE_ENVIRONMENT } from './layout.js';
+import { bridgeNetworkEntry, hardenedContainerEntry, internalNetworkEntry } from './places/fake-docker.js';
 
 const ID = 'a1b2c3d4e5f6';
 const OWNER = 'install-a';
@@ -78,8 +79,11 @@ describe('findHardeningViolations', () => {
     ['user', { ...goodContainer(), Config: { User: '' } }],
     ['user', { ...goodContainer(), Config: { User: '0:0' } }],
     ['environment', withEnv(['OPENCHAMBER_UI_PASSWORD=secret'])],
-    ['environment', withEnv(['OPENCODE_AUTH_CONTENT={}'])],
     ['environment', withEnv(['OPENCHAMBER_UI_PASSWORD='])],
+    // OpenCode 2 takes a provider key from its environment, directly or inside its config text.
+    ['environment', withEnv(['OPENAI_API_KEY=x'])],
+    ['environment', withEnv(['OPENCODE_CONFIG_CONTENT={"provider":{"groq":{"options":{"apiKey":"x"}}}}'])],
+    ['environment', withEnv(['OPENCODE_CLI_CONFIG_CONTENT={}'])],
     ['read_only', withHost({ ReadonlyRootfs: false })],
     ['privileged', withHost({ Privileged: true })],
     ['cap_drop', withHost({ CapDrop: ['NET_RAW'] })],
@@ -143,8 +147,18 @@ describe('findHardeningViolations', () => {
     expect(checksFor({ container: withHost({ Binds: ['/var/run/docker.sock:/var/run/docker.sock'] }) })).toEqual(['binds', 'runtime_socket']);
   });
 
-  it('accepts harmless variables next to the ones a space gets', () => {
-    expect(checksFor({ container: withEnv(['OPENCODE_DISABLE_AUTOUPDATE=1', 'NOT_OPENCHAMBER_UI_PASSWORD=x']) })).toEqual([]);
+  it('accepts exactly the variables a space gets and the base image sets', () => {
+    const full = withEnv([
+      ...Object.entries(SPACE_ENVIRONMENT).map(([name, value]) => `${name}=${value}`),
+      'NODE_VERSION=22.23.2',
+      'YARN_VERSION=1.22.22',
+    ]);
+    expect(checksFor({ container: full })).toEqual([]);
+  });
+
+  it('refuses any other variable, whatever its name says', () => {
+    const violations = findHardeningViolations({ spaceId: ID, owner: OWNER, container: withEnv(['NOT_OPENCHAMBER_UI_PASSWORD=x']), network: goodNetwork(), toolsVolume: goodToolsVolume() });
+    expect(violations).toEqual([{ check: 'environment', message: 'The container environment holds variables nobody set for it: NOT_OPENCHAMBER_UI_PASSWORD' }]);
   });
 
   describe('tools mount', () => {
@@ -247,6 +261,114 @@ describe('findHardeningViolations', () => {
       'shm_size', 'log_limit', 'tmpfs', 'tools_mount', 'network_mode',
       'networks', 'network_internal', 'network_host_isolation', 'network_labels',
     ]);
+  });
+});
+
+describe('findGatekeeperHardeningViolations', () => {
+  const OUTER = `openchamber-space-${ID}-outer-network`;
+  const GATEKEEPER_MEMORY = 268435456;
+
+  const goodGatekeeper = () => {
+    const container = hardenedContainerEntry({
+      name: `openchamber-space-${ID}-gatekeeper`,
+      labels: labels('gatekeeper'),
+      network: NETWORK,
+      mounts: [],
+      env: ['HOME=/tmp'],
+      memoryBytes: GATEKEEPER_MEMORY,
+      tmpfs: '/tmp:rw,noexec,nosuid,size=16m',
+      aliases: ['gatekeeper'],
+    });
+    container.NetworkSettings.Networks[OUTER] = {};
+    return container;
+  };
+  const goodOuterNetwork = () => bridgeNetworkEntry({ name: OUTER, labels: labels('outer-network') });
+
+  const gatekeeperChecks = ({ container = goodGatekeeper(), outerNetwork = goodOuterNetwork() }) => (
+    findGatekeeperHardeningViolations({ spaceId: ID, owner: OWNER, container, outerNetwork }).map((violation) => violation.check)
+  );
+
+  const withGatekeeperHost = (change) => {
+    const container = goodGatekeeper();
+    return { ...container, HostConfig: { ...container.HostConfig, ...change } };
+  };
+
+  const attachedTo = (networks) => ({ ...goodGatekeeper(), NetworkSettings: { Networks: networks } });
+
+  it('finds nothing in a gatekeeper created with its flags', () => {
+    expect(findGatekeeperHardeningViolations({ spaceId: ID, owner: OWNER, container: goodGatekeeper(), outerNetwork: goodOuterNetwork() })).toEqual([]);
+  });
+
+  it('names every check and every message as the gatekeeper\'s, so a caller can tell the two containers apart', () => {
+    const violations = findGatekeeperHardeningViolations({ spaceId: ID, owner: OWNER, container: {}, outerNetwork: null });
+    for (const violation of violations) {
+      expect(violation.check).toMatch(/^gatekeeper_/);
+      expect(violation.message).toMatch(/^Gatekeeper: /);
+    }
+  });
+
+  it.each([
+    ['gatekeeper_environment', { ...goodGatekeeper(), Config: { ...goodGatekeeper().Config, Env: ['HOME=/tmp', 'OPENCHAMBER_UI_PASSWORD=secret'] } }],
+    ['gatekeeper_environment', { ...goodGatekeeper(), Config: { ...goodGatekeeper().Config, Env: ['HOME=/tmp', 'OPENAI_API_KEY=x'] } }],
+    ['gatekeeper_user', { ...goodGatekeeper(), Config: { ...goodGatekeeper().Config, User: '0:0' } }],
+    ['gatekeeper_read_only', withGatekeeperHost({ ReadonlyRootfs: false })],
+    ['gatekeeper_privileged', withGatekeeperHost({ Privileged: true })],
+    ['gatekeeper_cap_drop', withGatekeeperHost({ CapDrop: [] })],
+    ['gatekeeper_cap_add', withGatekeeperHost({ CapAdd: ['NET_ADMIN'] })],
+    ['gatekeeper_no_new_privileges', withGatekeeperHost({ SecurityOpt: [] })],
+    ['gatekeeper_security_options', withGatekeeperHost({ SecurityOpt: ['no-new-privileges', 'seccomp=unconfined'] })],
+    ['gatekeeper_init', withGatekeeperHost({ Init: false })],
+    ['gatekeeper_pids_limit', withGatekeeperHost({ PidsLimit: 0 })],
+    ['gatekeeper_memory', withGatekeeperHost({ Memory: 0, MemorySwap: 0 })],
+    ['gatekeeper_memory_swap', withGatekeeperHost({ MemorySwap: -1 })],
+    ['gatekeeper_shm_size', withGatekeeperHost({ ShmSize: 1073741824 })],
+    ['gatekeeper_log_limit', withGatekeeperHost({ LogConfig: { Type: 'json-file', Config: {} } })],
+    // The space's tmpfs options are not the gatekeeper's: it needs no `exec` and 16 MiB.
+    ['gatekeeper_tmpfs', withGatekeeperHost({ Tmpfs: { '/tmp': 'rw,exec,nosuid,size=256m' } })],
+    ['gatekeeper_binds', withGatekeeperHost({ Binds: ['/Users/me:/host'] })],
+    ['gatekeeper_volumes_from', withGatekeeperHost({ VolumesFrom: ['another'] })],
+    ['gatekeeper_namespace', withGatekeeperHost({ PidMode: 'host' })],
+    ['gatekeeper_sysctls', withGatekeeperHost({ Sysctls: { 'net.ipv4.ip_forward': '1' } })],
+    ['gatekeeper_runtime', withGatekeeperHost({ Runtime: 'sysbox-runc' })],
+    ['gatekeeper_devices', withGatekeeperHost({ Devices: [{ PathOnHost: '/dev/kvm' }] })],
+    ['gatekeeper_port_bindings', withGatekeeperHost({ PortBindings: { '3128/tcp': [{ HostPort: '3128' }] } })],
+    ['gatekeeper_network_mode', withGatekeeperHost({ NetworkMode: 'bridge' })],
+    ['gatekeeper_memory_limit', withGatekeeperHost({ Memory: 4294967296, MemorySwap: 4294967296 })],
+  ])('reports %s', (check, container) => {
+    expect(gatekeeperChecks({ container })).toEqual([check]);
+  });
+
+  it('reports any mount at all, because the gatekeeper has none', () => {
+    const container = goodGatekeeper();
+    const mounted = { ...container, Mounts: [{ Type: 'volume', Name: TOOLS, Source: '/x', Destination: TOOLS_PATH, RW: false }] };
+    expect(gatekeeperChecks({ container: mounted })).toEqual(['gatekeeper_mounts']);
+  });
+
+  it('reports a mounted runtime socket', () => {
+    const container = goodGatekeeper();
+    const mounted = { ...container, Mounts: [{ Type: 'bind', Source: '/var/run/docker.sock', Destination: '/var/run/docker.sock' }] };
+    expect(gatekeeperChecks({ container: mounted })).toEqual(['gatekeeper_mounts', 'gatekeeper_runtime_socket']);
+  });
+
+  it('demands exactly the two networks of this space, by name', () => {
+    expect(gatekeeperChecks({ container: attachedTo({ [NETWORK]: { Aliases: ['gatekeeper'] } }) })).toEqual(['gatekeeper_networks']);
+    expect(gatekeeperChecks({ container: attachedTo({ [NETWORK]: { Aliases: ['gatekeeper'] }, [OUTER]: {}, bridge: {} }) })).toEqual(['gatekeeper_networks']);
+    expect(gatekeeperChecks({ container: attachedTo({ [NETWORK]: { Aliases: ['gatekeeper'] }, 'openchamber-space-ffffffffffff-outer-network': {} }) })).toEqual(['gatekeeper_networks']);
+    expect(gatekeeperChecks({ container: attachedTo({}) })).toEqual(['gatekeeper_networks']);
+  });
+
+  it('reports a gatekeeper the space cannot reach by name', () => {
+    expect(gatekeeperChecks({ container: attachedTo({ [NETWORK]: {}, [OUTER]: {} }) })).toEqual(['gatekeeper_alias']);
+    expect(gatekeeperChecks({ container: attachedTo({ [NETWORK]: { Aliases: ['something-else'] }, [OUTER]: {} }) })).toEqual(['gatekeeper_alias']);
+    // Newer engines report the same thing under DNSNames.
+    expect(gatekeeperChecks({ container: attachedTo({ [NETWORK]: { DNSNames: ['gatekeeper', 'abc123'] }, [OUTER]: {} }) })).toEqual([]);
+  });
+
+  it('reports an outer network that cannot reach outside, or that is not ours', () => {
+    expect(gatekeeperChecks({ outerNetwork: { ...goodOuterNetwork(), Internal: true } })).toEqual(['gatekeeper_outer_network']);
+    expect(gatekeeperChecks({ outerNetwork: null })).toEqual(['gatekeeper_outer_network_labels']);
+    expect(gatekeeperChecks({ outerNetwork: { ...goodOuterNetwork(), Labels: labels('network') } })).toEqual(['gatekeeper_outer_network_labels']);
+    expect(gatekeeperChecks({ outerNetwork: { ...goodOuterNetwork(), Labels: labels('outer-network', { owner: 'install-b' }) } })).toEqual(['gatekeeper_outer_network_labels']);
   });
 });
 

@@ -15,6 +15,10 @@ const DEFAULT_LOCAL_BIND_HOST = '127.0.0.1';
 // prefix inside the user's home instead.
 const REMOTE_USER_PREFIX = '$HOME/.openchamber/npm-global';
 const REMOTE_BUN_CANDIDATE = '"${BUN_INSTALL:-$HOME/.bun}/bin/bun"';
+// nvm puts node on PATH only from an interactive ~/.bashrc, which the SSH
+// login shell never runs. Use its newest installed node; with no nvm the path
+// does not exist and every probe skips it.
+const REMOTE_NVM_BIN = '${NVM_DIR:-$HOME/.nvm}/versions/node/v$(ls -1 "${NVM_DIR:-$HOME/.nvm}/versions/node" 2>/dev/null | sed "s/^v//" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)/bin';
 // The opencode CLI usually installs into the user's home, which an SSH login
 // shell does not have on PATH. The remote server only looks at OPENCODE_BINARY
 // and PATH, so resolve the CLI here and hand it over explicitly.
@@ -24,8 +28,9 @@ const REMOTE_OPENCODE_CANDIDATES = [
   '"${XDG_CACHE_HOME:-$HOME/.cache}/.bun/bin/opencode"',
   '"$HOME/.local/bin/opencode"',
   '"$HOME/.openchamber/npm-global/bin/opencode"',
+  `"${REMOTE_NVM_BIN}/opencode"`,
 ];
-const REMOTE_PATH_PREFIX = '$HOME/.opencode/bin:${BUN_INSTALL:-$HOME/.bun}/bin:${XDG_CACHE_HOME:-$HOME/.cache}/.bun/bin:$HOME/.local/bin:$HOME/.openchamber/npm-global/bin';
+const REMOTE_PATH_PREFIX = `$HOME/.opencode/bin:\${BUN_INSTALL:-$HOME/.bun}/bin:\${XDG_CACHE_HOME:-$HOME/.cache}/.bun/bin:$HOME/.local/bin:$HOME/.openchamber/npm-global/bin:${REMOTE_NVM_BIN}`;
 const REMOTE_BIN_CANDIDATES = [
   '"$HOME/.openchamber/npm-global/bin/openchamber"',
   '"${BUN_INSTALL:-$HOME/.bun}/bin/openchamber"',
@@ -534,13 +539,14 @@ export class ElectronSshManager {
     return stdout;
   }
 
-  async controlMasterOperation(parsed, controlPath, op) {
+  async controlMasterOperation(parsed, controlPath, op, opArgs = []) {
     return await this.runSshOutput(parsed, [
       '-o', 'ControlMaster=no',
       '-o', `ControlPath=${controlPath}`,
       '-o', 'BatchMode=yes',
       '-o', 'ConnectTimeout=3',
       '-O', op,
+      ...opArgs,
     ]);
   }
 
@@ -1069,13 +1075,14 @@ export class ElectronSshManager {
       REMOTE_BUN_CANDIDATE,
       '"${XDG_CACHE_HOME:-$HOME/.cache}/.bun/bin/bun"',
     ]);
-    const npmPath = await this.resolveRemoteTool(parsed, controlPath, 'npm');
+    const npmPath = await this.resolveRemoteTool(parsed, controlPath, 'npm', [`"${REMOTE_NVM_BIN}/npm"`]);
 
     // bun's global install targets `~/.bun` or `${XDG_CACHE_HOME:-~/.cache}/.bun` (bun 1.3.x XDG-aware);
     // npm is pinned to a prefix in the user's home so it never touches the root-owned global directory.
     const bunCommand = bunPath ? `${shellQuote(bunPath)} add -g @openchamber/web@${version}` : null;
     const npmCommand = npmPath
-      ? `mkdir -p "${REMOTE_USER_PREFIX}" && ${shellQuote(npmPath)} install -g --prefix "${REMOTE_USER_PREFIX}" @openchamber/web@${version}`
+      // npm is a node script: an nvm npm finds its node only next to itself.
+      ? `mkdir -p "${REMOTE_USER_PREFIX}" && PATH="$(dirname ${shellQuote(npmPath)}):$PATH" ${shellQuote(npmPath)} install -g --prefix "${REMOTE_USER_PREFIX}" @openchamber/web@${version}`
       : null;
 
     const commands = [];
@@ -1184,15 +1191,25 @@ export class ElectronSshManager {
     }
   }
 
+  // With a ControlMaster the master owns the listener: `-O forward` hands it
+  // over and its exit status says whether that worked. A `-N -L` client would
+  // instead open a remote login shell and exit with that shell's status, which
+  // is unrelated to the forward (#4132). Returns the child to monitor, or null
+  // when the master holds the forward.
   async spawnMainForward(parsed, controlPath, bindHost, localPort, remotePort) {
-    const connectionArgs = this.usesControlMaster()
-      ? ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`]
-      : this.independentConnectionArgs();
+    const forwardSpec = `${bindHost}:${localPort}:127.0.0.1:${remotePort}`;
+    if (this.usesControlMaster()) {
+      const { code, stdout, stderr } = await this.controlMasterOperation(parsed, controlPath, 'forward', ['-L', forwardSpec]);
+      if (code !== 0) {
+        throw new Error((stderr || stdout).trim() || `Failed to start main port forward (status: ${code})`);
+      }
+      return null;
+    }
     return this.spawnSsh(parsed, [
-      ...connectionArgs,
+      ...this.independentConnectionArgs(),
       '-o', 'ExitOnForwardFailure=yes',
       '-N',
-      '-L', `${bindHost}:${localPort}:127.0.0.1:${remotePort}`,
+      '-L', forwardSpec,
     ], {
       stdio: ['ignore', 'ignore', 'pipe'],
     });
@@ -1427,8 +1444,8 @@ export class ElectronSshManager {
       startedByUs: false,
       ownsRemoteServer: false,
       master: null,
+      // null while the ControlMaster holds the main forward.
       mainForward: null,
-      mainForwardDetached: false,
       extraForwards: [],
     };
     this.sessions.set(id, session);
@@ -1463,17 +1480,14 @@ export class ElectronSshManager {
 
     const mainForward = await this.spawnMainForward(parsed, controlPath, bindHost, localPort, remotePort);
     session.mainForward = mainForward;
-    let mainForwardDetached = false;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    if (typeof mainForward.exitCode === 'number' || childProcessDiagnostics.get(mainForward)?.error) {
-      if (this.usesControlMaster() && mainForward.exitCode === 0) {
-        mainForwardDetached = true;
-        this.appendLogWithLevel(id, 'INFO', 'Main tunnel helper exited after ControlMaster handoff');
-      } else {
+    if (mainForward) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (typeof mainForward.exitCode === 'number' || childProcessDiagnostics.get(mainForward)?.error) {
         throw new Error(this.processErrorDetail(mainForward, `Failed to start main port forward (status: ${mainForward.exitCode ?? 'spawn error'})`));
       }
+    } else {
+      this.appendLogWithLevel(id, 'INFO', 'Main tunnel forwarded through ControlMaster');
     }
-    session.mainForwardDetached = mainForwardDetached;
 
     const extraErrors = [];
     for (const forward of instance.portForwards.filter((item) => item.enabled)) {
@@ -1532,14 +1546,9 @@ export class ElectronSshManager {
       let droppedReason = null;
       let detachedNotice = null;
 
-      if (!session.mainForwardDetached) {
+      if (session.mainForward) {
         if (typeof session.mainForward.exitCode === 'number') {
-          if (this.usesControlMaster() && session.mainForward.exitCode === 0) {
-            session.mainForwardDetached = true;
-            detachedNotice = 'Main tunnel helper exited after ControlMaster handoff';
-          } else {
-            droppedReason = this.processErrorDetail(session.mainForward, `Main SSH forward exited (${session.mainForward.exitCode})`);
-          }
+          droppedReason = this.processErrorDetail(session.mainForward, `Main SSH forward exited (${session.mainForward.exitCode})`);
         } else if (childProcessDiagnostics.get(session.mainForward)?.error) {
           droppedReason = this.processErrorDetail(session.mainForward, 'Main SSH forward failed');
         }
@@ -1558,7 +1567,7 @@ export class ElectronSshManager {
       }
 
       if (!droppedReason) {
-        if (session.mainForwardDetached) {
+        if (!session.mainForward) {
           // Fast path: cheap TCP probe before expensive SSH subprocess
           if (await isLocalTunnelReachable(session.localPort)) {
             // Tunnel alive — skip SSH check

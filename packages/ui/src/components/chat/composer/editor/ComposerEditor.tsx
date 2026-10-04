@@ -36,10 +36,13 @@ import { cn } from '@/lib/utils';
 import type { ComposerLanguageContext } from '../language/tokenize';
 import type { ComposerAutoCorrect } from './autocorrect';
 import { composerLanguage, setLanguageContext } from './composerLanguage';
+import { composerBidi } from './bidi';
 import { replaceWithCaret } from './documentEdits';
 import type { ComposerEditorViewStore } from './viewStore';
+import { ComposerEditorView } from './ComposerEditorView';
 import { composerEditorTheme, composerSelectionExtension } from './theme';
 import { handleComposerHostMouseDown } from './hostMouseDown';
+import { getComposerHeightLimit, isComposerContentCapped } from './heightLimit';
 import { restoreDeferredEnterModifiers } from '../keyboardPolicy';
 
 export interface ComposerSelection {
@@ -85,6 +88,7 @@ export interface ComposerEditorProps {
      * message history and send.
      */
     onKeyDown?: (event: KeyboardEvent) => boolean;
+    onKeyUp?: (event: KeyboardEvent) => void;
     onFocus?: () => void;
     onBlur?: () => void;
     onPaste?: (event: ClipboardEvent) => void;
@@ -130,7 +134,6 @@ export interface ComposerEditorProps {
     'aria-label'?: string;
     'data-testid'?: string;
 }
-
 
 /**
  * The text inserted by a transaction, used to tell a typed `@` from a pasted
@@ -248,7 +251,7 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
                 },
             }];
 
-            const view = new EditorView({
+            const view = new ComposerEditorView({
                 state: EditorState.create({
                     doc: handlersRef.current.value,
                     extensions: [
@@ -267,6 +270,7 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
                         Prec.highest(keymap.of(interceptKeys)),
                         keymap.of([...standardKeymap, ...historyKeymap]),
                         composerLanguage(handlersRef.current.languageContext),
+                        composerBidi,
                         editableCompartment.of(
                             EditorView.editable.of(handlersRef.current.editable ?? true),
                         ),
@@ -300,6 +304,7 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
                             }
                         }),
                         EditorView.domEventHandlers({
+                            keyup: (event) => { handlersRef.current.onKeyUp?.(event); return false; },
                             focus: () => { handlersRef.current.onFocus?.(); return false; },
                             blur: () => { handlersRef.current.onBlur?.(); return false; },
                             paste: (event) => { handlersRef.current.onPaste?.(event); return false; },
@@ -421,6 +426,7 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
             // window while the rest of the surface sits empty.
             if (fillContainer) {
                 view.scrollDOM.style.maxHeight = '';
+                view.scrollDOM.style.overflowY = '';
                 return;
             }
 
@@ -442,17 +448,30 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
                     getComputedStyle(view.contentDOM).lineHeight || '',
                 );
                 if (!Number.isFinite(lineHeight) || lineHeight <= 0) return;
-                let cap = lineHeight * maxLines;
-                if (boundEl && branch) {
-                    const chrome = branch.offsetHeight - view.scrollDOM.offsetHeight;
-                    const available = boundEl.clientHeight - chrome - boundGapPx;
-                    if (available > 0) cap = Math.min(cap, available);
-                }
+                const cap = getComposerHeightLimit({
+                    maxLinesHeight: lineHeight * maxLines,
+                    boundHeight: boundEl?.clientHeight,
+                    surroundingHeight: branch
+                        ? branch.offsetHeight - view.scrollDOM.offsetHeight
+                        : undefined,
+                    boundGapPx,
+                });
                 const next = `${cap}px`;
                 // The scroller growing re-fires the observer with an unchanged
                 // result; writing only on change keeps that loop silent.
                 if (view.scrollDOM.style.maxHeight !== next) {
                     view.scrollDOM.style.maxHeight = next;
+                }
+                // Scroll only once the text is past the cap; below it, a
+                // sub-line overflow would draw a scrollbar with nothing to
+                // scroll (#4004).
+                const overflowY = isComposerContentCapped(
+                    view.contentDOM.getBoundingClientRect().height,
+                    cap,
+                    lineHeight,
+                ) ? 'auto' : 'hidden';
+                if (view.scrollDOM.style.overflowY !== overflowY) {
+                    view.scrollDOM.style.overflowY = overflowY;
                 }
             };
 
@@ -460,6 +479,9 @@ export const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEdi
             if (typeof ResizeObserver === 'undefined') return;
             const observer = new ResizeObserver(applyLimit);
             observer.observe(host);
+            // Past the cap the host stops growing, so the content is what
+            // reports the text crossing it.
+            observer.observe(view.contentDOM);
             if (branch) observer.observe(branch);
             if (boundEl) observer.observe(boundEl);
             return () => observer.disconnect();

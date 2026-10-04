@@ -7,7 +7,7 @@ description: Use when creating or modifying OpenChamber shared UI data access, O
 
 ## Core Boundary
 
-- Official OpenCode API calls use `@opencode-ai/sdk/v2` through `opencodeClient`.
+- Official OpenCode API calls use `@opencode/client` (OpenCode 2.x, `/api/*` routes) through `opencodeClient`; only `packages/ui/src/lib/opencode/` may see wire types, everything else uses the domain model in `lib/opencode/model.ts`.
 - OpenChamber-owned HTTP capabilities use `RuntimeAPIs` where runtime-specific behavior exists, otherwise explicit OpenChamber routes through `runtimeFetch`.
 - Browser/realtime consumers use shared runtime URL/socket helpers.
 - Shared UI never hardcodes localhost, ports, API origins, credentials, or one runtime's transport assumptions.
@@ -59,6 +59,7 @@ Load every matching reference before editing.
 11. **Parse at the boundary.** Treat external, persisted, bridge, IPC, and network payloads as unknown until a schema, parser, or narrow constructor produces the trusted type consumed by shared code. Do not validate fields and then continue passing the raw payload.
 12. **Model the real contract.** Prefer precise result/state unions and required dependencies over loose strings, boolean combinations, optional callback bags, `any`, or repeated casts. Make unsupported runtime behavior and failure distinct from valid empty success.
 13. **Keep adapters deep and bridges thin.** Hide meaningful protocol or platform mechanics behind an intention-revealing runtime operation; do not add pass-through layers that only rename SDK, fetch, or bridge calls.
+14. **Scope every OpenCode read to the directory being worked in.** A directory-scoped read makes OpenCode start that location with all its MCP servers, so a read names the current directory (UI) or the lifecycle's default directory (server), and one read per known project is a fan-out. Which routes and why: `opencode-v2`, *Every directory-scoped read starts a location*.
 
 ## HTTP Decision Rules
 

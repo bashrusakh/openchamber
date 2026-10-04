@@ -4,11 +4,13 @@ import path from 'path';
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { createScheduledTaskService } from './service.js';
 import { registerScheduledTaskRoutes } from './routes.js';
+import { CHATS_SCOPE_PUBLIC_ID, createChatsScope } from './chats-scope.js';
 
 const createService = (overrides = {}) => {
   const projectConfigRuntime = {
     listScheduledTasks: vi.fn(async () => []),
     deleteScheduledTask: vi.fn(async () => ({ deleted: true, tasks: [] })),
+    setLoopApproval: vi.fn(async () => {}),
     ...(overrides.projectConfigRuntime || {}),
   };
   const scheduledTasksRuntime = {
@@ -22,6 +24,7 @@ const createService = (overrides = {}) => {
     sanitizeProjects: (projects) => projects,
     projectConfigRuntime,
     scheduledTasksRuntime,
+    chatsScope: overrides.chatsScope ?? null,
   });
   return { service, projectConfigRuntime, scheduledTasksRuntime };
 };
@@ -85,9 +88,11 @@ Run the digest.
       const syncProject = vi.fn()
         .mockResolvedValueOnce([currentTask])
         .mockResolvedValueOnce([updatedTask]);
-      const { service } = createService({ scheduledTasksRuntime: { syncProject } });
+      const { service, projectConfigRuntime } = createService({ scheduledTasksRuntime: { syncProject } });
 
       await expect(service.setLoopEnabled('project-test', currentTask.id, false)).resolves.toEqual(updatedTask);
+      // Turning a loop off withdraws this machine's approval of it.
+      expect(projectConfigRuntime.setLoopApproval).toHaveBeenCalledWith('project-test', loopFilePath, null);
 
       const content = await readFile(loopFilePath, 'utf8');
       expect(content).toContain('enabled: false');
@@ -280,5 +285,67 @@ describe('scheduled-task service run', () => {
     const result = await service.run('project-test', 'task-1');
     expect(result.sessionId).toBe('sess-1');
     expect(result.persistError).toMatch(/timeout acquiring project config lock/);
+  });
+});
+
+describe('scheduled-task service chats scope', () => {
+  const chatsScope = createChatsScope('/home/user/.config/openchamber/chats');
+
+  it('keys the chats id the UI sends by the chats root storage id', async () => {
+    const { service, scheduledTasksRuntime } = createService({
+      chatsScope,
+      scheduledTasksRuntime: {
+        syncProject: vi.fn(async () => []),
+        runNow: vi.fn(async () => ({ ok: true, sessionID: 'ses_chat', directory: '/chat/dir' })),
+      },
+    });
+
+    await service.list(CHATS_SCOPE_PUBLIC_ID);
+    expect(scheduledTasksRuntime.syncProject).toHaveBeenCalledWith(chatsScope.id);
+    await expect(service.run(CHATS_SCOPE_PUBLIC_ID, 'task-1')).resolves.toMatchObject({
+      sessionId: 'ses_chat',
+      directory: '/chat/dir',
+    });
+    expect(scheduledTasksRuntime.runNow).toHaveBeenCalledWith(chatsScope.id, 'task-1');
+    expect(chatsScope.id).not.toContain(':');
+  });
+
+  it('resolves a directory inside a chat to the chats scope, and projects first', async () => {
+    const { service } = createService({ chatsScope });
+
+    await expect(service.resolveProjectID({ directory: `${chatsScope.root}/2026-09-30/session-a` })).resolves.toBe(chatsScope.id);
+    await expect(service.resolveProjectID({ directory: '/repo' })).resolves.toBe('project-test');
+    await expect(service.resolveProjectID({ directory: `${chatsScope.root}-other/session-a` })).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it('rejects the chats id when the server has no chats scope', async () => {
+    const { service } = createService();
+
+    await expect(service.list(CHATS_SCOPE_PUBLIC_ID)).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it('records approval of the exact loop version when the user enables it', async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'oc-loop-approve-'));
+    try {
+      const loopFilePath = path.join(tempRoot, 'daily.md');
+      await writeFile(loopFilePath, `---
+name: daily-digest
+schedule: "0 9 * * *"
+enabled: true
+model: openai/gpt-5
+---
+
+Run the digest.
+`, 'utf8');
+      const currentTask = { ...loopTask, loopFile: loopFilePath };
+      const syncProject = vi.fn(async () => [currentTask]);
+      const { service, projectConfigRuntime } = createService({ scheduledTasksRuntime: { syncProject } });
+
+      await service.setLoopEnabled('project-test', currentTask.id, true);
+
+      expect(projectConfigRuntime.setLoopApproval).toHaveBeenCalledWith('project-test', loopFilePath, expect.stringMatching(/^[0-9a-f]{64}$/));
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 });

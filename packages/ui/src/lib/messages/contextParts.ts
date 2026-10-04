@@ -15,9 +15,11 @@
  */
 
 import { z } from 'zod';
+import type { SourceControlProvider } from '@/lib/api/types';
 import type { JsonValue } from '@openchamber/sdk';
-import type { TextPart } from '@opencode-ai/sdk/v2';
+import type { Metadata } from '@/lib/opencode/model';
 import type { InlineCommentDraft } from '@/stores/useInlineCommentDraftStore';
+import { chatQuoteAnchorSchema, type ChatQuoteAnchor } from '@/lib/chatQuoteAnchor';
 import { appendTerminalContexts } from './terminalContext';
 
 export const CONTEXT_METADATA_KEY = 'openchamberContext';
@@ -66,8 +68,8 @@ type PrCheckContext = {
     text: string;
 };
 
-type GitHubIssueContext = {
-    kind: 'github-issue';
+type RepositoryIssueContext = {
+    kind: 'repository-issue';
     number: number;
     title: string;
     url: string;
@@ -87,12 +89,16 @@ type ChatQuoteContext = {
     kind: 'chat-quote';
     /** The message the quote came from, when known. */
     messageId?: string;
+    /** Where the quote sits in that message's rendered text, when captured. */
+    anchor?: ChatQuoteAnchor;
     quote: string;
     text: string;
 };
 
-type GitHubPrContext = {
-    kind: 'github-pr';
+type ChangeRequestContext = {
+    kind: 'change-request';
+    /** Absent on messages written before providers other than GitHub existed. */
+    provider?: SourceControlProvider;
     number: number;
     title: string;
     url: string;
@@ -132,8 +138,8 @@ export type ContextPartPayload =
     | PrCheckContext
     | FileQuoteContext
     | ChatQuoteContext
-    | GitHubIssueContext
-    | GitHubPrContext
+    | RepositoryIssueContext
+    | ChangeRequestContext
     | LinearIssueContext
     | GuestIssueContext
     | GuestPrContext;
@@ -151,9 +157,13 @@ export type ContextPartMetadata = {
     [OPENCODE_COMMENT_METADATA_KEY]?: OpenCodeCommentMetadata;
 };
 
+/**
+ * One context item as it goes on the wire: a synthetic message whose `text` is
+ * what the model reads and whose metadata carries the same information
+ * structured, so the timeline can render it as a dedicated block.
+ */
 export type ContextPart = {
     text: string;
-    synthetic: true;
     metadata: ContextPartMetadata;
 };
 
@@ -194,8 +204,8 @@ export function formatContextText(payload: ContextPartPayload): string {
         }
         case 'pr-check':
             return `Attached failed GitHub PR check (${payload.label}):\n\`\`\`\n${payload.output}\n\`\`\`${payload.text ? `\n\n${payload.text}` : ''}`;
-        case 'github-issue':
-        case 'github-pr':
+        case 'repository-issue':
+        case 'change-request':
         case 'linear-issue':
         case 'guest-issue':
         case 'guest-pr':
@@ -207,9 +217,8 @@ export function formatContextText(payload: ContextPartPayload): string {
 
 /**
  * Build the synthetic part for one context payload. `text` overrides the
- * derived text; github-issue/github-pr/linear-issue payloads require it
- * because their model-facing context is fetched by the picker, not derived
- * from metadata.
+ * derived text; repository-issue/change-request payloads require it because their
+ * model-facing context is fetched by the picker, not derived from metadata.
  */
 export function createContextPart(payload: ContextPartPayload, text?: string): ContextPart {
     const resolvedText = text ?? formatContextText(payload);
@@ -230,7 +239,6 @@ export function createContextPart(payload: ContextPartPayload, text?: string): C
     }
     return {
         text: resolvedText,
-        synthetic: true,
         metadata,
     };
 }
@@ -269,6 +277,7 @@ export function contextPayloadFromDraft(draft: InlineCommentDraft): ContextPartP
         case 'chat-quote': {
             const payload: ChatQuoteContext = { kind: 'chat-quote', quote: draft.code, text: draft.text };
             if (draft.fileLabel) payload.messageId = draft.fileLabel;
+            if (draft.anchor) payload.anchor = draft.anchor;
             return payload;
         }
         case 'diff':
@@ -294,7 +303,7 @@ export function contextPayloadFromDraft(draft: InlineCommentDraft): ContextPartP
 // Read-back: parsing part metadata at the display boundary
 // ---------------------------------------------------------------------------
 
-const contextPayloadSchema = z.discriminatedUnion('kind', [
+const canonicalContextPayloadSchema = z.discriminatedUnion('kind', [
     z.object({
         kind: z.literal('code-comment'),
         source: z.enum(['diff', 'file', 'plan']),
@@ -343,17 +352,19 @@ const contextPayloadSchema = z.discriminatedUnion('kind', [
     z.object({
         kind: z.literal('chat-quote'),
         messageId: z.string().optional(),
+        anchor: chatQuoteAnchorSchema.optional(),
         quote: z.string(),
         text: z.string(),
     }),
     z.object({
-        kind: z.literal('github-issue'),
+        kind: z.literal('repository-issue'),
         number: z.number().int().positive(),
         title: z.string(),
         url: z.string(),
     }),
     z.object({
-        kind: z.literal('github-pr'),
+        kind: z.literal('change-request'),
+        provider: z.enum(['github', 'gitlab']).optional(),
         number: z.number().int().positive(),
         title: z.string(),
         url: z.string(),
@@ -380,6 +391,21 @@ const contextPayloadSchema = z.discriminatedUnion('kind', [
         url: z.string(),
         data: z.json().optional(),
     }),
+]);
+const contextPayloadSchema = z.union([
+    canonicalContextPayloadSchema,
+    z.object({
+        kind: z.literal('github-issue'),
+        number: z.number().int().positive(),
+        title: z.string(),
+        url: z.string(),
+    }).transform(({ number, title, url }): RepositoryIssueContext => ({ kind: 'repository-issue', number, title, url })),
+    z.object({
+        kind: z.literal('github-pr'),
+        number: z.number().int().positive(),
+        title: z.string(),
+        url: z.string(),
+    }).transform(({ number, title, url }): ChangeRequestContext => ({ kind: 'change-request', provider: 'github', number, title, url })),
 ]);
 
 /**
@@ -409,8 +435,12 @@ export const contextPartMetadataSchema = z.object({
     [OPENCODE_COMMENT_METADATA_KEY]: openCodeCommentSchema.optional(),
 });
 
-/** The subset of a message part that context read-back inspects. */
-export type ContextCarrierPart = { type: string } & Pick<TextPart, 'metadata'>;
+/**
+ * The subset of a record that context read-back inspects. Context now travels
+ * as synthetic messages, which carry no `type`; the optional field keeps the
+ * reader usable for anything else that carries the same metadata.
+ */
+export type ContextCarrierPart = { type?: string; metadata?: Metadata };
 
 /**
  * Read the structured context payload from a message part, if it carries one.
@@ -418,7 +448,7 @@ export type ContextCarrierPart = { type: string } & Pick<TextPart, 'metadata'>;
  * schema-validated before it is trusted.
  */
 export function readContextPart(part: ContextCarrierPart): ContextPartPayload | null {
-    if (part.type !== 'text') return null;
+    if (part.type !== undefined && part.type !== 'text') return null;
     const parsed = contextPayloadSchema.safeParse(part.metadata?.[CONTEXT_METADATA_KEY]);
     if (parsed.success) return parsed.data;
 
@@ -520,9 +550,10 @@ export function draftFromContextPayload(
                 code: payload.quote,
                 language: '',
                 text: payload.text,
+                anchor: payload.anchor,
             };
-        case 'github-issue':
-        case 'github-pr':
+        case 'repository-issue':
+        case 'change-request':
         case 'linear-issue':
         case 'guest-issue':
         case 'guest-pr':

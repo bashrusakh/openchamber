@@ -1,5 +1,5 @@
 import type { useI18n } from '@/lib/i18n';
-import { OpencodeRequestError } from '@/lib/opencode/upstreamError';
+import { OpencodeApiError } from '@/lib/opencode/client';
 
 type Translate = ReturnType<typeof useI18n>['t'];
 
@@ -9,19 +9,18 @@ type Translate = ReturnType<typeof useI18n>['t'];
  * alone sends whoever reads it hunting for a server that is in fact up.
  */
 export const describeSessionActionError = (error: Error, t: Translate): string => {
-  if (error instanceof OpencodeRequestError) {
-    const detail = error.upstream;
-    if (detail.status !== undefined && detail.ref) {
+  if (error instanceof OpencodeApiError) {
+    if (error.status !== undefined && error.ref) {
       return t('sessions.sidebar.session.action.upstreamErrorWithRef', {
-        status: detail.status,
-        name: detail.name ?? 'Error',
-        ref: detail.ref,
+        status: error.status,
+        name: error.tag ?? 'Error',
+        ref: error.ref,
       });
     }
-    if (detail.status !== undefined) {
+    if (error.status !== undefined) {
       return t('sessions.sidebar.session.action.upstreamError', {
-        status: detail.status,
-        message: detail.message ?? detail.name ?? t('sessions.sidebar.session.action.noDetails'),
+        status: error.status,
+        message: error.detail || error.tag || t('sessions.sidebar.session.action.noDetails'),
       });
     }
   }

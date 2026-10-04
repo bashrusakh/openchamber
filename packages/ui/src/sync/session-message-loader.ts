@@ -1,9 +1,9 @@
-import type { Message, OpencodeClient, Part } from "@opencode-ai/sdk/v2/client"
+import type { Message, Part } from "@/lib/opencode/model"
+import type { MessagePage } from "@/lib/opencode/client"
 import type { ChildStoreManager, DirectoryStore } from "./child-store"
 import { retry } from "./retry"
 import { mergeOptimisticPage, type OptimisticItem } from "./optimistic"
 import { findMessageIndex, insertMessageChronologically, sortMessagesChronologically } from "./message-ordering"
-import { stripMessageDiffSnapshots } from "./sanitize"
 import { getSessionMaterializationStatus, materializeSessionSnapshots } from "./materialization"
 import {
   clearDirectorySessionPrefetch,
@@ -20,7 +20,6 @@ import { dropSessionCaches } from "./session-cache"
 import { SessionCacheRetention } from "./session-cache-retention"
 import { SESSION_CACHE_LIMIT } from "./types"
 
-const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
 // One agent turn can span well over a hundred tool steps, so the first
 // request is sized to hold a long last turn without a follow-up read.
 const INITIAL_MESSAGE_PAGE_SIZE = 100
@@ -80,8 +79,21 @@ type LoadPerformanceDetails = {
   recordCount: number
 }
 
+/**
+ * The loader only needs one page call. Narrowing the dependency to that call
+ * keeps the adapter (`opencodeClient`) the single place that knows how the
+ * server encodes messages, and keeps tests free of a whole SDK double.
+ */
+export type SessionMessagePageSource = {
+  getSessionMessages(
+    id: string,
+    options?: { limit?: number; cursor?: string; order?: "asc" | "desc" },
+    directory?: string | null,
+  ): Promise<MessagePage>
+}
+
 type LoaderConfiguration = {
-  sdk: OpencodeClient
+  sdk: SessionMessagePageSource
   runtimeKey: string
 }
 
@@ -93,11 +105,7 @@ const getInitialWindowMaxRecords = () => isConstrainedRuntime()
   ? CONSTRAINED_INITIAL_WINDOW_MAX_RECORDS
   : INITIAL_WINDOW_MAX_RECORDS
 
-const isUserMessage = (message: Message): boolean => {
-  const candidate = message as Message & { clientRole?: unknown; role?: unknown }
-  const role = typeof candidate.clientRole === "string" ? candidate.clientRole : candidate.role
-  return role === "user"
-}
+const isUserMessage = (message: Message): boolean => message.role === "user"
 
 const hasUserMessage = (messages: Message[]): boolean => messages.some(isUserMessage)
 
@@ -109,27 +117,8 @@ const hasInitialTurns = (messages: Message[]): boolean => {
   return false
 }
 
-const formatSdkError = (error: unknown): string => {
-  if (error instanceof Error) return error.message
-  if (typeof error === "string") return error
-  if (error && typeof error === "object" && "message" in error) {
-    const message = (error as { message?: unknown }).message
-    if (typeof message === "string" && message) return message
-  }
-  return "Session messages could not be loaded"
-}
-
-const assertSdkSuccess = (result: {
-  error?: unknown
-  response?: { status?: number }
-}, operation: string): void => {
-  if (!result.error) return
-  const status = result.response?.status
-  const message = `${operation} failed${status ? ` (${status})` : ""}: ${formatSdkError(result.error)}`
-  const error = new Error(message) as Error & { status?: number }
-  if (status !== undefined) error.status = status
-  throw error
-}
+const toLoadError = (error: unknown): Error =>
+  error instanceof Error ? error : new Error("Session messages could not be loaded")
 
 const filterIdentifiedParts = (parts: Part[]): Part[] => parts
   .filter((part) => Boolean(part?.id))
@@ -149,7 +138,7 @@ const createDefaultState = (generation = 0): SessionMessageLoadState => ({
 export const EMPTY_SESSION_MESSAGE_LOAD_STATE = createDefaultState()
 
 export class SessionMessageLoader {
-  private sdk: OpencodeClient
+  private sdk: SessionMessagePageSource
   private runtimeKey: string
   private sdkEpoch = 0
   private disposed = false
@@ -267,8 +256,8 @@ export class SessionMessageLoader {
     const current = store.getState()
     const draft = {
       message: { ...current.message }, part: { ...current.part },
-      session_status: { ...current.session_status }, session_diff: { ...current.session_diff },
-      todo: { ...current.todo }, permission: { ...current.permission }, question: { ...current.question },
+      session_status: { ...current.session_status }, permission: { ...current.permission },
+      form: { ...current.form },
     }
     this.invalidateSession(target)
     this.getEntry(target).evicted = true
@@ -540,16 +529,20 @@ export class SessionMessageLoader {
     this.getEntry(target).optimistic.delete(input.messageID)
   }
 
-  invalidateSession(target: SessionMessageTarget): void {
+  /** Revert commits preserve only the optimistic records still in the reduced transcript. */
+  invalidateSession(target: SessionMessageTarget, preservedMessages: readonly Message[] = []): void {
     const normalized = this.normalizeTarget(target)
     if (!normalized) return
+    clearSessionPrefetch(normalized.directory, [normalized.sessionID], this.runtimeKey)
     const entry = this.entries.get(this.keyFor(normalized))
     if (!entry) return
     this.bumpGeneration(entry)
     entry.inflight = null
-    entry.optimistic.clear()
+    const preservedIDs = new Set(preservedMessages.map((message) => message.id))
+    for (const messageID of entry.optimistic.keys()) {
+      if (!preservedIDs.has(messageID)) entry.optimistic.delete(messageID)
+    }
     entry.snapshot = createDefaultState(entry.snapshot.generation)
-    clearSessionPrefetch(normalized.directory, [normalized.sessionID], this.runtimeKey)
     this.notify(entry)
   }
 
@@ -674,7 +667,7 @@ export class SessionMessageLoader {
         this.patchEntry(entry, {
           status: "error",
           loadingKind: null,
-          error: error instanceof Error ? error : new Error(formatSdkError(error)),
+          error: toLoadError(error),
         })
       })
       .finally(() => {
@@ -737,10 +730,15 @@ export class SessionMessageLoader {
     this.persistCoverage(target, entry.snapshot)
   }
 
+  /**
+   * One page of messages, newest first. `cursor` comes from the previous
+   * page's `next` and walks toward older history; its absence is the adapter
+   * saying this is the oldest page, which is the only signal for `complete`.
+   */
   private async fetchPage(
     target: SessionMessageTarget,
     limit: number,
-    before?: string,
+    cursor?: string,
     caller: "initial-page" | "older" | "refresh" = "initial-page",
     performance?: LoadPerformanceDetails,
   ): Promise<FetchedPage> {
@@ -748,41 +746,26 @@ export class SessionMessageLoader {
       operation: "session-messages.page",
       caller,
       requestLimit: limit,
-      cursorPresent: before !== undefined,
+      cursorPresent: cursor !== undefined,
     })
     let attempts = 0
     let recordCount = 0
     try {
-      const result = await retry(async () => {
+      const page = await retry(async () => {
         attempts += 1
-        const response = await this.sdk.session.messages({
-          sessionID: target.sessionID,
-          directory: target.directory,
-          limit,
-          before,
-        })
-        assertSdkSuccess(response, "session.messages")
-        const data = response.data
-        if (!Array.isArray(data)) {
-          const error = new Error("session.messages returned no data") as Error & { status?: number }
-          error.status = 503
-          throw error
-        }
-        return { data, response: response.response }
+        return this.sdk.getSessionMessages(target.sessionID, { limit, cursor }, target.directory)
       })
-      const records = result.data.filter((record: { info?: { id?: string } }) => Boolean(record?.info?.id))
+      const records = page.items.filter((record) => Boolean(record?.info?.id))
       recordCount = records.length
       if (performance) performance.recordCount += recordCount
-      const session = sortMessagesChronologically(
-        records.map((record: { info: Message }) => stripMessageDiffSnapshots(record.info)),
-      )
+      const session = sortMessagesChronologically(records.map((record) => record.info))
       const partsByMessageID = new Map<string, Part[]>()
-      for (const record of records as Array<{ info: { id: string }; parts?: Part[] }>) {
+      for (const record of records) {
         partsByMessageID.set(record.info.id, filterIdentifiedParts(record.parts ?? []))
       }
-      const cursor = result.response?.headers?.get?.("x-next-cursor") ?? undefined
+      const nextCursor = page.cursor?.next
       finishPagePerformance("complete", { retryCount: Math.max(0, attempts - 1), recordCount })
-      return { session, partsByMessageID, cursor, complete: !cursor }
+      return { session, partsByMessageID, cursor: nextCursor, complete: !nextCursor }
     } catch (error) {
       finishPagePerformance("error", { retryCount: Math.max(0, attempts - 1), recordCount })
       throw error
@@ -817,7 +800,7 @@ export class SessionMessageLoader {
           ?? mergedPartsByMessageID.get(info.id)
           ?? [],
       })),
-      { skipPartTypes: SKIP_PARTS, mode },
+      { mode },
     )
     if (!isCurrent()) return null
     if (materialized.messagesChanged || materialized.partsChanged) {

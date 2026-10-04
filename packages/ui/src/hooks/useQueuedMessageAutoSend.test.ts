@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
-import type { Agent, Message } from '@opencode-ai/sdk/v2';
+import type { Agent, Message, Session } from '@/lib/opencode/model';
 import type { QueuedMessage } from '../stores/messageQueueStore';
 import { ChildStoreManager } from '@/sync/child-store';
 import { setSyncRefs } from '@/sync/sync-refs';
@@ -167,6 +167,15 @@ describe('resolveQueuedSessionStatusType', () => {
     expect(resolveQueuedSessionStatusType('ses_1', DIRECTORY)).toBe('idle');
   });
 
+  test('treats an idle parent as busy while its background subagent runs', () => {
+    const store = childStores.ensureChild(DIRECTORY, { bootstrap: false });
+    const child = { id: 'ses_child', parentID: 'ses_1' } as Session;
+    store.setState({ session: [child], session_status: { ses_child: { type: 'busy' } } });
+    expect(resolveQueuedSessionStatusType('ses_1', DIRECTORY)).toBe('busy');
+    store.setState({ session_status: {} });
+    expect(resolveQueuedSessionStatusType('ses_1', DIRECTORY)).toBe('idle');
+  });
+
   test('resolves an explicit idle entry and unknown sessions as idle', () => {
     const store = childStores.ensureChild(DIRECTORY, { bootstrap: false });
     store.setState({ session_status: { ses_1: { type: 'idle' } } });
@@ -206,7 +215,7 @@ describe('buildQueuedAutoSendPayload', () => {
   });
 
   test('delivers the captured mention and context instead of re-parsing the content', () => {
-    const metadata = { openchamberContext: { kind: 'github-issue' as const, number: 3, title: 'Bug', url: 'https://x/issues/3' } };
+    const metadata = { openchamberContext: { kind: 'repository-issue' as const, number: 3, title: 'Bug', url: 'https://x/issues/3' } };
     const queue: QueuedMessage[] = [
       {
         id: 'queued-mention',

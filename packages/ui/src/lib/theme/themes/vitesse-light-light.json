@@ -29,13 +29,13 @@
       "subtle": "#f6f3f3"
     },
     "interactive": {
-      "border": "#dbd8d8",
+      "border": "#E6E2E2",
       "selection": "#22222218",
       "selectionForeground": "#393a34",
       "borderHover": "#cbc7c7",
       "borderFocus": "#635454b8",
       "focus": "#00000000",
-      "focusRing": "#0000000050",
+      "focusRing": "#00000050",
       "cursor": "#CECDC3",
       "hover": "#22222218",
       "active": "#22222218"

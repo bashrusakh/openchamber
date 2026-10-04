@@ -1,5 +1,6 @@
 export { OPENCHAMBER_SDK_API_VERSION, OPENCHAMBER_SDK_CHANNEL, OPENCHAMBER_SDK_MANIFEST_API_VERSIONS } from './api-version.ts';
-export { GUEST_SCROLLBAR_CSS } from './scrollbar-style.ts';
+export { GUEST_SCROLLBAR_CSS, GUEST_SCROLLBAR_SCRIPT } from './scrollbar-style.ts';
+export { guestFramePolicy } from './frame-policy.ts';
 export type { GuestLoadState, GuestProject, GuestWorktree, GuestSessionActivity, GuestSessionRecord, GuestDirectoryCoverage, GuestProjectsSnapshot, GuestWorktreesSnapshot, GuestSessionsSnapshot, GuestWorkspaceSnapshot, GuestWorkspaceQuery, GuestWorkspaceSubscription, GuestWorkspaceUpdate, GuestStorageRequest, GuestStorageResult, GuestSessionWorktree } from './workspace.ts';
 export { GUEST_STORAGE_KEY_MAX, GUEST_STORAGE_KEYS_MAX, GUEST_STORAGE_VALUE_BYTES, GUEST_STORAGE_TOTAL_BYTES } from './workspace.ts';
 export type { OpenChamberManifestApiVersion } from './api-version.ts';
@@ -31,12 +32,18 @@ export {
   guestActionsNeedConversation,
   GUEST_FILESYSTEM_PATTERN_MAX,
   GUEST_FILESYSTEM_PATTERNS_MAX,
+  GUEST_ORIGINS_MAX,
   GUEST_SERVICE_PROVIDES,
   GUEST_SURFACE_DOCKS,
   GUEST_SURFACE_DOCK_DEFAULT,
   GUEST_SURFACE_DOCK_SIZE_DEFAULT,
   GUEST_SURFACE_DOCK_SIZE_MAX,
   GUEST_SURFACE_DOCK_SIZE_MIN,
+  GUEST_STATUS_SECTION_HEIGHT_DEFAULT,
+  GUEST_STATUS_SECTION_HEIGHT_MAX,
+  GUEST_STATUS_SECTION_HEIGHT_MIN,
+  GUEST_STATUS_SECTION_TITLE_MAX,
+  clampStatusSectionHeight,
   HOST_LINEAR_API_ORIGIN,
   isGuestFilesystemPattern,
   hasGuestCapability,
@@ -46,6 +53,7 @@ export {
   requestedGuestCapabilities,
   resolveAttachEntry,
   resolvePageEntry,
+  resolveStatusSectionEntry,
   resolveAttachMode,
   resolveIntegrationApi,
   resolveIntegrationAuth,
@@ -86,6 +94,7 @@ export type {
   PanelContribution,
   BackgroundContribution,
   PageContribution,
+  StatusSectionContribution,
   ParseManifestErrorCode,
   ParseManifestFailure,
   ParseManifestResult,
@@ -100,11 +109,36 @@ export type {
   SocketBinding,
   SocketPlatform,
 } from './manifest.ts';
+export {
+  GUEST_FILE_EDITORS_MAX,
+  GUEST_FILE_EDITOR_CONTENT_MAX,
+  GUEST_FILE_EDITOR_PATTERNS_MAX,
+  GUEST_FILE_EDITOR_PATTERN_MAX,
+  GUEST_FILE_EDITOR_TITLE_MAX,
+  GUEST_FILE_EDITOR_VERSION_MAX,
+  createFileSaveTracker,
+  fileEditorPayloadSize,
+  isFileEditorPattern,
+  matchesFileEditorPattern,
+} from './file-editor.ts';
+export type {
+  FileEditorChange,
+  FileEditorContentKind,
+  FileEditorContribution,
+  FileEditorDocument,
+  FileEditorSnapshot,
+  FileSnapshotPurpose,
+  FileSnapshotRequest,
+  FileSnapshotResultPayload,
+} from './file-editor.ts';
 export { connectHost, HostRequestError } from './host.ts';
 export type { HostClient, HostClientOptions, HostFrame } from './host.ts';
 export {
   clampAttachRequest,
   clampBadgeCount,
+  clampFrameHeight,
+  isGuestCommitSha,
+  GUEST_COMMIT_SHA,
   clampPromptRequest,
   clampStartSessionRequest,
   guestFileScope,
@@ -134,7 +168,18 @@ export type {
   GuestActionItem,
   GuestActionResultMessage,
   HostActionMessage,
+  HostFileOpenMessage,
+  HostFileSnapshotMessage,
+  HostFileSavedMessage,
+  GuestFileSnapshotResultMessage,
+  GuestFileChangeMessage,
+  GuestFileSaveMessage,
+  GuestFileUnsupportedMessage,
   GuestBadgeMessage,
+  GuestResizeMessage,
+  GuestOpenCommitMessage,
+  OpenCommitRequest,
+  ResizeRequest,
   GuestItem,
   GuestItemRole,
   GuestMessageItem,
@@ -222,6 +267,7 @@ export type {
 export {
   EMPTY_GUEST_CONNECTION,
   GUEST_BADGE_MAX,
+  GUEST_FRAME_HEIGHT_MAX,
   GUEST_ITEM_MESSAGE_TEXT_MAX,
   GUEST_ITEM_SESSION_MAX,
   GUEST_RESOLVE_ERROR_MAX,
@@ -295,6 +341,8 @@ export type {
   BrowserSnapshotData,
   BrowserSnapshotElement,
   BrowserSnapshotParameters,
+  BrowserTab,
+  BrowserTabTarget,
   BrowserTypeData,
   BrowserTypeParameters,
   BrowserViewportMode,
@@ -310,6 +358,7 @@ export {
   SURFACE_FRAME_MAX_BYTES,
   SURFACE_FRAME_MIMES,
   SURFACE_FRAME_PATH,
+  SURFACE_FRAME_SEQ_HEADER,
   SURFACE_FRAME_WAIT_MS,
   SURFACE_HEIGHT_HEADER,
   SURFACE_INPUT_BATCH_MAX,
@@ -319,6 +368,8 @@ export {
   SURFACE_TEXT_MAX,
   SURFACE_TITLE_HEADER,
   SURFACE_TITLE_MAX,
+  SURFACE_VIEWER_CONTROLS_HEADER,
+  SURFACE_VIEWER_HEADER,
   SURFACE_WIDTH_HEADER,
   readSurfaceControlNotice,
   readSurfaceInputBatch,

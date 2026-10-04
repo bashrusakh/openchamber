@@ -1,4 +1,4 @@
-import { readAuthFile } from '../../opencode/auth.js';
+import { readOpenCodeCredentials } from '../../opencode/auth.js';
 import {
   getAuthEntry,
   normalizeAuthEntry,
@@ -6,22 +6,20 @@ import {
   toUsageWindow,
   toNumber,
   toTimestamp,
-  resolveWindowLabel,
-  formatMoney
+  resolveWindowLabel
 } from '../utils/index.js';
 
 export const providerId = 'codex';
 export const providerName = 'Codex';
 const aliases = ['openai', 'codex', 'chatgpt'];
 
-export const isConfigured = () => {
-  const auth = readAuthFile();
+export const isConfigured = (auth) => {
   const entry = normalizeAuthEntry(getAuthEntry(auth, aliases));
   return Boolean(entry?.access || entry?.token);
 };
 
 export const fetchQuota = async () => {
-  const auth = readAuthFile();
+  const auth = await readOpenCodeCredentials();
   const entry = normalizeAuthEntry(getAuthEntry(auth, aliases));
   const accessToken = entry?.access ?? entry?.token;
   const accountId = entry?.accountId;
@@ -87,7 +85,7 @@ export const fetchQuota = async () => {
       const label = unlimited
         ? 'Unlimited'
         : balance !== null
-          ? `$${formatMoney(balance)}`
+          ? String(balance)
           : null;
       windows.credits_balance = toUsageWindow({
         usedPercent: null,

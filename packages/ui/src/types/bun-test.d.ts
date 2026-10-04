@@ -59,10 +59,16 @@ declare module "bun:test" {
     function module(moduleName: string, factory: () => Record<string, unknown>): void;
     function restore(): void;
   }
+  export namespace jest {
+    function useFakeTimers(): void;
+    function useRealTimers(): void;
+    function advanceTimersByTime(ms: number): void;
+  }
 }
 
 // Vite asset-query imports need a URL loader when real UI modules run in Bun.
 declare module "bun" {
+  export function gc(force?: boolean): void;
   export function plugin(options: {
     name: string;
     setup(build: {

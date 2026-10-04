@@ -1,7 +1,7 @@
+import { OpenCodeCompatibilityGate } from '@/components/update/OpenCodeCompatibilityGate';
 import React from 'react';
 import { AppStartupOverlay } from '@/components/ui/AppStartupOverlay';
 import { MainLayout } from '@/components/layout/MainLayout';
-import { ChatView } from '@/components/views/ChatView';
 import { AppLinkConfirmDialog } from '@/components/chat/AppLinkConfirmDialog';
 import { SharedTrustConfirmDialog } from '@/components/projects/SharedTrustConfirmDialog';
 import { FireworksProvider } from '@/contexts/FireworksContext';
@@ -21,12 +21,13 @@ import { usePushVisibilityBeacon } from '@/hooks/usePushVisibilityBeacon';
 import { useWebNotificationStream } from '@/hooks/useWebNotificationStream';
 import { useAgentMemorySync } from '@/hooks/useAgentMemorySync';
 import { useBrowserProviderSync } from '@/hooks/useBrowserProviderSync';
+import { useEnterprisePolicySync } from '@/hooks/useEnterprisePolicySync';
 import { useRoutingSync } from '@/hooks/useRoutingSync';
 import { usePwaInstallPrompt } from '@/hooks/usePwaInstallPrompt';
 import { useWindowTitle } from '@/hooks/useWindowTitle';
 import { useRootScrollLock } from '@/hooks/useRootScrollLock';
 import { useConfigStore } from '@/stores/useConfigStore';
-import { isDesktopLocalOriginActive, isDesktopShell, restartDesktopApp, invokeDesktop } from '@/lib/desktop';
+import { isDesktopLocalOriginActive, isDesktopShell, restartDesktopApp, invokeDesktop, takePendingDesktopSessionLinks } from '@/lib/desktop';
 import {
   getInjectedBootOutcome,
   getBootInjectionStatus,
@@ -38,6 +39,8 @@ import {
 } from '@/lib/desktopBoot';
 import type { RecoveryVariant } from '@/components/onboarding/DesktopConnectionRecovery';
 import { useSessionUIStore } from '@/sync/session-ui-store';
+import { openSessionLink } from '@/lib/router/openSessionFromRoute';
+import { restoreLastActiveSession } from '@/sync/last-session-restore';
 import { markSessionViewed } from '@/sync/notification-store';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { opencodeClient } from '@/lib/opencode/client';
@@ -46,33 +49,26 @@ import { getRuntimeKey, subscribeRuntimeEndpointChanged } from '@/lib/runtime-sw
 import { useAutoReviewStore } from '@/stores/useAutoReviewStore';
 import { resumeAutoReviewRun } from '@/lib/reviewFlow';
 import { SyncProvider } from '@/sync/sync-context';
-import { useSync } from '@/sync/use-sync';
 import { ConfigUpdateOverlay } from '@/components/ui/ConfigUpdateOverlay';
 import { AboutDialog } from '@/components/ui/AboutDialog';
 import { RuntimeAPIProvider } from '@/contexts/RuntimeAPIProvider';
 import { registerRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { useUIStore } from '@/stores/useUIStore';
-import { useGitHubAuthStore } from '@/stores/useGitHubAuthStore';
+import { useSourceControlAuthStore } from '@/stores/useSourceControlAuthStore';
 import { useLinearAuthStore } from '@/stores/useLinearAuthStore';
 import { useFeatureFlagsStore } from '@/stores/useFeatureFlagsStore';
 import type { RuntimeAPIs } from '@/lib/api/types';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { McpOAuthCallbackPage } from '@/components/sections/mcp/McpOAuthCallbackPage';
-import { MCP_OAUTH_CALLBACK_PATH } from '@/components/sections/mcp/mcpOAuth';
 import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
 import { useI18n } from '@/lib/i18n';
 import { applyMobileKeyboardMode } from '@/lib/mobileKeyboardMode';
-import {
-  EMBEDDED_VISIBILITY_UPDATE,
-  isEmbeddedSessionChat,
-  requestEmbeddedSessionVisibility,
-} from '@/components/layout/contextPanelEmbeddedChat';
 import { SyncAppEffects } from '@/apps/AppEffects';
-import { resetAppForRuntimeEndpointChange } from '@/apps/runtimeEndpointReset';
+import { isSameRuntimeEndpoint, resetAppForRuntimeEndpointChange } from '@/apps/runtimeEndpointReset';
 import { useAppFontEffects } from '@/apps/useAppFontEffects';
 import { OpenCodeUpdateToast } from '@/components/update/OpenCodeUpdateToast';
+import { ProjectConfigErrorToast } from '@/components/projects/ProjectConfigErrorToast';
 import { markStartupTrace, startupTraceEnabled } from '@/lib/startupTrace';
-import { fetchStartupDiagnostics, type StartupDiagnostics } from '@/lib/startupDiagnostics';
+import { fetchStartupDiagnostics, getInitRecoveryDescriptionKey, type StartupDiagnostics } from '@/lib/startupDiagnostics';
 
 // Lazy-loaded heavy views — loaded on demand to reduce initial bundle size.
 const OnboardingScreen = lazyWithChunkRecovery(() =>
@@ -114,13 +110,23 @@ const StartupInitializationRecovery: React.FC<{
     };
   }, []);
 
+  const failure = useConfigStore((s) => s.lastInitFailure);
+  // Server diagnostics outrank the client's guess: they prove the server answered.
+  const failureMessage = diagnostics ? null : failure?.message ?? null;
+
   return (
     <div className="flex h-full flex-col items-center overflow-y-auto bg-background px-6 py-6 text-foreground">
       <div className="my-auto flex w-full max-w-xl shrink-0 flex-col items-center gap-4 text-center">
         <div className="flex flex-col gap-2">
           <h1 className="typography-title text-foreground">{t('startup.initRecovery.title')}</h1>
-          <p className="typography-body text-muted-foreground">{t(diagnostics ? 'startup.initRecovery.openCodeUnavailable' : 'startup.initRecovery.description')}</p>
+          <p className="typography-body text-muted-foreground">{t(getInitRecoveryDescriptionKey(diagnostics, failure))}</p>
         </div>
+        {failureMessage && (
+          <dl className="w-full min-w-0 text-left" aria-live="polite">
+            <dt className="typography-meta text-muted-foreground">{t('startup.initRecovery.lastError')}</dt>
+            <dd className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-[var(--surface-muted)] px-3 py-2 font-mono typography-meta text-muted-foreground">{failureMessage}</dd>
+          </dl>
+        )}
         {diagnostics && (
           <dl className="w-full min-w-0 space-y-3 text-left" aria-live="polite">
             {diagnostics.binary && (
@@ -149,122 +155,6 @@ type AppProps = {
   apis: RuntimeAPIs;
 };
 
-type EmbeddedSessionChatConfig = {
-  sessionId: string;
-  directory: string | null;
-  readOnly: boolean;
-  allowPromptingSubagentSessions?: boolean;
-};
-
-type EmbeddedVisibilityPayload = {
-  visible?: unknown;
-};
-
-const normalizeEmbeddedDirectory = (value: string | null | undefined): string => {
-  if (!value) return '';
-  return value.replace(/\\/g, '/').replace(/\/+$/g, '');
-};
-
-const readEmbeddedSessionChatConfig = (): EmbeddedSessionChatConfig | null => {
-  if (typeof window === 'undefined' || !isEmbeddedSessionChat()) {
-    return null;
-  }
-
-  const params = new URLSearchParams(window.location.search);
-  const sessionIdRaw = params.get('sessionId');
-  const sessionId = typeof sessionIdRaw === 'string' ? sessionIdRaw.trim() : '';
-  if (!sessionId) {
-    return null;
-  }
-
-  const directoryRaw = params.get('directory');
-  const directory = typeof directoryRaw === 'string' && directoryRaw.trim().length > 0
-    ? directoryRaw.trim()
-    : null;
-
-  return {
-    sessionId,
-    directory,
-    readOnly: params.get('readOnly') === '1' || params.get('readOnly') === 'true',
-    allowPromptingSubagentSessions: params.has('allowPromptingSubagentSessions')
-      ? params.get('allowPromptingSubagentSessions') === '1'
-      : undefined,
-  };
-};
-
-const isMcpOAuthCallbackPath = (): boolean => {
-  if (typeof window === 'undefined') {
-    return false;
-  }
-
-  return window.location.pathname === MCP_OAUTH_CALLBACK_PATH;
-};
-
-const EmbeddedSessionChatContent: React.FC<{
-  embeddedSessionChat: EmbeddedSessionChatConfig;
-  isVSCodeRuntime: boolean;
-  embeddedBackgroundWorkEnabled: boolean;
-}> = ({ embeddedSessionChat, isVSCodeRuntime, embeddedBackgroundWorkEnabled }) => {
-  const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
-  const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
-  const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
-  const sync = useSync();
-  const bootstrapKeyRef = React.useRef<string | null>(null);
-
-  const expectedDirectory = normalizeEmbeddedDirectory(embeddedSessionChat.directory);
-  const activeDirectory = normalizeEmbeddedDirectory(currentDirectory);
-
-  React.useEffect(() => {
-    if (isVSCodeRuntime) return;
-    if (expectedDirectory && activeDirectory !== expectedDirectory) return;
-
-    const bootstrapKey = `${expectedDirectory}\n${embeddedSessionChat.sessionId}`;
-    // Skip if this session was already bootstrapped and a session is still
-    // active — allows in-place navigation (e.g. "Open subtask") to change
-    // currentSessionId without this effect forcing it back. Only re-bootstrap
-    // when currentSessionId was cleared (store init, draft, delete/archive,
-    // runtime-switch remount).
-    if (bootstrapKeyRef.current === bootstrapKey && currentSessionId) {
-      return;
-    }
-
-    bootstrapKeyRef.current = bootstrapKey;
-    setCurrentSession(embeddedSessionChat.sessionId, embeddedSessionChat.directory);
-    void sync.ensureSessionRenderable(embeddedSessionChat.sessionId, true);
-  }, [
-    activeDirectory,
-    currentSessionId,
-    embeddedSessionChat.directory,
-    embeddedSessionChat.sessionId,
-    expectedDirectory,
-    isVSCodeRuntime,
-    setCurrentSession,
-    sync,
-  ]);
-
-  if (expectedDirectory && activeDirectory !== expectedDirectory) {
-    return null;
-  }
-
-  return (
-    <>
-      <SyncAppEffects embeddedBackgroundWorkEnabled={embeddedBackgroundWorkEnabled} />
-      <OpenCodeUpdateToast />
-      <ChatView
-        active={embeddedBackgroundWorkEnabled}
-        // Always subscribe to message history in the mounted session-chat
-        // iframe. Visibility still gates composer focus and background work so
-        // a boot-inactive / lost-handshake race cannot leave a busy subagent
-        // showing only its status row (#2903 / #2892).
-        messagesEnabled={true}
-        readOnly={embeddedSessionChat.readOnly}
-        initialAllowPromptingSubagentSessions={embeddedSessionChat.allowPromptingSubagentSessions}
-      />
-      <Toaster />
-    </>
-  );
-};
-
 function App({ apis }: AppProps) {
   React.useEffect(() => {
     markStartupTrace('App:mounted');
@@ -283,16 +173,11 @@ function App({ apis }: AppProps) {
   const error = useSessionUIStore((s) => s.error);
   const clearError = useSessionUIStore((s) => s.clearError);
   const currentDirectory = useDirectoryStore((state) => state.currentDirectory);
-  const setDirectory = useDirectoryStore((state) => state.setDirectory);
   const isSwitchingDirectory = useDirectoryStore((state) => state.isSwitchingDirectory);
   const [showMemoryDebug, setShowMemoryDebug] = React.useState(false);
-  const refreshGitHubAuthStatus = useGitHubAuthStore((state) => state.refreshStatus);
+  const refreshSourceControlAuth = useSourceControlAuthStore((state) => state.refreshAll);
   const refreshLinearAuthStatus = useLinearAuthStore((state) => state.refreshStatus);
   const [isVSCodeRuntime, setIsVSCodeRuntime] = React.useState<boolean>(() => apis.runtime.isVSCode);
-  // Embedded chats start inactive until the parent panel identifies the active
-  // tab. Otherwise a newly loaded background tab can focus its composer first
-  // and steal keyboard input from the main chat.
-  const [isEmbeddedVisible, setIsEmbeddedVisible] = React.useState(false);
   const [initRetryExhausted, setInitRetryExhausted] = React.useState(false);
   const [initRetryEpoch, setInitRetryEpoch] = React.useState(0);
   const [runtimeEndpointEpoch, setRuntimeEndpointEpoch] = React.useState(0);
@@ -311,9 +196,6 @@ function App({ apis }: AppProps) {
       : null;
   });
   const appReadyDispatchedRef = React.useRef(false);
-  const embeddedSessionChat = React.useMemo<EmbeddedSessionChatConfig | null>(() => readEmbeddedSessionChatConfig(), []);
-  const embeddedBackgroundWorkEnabled = !embeddedSessionChat || isEmbeddedVisible;
-  const isMcpOAuthCallback = React.useMemo(() => isMcpOAuthCallbackPath(), []);
 
   React.useEffect(() => {
     setStreamPerfMemoryDebugEnabled(showMemoryDebug);
@@ -333,8 +215,13 @@ function App({ apis }: AppProps) {
   }, [apis.runtime.isVSCode]);
 
   React.useEffect(() => {
+    // A change of runtime is reset by `installRuntimeEndpointReset`, which runs
+    // even while a gate has this component unmounted. Same-runtime credential
+    // changes reset only here, so a sign-in behind the login gate keeps state.
     return subscribeRuntimeEndpointChanged((detail) => {
-      resetAppForRuntimeEndpointChange(detail);
+      if (isSameRuntimeEndpoint(detail)) {
+        resetAppForRuntimeEndpointChange(detail);
+      }
       setRuntimeEndpointEpoch((epoch) => epoch + 1);
       setInitRetryExhausted(false);
       setInitRetryEpoch((epoch) => epoch + 1);
@@ -351,17 +238,13 @@ function App({ apis }: AppProps) {
   });
 
   React.useEffect(() => {
-    if (embeddedSessionChat) {
-      return;
-    }
-
     const runtimeKey = getRuntimeKey();
     const runs = Object.values(useAutoReviewStore.getState().runsByOriginalSessionID)
       .filter((run) => run.status === 'running' && run.runtimeKey === runtimeKey);
     for (const run of runs) {
       resumeAutoReviewRun(run.originalSessionID);
     }
-  }, [autoReviewResumeSignature, embeddedSessionChat, runtimeEndpointEpoch]);
+  }, [autoReviewResumeSignature, runtimeEndpointEpoch]);
 
   React.useEffect(() => {
     document.documentElement.classList.toggle('wide-chat-layout', wideChatLayoutEnabled);
@@ -376,18 +259,18 @@ function App({ apis }: AppProps) {
   }, [apis]);
 
   React.useEffect(() => {
-    if (embeddedSessionChat) {
+    if (!isConnected) {
       return;
     }
 
-    void refreshGitHubAuthStatus(apis.github, { force: true });
+    void refreshSourceControlAuth(apis.sourceControl, { force: true });
     void refreshLinearAuthStatus(apis.linear, { force: true });
     // `apis` is the same object across an instance switch, so without the epoch
     // this ran once for the whole app session and both statuses kept describing
     // whichever instance happened to be connected at startup. `isConnected` is
     // here to re-ask, not to gate: both integrations answer independently of
     // OpenCode, but a switch can race the transport and the retry is deduped.
-  }, [apis.github, apis.linear, embeddedSessionChat, isConnected, refreshGitHubAuthStatus, refreshLinearAuthStatus, runtimeEndpointEpoch]);
+  }, [apis.sourceControl, apis.linear, isConnected, refreshSourceControlAuth, refreshLinearAuthStatus, runtimeEndpointEpoch]);
 
   useAppFontEffects();
 
@@ -594,94 +477,44 @@ function App({ apis }: AppProps) {
   }, [currentDirectory, isSwitchingDirectory, isConnected, isVSCodeRuntime]);
 
   React.useEffect(() => {
-    if (!embeddedSessionChat || typeof window === 'undefined') {
-      return;
-    }
-
-    const applyVisibility = (payload?: EmbeddedVisibilityPayload) => {
-      setIsEmbeddedVisible(payload?.visible === true);
-    };
-
-    const handleMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin || event.source !== window.parent) {
-        return;
-      }
-
-      const data = event.data as { type?: unknown; payload?: EmbeddedVisibilityPayload };
-      if (data?.type !== EMBEDDED_VISIBILITY_UPDATE) {
-        return;
-      }
-
-      applyVisibility(data.payload);
-    };
-
-    const scopedWindow = window as unknown as {
-      __openchamberSetEmbeddedVisibility?: (payload?: EmbeddedVisibilityPayload) => void;
-    };
-
-    scopedWindow.__openchamberSetEmbeddedVisibility = applyVisibility;
-    window.addEventListener('message', handleMessage);
-    requestEmbeddedSessionVisibility();
-
-    return () => {
-      window.removeEventListener('message', handleMessage);
-      if (scopedWindow.__openchamberSetEmbeddedVisibility === applyVisibility) {
-        delete scopedWindow.__openchamberSetEmbeddedVisibility;
-      }
-    };
-  }, [embeddedSessionChat]);
-
-  React.useEffect(() => {
-    if (!embeddedSessionChat?.directory || isVSCodeRuntime) {
-      return;
-    }
-
-    if (currentDirectory === embeddedSessionChat.directory) {
-      return;
-    }
-
-    setDirectory(embeddedSessionChat.directory, { showOverlay: false });
-  }, [currentDirectory, embeddedSessionChat, isVSCodeRuntime, setDirectory]);
-
-  React.useEffect(() => {
-    if (!embeddedSessionChat || typeof window === 'undefined') {
-      return;
-    }
-
-    const handleStorage = (event: StorageEvent) => {
-      if (event.storageArea !== window.localStorage) {
-        return;
-      }
-
-      if (event.key !== 'ui-store') {
-        return;
-      }
-
-      void useUIStore.persist.rehydrate();
-    };
-
-    window.addEventListener('storage', handleStorage);
-    return () => {
-      window.removeEventListener('storage', handleStorage);
-    };
-  }, [embeddedSessionChat]);
-
-  React.useEffect(() => {
     if (typeof window === 'undefined') return;
 
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessionId?: string; directory?: string }>).detail;
+      const detail = (event as CustomEvent<{ sessionId?: string; directory?: string; messageId?: string }>).detail;
       const sessionId = typeof detail?.sessionId === 'string' ? detail.sessionId.trim() : '';
       if (!sessionId) return;
       const directory = typeof detail?.directory === 'string' && detail.directory.trim().length > 0
         ? detail.directory.trim()
         : null;
+      // A link (a desktop deep link, a link to this window's instance) carries
+      // no directory; the route opener resolves it from the global session
+      // list, as for a web link.
+      if (!directory) {
+        void openSessionLink(sessionId, typeof detail?.messageId === 'string' ? detail.messageId.trim() : null);
+        return;
+      }
       void useSessionUIStore.getState().setCurrentSession(sessionId, directory);
     };
 
     window.addEventListener('openchamber:open-session', handler as EventListener);
+    // A link that launched the app arrived before this listener existed; the
+    // desktop shell keeps it until the window asks. Taking is one-shot, so a
+    // cleanup must not drop links already taken (Strict Mode re-runs this).
+    void takePendingDesktopSessionLinks().then((links) => {
+      for (const link of links) void openSessionLink(link.sessionId, link.messageId);
+    });
     return () => window.removeEventListener('openchamber:open-session', handler as EventListener);
   }, []);
+
+  // Launch continuity: reopen the session that was open when the app last
+  // closed, once per page load. A link or route that already opened
+  // something wins; see restoreLastActiveSession.
+  const lastSessionRestoreStartedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!isInitialized || lastSessionRestoreStartedRef.current) return;
+    lastSessionRestoreStartedRef.current = true;
+    void restoreLastActiveSession({ refresh: false });
+  }, [isInitialized]);
 
   // Open a draft Mini Chat window from the native File menu / tray. Uses a
   // dedicated single-fire event (not the menu-action channel) because draft
@@ -750,14 +583,15 @@ function App({ apis }: AppProps) {
 
   // Session attention now handled by notification-store via SSE events (session.idle/session.error)
 
-  usePushVisibilityBeacon({ enabled: embeddedBackgroundWorkEnabled });
-  useWebNotificationStream({ enabled: embeddedBackgroundWorkEnabled });
+  usePushVisibilityBeacon();
+  useWebNotificationStream();
   // Loaded here rather than by the Memory tab: the session index is built from
   // this snapshot, so leaving it to the panel meant a user who never opened
   // Project notes sent every message with no memory index at all.
   useAgentMemorySync(currentDirectory || null);
   useBrowserProviderSync();
   useRoutingSync();
+  useEnterprisePolicySync();
   usePwaInstallPrompt();
 
   useWindowTitle();
@@ -773,28 +607,23 @@ function App({ apis }: AppProps) {
   useMenuActions(handleToggleMemoryDebug);
 
   useTraySync();
-  useGlobalSessionsPolling(!embeddedSessionChat);
+  useGlobalSessionsPolling(true);
 
-  useSessionStatusBootstrap({ enabled: embeddedBackgroundWorkEnabled });
+  useSessionStatusBootstrap();
 
   // Palette-only action: the memory debug panel has no keyboard shortcut.
   React.useEffect(() => {
-    if (embeddedSessionChat) return;
     const handleToggle = () => setShowMemoryDebug((previous) => !previous);
     window.addEventListener('openchamber:memory-debug-toggle', handleToggle);
     return () => window.removeEventListener('openchamber:memory-debug-toggle', handleToggle);
-  }, [embeddedSessionChat]);
+  }, []);
 
   React.useEffect(() => {
-    if (embeddedSessionChat) {
-      return;
-    }
-
     if (error) {
 
       setTimeout(() => clearError(), 5000);
     }
-  }, [clearError, embeddedSessionChat, error]);
+  }, [clearError, error]);
 
   // Poll for the injected boot outcome until it becomes available (desktop only).
   // The Rust backend sets window.__OPENCHAMBER_DESKTOP_BOOT_OUTCOME__ once the
@@ -936,37 +765,7 @@ function App({ apis }: AppProps) {
     );
   }
 
-  if (embeddedSessionChat) {
-    return (
-      <ErrorBoundary>
-        <SyncProvider key={runtimeEndpointEpoch} sdk={opencodeClient.getSdkClient()} directory={currentDirectory || ''}>
-          <RuntimeAPIProvider apis={apis}>
-            <TooltipProvider delayDuration={300} skipDelayDuration={150}>
-              <div className="h-full text-foreground bg-background">
-                <EmbeddedSessionChatContent
-                  embeddedSessionChat={embeddedSessionChat}
-                  isVSCodeRuntime={isVSCodeRuntime}
-                  embeddedBackgroundWorkEnabled={embeddedBackgroundWorkEnabled}
-                />
-                <AppLinkConfirmDialog />
-                <SharedTrustConfirmDialog />
-              </div>
-            </TooltipProvider>
-          </RuntimeAPIProvider>
-        </SyncProvider>
-      </ErrorBoundary>
-    );
-  }
-
-  if (isMcpOAuthCallback) {
-    return (
-      <ErrorBoundary>
-        <McpOAuthCallbackPage />
-      </ErrorBoundary>
-    );
-  }
-
-  if (initRetryExhausted && !isInitialized && !isVSCodeRuntime && !embeddedSessionChat) {
+  if (initRetryExhausted && !isInitialized && !isVSCodeRuntime) {
     return (
       <ErrorBoundary>
         <StartupInitializationRecovery
@@ -990,8 +789,9 @@ function App({ apis }: AppProps) {
           <FireworksProvider>
               <TooltipProvider delayDuration={300} skipDelayDuration={150}>
                 <div className={isDesktopRuntime ? 'h-full text-foreground bg-transparent' : 'h-full text-foreground bg-background'}>
-                  <SyncAppEffects embeddedBackgroundWorkEnabled={embeddedBackgroundWorkEnabled} />
+                  <SyncAppEffects backgroundWorkEnabled />
                   <OpenCodeUpdateToast />
+                  <ProjectConfigErrorToast />
                   <MainLayout />
                   <AppStartupOverlay ready={isInitialized && (!isDesktopRuntime || (bootOutcomeKnown && bootViewIsMain))} />
                   <Toaster />
@@ -1015,4 +815,6 @@ function App({ apis }: AppProps) {
   );
 }
 
-export default App;
+export default function CompatibleApp(props: AppProps) {
+  return <OpenCodeCompatibilityGate><App {...props} /></OpenCodeCompatibilityGate>;
+}

@@ -3,39 +3,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
 import { Icon } from "@/components/icon/Icon";
 import type { GitStatus } from '@/lib/api/types';
+import { cn } from '@/lib/utils';
 import { useI18n } from '@/lib/i18n';
-
-type ChangeDescriptor = {
-  code: string;
-  color: string;
-  description: string;
-};
-
-const CHANGE_DESCRIPTORS: Record<string, ChangeDescriptor> = {
-  '?': { code: '?', color: 'var(--status-info)', description: 'Untracked file' },
-  A: { code: 'A', color: 'var(--status-success)', description: 'New file' },
-  D: { code: 'D', color: 'var(--status-error)', description: 'Deleted file' },
-  R: { code: 'R', color: 'var(--status-info)', description: 'Renamed file' },
-  C: { code: 'C', color: 'var(--status-info)', description: 'Copied file' },
-  M: { code: 'M', color: 'var(--status-warning)', description: 'Modified file' },
-};
-
-const DEFAULT_DESCRIPTOR = CHANGE_DESCRIPTORS.M;
-
-function getChangeSymbol(file: GitStatus['files'][number]): string {
-  const indexCode = file.index?.trim();
-  const workingCode = file.working_dir?.trim();
-
-  if (indexCode && indexCode !== '?') return indexCode.charAt(0);
-  if (workingCode) return workingCode.charAt(0);
-
-  return indexCode?.charAt(0) || workingCode?.charAt(0) || 'M';
-}
-
-function describeChange(file: GitStatus['files'][number]): ChangeDescriptor {
-  const symbol = getChangeSymbol(file);
-  return CHANGE_DESCRIPTORS[symbol] ?? DEFAULT_DESCRIPTOR;
-}
+import { describeChange } from './changeStatus';
 
 interface ChangeRowProps {
   file: GitStatus['files'][number];
@@ -50,6 +20,8 @@ interface ChangeRowProps {
   indentPx?: number;
   /** Place the stage/unstage action at the row start (flat view) instead of the end (tree view). */
   actionAtStart?: boolean;
+  /** Tree view: the directory rows above already say where the file lives. */
+  nameOnly?: boolean;
   showRevert?: boolean;
 }
 
@@ -65,11 +37,12 @@ export const ChangeRow = React.memo<ChangeRowProps>(function ChangeRow({
   rowPaddingClassName,
   indentPx = 0,
   actionAtStart = false,
+  nameOnly = false,
   showRevert = true,
 }) {
   const descriptor = useMemo(() => describeChange(file), [file]);
   const { t } = useI18n();
-  const indicatorLabel = descriptor.description;
+  const indicatorLabel = t(descriptor.descriptionKey);
   const insertions = stats?.insertions ?? 0;
   const deletions = stats?.deletions ?? 0;
 
@@ -116,6 +89,35 @@ export const ChangeRow = React.memo<ChangeRowProps>(function ChangeRow({
     </button>
   );
 
+  const statsLabel = (
+    <span className="shrink-0 typography-micro">
+      <span style={{ color: 'var(--status-success)' }}>+{insertions}</span>
+      <span className="text-muted-foreground mx-0.5">/</span>
+      <span style={{ color: 'var(--status-error)' }}>-{deletions}</span>
+    </span>
+  );
+
+  const revertButton = showRevert ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onClick={handleRevertClick}
+          disabled={isReverting}
+          className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          aria-label={t('gitView.changes.revertFileAria', { path: file.path })}
+        >
+          {isReverting ? (
+            <Icon name="loader-4" className="size-3.5 animate-spin" />
+          ) : (
+            <Icon name="arrow-go-back" className="size-3.5" />
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent sideOffset={8}>{t('gitView.changes.revertFileTooltip')}</TooltipContent>
+    </Tooltip>
+  ) : null;
+
   return (
     <div
       className={`group flex items-center gap-2 py-1.5 cursor-pointer ${rowPaddingClassName ?? 'px-3'}`}
@@ -137,14 +139,14 @@ export const ChangeRow = React.memo<ChangeRowProps>(function ChangeRow({
         <FileTypeIcon filePath={file.path} className="h-3.5 w-3.5 shrink-0" />
         {(() => {
           const lastSlash = file.path.lastIndexOf('/');
-          if (lastSlash === -1) {
+          if (lastSlash === -1 || nameOnly) {
             return (
               <span
                 className="flex-1 min-w-0 truncate typography-ui-label text-foreground"
                 style={{ direction: 'rtl', textAlign: 'left', unicodeBidi: 'plaintext' }}
                 title={file.path}
               >
-                {file.path}
+                {file.path.slice(lastSlash + 1)}
               </span>
             );
           }
@@ -162,32 +164,35 @@ export const ChangeRow = React.memo<ChangeRowProps>(function ChangeRow({
             </span>
           );
         })()}
-        <span className="shrink-0 typography-micro">
-          <span style={{ color: 'var(--status-success)' }}>+{insertions}</span>
-          <span className="text-muted-foreground mx-0.5">/</span>
-          <span style={{ color: 'var(--status-error)' }}>-{deletions}</span>
-        </span>
-        {showRevert ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={handleRevertClick}
-                disabled={isReverting}
-                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                aria-label={t('gitView.changes.revertFileAria', { path: file.path })}
-              >
-                {isReverting ? (
-                  <Icon name="loader-4" className="size-3.5 animate-spin" />
-                ) : (
-                  <Icon name="arrow-go-back" className="size-3.5" />
-                )}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent sideOffset={8}>{t('gitView.changes.revertFileTooltip')}</TooltipContent>
-          </Tooltip>
-        ) : null}
-        {actionAtStart ? null : actionButton}
+        {actionAtStart ? (
+          <>
+            {statsLabel}
+            {revertButton}
+          </>
+        ) : (
+          // Tree view: on hover the actions take the place of the stats, so
+          // nothing in the row moves. Narrow (touch) layouts have no hover and
+          // show both side by side.
+          <span className="flex shrink-0 items-center justify-items-end gap-2 md:grid">
+            <span
+              className={cn(
+                'md:col-start-1 md:row-start-1',
+                isReverting ? 'md:invisible' : 'md:group-hover:invisible md:group-focus-within:invisible'
+              )}
+            >
+              {statsLabel}
+            </span>
+            <span
+              className={cn(
+                'flex items-center gap-2 md:col-start-1 md:row-start-1',
+                !isReverting && 'md:invisible md:group-hover:visible md:group-focus-within:visible'
+              )}
+            >
+              {revertButton}
+              {actionButton}
+            </span>
+          </span>
+        )}
     </div>
   );
 });

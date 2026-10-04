@@ -1,6 +1,7 @@
 import { ensureChatsRootDirectory } from '@/lib/chatDirectories';
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import type { OpencodeClient, Session } from "@opencode-ai/sdk/v2"
+import type { Session } from "@/lib/opencode/model"
+import type { SessionPage } from "@/lib/opencode/client"
 
 import { opencodeClient } from "@/lib/opencode/client"
 import { useGlobalSessionsStore } from "./useGlobalSessionsStore"
@@ -23,37 +24,35 @@ const deferred = <T>(): Deferred<T> => {
 
 let listRequest: Deferred<Session[]>
 
-// The store issues one inclusive (`archived: true`) paginated request per
-// load/refresh scope and splits active/archived client-side, so restored
-// sessions (`time.archived` falsy-but-present) stay visible in the active
-// list. The mock serves that single request.
-const sdk = {
-  experimental: {
-    session: {
-      list: async () => ({
-        data: await listRequest.promise,
-        response: { headers: new Headers() },
-      }),
-    },
-  },
-} as unknown as OpencodeClient
-const originalGetSdkClient = opencodeClient.getSdkClient
+// The store issues one paginated request per load/refresh scope and splits
+// active/archived client-side, so restored sessions (`time.archived`
+// falsy-but-present) stay visible in the active list. The mock serves that
+// single request.
+const listSessionsPage = async (): Promise<SessionPage> => ({
+  sessions: await listRequest.promise,
+  cursor: {},
+})
+const originalListSessionsPage = opencodeClient.listSessionsPage
 
 const session = (id: string, title = id, archived?: number): Session => ({
   id,
+  projectID: 'project',
+  directory: '',
+  cost: 0,
+  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
   title,
   time: { created: 1, updated: 1, ...(archived !== undefined ? { archived } : {}) },
-} as Session)
+})
 
 describe("global session mutation reconciliation", () => {
   beforeEach(() => {
     listRequest = deferred<Session[]>()
-    opencodeClient.getSdkClient = () => sdk
+    opencodeClient.listSessionsPage = listSessionsPage
     useGlobalSessionsStore.getState().resetForRuntimeSwitch()
   })
 
   afterEach(() => {
-    opencodeClient.getSdkClient = originalGetSdkClient
+    opencodeClient.listSessionsPage = originalListSessionsPage
   })
 
   test("keeps a session created after a full load starts", async () => {
@@ -166,19 +165,12 @@ describe("paginated global session load", () => {
     time: { created: 1, updated: 1000 - index },
   }) as Session)
 
-  const pagedSdk = {
-    experimental: {
-      session: {
-        list: async (options: { cursor?: number }) => {
-          listCalls += 1
-          return {
-            data: options.cursor === undefined ? firstPage : await secondPage.promise,
-            response: { headers: new Headers() },
-          }
-        },
-      },
-    },
-  } as unknown as OpencodeClient
+  // Two pages: a full first page that names a cursor, then a short last page.
+  const pagedListSessionsPage = async (options?: { cursor?: string }): Promise<SessionPage> => {
+    listCalls += 1
+    if (options?.cursor === undefined) return { sessions: firstPage, cursor: { next: "page-2" } }
+    return { sessions: await secondPage.promise, cursor: {} }
+  }
 
   const until = async (predicate: () => boolean): Promise<void> => {
     for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -191,12 +183,12 @@ describe("paginated global session load", () => {
   beforeEach(() => {
     secondPage = deferred<Session[]>()
     listCalls = 0
-    opencodeClient.getSdkClient = () => pagedSdk
+    opencodeClient.listSessionsPage = pagedListSessionsPage
     useGlobalSessionsStore.getState().resetForRuntimeSwitch()
   })
 
   afterEach(() => {
-    opencodeClient.getSdkClient = originalGetSdkClient
+    opencodeClient.listSessionsPage = originalListSessionsPage
   })
 
   test("shows the first page before pagination finishes", async () => {
@@ -257,6 +249,7 @@ describe("paginated global session load", () => {
     const state = useGlobalSessionsStore.getState()
     expect(state.activeSessions).toHaveLength(PAGE_SIZE)
     expect(state.status).toBe("error")
+    expect(state.hasLoaded).toBe(false)
   })
 
   test("drops the pages when the runtime switches mid-load", async () => {

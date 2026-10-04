@@ -1,5 +1,5 @@
 import React from 'react';
-import type { Session } from '@opencode-ai/sdk/v2';
+import type { Session } from '@/lib/opencode/model';
 import { toast } from '@/components/ui';
 import { copyTextToClipboard } from '@/lib/clipboard';
 import { useI18n } from '@/lib/i18n';
@@ -39,8 +39,6 @@ type Args = {
   setEditTitle: (value: string) => void;
   editingId: string | null;
   editTitle: string;
-  copiedSessionId: string | null;
-  setCopiedSessionId: (sessionId: string | null) => void;
 };
 
 export const useSessionActions = (args: Args) => {
@@ -56,8 +54,6 @@ export const useSessionActions = (args: Args) => {
   const setSessionSwitcherOpen = useUIStore((state) => state.setSessionSwitcherOpen);
   const setCurrentSession = useSessionUIStore((state) => state.setCurrentSession);
   const updateSessionTitle = useSessionUIStore((state) => state.updateSessionTitle);
-  const shareSession = useSessionUIStore((state) => state.shareSession);
-  const unshareSession = useSessionUIStore((state) => state.unshareSession);
   const deleteSession = useSessionUIStore((state) => state.deleteSession);
   const deleteSessions = useSessionUIStore((state) => state.deleteSessions);
   const archiveSession = useSessionUIStore((state) => state.archiveSession);
@@ -77,7 +73,6 @@ export const useSessionActions = (args: Args) => {
     editingSessionId,
     editingOccurrenceKey,
     setEditTitle,
-    setCopiedSessionId,
   } = args;
 
   React.useEffect(() => {
@@ -147,42 +142,6 @@ export const useSessionActions = (args: Args) => {
     setEditTitle('');
   }, [setEditTitle, setEditingId, setEditingRowKey]);
 
-  const copyShareUrl = React.useCallback(async (url: string, sessionId: string): Promise<boolean> => {
-    try {
-      const result = await copyTextToClipboard(url);
-      if (!result.ok) return false;
-      setCopiedSessionId(sessionId);
-      if (copyTimeout.current) clearTimeout(copyTimeout.current);
-      copyTimeout.current = window.setTimeout(() => {
-        setCopiedSessionId(null);
-        copyTimeout.current = null;
-      }, 2000);
-      return true;
-    } catch {
-      return false;
-    }
-  }, [setCopiedSessionId]);
-
-  const handleShareSession = React.useCallback(async (session: Session) => {
-    const result = await shareSession(session.id);
-    if (!result?.share?.url) {
-      toast.error(t('sessions.sidebar.session.share.error'));
-      return;
-    }
-    const copied = await copyShareUrl(result.share.url, session.id);
-    toast[copied ? 'success' : 'warning'](t('sessions.sidebar.session.share.successTitle'), {
-      description: t(copied
-        ? 'sessions.sidebar.session.share.successDescription'
-        : 'sessions.sidebar.session.share.copyUrlError'),
-    });
-  }, [copyShareUrl, shareSession, t]);
-
-  const handleCopyShareUrl = React.useCallback((url: string, sessionId: string) => {
-    void copyShareUrl(url, sessionId).then((copied) => {
-      if (!copied) toast.error(t('sessions.sidebar.session.share.copyUrlError'));
-    });
-  }, [copyShareUrl, t]);
-
   const handleCopySessionId = React.useCallback((sessionId: string) => {
     void copyTextToClipboard(sessionId)
       .then((result) => {
@@ -194,15 +153,6 @@ export const useSessionActions = (args: Args) => {
       })
       .catch(() => toast.error(t('sessions.sidebar.session.copyId.error')));
   }, [t]);
-
-  const handleUnshareSession = React.useCallback(async (sessionId: string) => {
-    const result = await unshareSession(sessionId);
-    if (result) {
-      toast.success(t('sessions.sidebar.session.unshare.success'));
-    } else {
-      toast.error(t('sessions.sidebar.session.unshare.error'));
-    }
-  }, [t, unshareSession]);
 
   const executeDeleteSession = React.useCallback(
     async (
@@ -270,14 +220,11 @@ export const useSessionActions = (args: Args) => {
     handleSessionDoubleClick,
     handleSaveEdit,
     handleCancelEdit,
-    handleShareSession,
-    handleCopyShareUrl,
     handleCopySessionId,
-    handleUnshareSession,
     handleDeleteSession,
     handleRestoreSession,
     confirmDeleteSession,
-  }), [handleCancelEdit, handleCopySessionId, handleCopyShareUrl, handleDeleteSession,
-    handleRestoreSession, handleSaveEdit, handleSessionDoubleClick, handleSessionSelect, handleShareSession,
-    handleUnshareSession, confirmDeleteSession]);
+  }), [handleCancelEdit, handleCopySessionId, handleDeleteSession,
+    handleRestoreSession, handleSaveEdit, handleSessionDoubleClick, handleSessionSelect,
+    confirmDeleteSession]);
 };

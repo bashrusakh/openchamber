@@ -1,6 +1,7 @@
 import React from 'react';
 import { ThemeImportButton } from './ThemeImportButton';
-import { ThemeSelectItem } from './ThemeSelectItem';
+import { ThemePicker } from './ThemePicker';
+import { MessageSearchSettings } from './MessageSearchSettings';
 
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import type { ThemeMode } from '@/types/theme';
@@ -33,6 +34,8 @@ import { loadDesktopSettings, updateDesktopSettings } from '@/lib/persistence';
 import { CODE_FONT_OPTIONS, DEFAULT_MONO_FONT, DEFAULT_UI_FONT, UI_FONT_OPTIONS, type MonoFontOption, type UiFontOption } from '@/lib/fontOptions';
 import { useI18n, type Locale } from '@/lib/i18n';
 import { useConfigStore } from '@/stores/useConfigStore';
+import { useEnterpriseMode } from '@/stores/useEnterprisePolicyStore';
+import { useFontPreferences } from '@/hooks/useFontPreferences';
 import { normalizeMobileKeyboardMode, supportsMobileKeyboardResizeContent, type MobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 import {
     setDirectoryShowHidden,
@@ -59,6 +62,7 @@ import {
     SETTINGS_NUMBER_INPUT_CLASS,
     SETTINGS_FIELDS_STACK_CLASS,
     SETTINGS_OPTION_STACK_CLASS,
+    SETTINGS_HELPER_CLASS,
 } from '@/components/sections/shared/SettingsSection';
 import { SettingsInfoHint } from '@/components/sections/shared/SettingsInfoHint';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
@@ -73,6 +77,7 @@ import { isTerminalShell } from '@/lib/terminalShell';
 import { subscribeRuntimeEndpointChanged } from '@/lib/runtime-switch';
 import { formatShortcutForDisplay } from '@/lib/shortcuts';
 import { useInputHistoryStore } from '@/stores/useInputHistoryStore';
+import { SessionGoalCheckerField, SessionGoalMaxTurnsField } from './SessionGoalCheckerField';
 
 interface Option<T extends string> {
     id: T;
@@ -286,6 +291,10 @@ const LARGE_TEXT_PASTE_BEHAVIOR_OPTIONS: Option<LargeTextPasteBehavior>[] = [
         id: 'inline',
         labelKey: 'settings.openchamber.visual.option.largeTextPaste.inline.label',
     },
+    {
+        id: 'inline-double-paste',
+        labelKey: 'settings.openchamber.visual.option.largeTextPaste.inlineDoublePaste.label',
+    },
 ];
 
 const INPUT_HISTORY_SCOPE_OPTIONS: Option<InputHistoryScope>[] = [
@@ -303,7 +312,7 @@ const normalizeUserMessageRenderingMode = (mode: unknown): 'markdown' | 'plain' 
     return mode === 'markdown' ? 'markdown' : 'plain';
 };
 
-type VisibleSetting = 'sessionAssist' | 'sessionGoal' | 'theme' | 'windowControlsPosition' | 'pwaInstallName' | 'pwaOrientation' | 'mobileKeyboardMode' | 'timeFormat' | 'weekStart' | 'fontSize' | 'terminalFontSize' | 'terminalShell' | 'terminalLoginShell' | 'editorFontSize' | 'spacing' | 'scrollbars' | 'inputBarOffset' | 'mermaidRendering' | 'userMessageRendering' | 'chatRenderMode' | 'messageTransport' | 'activityRenderMode' | 'collapsibleUserMessages' | 'stickyUserHeader' | 'promptNavigatorEnabled' | 'wideChatLayout' | 'codeBlockLineWrap' | 'splitAssistantMessageActions' | 'subagentReadOnlyBanner' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'fileViewerPreview' | 'reasoning' | 'showToolFileIcons' | 'showTurnChangedFiles' | 'expandedTools' | 'followUpBehavior' | 'inputHistoryScope' | 'inputHistoryLimit' | 'terminalQuickKeys' | 'fileEditorKeymap' | 'persistDraft' | 'inputSpellcheck' | 'largeTextPaste' | 'enterToSend' | 'reportUsage' | 'autoSaveEnabled' | 'sessionTabs' | 'animatedActivityIndicators';
+type VisibleSetting = 'sessionAssist' | 'sessionGoal' | 'theme' | 'windowControlsPosition' | 'pwaInstallName' | 'pwaOrientation' | 'mobileKeyboardMode' | 'timeFormat' | 'weekStart' | 'fontSize' | 'terminalFontSize' | 'terminalShell' | 'terminalLoginShell' | 'editorFontSize' | 'spacing' | 'scrollbars' | 'inputBarOffset' | 'mermaidRendering' | 'userMessageRendering' | 'chatRenderMode' | 'messageTransport' | 'activityRenderMode' | 'collapsibleUserMessages' | 'stickyUserHeader' | 'promptNavigatorEnabled' | 'wideChatLayout' | 'codeBlockLineWrap' | 'splitAssistantMessageActions' | 'subagentReadOnlyBanner' | 'diffLayout' | 'mobileStatusBar' | 'dotfiles' | 'fileViewerPreview' | 'reasoning' | 'showToolFileIcons' | 'showTurnChangedFiles' | 'expandedTools' | 'followUpBehavior' | 'inputHistoryScope' | 'inputHistoryLimit' | 'messageSearch' | 'terminalQuickKeys' | 'fileEditorKeymap' | 'persistDraft' | 'inputSpellcheck' | 'largeTextPaste' | 'enterToSend' | 'reportUsage' | 'autoSaveEnabled' | 'sessionTabs' | 'animatedActivityIndicators';
 
 const WINDOW_CONTROLS_POSITION_OPTIONS: Array<{ id: DesktopWindowControlsPosition; labelKey: string }> = [
     { id: 'left', labelKey: 'settings.openchamber.desktopNetwork.option.windowControlsLeft' },
@@ -376,10 +385,12 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
     const setTerminalLoginShells = useUIStore(state => state.setTerminalLoginShells);
     const editorFontSize = useUIStore(state => state.editorFontSize);
     const setEditorFontSize = useUIStore(state => state.setEditorFontSize);
-    const uiFont = useUIStore(state => state.uiFont);
+    // The fonts in effect: enterprise mode shows the system font where the
+    // stored choice would load from a CDN (useFontPreferences).
+    const { uiFont, monoFont } = useFontPreferences();
     const setUiFont = useUIStore(state => state.setUiFont);
-    const monoFont = useUIStore(state => state.monoFont);
     const setMonoFont = useUIStore(state => state.setMonoFont);
+    const webFontsBlocked = useEnterpriseMode();
     const padding = useUIStore(state => state.padding);
     const setPadding = useUIStore(state => state.setPadding);
     const inputBarOffset = useUIStore(state => state.inputBarOffset);
@@ -677,6 +688,16 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
         return themeName.endsWith(suffix) ? themeName.slice(0, -suffix.length) : themeName;
     }, []);
 
+    const lightThemeOptions = React.useMemo(
+        () => lightThemes.map((theme) => ({ id: theme.metadata.id, label: formatThemeLabel(theme.metadata.name, 'light') })),
+        [lightThemes, formatThemeLabel],
+    );
+
+    const darkThemeOptions = React.useMemo(
+        () => darkThemes.map((theme) => ({ id: theme.metadata.id, label: formatThemeLabel(theme.metadata.name, 'dark') })),
+        [darkThemes, formatThemeLabel],
+    );
+
     const shouldShow = (setting: VisibleSetting): boolean => {
         if (setting === 'enterToSend' && isMobile) return false;
         if (!visibleSettings) return true;
@@ -700,7 +721,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
         || shouldShow('activityRenderMode')
         || shouldShow('collapsibleUserMessages')
         || shouldShow('stickyUserHeader')
-        || (shouldShow('promptNavigatorEnabled') && !isVSCode)
+        || shouldShow('promptNavigatorEnabled')
         || shouldShow('wideChatLayout')
         || shouldShow('codeBlockLineWrap')
         || shouldShow('splitAssistantMessageActions')
@@ -732,7 +753,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
         || shouldShow('subagentReadOnlyBanner')
         || shouldShow('collapsibleUserMessages')
         || shouldShow('stickyUserHeader')
-        || (shouldShow('promptNavigatorEnabled') && !isVSCode)
+        || shouldShow('promptNavigatorEnabled')
         || shouldShow('wideChatLayout')
         || shouldShow('codeBlockLineWrap')
         || shouldShow('splitAssistantMessageActions')
@@ -943,39 +964,25 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                             label={t('settings.openchamber.visual.field.lightTheme')}
                                             settingsItem="appearance.light-theme"
                                         >
-                                            <Select value={selectedLightTheme?.metadata.id ?? ''} onValueChange={setLightThemePreference}>
-                                                <SelectTrigger aria-label={t('settings.openchamber.visual.field.selectLightThemeAria')} size={SETTINGS_SELECT_SIZE} className={SETTINGS_SELECT_TRIGGER_CLASS}>
-                                                    <SelectValue placeholder={t('settings.openchamber.visual.field.selectThemePlaceholder')}>
-                                                        {selectedLightTheme
-                                                            ? formatThemeLabel(selectedLightTheme.metadata.name, 'light')
-                                                            : undefined}
-                                                    </SelectValue>
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    {lightThemes.map((theme) => (
-                                                        <ThemeSelectItem key={theme.metadata.id} id={theme.metadata.id} label={formatThemeLabel(theme.metadata.name, 'light')} />
-                                                    ))}
-                                                </SelectContent>
-                                            </Select>
+                                            <ThemePicker
+                                                options={lightThemeOptions}
+                                                value={selectedLightTheme?.metadata.id ?? ''}
+                                                onValueChange={setLightThemePreference}
+                                                placeholder={t('settings.openchamber.visual.field.selectThemePlaceholder')}
+                                                ariaLabel={t('settings.openchamber.visual.field.selectLightThemeAria')}
+                                            />
                                         </SettingsStackedField>
                                         <SettingsStackedField
                                             label={t('settings.openchamber.visual.field.darkTheme')}
                                             settingsItem="appearance.dark-theme"
                                         >
-                                            <Select value={selectedDarkTheme?.metadata.id ?? ''} onValueChange={setDarkThemePreference}>
-                                                <SelectTrigger aria-label={t('settings.openchamber.visual.field.selectDarkThemeAria')} size={SETTINGS_SELECT_SIZE} className={SETTINGS_SELECT_TRIGGER_CLASS}>
-                                                    <SelectValue placeholder={t('settings.openchamber.visual.field.selectThemePlaceholder')}>
-                                                        {selectedDarkTheme
-                                                            ? formatThemeLabel(selectedDarkTheme.metadata.name, 'dark')
-                                                            : undefined}
-                                                    </SelectValue>
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    {darkThemes.map((theme) => (
-                                                        <ThemeSelectItem key={theme.metadata.id} id={theme.metadata.id} label={formatThemeLabel(theme.metadata.name, 'dark')} />
-                                                    ))}
-                                                </SelectContent>
-                                            </Select>
+                                            <ThemePicker
+                                                options={darkThemeOptions}
+                                                value={selectedDarkTheme?.metadata.id ?? ''}
+                                                onValueChange={setDarkThemePreference}
+                                                placeholder={t('settings.openchamber.visual.field.selectThemePlaceholder')}
+                                                ariaLabel={t('settings.openchamber.visual.field.selectDarkThemeAria')}
+                                            />
                                         </SettingsStackedField>
 
                                         <div className="flex items-center gap-2 pt-1">
@@ -1286,7 +1293,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                             </SelectTrigger>
                                             <SelectContent>
                                                 {UI_FONT_OPTIONS.map((option) => (
-                                                    <SelectItem key={option.id} value={option.id}>
+                                                    <SelectItem key={option.id} value={option.id} disabled={webFontsBlocked && Boolean(option.source)}>
                                                         <span style={{ fontFamily: option.stack }}>{option.label}</span>
                                                     </SelectItem>
                                                 ))}
@@ -1316,7 +1323,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                             </SelectTrigger>
                                             <SelectContent>
                                                 {CODE_FONT_OPTIONS.map((option) => (
-                                                    <SelectItem key={option.id} value={option.id}>
+                                                    <SelectItem key={option.id} value={option.id} disabled={webFontsBlocked && Boolean(option.source)}>
                                                         <span style={{ fontFamily: option.stack }}>{option.label}</span>
                                                     </SelectItem>
                                                 ))}
@@ -1336,6 +1343,9 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                     </SettingsStackedField>
                                 )}
                             </SettingsTwoColumn>
+                        ) : null}
+                        {webFontsBlocked && ((shouldShow('fontSize') && !isMobile) || shouldShow('terminalFontSize')) ? (
+                            <p className={SETTINGS_HELPER_CLASS}>{t('settings.openchamber.visual.field.webFontsEnterprise')}</p>
                         ) : null}
 
                         {(shouldShow('fontSize') && !isMobile) || shouldShow('terminalFontSize') || shouldShow('editorFontSize') ? (
@@ -1872,6 +1882,8 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                             </SettingsSection>
                         )}
 
+                        {shouldShow('messageSearch') && !isVSCode && <MessageSearchSettings />}
+
                         {showBehaviorFeatureCheckboxes && (
                             <>
                                 {shouldShow('expandedTools') && (
@@ -1949,6 +1961,8 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                             ariaLabel={t('settings.openchamber.visual.field.sessionGoalAria')}
                                             settingsItem="chat.session-goal"
                                         />
+                                        <SessionGoalCheckerField disabled={!sessionGoalEnabled} />
+                                        <SessionGoalMaxTurnsField disabled={!sessionGoalEnabled} />
                                         <div data-settings-item="chat.session-goal-budget" className="flex items-center gap-2">
                                             <SettingsCheckboxRow
                                                 checked={sessionGoalDefaultBudgetEnabled}
@@ -2011,7 +2025,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                     />
                                 </SettingsSection>
 
-                                {(shouldShow('collapsibleUserMessages') || shouldShow('stickyUserHeader') || (shouldShow('promptNavigatorEnabled') && !isVSCode) || shouldShow('wideChatLayout') || shouldShow('splitAssistantMessageActions') || shouldShow('codeBlockLineWrap')) && (
+                                {(shouldShow('collapsibleUserMessages') || shouldShow('stickyUserHeader') || shouldShow('promptNavigatorEnabled') || shouldShow('wideChatLayout') || shouldShow('splitAssistantMessageActions') || shouldShow('codeBlockLineWrap')) && (
                                 <SettingsSection
                                     title={t('settings.openchamber.visual.section.messageAppearance')}
                                     settingsItem="chat.message-appearance"
@@ -2037,7 +2051,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                     />
                                 )}
 
-                                {shouldShow('promptNavigatorEnabled') && !isVSCode && (
+                                {shouldShow('promptNavigatorEnabled') && (
                                     <SettingsCheckboxRow
                                         checked={promptNavigatorEnabled}
                                         onChange={handlePromptNavigatorEnabledChange}
@@ -2160,7 +2174,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                 {shouldShow('largeTextPaste') && (
                                     <SettingsControlGroup
                                         title={t('settings.openchamber.visual.field.largeTextPaste')}
-                                        description={t('settings.openchamber.visual.field.largeTextPasteHint')}
+                                        info={t('settings.openchamber.visual.field.largeTextPasteHint')}
                                         settingsItem="chat.large-text-paste"
                                     >
                                         <SettingsRadioGroup aria-label={t('settings.openchamber.visual.field.largeTextPasteAria')}>
@@ -2179,7 +2193,7 @@ export const OpenChamberVisualSettings: React.FC<OpenChamberVisualSettingsProps>
                                 {shouldShow('enterToSend') && (
                                     <SettingsControlGroup
                                         title={t('settings.openchamber.visual.field.enterToSend')}
-                                        description={t('settings.openchamber.visual.field.enterToSendHint')}
+                                        info={t('settings.openchamber.visual.field.enterToSendHint')}
                                         settingsItem="chat.enter-to-send"
                                     >
                                         <SettingsRadioGroup aria-label={t('settings.openchamber.visual.field.enterToSend')}>

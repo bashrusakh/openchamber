@@ -3,15 +3,23 @@ import { Window } from 'happy-dom';
 import { describe, expect, test } from 'bun:test';
 import { createRoot } from 'react-dom/client';
 
-import { createOpencodeClient } from '@opencode-ai/sdk/v2';
+import { OpenCode } from '@opencode/client';
 import { SyncProvider } from '@/sync/sync-context';
 import { ThemeSystemProvider } from '@/contexts/ThemeSystemContext';
 import { I18nProvider } from '@/lib/i18n';
+import { useConfigStore } from '@/stores/useConfigStore';
 
 import { MobilePillComposer } from './MobilePillComposer';
 
-const renderPill = async (options: { hasContent: boolean; newSessionDraftOpen: boolean; canAbort?: boolean }) => {
+const renderPill = async (options: { hasContent: boolean; newSessionDraftOpen: boolean; canAbort?: boolean; dictationEnabled?: boolean }) => {
     const win = new Window({ url: 'http://localhost' });
+    Object.defineProperty(win.navigator, 'mediaDevices', {
+        value: { getUserMedia: () => Promise.resolve() },
+        configurable: true,
+    });
+    // @ts-expect-error test mock
+    win.AudioContext = class {} as unknown as typeof AudioContext;
+    useConfigStore.setState({ dictationEnabled: options.dictationEnabled ?? true });
     const values = { window: win, document: win.document, navigator: win.navigator, localStorage: win.localStorage, IS_REACT_ACT_ENVIRONMENT: true };
     const previous = new Map(Object.keys(values).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
     for (const [key, value] of Object.entries(values)) Object.defineProperty(globalThis, key, { configurable: true, value });
@@ -21,7 +29,7 @@ const renderPill = async (options: { hasContent: boolean; newSessionDraftOpen: b
     let queued = 0;
     try {
         await act(async () => root.render(
-        <SyncProvider directory="/fixture" sdk={createOpencodeClient({ baseUrl: "http://opencode.test", fetch: async () => new Response("[]", { headers: { "content-type": "application/json" } }) })}>
+        <SyncProvider directory="/fixture" sdk={OpenCode.make({ baseUrl: "http://opencode.test", fetch: async () => new Response("[]", { headers: { "content-type": "application/json" } }) })}>
         <ThemeSystemProvider>
         <I18nProvider>
             <MobilePillComposer
@@ -40,8 +48,7 @@ const renderPill = async (options: { hasContent: boolean; newSessionDraftOpen: b
                 onPrimaryAction={() => { primaryActions += 1; }}
                 onQueueMessage={() => { queued += 1; }}
                 onPickLocalFiles={() => {}}
-                onOpenIssuePicker={() => {}}
-                onOpenPrPicker={() => {}}
+                onOpenGitHubPicker={() => {}}
                 onOpenAttachSheet={() => {}}
                 onStartDictation={() => {}}
                 onAbort={() => {}}
@@ -122,5 +129,17 @@ describe('MobilePillComposer', () => {
         expect(markup).toContain('aria-label="Stop generating"');
         expect(markup).toContain('w-0 opacity-0 overflow-hidden');
         expect(markup).not.toContain('aria-label="Send message"');
+    });
+
+    test('renders the mic button when dictation is enabled and supported', async () => {
+        const markup = await renderPill({ hasContent: false, newSessionDraftOpen: false, dictationEnabled: true });
+
+        expect(markup).toContain('aria-label="Start dictation"');
+    });
+
+    test('hides the mic button when dictation is disabled', async () => {
+        const markup = await renderPill({ hasContent: false, newSessionDraftOpen: false, dictationEnabled: false });
+
+        expect(markup).not.toContain('aria-label="Start dictation"');
     });
 });

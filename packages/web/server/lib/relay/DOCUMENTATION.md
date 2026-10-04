@@ -19,7 +19,7 @@ Traffic is modeled as three stacked layers. The relay understands only Layer 1; 
 ## Entrypoints and structure
 
 Host side (`packages/web/server/lib/relay/`):
-- `service.js` — thin entrypoint: relay config (enabled flag + relay URL), the management routes (`GET/POST /api/openchamber/relay/{status,enable,disable}`), a `getPairingCandidate()` accessor (the relay transport candidate folded into pairing-v2 links when enabled, consumed by the pairing-session route in `core-routes.js`), and lifecycle wiring. Started from `packages/web/server/index.js` only when the user has explicitly enabled the relay. The relay endpoint defaults to the OpenChamber-hosted relay but can be pinned to a self-hosted relay via the `OPENCHAMBER_RELAY_URL` env var (must be `ws://`/`wss://`); when set it overrides the stored setting for the host connection, the pairing candidate, and status, so paired clients inherit the endpoint automatically.
+- `service.js` — thin entrypoint: relay config (enabled flag + relay URL), the management routes (`GET/POST /api/openchamber/relay/{status,enable,disable}`), a `getPairingCandidate()` accessor (the relay transport candidate folded into pairing-v2 links when enabled, consumed by the pairing-session route in `core-routes.js`), and lifecycle wiring. Started from `packages/web/server/index.js` only when the user has explicitly enabled the relay. The relay endpoint defaults to the OpenChamber-hosted relay but can be pinned to a self-hosted relay (`pinnedRelayUrl`: `relayUrl` in the machine policy file, else the `OPENCHAMBER_RELAY_URL` env var; see `../enterprise-mode.js`; must be `ws://`/`wss://`, an invalid value pins nothing); when set it overrides the stored setting for the host connection, the pairing candidate, and status, so paired clients inherit the endpoint automatically. In enterprise mode (`../enterprise-mode.js`) the relay runs only with that pin (`relayBlockedByEnterprise`): `start()` refuses otherwise (every path in passes through it), `enable` answers 403, `getPairingCandidate()` is null, `ensureEnabledForPairing()` throws (the pairing route drops the candidate and direct pairing still works), status carries `blockedByEnterprise`, and `resolvePairingTransports` in `index.js` reports `relayAvailable: false`.
 - `identity.js` — the host's stable identity: the long-lived signing keypair (shared with the push relay, defines the routing id) plus a long-lived encryption keypair (the E2EE trust anchor). Reused across restarts; never rotated implicitly.
 - `signing-key.js` — storage/derivation of the signing keypair and the routing id, shared with the notifications runtime.
 - `host-client.js` — the long-lived connection manager: one outbound control connection to the relay, a per-client data connection for each connected device, reconnect/backoff, and the E2EE responder handshake per connection.
@@ -157,10 +157,14 @@ The E2EE and framing logic exists twice: TypeScript in `packages/ui/src/lib/rela
 
 Client keepalive liveness comes from received frames only. Outbound HTTP retries
 cannot suppress a probe of a silent peer. Any valid inbound traffic, including a
-Pong, clears the probe deadline. Terminal relay close codes retain their error
-for the lifetime of that client: subsequent HTTP requests and WS opens fail
-immediately rather than waiting for a reconnect that will never be scheduled.
-Transient failures still use the existing reconnect/backoff path.
+Pong, clears the probe deadline. Terminal relay close codes (auth failed,
+duplicate client, limit exceeded) never schedule a timed reconnect: subsequent
+HTTP requests and WS opens fail immediately instead of waiting. Those codes do
+occur transiently in the field (a same-identity dial taking the leg, relay state
+left by a host restart), so the client keeps its wake listeners armed and the
+next `online` event or return to the foreground clears the error and makes one
+fresh attempt. There is still no background loop. Transient failures use the
+existing reconnect/backoff path.
 
 Relay mode plugs into the existing client transport layer rather than a parallel path: `runtime-switch` activates the tunnel singleton, `runtime-fetch` routes runtime requests through it, `runtime-url`/`runtime-socket` yield tunnel-backed URLs and sockets, and `runtime-auth` mints the URL-scoped token through the tunnel. Direct-URL connections and the Electron realtime-proxy path are unaffected.
 

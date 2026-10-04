@@ -1,5 +1,4 @@
-import type { SessionStatus } from '@opencode-ai/sdk/v2/client'
-import type { Session } from '@opencode-ai/sdk/v2'
+import type { Session, SessionStatus } from '@/lib/opencode/model'
 import type { State } from './types'
 import { countSyncPerformance } from './performance-diagnostics'
 
@@ -26,7 +25,6 @@ const getSessionSignature = (session: Session): string => {
     session.time?.archived ?? 0,
     directory,
     parentID,
-    session.share?.url ?? '',
   ].join('|')
 }
 
@@ -43,21 +41,12 @@ const getStatusPriority = (status: SessionStatus | undefined): number => {
   }
 }
 
-const getStatusMessage = (status: SessionStatus | undefined): string | null => {
-  const message = (status as { message?: unknown } | undefined)?.message
-  return typeof message === 'string' ? message : null
-}
-
-const getStatusNumberField = (status: SessionStatus | undefined, field: 'attempt' | 'next'): number | null => {
-  const value = (status as Record<string, unknown> | undefined)?.[field]
-  return typeof value === 'number' ? value : null
-}
-
+// Only the retry variant carries attempt/message/next, so equality compares
+// those fields when both sides are retries and the discriminator otherwise.
 const areStatusesEquivalent = (left: SessionStatus | undefined, right: SessionStatus | undefined): boolean => {
-  return left?.type === right?.type
-    && getStatusMessage(left) === getStatusMessage(right)
-    && getStatusNumberField(left, 'attempt') === getStatusNumberField(right, 'attempt')
-    && getStatusNumberField(left, 'next') === getStatusNumberField(right, 'next')
+  if (left?.type !== right?.type) return false
+  if (left?.type !== 'retry' || right?.type !== 'retry') return true
+  return left.attempt === right.attempt && left.message === right.message && left.next === right.next
 }
 
 type StatusCandidate = {
@@ -99,6 +88,10 @@ export const areSessionListsEquivalent = (left: Session[], right: Session[]): bo
   }
 
   for (let index = 0; index < left.length; index += 1) {
+    if (left[index].model?.id !== right[index].model?.id
+      || left[index].model?.providerID !== right[index].model?.providerID) {
+      return false
+    }
     if (getSessionSignature(left[index]) !== getSessionSignature(right[index])) {
       return false
     }

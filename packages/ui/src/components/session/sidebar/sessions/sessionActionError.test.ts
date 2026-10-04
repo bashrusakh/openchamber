@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { OpencodeRequestError } from '@/lib/opencode/upstreamError';
+import { OpencodeApiError } from '@/lib/opencode/client';
 import { describeSessionActionError } from './sessionActionError';
 
 const t = ((key: string, params?: Record<string, string | number>) => (
@@ -8,10 +8,9 @@ const t = ((key: string, params?: Record<string, string | number>) => (
 
 describe('describeSessionActionError', () => {
   test('quotes the OpenCode status, error class and log ref when the server sent one', () => {
-    const error = new OpencodeRequestError('session.update failed (500): ...', {
+    const error = new OpencodeApiError('session.update', 'Unexpected server error. Check server logs for details.', {
       status: 500,
-      name: 'UnknownError',
-      message: 'Unexpected server error. Check server logs for details.',
+      tag: 'UnknownError',
       ref: 'err_07817ddc',
     });
 
@@ -21,7 +20,7 @@ describe('describeSessionActionError', () => {
   });
 
   test('falls back to the upstream message without a ref, and to the plain error otherwise', () => {
-    const noRef = new OpencodeRequestError('session.update failed (404): ...', { status: 404, name: 'NotFoundError', message: 'Session not found' });
+    const noRef = new OpencodeApiError('session.update', 'Session not found', { status: 404, tag: 'SessionNotFoundError' });
     expect(describeSessionActionError(noRef, t)).toBe('sessions.sidebar.session.action.upstreamError status=404 message=Session not found');
     expect(describeSessionActionError(new Error('offline'), t)).toBe('offline');
   });

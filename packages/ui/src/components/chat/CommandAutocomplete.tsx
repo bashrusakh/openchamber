@@ -1,6 +1,7 @@
 import React from 'react';
 import { cn, fuzzyMatch } from '@/lib/utils';
 import { useSessionUIStore } from '@/sync/session-ui-store';
+import { useChatSessionSelection } from './chatColumnSession';
 import { selectCommandsForDirectory, useCommandsStore } from '@/stores/useCommandsStore';
 import { selectSkillsForDirectory, useSkillsStore } from '@/stores/useSkillsStore';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
@@ -35,7 +36,7 @@ export interface CommandInfo {
 // Every name the composer runs itself; an extension command with one of
 // these names is dropped before it reaches the list.
 const LOCAL_COMMAND_NAMES = [
-  'init', 'review', 'undo', 'redo', 'timeline', 'compact', 'btw', 'summary', 'workspace-review', 'handoff-review',
+  'init', 'review', 'undo', 'redo', 'timeline', 'compact', 'fork', 'btw', 'summary', 'workspace-review', 'handoff-review',
   'plan-feature', 'craft-goal', 'schedule-task', 'catch-up', 'debug', 'weigh', 'explore',
 ];
 
@@ -75,7 +76,7 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
   style,
 }, ref) => {
   const { t } = useI18n();
-  const currentSessionId = useSessionUIStore((state) => state.currentSessionId);
+  const currentSessionId = useChatSessionSelection().sessionId;
   const hasSession = Boolean(currentSessionId);
   const hasNewSessionDraft = useSessionUIStore((state) => Boolean(state.newSessionDraft?.open));
   const canStartSessionCommand = hasSession || hasNewSessionDraft;
@@ -180,6 +181,10 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
             : []
           ),
           ...(hasSession
+            ? [{ id: 'openchamber:fork', name: 'fork', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.forkDescription'), isOpenChamber: true }]
+            : []
+          ),
+          ...(hasSession
             ? [{ id: 'openchamber:summary', name: 'summary', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.summaryDescription'), isOpenChamber: true }]
             : []
           ),
@@ -263,6 +268,10 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
           { id: 'openchamber:compact', name: 'compact', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.compactDescription'), isBuiltIn: true },
           ...(hasSession
             ? [{ id: 'openchamber:btw', name: 'btw', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.btwDescription'), isOpenChamber: true }]
+            : []
+          ),
+          ...(hasSession
+            ? [{ id: 'openchamber:fork', name: 'fork', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.forkDescription'), isOpenChamber: true }]
             : []
           ),
           ...(hasSession

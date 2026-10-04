@@ -34,7 +34,7 @@ describe('readHostToolVersions', () => {
   });
 
   it('rejects a manifest whose OpenCode dependency is a range', () => {
-    const manifest = tarball('range.json', JSON.stringify({ version: '1.0.0', dependencies: { '@opencode-ai/sdk': '^1.18.0' } }));
+    const manifest = tarball('range.json', JSON.stringify({ version: '1.0.0', dependencies: { '@opencode/client': '^1.18.0' } }));
     expect(() => readHostToolVersions(pathToFileURL(manifest))).toThrow(expect.objectContaining({ code: 'invalid_tools_version' }));
   });
 
@@ -52,7 +52,7 @@ describe('createRegistryToolsSource', () => {
     expect(JSON.parse(source.packageJson)).toEqual({
       name: 'openchamber-space-tools',
       private: true,
-      dependencies: { '@openchamber/web': '1.24.2', 'opencode-ai': '1.18.31', '@opencode-ai/plugin': '1.18.31' },
+      dependencies: { '@openchamber/web': '1.24.2', '@opencode/cli': '1.18.31', '@opencode/plugin': '1.18.31' },
     });
   });
 
@@ -81,8 +81,8 @@ describe('createPackedToolsSource', () => {
       dependencies: {
         '@openchamber/web': 'file:/tmp/openchamber-fill/openchamber-web.tgz',
         '@openchamber/sdk': 'file:/tmp/openchamber-fill/openchamber-sdk.tgz',
-        'opencode-ai': '1.18.31',
-        '@opencode-ai/plugin': '1.18.31',
+        '@opencode/cli': '1.18.31',
+        '@opencode/plugin': '1.18.31',
       },
       overrides: { '@openchamber/sdk': '$@openchamber/sdk' },
     });

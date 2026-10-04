@@ -8,6 +8,33 @@ Server-owned scheduled task runtime and routes for OpenChamber-only automation.
 - Markdown loop discovery/parsing is owned by `packages/web/server/lib/scheduled-tasks/loops.js`.
 - Runtime orchestration and execution is owned by `packages/web/server/lib/scheduled-tasks/runtime.js`.
 - This module is OpenChamber feature logic; it is intentionally separate from OpenCode proxy/runtime internals.
+- The chats scope is owned by `packages/web/server/lib/scheduled-tasks/chats-scope.js`.
+
+## Chats scope
+
+Chats (sessions outside any project) can have scheduled tasks too. They are
+scheduled like one more project, with three differences:
+
+- **Identity.** The UI and the routes address the scope as `openchamber:chats`
+  (the UI's `CHAT_DRAFT_PROJECT_ID`). A colon is not a valid Windows file name,
+  so tasks are stored under the chats root's path id
+  (`createProjectIdFromPath(<chats root>)`, the same id agent memory uses for
+  chats). The service maps the public id to the storage id on the way in, and
+  `openchamber:scheduled-task-ran` events map it back on the way out.
+- **One new chat per run.** A project run works in the project path. A chats run
+  creates `<chats root>/<yyyy-mm-dd>/session-<uuid>`, the layout the UI uses for
+  a new chat, and starts the session there, so each run lands in the sidebar's
+  chats section as its own chat. If the session cannot be created, the empty
+  directory is removed. The run result carries the directory, so "Run now" can
+  open the new chat.
+- **No loop files.** The chats root is not a repository. User-scope loops
+  already run once per project, so the chats scope never discovers loops.
+- **Directory resolution.** `resolveProjectID({ directory })` maps any
+  directory inside the chats root to the chats scope, after checking registered
+  projects, so an agent working in a chat schedules into chats.
+
+The chats root is `OPENCHAMBER_CHATS_DIR` (default `<config root>/chats`). The
+VS Code extension has no chats, so its UI does not offer the scope.
 
 ## Cross-instance occurrence claiming
 
@@ -116,7 +143,7 @@ Field mapping (model: `packages/ui/src/lib/scheduledTasksApi.ts`):
 |---|---|
 | `name` | `name` (required, max 80 characters — longer names are rejected as malformed) |
 | `schedule` | `schedule.kind: "cron"` + `schedule.cron` (required, cron-only in the portable format) |
-| `enabled` | `enabled` (default `false` — a loop only runs when the file explicitly enables it; add `enabled: true` to activate) |
+| `enabled` | `enabled` (default `false` — a loop only runs when the file explicitly enables it; add `enabled: true` to activate). For a project-scope loop the file's word is not enough: it runs only once the user enabled it on this machine, see *Local approval* |
 | `model` | split on the first `/` into `execution.providerID` / `execution.modelID` (required) |
 | `agent` | `execution.agent` (optional) |
 | `timezone` | `schedule.timezone` (optional, IANA; defaults to the server zone) |
@@ -159,6 +186,14 @@ project write lock on every `syncProject` when the project path is known:
 - **Malformed files** (missing `name`/`schedule`/`model`/body, invalid cron,
   unreadable) are reported to the scheduler as `definition: null` entries and
   warned about; they never block valid loops in the same or other scopes.
+- **Local approval.** A project-scope loop arrives with the repository, so
+  `enabled: true` in its file is the author's suggestion. `reconcileLoopTasks`
+  keeps it disabled unless the per-machine project config holds an approval
+  (`loopApprovals`: file path -> `loopFingerprint`) matching the file's current
+  name, schedule and execution. Enabling a loop in the UI (the loop-file
+  endpoint) records that approval; disabling withdraws it. A pull that changes
+  what a loop runs or when changes its fingerprint, and the loop waits for a
+  new approval. User-scope loops (`~/.agents/loops`) need none.
 - **Loop-file mutations.** The loop file remains authoritative. The scheduled-
   tasks UI opens it in the built-in file editor, updates its `enabled`
   frontmatter through the loop-file endpoint, and deletes the file through the
@@ -188,3 +223,7 @@ project write lock on every `syncProject` when the project path is known:
   - `POST /api/projects/:projectId/scheduled-tasks/:taskId/run`
   - `GET /api/openchamber/scheduled-tasks/status`
   - `GET /api/openchamber/events`
+
+The shared `/api/openchamber/events` stream also carries web notifications.
+Its connection ownership and browser capability flag stay unchanged. Delivery
+and duplicate handling are documented in `../notifications/DOCUMENTATION.md`.

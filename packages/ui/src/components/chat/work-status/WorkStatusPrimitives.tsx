@@ -1,6 +1,7 @@
 import React from 'react';
 import { cn } from '@/lib/utils';
 import { Icon } from '@/components/icon/Icon';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useUIStore } from '@/stores/useUIStore';
 import type { IconName } from '@/components/icon/icons';
 
@@ -124,6 +125,7 @@ type RowProps = {
   /** Turns the row into a button; the caller decides what it opens. */
   onClick?: () => void;
   ariaLabel?: string;
+  tooltip?: React.ReactNode;
   className?: string;
 };
 
@@ -140,8 +142,10 @@ export const WorkStatusRow: React.FC<RowProps> = ({
   muted,
   onClick,
   ariaLabel,
+  tooltip,
   className,
 }) => {
+  const labelId = React.useId();
   const body = (
     <>
       {leading ?? (icon ? (
@@ -151,7 +155,7 @@ export const WorkStatusRow: React.FC<RowProps> = ({
           style={iconColor ? { color: iconColor } : undefined}
         />
       ) : null)}
-      <span className={cn('min-w-0 flex-1 truncate text-[13px]', muted && 'text-muted-foreground')}>
+      <span id={labelId} className={cn('min-w-0 flex-1 truncate text-[13px]', muted && 'text-muted-foreground')}>
         {label}
       </span>
       {value !== undefined && value !== null ? (
@@ -165,17 +169,34 @@ export const WorkStatusRow: React.FC<RowProps> = ({
     className,
   );
 
-  if (!onClick) return <div className={shared}>{body}</div>;
+  // A button cannot hold another one, and rows often carry their own (unpin,
+  // a row action). The row's button is stretched under the content instead:
+  // the whole row still answers a press, and controls inside it sit above.
+  const row = onClick ? (
+    <div className={cn(shared, 'relative transition-colors hover:text-foreground')}>
+      <button
+        type="button"
+        onClick={onClick}
+        // The label no longer sits inside the button, so it names it here.
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabel ? undefined : labelId}
+        className="absolute inset-0 rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--interactive-focus-ring)]"
+      />
+      <div className="pointer-events-none relative flex min-w-0 flex-1 items-center gap-2 [&_a]:pointer-events-auto [&_button]:pointer-events-auto">
+        {body}
+      </div>
+    </div>
+  ) : <div className={shared} tabIndex={tooltip ? 0 : undefined}>{body}</div>;
+
+  if (!tooltip) return row;
 
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={ariaLabel}
-      className={cn(shared, 'transition-colors hover:text-foreground')}
-    >
-      {body}
-    </button>
+    <Tooltip delayDuration={750}>
+      <TooltipTrigger asChild>{row}</TooltipTrigger>
+      <TooltipContent side="left" sideOffset={8} className="max-w-[min(320px,calc(100vw-24px))] whitespace-normal break-words text-left">
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
   );
 };
 

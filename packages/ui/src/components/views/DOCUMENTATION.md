@@ -32,7 +32,8 @@ while previewing, so same-length edits in the middle invalidate cached output.
 
 DiffView, mobile Changes and walkthrough share `PullRequestComparisonSelector`
 and the selection owned by `usePullRequestComparison`. PR mode reads GitHub's
-published patch through `/api/walkthrough/pr-diff`. It includes no local edits
+published patch through `/api/walkthrough/pr-diff`, always through the checkout's
+bound GitHub context; without one, PR mode is not offered and reads nothing. It includes no local edits
 or unpushed commits. `lib/diff/pullRequestDiff.ts` splits the response once;
 `useGitComparison` serves file patches from that same snapshot. Snapshot revisions
 invalidate the view's patch cache atomically, including edits with unchanged
@@ -40,12 +41,14 @@ file names and line counts. Opening a file adds no network request.
 
 PR comparisons retain completed snapshots across panel and mode switches.
 `pullRequestSnapshotCache.ts` belongs to the retained view and deduplicates
-in-flight reads. It keeps at most eight completed snapshots with a 32 MiB
+in-flight reads. The bound context is part of each snapshot's identity, so a
+rebind never serves a snapshot read under the previous binding. It keeps at most eight completed snapshots with a 32 MiB
 text target, allowing one oversized PR to remain complete. Eviction drops cache
 ownership only, never mounted content or pending requests.
 
-The HTTP Git adapter emits `gitPushEvents` only after a successful push, with
-the runtime captured at request start. Matching runtime/directory snapshots are
+`gitPushEvents` fires only after a confirmed push, with the runtime captured at
+request start. The HTTP Git adapter emits it, and so do the managed network
+operations the Git panel pushes through: publish, sync, and contributor pushes. Matching runtime/directory snapshots are
 invalidated synchronously. A visible PR comparison refreshes immediately; a
 hidden one waits until activation. Old pre-push reads cannot overwrite the new
 snapshot. Explicit Refresh always reads again. Terminal and external-client
@@ -54,13 +57,23 @@ Walkthrough also retains its last PR read across visibility changes and reloads
 after push, source, model or language changes. The PR picker retains its list
 on panel switches; opening the picker or changing search still refreshes it.
 
-Full-local-file loading and working-tree mutations are unavailable for PR
-snapshots. Existing inline comment controls still attach selected code to chat.
+Working-tree mutations are unavailable for PR snapshots, and "Load full files"
+does not apply to them. Expanding collapsed context on one file works: the
+expander asks `useGitComparison.fetchFullFile`, which reads both sides of that
+file from GitHub through `/api/walkthrough/pr-file` (merge base and PR head),
+never from disk, so local edits and unfetched fork commits cannot leak in or
+block it. Existing inline comment controls still attach selected code to chat.
 Changes hands its PR source to walkthrough; walkthrough's Changes action opens
 PR mode with the shared selection. Picking a PR never generates a walkthrough.
 
 Web, Electron, hosted mobile and Capacitor use the server route. VS Code keeps
 PR comparison unavailable, like the other server-backed comparison modes.
+
+Mobile Changes uses the same expansion for branch, commit and PR files: the
+patch opens with 3 lines of context, and expanding reads that file in full once
+(git with whole-file context, or both PR sides from GitHub), then replays the
+expansion. A failed read toasts and keeps the patch. Working-tree files there
+already load both full sides, so they expand without a read.
 
 Most focused tests use Bun. `MultiFileDiffEntry.vitest.tsx` exercises the real
 diff component through the web workspace's Vitest runner because its transitive

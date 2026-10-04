@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 
 import { expect } from 'vitest';
 
-import { LABEL_MARKER, LABEL_OWNER, ROLE_SPACE, spaceResourceName } from '../labels.js';
+import { LABEL_MARKER, LABEL_OWNER, ROLE_GATEKEEPER, ROLE_NETWORK, ROLE_OUTER_NETWORK, ROLE_SPACE, spaceResourceName } from '../labels.js';
 import { runCommand } from '../run-command.js';
 import { createRegistryToolsSource, readHostToolVersions } from '../tools.js';
 import { SPACE_BASE_IMAGE, createDockerPlace } from './docker.js';
@@ -88,6 +88,106 @@ export function createLiveDockerPlace({ toolsSource = createRegistryToolsSource(
     // Everything the place's own records show about the space container. A secret must not be in here.
     spaceMetadata: async (spaceId) => (await docker(['inspect', spaceResourceName(spaceId, ROLE_SPACE)])).stdout,
 
+    // The same for the gatekeeper, which is where the secrets are.
+    gatekeeperMetadata: async (spaceId) => (await docker(['inspect', spaceResourceName(spaceId, ROLE_GATEKEEPER)])).stdout,
+
+    /** The space container's own address on its inner network, as Docker gave it. */
+    spaceAddress: async (spaceId) => {
+      const [entry] = JSON.parse((await docker(['inspect', spaceResourceName(spaceId, ROLE_SPACE)])).stdout);
+      return entry.NetworkSettings.Networks[spaceResourceName(spaceId, ROLE_NETWORK)]?.IPAddress ?? '';
+    },
+
+    /** The gatekeeper's own addresses, `{ inner, outer }`, as Docker gave them. */
+    gatekeeperAddresses: async (spaceId) => {
+      const [entry] = JSON.parse((await docker(['inspect', spaceResourceName(spaceId, ROLE_GATEKEEPER)])).stdout);
+      const networks = entry.NetworkSettings.Networks;
+      return {
+        inner: networks[spaceResourceName(spaceId, ROLE_NETWORK)]?.IPAddress ?? '',
+        outer: networks[spaceResourceName(spaceId, ROLE_OUTER_NETWORK)]?.IPAddress ?? '',
+      };
+    },
+
+    /**
+     * A stand-in model provider on the space's outer network, where a real one would be. It
+     * answers with the sha256 of the credentials it saw, never with the credentials, so that a
+     * test can prove the real key travelled without handing it to the space.
+     */
+    startWindowUpstream: async (spaceId) => {
+      const name = `openchamber-test-upstream-${owner}`;
+      const program = `
+const crypto = require('node:crypto');
+const hash = (value) => (value === undefined ? 'none' : 'sha256:' + crypto.createHash('sha256').update(String(value)).digest('hex'));
+require('node:http').createServer((request, response) => {
+  const seen = {
+    method: request.method,
+    path: request.url,
+    authorization: hash(request.headers.authorization),
+    apiKey: hash(request.headers['x-api-key']),
+    headerNames: Object.keys(request.headers).sort(),
+  };
+  // One line per request in the container's log, so the host can read what a client it does
+  // not control, OpenCode inside a space, sent here. Hashes only, as in the answer.
+  console.log('seen ' + JSON.stringify(seen));
+  request.resume();
+  request.on('end', () => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(seen));
+  });
+}).listen(9000, '0.0.0.0', () => console.log('upstream listening'));
+`;
+      await docker([
+        'run', '--detach', '--name', name, ...helperLabels,
+        '--network', spaceResourceName(spaceId, ROLE_OUTER_NETWORK), '--network-alias', 'upstream',
+        SPACE_BASE_IMAGE, 'node', '-e', program,
+      ], { timeoutMs: 120_000 });
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await new Promise((resolve) => { setTimeout(resolve, 250); });
+        if ((await docker(['logs', name])).stdout.includes('upstream listening')) break;
+      }
+      return {
+        url: 'http://upstream:9000/v1',
+        /** Every request this upstream has seen so far, oldest first, from its log. */
+        seen: async () => (await docker(['logs', name])).stdout.split('\n').filter((line) => line.startsWith('seen ')).map((line) => JSON.parse(line.slice(5))),
+        stop: () => docker(['rm', '--force', name]),
+      };
+    },
+
+    /**
+     * Runs a Node script in a helper container on the space's outer network, where the stand-in
+     * upstream sits and where, on a Linux host, the host's own processes can reach. What such a
+     * neighbour can reach on the gatekeeper is what the gatekeeper's bind address decides.
+     */
+    probeFromOuterNetwork: (spaceId, script) => docker(
+      ['run', '--rm', ...helperLabels, '--network', spaceResourceName(spaceId, ROLE_OUTER_NETWORK), SPACE_BASE_IMAGE, 'node', '-e', script],
+      { timeoutMs: 120_000 },
+    ),
+
+    /**
+     * A name of our own in the space's outer network, answered by Docker's embedded resolver with
+     * an address in that bridge's subnet — a private range, and therefore one the corridor must
+     * refuse. It exists so that the resolve-then-refuse path can be proved live without a
+     * third-party wildcard DNS service: when somebody else's resolver has a bad minute, a test
+     * that leans on it reports an inconclusive run and proves nothing.
+     */
+    startBlockedName: async (spaceId) => {
+      const name = `openchamber-test-blocked-${owner}`;
+      // A last label that is not a number, because the corridor takes names and this one has to
+      // get past the name rule to reach the address rule that is under test.
+      const alias = 'blocked-by-address.test';
+      const network = spaceResourceName(spaceId, ROLE_OUTER_NETWORK);
+      await docker([
+        'run', '--detach', '--name', name, ...helperLabels,
+        '--network', network, '--network-alias', alias,
+        SPACE_BASE_IMAGE, 'sleep', '3600',
+      ], { timeoutMs: 120_000 });
+      const [entry] = JSON.parse((await docker(['inspect', name])).stdout);
+      return {
+        alias,
+        address: entry.NetworkSettings.Networks[network]?.IPAddress ?? '',
+        stop: () => docker(['rm', '--force', name]),
+      };
+    },
+
     /** The names of this owner's volumes. */
     volumes: async () => (await docker([...LISTINGS[2], ...ownerFilter])).stdout.split('\n').filter(Boolean),
 
@@ -99,6 +199,12 @@ export function createLiveDockerPlace({ toolsSource = createRegistryToolsSource(
 
   /** Removes every space, helper and tools volume of this run, then asserts that Docker holds nothing with this owner label. */
   const dispose = async () => {
+    // Helpers first: one of them sits on a space's outer network, and a network with a
+    // container on it cannot go.
+    const spaces = new Set((await place.list()).flatMap((space) => [spaceResourceName(space.id, ROLE_SPACE), spaceResourceName(space.id, ROLE_GATEKEEPER)]));
+    for (const helper of (await docker([...LISTINGS[0], ...ownerFilter])).stdout.split('\n').filter(Boolean)) {
+      if (!spaces.has(helper)) await docker(['rm', '--force', helper]);
+    }
     for (const space of await place.list()) {
       await place.remove(space.id);
     }

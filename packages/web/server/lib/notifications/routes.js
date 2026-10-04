@@ -167,7 +167,9 @@ export const registerNotificationRoutes = (app, dependencies) => {
     // TestFlight/App Store report 'production'. Absent (older clients, Android) → production.
     const environment = req.body?.environment === 'sandbox' ? 'sandbox' : 'production';
     if (typeof addOrUpdateApnsToken === 'function') {
-      await addOrUpdateApnsToken(uiToken, deviceToken, req.headers['user-agent'], platform, environment);
+      // Optional: newer apps send a key so the server can seal push text for this device
+      // alone (push-seal.js). Malformed keys are ignored and the device gets plain text.
+      await addOrUpdateApnsToken(uiToken, deviceToken, req.headers['user-agent'], platform, environment, req.body?.pushKey);
     }
     return res.json({ ok: true });
   });
@@ -297,7 +299,7 @@ export const registerNotificationRoutes = (app, dependencies) => {
   });
 
   // Cross-project seed for clients that do not initialize every directory:
-  // live status per session plus the permission and question requests still
+  // live status per session plus the permission requests and forms still
   // waiting for an answer. Both come from the server's single upstream stream.
   app.get('/api/sessions/status', async (_req, res) => {
     await ensureSessionWatcher();

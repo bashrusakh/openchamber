@@ -41,8 +41,15 @@ From inside a space, each attempt must fail:
 - Claim, in its session list or events, a directory outside its own root, another space's directory, or a session id that exists on the host.
 - Hang the result fetch forever or fill the host's disk with it. The host's timeout and size cap must end both, and the process left inside the space must be cleaned up.
 - Get tree paths such as `.git/hooks/x`, `.GIT`, `..`, or `a/../../x` past the host's object checks, or write through a symlink or into `.git/` when applied as a patch.
-- Reach `auth.openai.com`, in either network mode.
+- Find a long-lived credential of the user's anywhere in the space: in a process environment, in a file under HOME or the work directory, binary files included, or in OpenCode's own login store. Since OpenCode 2 that store is the `credential` table of its SQLite database, and a provider key in its environment counts as a login too, so ask OpenCode for its logins as well. The positive control plants a login the way OpenCode stores one and shows the search finds it. This is the guarantee that protects the user's login, and it holds in both network modes.
+- Reach `auth.openai.com` in allowlist mode. In open mode this cannot be a guarantee and must not be written as one: the space reaches every public host on 443, so it can go through a third-party intermediary and the corridor sees only that intermediary's name. The refusal of the name and of its address makes it harder there, and the test says no more than that.
 - Have a request without the space prefix, but with a space directory, run on the host.
+
+An escape test decides its verdict on this machine. A name from somebody else's wildcard DNS service, or anything the run does not control, must not stand between a restriction and its evidence: when that service has a bad minute the run reports an inconclusive, which is a failed run with no evidence in it, and a test that cries wolf twice gets ignored. Where a name that resolves into a refused range is needed, use one of ours: a helper container on the space's outer network with a network alias of its own resolves, through Docker's embedded DNS, to an address on that bridge.
+
+The internet baseline is the deliberate exception, because a positive control that the corridor carries anything at all cannot be built out of our own networks: every address on them is in a range the corridor refuses. That baseline stays a control, never a verdict.
+
+That is also why there is no live large-download test. A proxy that carries a big transfer and loses bytes at the close is a real defect, and it is proved in the unit tests, full duplex, four megabytes, sha256 compared, failing when the teardown goes back — byte-exact, and needing nobody's server. The live half of the claim is the baseline control. Do not add a download from a public registry back thinking the path is uncovered.
 
 On a place that cannot restrict the network, the probe must report that and the allowlist mode must be unavailable.
 

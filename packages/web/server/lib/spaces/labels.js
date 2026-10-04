@@ -16,7 +16,11 @@ export const ROLE_SPACE = 'space';
 export const ROLE_SETUP = 'setup';
 export const ROLE_NETWORK = 'network';
 export const ROLE_VOLUME = 'volume';
-const ROLES = new Set([ROLE_SPACE, ROLE_SETUP, ROLE_NETWORK, ROLE_VOLUME]);
+// Since stage 2 every space also has a gatekeeper container and an outer network of its own.
+// The inner network keeps the plain `network` role, so nothing that existed changes name.
+export const ROLE_GATEKEEPER = 'gatekeeper';
+export const ROLE_OUTER_NETWORK = 'outer-network';
+const ROLES = new Set([ROLE_SPACE, ROLE_SETUP, ROLE_NETWORK, ROLE_VOLUME, ROLE_GATEKEEPER, ROLE_OUTER_NETWORK]);
 
 // The tools volume and its two one-shot containers belong to an owner, not to a space.
 // They carry no space id, so parseSpaceLabels returns null for them and `list` and `remove` pass them by.
