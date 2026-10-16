@@ -11,12 +11,17 @@ const hostPermissionRequestSchema = z.object({
   sessionID: z.string().min(1),
   action: z.string(),
   resources: z.array(z.string()),
+  // The tray decides whether to offer "Allow always" from these patterns, so a
+  // seeded request has to keep them or it looks unsavable.
+  save: z.array(z.string()).optional(),
 })
 const hostFormRequestSchema = z.object({
   id: z.string().min(1),
   sessionID: z.string().min(1),
   title: z.string(),
 })
+// A page an agent showed that waits for the user's answer: same projection.
+const hostPageRequestSchema = hostFormRequestSchema
 
 // Cross-project status kept by the OpenChamber host (web server or VS Code
 // extension host) from its single upstream event stream. Entries carry the
@@ -31,6 +36,8 @@ export const hostSessionStatusSnapshotSchema = z.object({
   pending: z.record(z.string().min(1), z.object({
     permissions: z.array(hostPermissionRequestSchema),
     forms: z.array(hostFormRequestSchema),
+    // Hosts predating waiting pages, and the VS Code shim, omit it.
+    pages: z.array(hostPageRequestSchema).optional().default([]),
   })).optional(),
   serverTime: z.number(),
 })

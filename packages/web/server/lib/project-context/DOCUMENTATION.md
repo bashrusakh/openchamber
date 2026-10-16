@@ -43,7 +43,8 @@ Nothing outside this module may write `context.json` or the `plans` directory.
     "origin": { "sessionId": "", "messageId": "" }
   }],
   "todos": [{ "id": "", "text": "", "completed": false, "createdAt": 0 }],
-  "plans": [{ "id": "", "file": "1700000000-title.md", "title": "", "createdAt": 0 }]
+  "plans": [{ "id": "", "file": "1700000000-title.md", "title": "", "createdAt": 0 }],
+  "planSessions": { "<planId>": { "sessionId": "", "linkedAt": 0 } }
 }
 ```
 
@@ -68,6 +69,28 @@ a reference and a caller can never address a file outside it. `title` is
 denormalized into the manifest so listing plans costs one read rather than one
 read per plan; `readPlan` returns the title parsed from the file, which wins if
 the two ever disagree.
+
+## Plan progress
+
+A plan's progress is its `## Steps` checklist: the knowledge tool tells agents
+to open every plan with one and to tick a step when it is done, and
+`plan-progress.js` counts ticked and total items in that section only (later
+checklists are detail). There is no separate status field to drift from the
+file. Listed plans carry `progress: { done, total }`; a plan without the
+section, or whose file cannot be read, carries none, and one unreadable plan
+never fails the list. `knowledge.save` answers a plan saved without the
+section with a `warning`, so the agent adds it in the same turn.
+
+Agents tick steps with their own file tools, which announce nothing, so the
+Plans tab re-reads the list while it is on screen. Listing therefore costs one
+`stat` per plan: a file is read and parsed again only when its modification
+time or size changed. Clients receive the counts, never the text.
+
+`planSessions` records the session a plan was last sent to with Implement or
+Improve (`PUT .../plans/:planId/session`), so its card leads there. It is a map
+beside the manifest because a plan that only lives in the team's folder has no
+link to carry it. Deleting a plan drops its entry; a `shared:` plan made
+personal takes its entry to the new id.
 
 ## Shared plans
 
@@ -95,17 +118,21 @@ collision gets a numeric suffix. Sharing is refused only when the checkout canno
 | Method | Route | Notes |
 |---|---|---|
 | GET | `/api/project-context/:projectId` | full context; missing file is `200` empty |
-| PUT | `/api/project-context/:projectId/todos` | replaces the whole list; returns committed context |
+| PUT | `/api/project-context/:projectId/todos` | replaces the whole list (reorder, clear completed); returns committed context |
+| POST | `/api/project-context/:projectId/todos` | `201`; takes `{text, id?}`, adds one open todo before the completed ones; the panel sends the id its row already shows, and a taken or missing id gets a fresh one; returns committed context |
+| PATCH | `/api/project-context/:projectId/todos/:todoId` | takes `text` and/or `completed`; completing moves it last, reopening puts it before the completed ones; returns committed context; `404` when unknown |
+| DELETE | `/api/project-context/:projectId/todos/:todoId` | returns committed context; `404` when unknown |
 | POST | `/api/project-context/:projectId/notes` | `201`; takes `{body, source?, origin?}` |
 | PATCH | `/api/project-context/:projectId/notes/:noteId` | patches `body`; legacy `pinned` input is ignored by session knowledge; `404` when unknown |
 | DELETE | `/api/project-context/:projectId/notes/:noteId` | `404` when unknown |
 | PATCH | `/api/project-context/:projectId/plans/:planId` | legacy project pin state only; session attachment uses session knowledge; `404` when unknown |
-| GET | `/api/project-context/:projectId/plans/:planId` | `404` when the link or its markdown is gone |
+| GET | `/api/project-context/:projectId/plans/:planId` | `404` when the link or its markdown is gone; the answer carries `path`, the markdown's absolute path, so comments on the plan name the file to the agent (reads and writes stay id-addressed) |
 | POST | `/api/project-context/:projectId/plans` | `201`; takes `{title, body}`, never a path |
 | PUT | `/api/project-context/:projectId/plans/:planId` | takes the whole `{raw}` document; `404` when the link or its markdown is gone |
 | DELETE | `/api/project-context/:projectId/plans/:planId` | `404` when unknown |
 | POST | `/api/project-context/:projectId/plans/:planId/share` | moves the plan into the shared folder; `400` without one, `404` when unknown |
 | POST | `/api/project-context/:projectId/plans/:planId/unshare` | moves a `shared:` plan back; `404` when unknown |
+| PUT | `/api/project-context/:projectId/plans/:planId/session` | takes `{sessionId}`, the session the plan was just sent to; replaces the previous one; `404` when unknown |
 
 **Body parsing is attached per route.** This server has no global JSON parser:
 `core-routes` parses only an allowlist of `/api` path prefixes so the generic
@@ -118,6 +145,12 @@ on a bare express app so that failure mode fails the suite instead of the user.
 `projectId` is validated against `/^[a-zA-Z0-9._:-]+$/`, which rejects
 separators and traversal. Validation failures are `400`; malformed stored data
 and I/O failures are `500`.
+
+## Change notifications
+
+After `writeContext` atomically commits `context.json`, the runtime calls its optional `onChanged(projectId)` dependency. The server broadcasts `openchamber:project-context-changed` with `{ projectId }` on the existing OpenChamber control stream. It carries the path-derived owner id, not the bounded storage stem or any note content. Failed writes and missing-entry no-ops announce nothing. Updating or deleting a shared plan through the API announces the same way after the file write, since shared plans have no manifest entry.
+
+Clients re-read authoritative context for the visible owner. This is a commit notification, not a filesystem watcher; direct changes to shared plan files outside the API retain their existing read-on-open behavior.
 
 ## Invariants
 
@@ -149,6 +182,16 @@ and I/O failures are `500`.
 - **A note body can be clamped but never blanked.** An empty body is rejected
   rather than stored, since a note with nothing in it is indistinguishable from
   a delete the user did not ask for.
+- **Panel item writes touch one todo.** The panel sends a check, uncheck,
+  add or delete as one item route, applied to the list as it is on disk, so a
+  todo an agent added since the panel's last read survives it. Only a reorder
+  or "clear completed" sends the whole list.
+- **Agents write conditionally; the panel does not.** `updateNote` and
+  `updatePlan` take an optional `expectedBody` / `expectedRaw` and answer `409`
+  without writing or announcing when the stored text differs. Only the agent
+  tool passes them (`../openchamber-control/project-knowledge.js`): what the
+  user types in the panel is saved over an agent's change, and an agent that
+  read before the user's save is refused and reads again.
 - **Notes are capped at 200 per project.** Past that, creation fails loudly
   instead of silently evicting the oldest entry.
 - **Per-entry sanitization never fails the whole read.** A malformed todo or

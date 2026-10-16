@@ -180,6 +180,14 @@ describe('docker place: check', () => {
     expect(result.message).toMatch(/Start Docker Desktop or Colima/);
   });
 
+  it('tells a socket that refuses this user from a daemon that is down', async () => {
+    const stdout = JSON.stringify({ Client: { Version: '29.3.0' }, Server: null });
+    const stderr = 'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/version": dial unix /var/run/docker.sock: connect: permission denied';
+    const result = await placeWith(async () => ({ code: 1, stdout, stderr })).check();
+    expect(result).toMatchObject({ available: false, code: 'docker_permission_denied' });
+    expect(result.message).toMatch(/docker group/);
+  });
+
   it('says the daemon is unreachable on a timeout', async () => {
     const place = placeWith(async () => { throw new SpaceError('command_timeout', 'too slow'); });
     expect((await place.check()).code).toBe('docker_daemon_unreachable');
@@ -270,6 +278,8 @@ describe('docker place: create', () => {
       '--log-opt', 'compress=false',
       '--network', NETWORK,
       '--network-alias', 'gatekeeper',
+      // The Docker host by name, for a provider that listens on that machine's loopback.
+      '--add-host', 'host.docker.internal:host-gateway',
       '--env', 'HOME=/tmp',
       SPACE_BASE_IMAGE,
       '/bin/sh', '-c',
@@ -348,6 +358,16 @@ describe('docker place: create', () => {
         if (args[index - 1] === '--ipc' || args[index - 1] === '--cgroupns') expect(arg).toBe('private');
       });
     }
+  });
+
+  it('names the slow parts it does as they begin, and none it skips', async () => {
+    const fresh = [];
+    await makePlace(createFakeDocker({ imagePresent: false })).create(SPEC, { onStep: (step) => fresh.push(step) });
+    expect(fresh).toEqual(['downloading_image', 'preparing_tools', 'creating']);
+
+    const ready = [];
+    await makePlace(createFakeDocker({ resources: [toolsResource()] })).create(SPEC, { onStep: (step) => ready.push(step) });
+    expect(ready).toEqual([]);
   });
 
   it('pulls the image, fills the tools, then makes the space, starts it, and waits for its server', async () => {
@@ -1666,6 +1686,75 @@ describe('docker place: new tools at the next start', () => {
       const result = await makePlace(fake).remove(ID);
       expect(result.failed).toEqual([]);
       expect(fake.names().filter((name) => name.startsWith('container:'))).toEqual([]);
+    });
+  });
+});
+
+// The Docker over SSH place: the same place, with every command sent to another machine's daemon.
+describe('docker place over SSH', () => {
+  const HOST = 'ssh://me@debian-box';
+  /** The fake docker behind a runner that demands the host flag first and takes it off before the fake reads the argv. */
+  const remoteFake = () => {
+    const fake = createFakeDocker({ resources: [toolsResource(), ...spaceResources()] });
+    const withoutHost = [];
+    const runCommand = (file, args, options) => {
+      if (args[0] !== '--host' || args[1] !== HOST) withoutHost.push(args.slice(0, 3));
+      return fake.runCommand(file, args.slice(2), options);
+    };
+    return { fake, runCommand, withoutHost };
+  };
+  const remotePlace = (runCommand, fake, options = {}) => placeOn(runCommand, { dockerPath: '/usr/bin/docker', dockerHost: HOST, id: 'docker-ssh', wait: fake.wait, now: fake.now, ...options });
+
+  it('carries its own id, and gives the host flag to every docker call of a create, a list, a stop and a start', async () => {
+    const { fake, runCommand, withoutHost } = remoteFake();
+    const place = remotePlace(runCommand, fake);
+    expect(place.id).toBe('docker-ssh');
+    // The machine as the user wrote it, for the screens; the local place names none.
+    expect(place.machine).toBe('me@debian-box');
+    expect(placeOn(runCommand, { dockerPath: '/usr/bin/docker', wait: fake.wait, now: fake.now }).machine).toBeNull();
+    await place.create({ ...SPEC, id: 'b1b2c3d4e5f6' });
+    expect((await place.list()).map((space) => space.id).sort()).toEqual([ID, 'b1b2c3d4e5f6']);
+    await place.stop(ID);
+    await place.start(ID);
+    expect(await place.exec(ID, ['/bin/true'])).toMatchObject({ code: 0 });
+    expect(await place.readDisk()).toMatchObject({ imageBytes: expect.any(Number) });
+    expect(fake.calls.length).toBeGreaterThan(20);
+    expect(withoutHost).toEqual([]);
+  });
+
+  it('hands git and the dispatcher an argv that reaches the remote daemon', async () => {
+    const { fake, runCommand } = remoteFake();
+    const opened = [];
+    const place = remotePlace(runCommand, fake, { openCommandStream: (file, args) => { opened.push([file, ...args]); return {}; } });
+    expect(await place.execArgv(ID)).toEqual(['/usr/bin/docker', '--host', HOST, 'exec', '--interactive', '--user', '1000:1000', CONTAINER]);
+    await place.connect(ID);
+    expect(opened).toEqual([['/usr/bin/docker', '--host', HOST, 'exec', '--interactive', '--user', '1000:1000', CONTAINER, ...SPACE_CONNECT_COMMAND]]);
+  });
+
+  describe('check', () => {
+    const checkWith = (runCommand) => placeOn(runCommand, { dockerPath: '/usr/bin/docker', dockerHost: HOST, id: 'docker-ssh' }).check();
+    const client = JSON.stringify({ Client: { Version: '29.3.0' }, Server: null });
+
+    it('reports the remote engine like the local one', async () => {
+      const answer = async (file, args) => {
+        expect(args.slice(0, 2)).toEqual(['--host', HOST]);
+        return { code: 0, stdout: JSON.stringify(args[2] === 'version' ? { Client: { Version: '29.3.0' }, Server: { Version: '29.8.1', Os: 'linux', Arch: 'amd64' } } : ['name=seccomp,profile=builtin']), stderr: '' };
+      };
+      expect(await checkWith(answer)).toEqual({ available: true, version: '29.8.1', os: 'linux', arch: 'amd64', hostIsolation: true });
+    });
+
+    it('names the machine that did not answer in time', async () => {
+      const result = await checkWith(async () => { throw new SpaceError('command_timeout', 'too slow'); });
+      expect(result).toMatchObject({ available: false, code: 'place_unreachable' });
+      expect(result.message).toBe('me@debian-box did not answer. Check that it is on and reachable over SSH.');
+    });
+
+    it('tells a machine SSH could not reach from one whose Docker is down or missing, by what the CLI said', async () => {
+      const said = (stderr) => checkWith(async () => ({ code: 1, stdout: client, stderr }));
+      expect(await said('error during connect: ... ssh: connect to host debian-box port 22: Operation timed out')).toMatchObject({ code: 'place_unreachable', message: 'Could not reach me@debian-box over SSH. Check the connection, then try again.' });
+      expect(await said('Permission denied (publickey).')).toMatchObject({ code: 'place_unreachable' });
+      expect(await said('error during connect: ... Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?')).toMatchObject({ code: 'docker_daemon_unreachable', message: 'Docker is not running on me@debian-box. Start it there, then try again.' });
+      expect(await said('bash: line 1: docker: command not found')).toMatchObject({ code: 'docker_cli_missing', message: 'Docker is not installed on me@debian-box. Install Docker Engine there, then try again.' });
     });
   });
 });

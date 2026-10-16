@@ -58,6 +58,8 @@ let forcePreserveManualOverride: boolean | null = null;
 const variantWrites: VariantChoice[] = [];
 /** Every `(override, inherited)` pair pushed into the config store. */
 const overrideWrites: Array<{ override: VariantChoice; inherited: string | undefined }> = [];
+/** Every model remembered as the last chat pick. */
+const lastSelectedWrites: string[] = [];
 
 type ConfigState = {
   providers: typeof provider[];
@@ -208,6 +210,8 @@ const useUIStore = create(() => ({
   isMobile: false,
   isModelSelectorOpen: false,
   hiddenModels: [],
+  favoriteAgents: [],
+  toggleFavoriteAgent: () => undefined,
   providerOrder: [],
   shortcutOverrides: {},
   isFavoriteModel: () => false,
@@ -219,6 +223,7 @@ const useUIStore = create(() => ({
   setSettingsPage: () => undefined,
   addRecentAgent: () => undefined,
   addRecentModel: () => undefined,
+  setLastSelectedModel: (providerID: string, modelID: string) => { lastSelectedWrites.push(`${providerID}/${modelID}`); },
   addRecentEffort: () => undefined,
 }));
 
@@ -226,10 +231,15 @@ const passthrough = ({ children }: React.PropsWithChildren) => <div>{children}</
 
 // Captured by value before the module is replaced: reading it back off the
 // namespace afterwards would resolve to the replacement and recurse.
-const { shouldPreserveManualModelOverride: realShouldPreserveManualModelOverride } =
-  await import('@/lib/messages/userModelChoice');
+const {
+  areModelChoicesEqual,
+  extractSessionRecordModelChoice,
+  shouldPreserveManualModelOverride: realShouldPreserveManualModelOverride,
+} = await import('@/lib/messages/userModelChoice');
 
 mock.module('@/lib/messages/userModelChoice', () => ({
+  areModelChoicesEqual,
+  extractSessionRecordModelChoice,
   findLatestUserModelChoice: () => latestUserChoice,
   // The real guard, unless a test opts out: whether it fires decides which
   // restore branch runs, and the branch that erased a recorded Default is the
@@ -263,12 +273,16 @@ type SessionRecord = { id: string; agent?: string; model?: { providerID: string;
 const useSessionRecordStore = create<{ record: SessionRecord | undefined }>(() => ({ record: undefined }));
 const setSessionRecord = (record: SessionRecord | undefined) => useSessionRecordStore.setState({ record });
 mock.module('@/sync/sync-context', () => ({
-  useSessionMessages: () => [],
+  useSessionMessagesSelector: <T,>(_sessionID: string, _directory: string | undefined, select: (messages: [], state: { part: Record<string, never> }) => T): T => (
+    select([], { part: {} })
+  ),
   useSessionRenderable: () => true,
-  useSession: () => useSessionRecordStore((state) => state.record),
+  useSessionSelector: <T,>(_sessionID: string | undefined, _directory: string | undefined, select: (session: SessionRecord | undefined) => T): T => {
+    const record = useSessionRecordStore((state) => state.record);
+    return React.useMemo(() => select(record), [record, select]);
+  },
 }));
 mock.module('@/sync/use-sync', () => ({ useSync: () => ({ sessions: [] }) }));
-mock.module('@/sync/sync-refs', () => ({ getSyncParts: () => [] }));
 
 mock.module('@/components/ui/dropdown-menu', () => ({
   DropdownMenu: ({ children, open }: React.PropsWithChildren<{ open?: boolean }>) => <div data-menu-open={open}>{children}</div>,
@@ -405,6 +419,7 @@ describe('ModelControls effort restore', () => {
   beforeEach(() => {
     variantWrites.length = 0;
     overrideWrites.length = 0;
+    lastSelectedWrites.length = 0;
     latestUserChoice = null;
     knownElsewhere = nothingKnownElsewhere();
     setSessionRecord(undefined);
@@ -490,6 +505,8 @@ describe('ModelControls effort restore', () => {
       expect(dom.container.querySelector('.model-controls__model-trigger')?.closest('[data-menu-open]')?.getAttribute('data-menu-open')).toBe('true');
       expect(variantWrites).toContain('low');
       expect(variantWrites).not.toContain(null);
+      // Opening a session is not a pick: the next new session must not inherit its model.
+      expect(lastSelectedWrites).toEqual([]);
       expect(useSelectionStore.getState().savedVariant).toBe('low');
       expect(useConfigStore.getState().currentVariantSelection.override).toBe('low');
     } finally {
@@ -509,6 +526,7 @@ describe('ModelControls effort restore', () => {
       expect(variantWrites).toContain('high');
       expect(useSelectionStore.getState().savedVariant).toBe('high');
       expect(useConfigStore.getState().currentVariantSelection.override).toBe('high');
+      expect(lastSelectedWrites).toEqual([]);
     } finally {
       await cleanup();
     }
@@ -944,6 +962,8 @@ describe('ModelControls effort restore', () => {
 
         await act(async () => setSessionRecord(recordWith(THIRD_MODEL_ID)));
         expect(useConfigStore.getState().currentModelId).toBe(THIRD_MODEL_ID);
+        // A switch made elsewhere is not this person's pick.
+        expect(lastSelectedWrites).toEqual([]);
       } finally {
         await cleanup();
       }

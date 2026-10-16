@@ -26,6 +26,7 @@ import {
   GitOperationResultError,
   refreshGitOperation,
   type GitOperationRead,
+  describeGitSyncOutcome,
 } from './boundGitNetworkOperation';
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -146,7 +147,7 @@ const withoutSubtle = async <T>(run: () => Promise<T>): Promise<T> => {
   const real = globalThis.crypto;
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
   const stub = {
-    getRandomValues: <A extends ArrayBufferView>(array: A): A => real.getRandomValues(array),
+    getRandomValues: <A extends ArrayBufferView<ArrayBuffer>>(array: A): A => real.getRandomValues(array),
     randomUUID: () => real.randomUUID(),
   };
   Object.defineProperty(globalThis, 'crypto', { configurable: true, writable: true, value: stub });
@@ -159,6 +160,33 @@ const withoutSubtle = async <T>(run: () => Promise<T>): Promise<T> => {
     else Reflect.deleteProperty(globalThis, 'crypto');
   }
 };
+
+describe('sync outcome', () => {
+  const finished = (pull: 'succeeded' | 'skipped', push: 'succeeded' | 'skipped'): GitNetworkOperation => ({
+    ...plan, state: 'succeeded', stepResults: [
+      { step: 'fetch', status: 'succeeded' }, { step: 'pull', status: pull }, { step: 'push', status: push },
+    ],
+  });
+
+  test('a sync that had nothing to pull or push is a finished success, not an unknown outcome', async () => {
+    const operation = await runBoundGitNetworkOperation({
+      action: 'sync', directory: '/repo', remoteName: 'upstream', status, targets,
+      sourceControl: { repositoryBinding: async () => boundRead }, runtimeKey: () => 'runtime-one',
+      git: { planNetworkOperation: async () => plan, executeNetworkOperation: async () => finished('skipped', 'skipped'), getNetworkOperation },
+    });
+    expect(operation.state).toBe('succeeded');
+    expect(describeGitSyncOutcome(operation)).toEqual({ kind: 'up-to-date' });
+  });
+
+  test('says what the sync did, step by step', () => {
+    expect(describeGitSyncOutcome(finished('skipped', 'skipped'))).toEqual({ kind: 'up-to-date' });
+    expect(describeGitSyncOutcome(finished('succeeded', 'skipped'))).toEqual({ kind: 'pulled', remoteName: syncTarget.fetch.name });
+    expect(describeGitSyncOutcome(finished('skipped', 'succeeded'))).toEqual({ kind: 'pushed', remoteName: syncTarget.push.name });
+    expect(describeGitSyncOutcome(finished('succeeded', 'succeeded'))).toEqual({ kind: 'synced' });
+    // Without step results (another runtime, a contributor push) it stays generic.
+    expect(describeGitSyncOutcome(null)).toEqual({ kind: 'synced' });
+  });
+});
 
 describe('managed push announcement', () => {
   // Changes and walkthrough refresh a published pull request diff on this
@@ -627,9 +655,10 @@ describe('explicit publication selection', () => {
       const requests: GitNetworkOperationRequest[] = [];
       let executions = 0;
       let reads = 0;
+      const branchOptions: unknown[] = [];
       const git = {
         getGitStatus: async () => { reads += 1; return { ...status, tracking }; },
-        getGitBranches: async () => branches,
+        getGitBranches: async (_directory: string, options?: { remote?: 'local' }) => { branchOptions.push(options); return branches; },
         planNetworkOperation: async (request: GitNetworkOperationRequest) => { requests.push(request); return pushPlan; },
         executeNetworkOperation: async (): Promise<GitNetworkOperation> => { executions += 1; return { ...pushPlan, state: 'succeeded' }; },
         getNetworkOperation,
@@ -647,6 +676,8 @@ describe('explicit publication selection', () => {
       expect(requests).toHaveLength(0);
       await runPreparedGitPublish({ ...dependencies, selection });
       expect(reads).toBe(3);
+      // Publishing reads local refs only; asking every remote made each push wait seconds.
+      expect(branchOptions).toEqual([{ remote: 'local' }, { remote: 'local' }, { remote: 'local' }]);
       expect(executions).toBe(1);
       expect(requests).toEqual([{
         operation: 'push', directory: '/repo', repositoryId: 'repository-one', bindingRevision: 7, configRevision: 'config-one',

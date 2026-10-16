@@ -3,7 +3,7 @@ import { createBindingService } from './binding-service.js';
 import { fingerprintRemoteUrl, redactRemoteUrl } from './url-redaction.js';
 import { createBindingStore } from './binding-storage.js';
 import { createHttpsCredentialReference, createSshCredentialReference, normalizeGitRemoteEndpoint } from '../git/credential-resolver.js';
-import { resolveBindingReadiness } from './binding-contract.js';
+import { parseBinding, parseBindingResponse, resolveBindingReadiness } from './binding-contract.js';
 
 const createMemoryBindingFs = () => {
   const files = new Map();
@@ -115,6 +115,53 @@ describe('explicit remote transport configuration', () => {
     for (const extra of [{ credentialId: 'secret' }, { credentialAccount: account }, { unverifiedConfirmed: true }]) {
       await expect(service.configureTransportBinding({ ...selection, transport: 'anonymous', ...extra })).rejects.toMatchObject({ code: 'INVALID_SOURCE_CONTROL_BINDING' });
     }
+  });
+
+  it('lets remotes without their own grant follow the identity: System everywhere, an account on its own host', async () => {
+    const ssh = (url) => ({ rawUrl: url, displayUrl: redactRemoteUrl(url), fingerprint: fingerprintRemoteUrl(url) });
+    const wide = { ...context, remotes: [remote('origin'), remote('fork'), remote('elsewhere', 'gitlab.com'),
+      { name: 'ssh-fork', fetch: ssh('git@github.com:fork/repo.git'), push: ssh('git@github.com:fork/repo.git') }] };
+    const { files, fsImpl } = createMemoryBindingFs();
+    const service = createBindingService({
+      store: createBindingStore({ filePath: '/bindings.json', fsImpl }),
+      resolveRepository: async () => ({ ...wide, remotes: wide.remotes.map((entry) => ({ name: entry.name,
+        fetch: { displayUrl: entry.fetch.displayUrl, fingerprint: entry.fetch.fingerprint },
+        push: { displayUrl: entry.push.displayUrl, fingerprint: entry.push.fingerprint } })) }),
+      resolveTransportRepository: async () => structuredClone(wide),
+      readTransportAccount: async () => resolvedAccount,
+    });
+    const intent = (expectedRevision, name, selection) => {
+      const target = wide.remotes.find((entry) => entry.name === name);
+      return { directory: '/repo', expectedRepositoryId: wide.repositoryId, expectedConfigRevision: wide.configRevision,
+        expectedRevision, remote: name, expectedFetchFingerprint: target.fetch.fingerprint,
+        expectedPushFingerprint: target.push.fingerprint, ...selection };
+    };
+    const validate = (bindingRevision, name) => service.validateGitTransportContext({ directory: '/repo',
+      repositoryId: wide.repositoryId, bindingRevision, configRevision: wide.configRevision, remote: name, endpointKind: 'push' });
+
+    const system = await service.configureTransportBinding(intent(0, 'origin', { transport: 'system', unverifiedConfirmed: true }));
+    for (const name of ['fork', 'elsewhere', 'ssh-fork']) {
+      await expect(validate(system.revision, name)).resolves.toMatchObject({ transportMode: 'system', remote: name });
+    }
+    const shown = await service.get('/repo');
+    expect(shown.binding.remotes.map((entry) => [entry.name, entry.inherited ?? false]))
+      .toEqual([['origin', false], ['fork', true], ['elsewhere', true], ['ssh-fork', true]]);
+    expect(() => parseBindingResponse(shown.binding)).not.toThrow();
+    // Derived grants are what a reader sees, never what is stored.
+    expect(() => parseBinding(shown.binding)).toThrow();
+    expect(JSON.parse(files.get('/bindings.json')).repositories[wide.repositoryId].binding.remotes.map((entry) => entry.name))
+      .toEqual(['origin']);
+
+    const managed = await service.configureTransportBinding(intent(system.revision, 'origin',
+      { transport: 'https', credentialAccount: account }));
+    await expect(validate(managed.revision, 'fork')).resolves.toMatchObject({ transportMode: 'managed', credentialId: accountReference() });
+    for (const name of ['elsewhere', 'ssh-fork']) {
+      await expect(validate(managed.revision, name)).rejects.toMatchObject({ code: 'SOURCE_CONTROL_BINDING_STALE' });
+    }
+
+    // A remote's own grant wins over the one it would inherit.
+    const own = await service.configureTransportBinding(intent(managed.revision, 'fork', { transport: 'system', unverifiedConfirmed: true }));
+    await expect(validate(own.revision, 'fork')).resolves.toMatchObject({ transportMode: 'system' });
   });
 
   it('configures and removes one rediscovered auxiliary grant while preserving siblings', async () => {
@@ -1046,6 +1093,41 @@ describe('source-control binding service', () => {
     })).rejects.toMatchObject({ code: 'INVALID_SOURCE_CONTROL_MUTATION_CONTEXT', status: 400 });
   });
 
+  it('lets a mutation through a remote added beside the bound ones, not through a granted remote that moved', async () => {
+    const grant = { name: 'origin', fetch: repository.remotes[0].fetch, push: repository.remotes[0].push, mode: 'system', readiness: 'ready' };
+    const binding = {
+      repositoryId: 'repo_one', revision: 3, state: 'bound', configRevision: 'config_one', remotes: [grant], auxiliary: [],
+      providers: [readyProvider({ provider: 'github', instance: 'github.com', accountId: 'github.com#1', primaryRemote: 'origin' })],
+    };
+    const input = {
+      directory: '/repository', repositoryId: 'repo_one', provider: 'github', instance: 'github.com',
+      accountId: 'github.com#1', bindingRevision: 3, primaryRemote: 'origin', idempotencyKey: 'request-one',
+      target: { project: { owner: 'owner', name: 'repo' } },
+    };
+    const serviceFor = (resolved) => createBindingService({
+      store: { read: vi.fn(async () => ({ revision: 3, binding })), compareAndSwap: vi.fn() },
+      resolveRepository: async () => resolved,
+    });
+    const withFork = {
+      ...repository,
+      configRevision: 'config_two',
+      remotes: [...repository.remotes, {
+        name: 'pr-alice',
+        fetch: { displayUrl: 'https://github.com/alice/repo.git', fingerprint: 'alice' },
+        push: { displayUrl: 'https://github.com/alice/repo.git', fingerprint: 'alice' },
+      }],
+    };
+    await expect(serviceFor(withFork).validateMutationContext(input)).resolves.toMatchObject({ primaryRemote: 'origin' });
+
+    const pushMoved = {
+      ...repository,
+      configRevision: 'config_three',
+      remotes: [{ ...repository.remotes[0], push: { displayUrl: 'git@github.com:other/repo.git', fingerprint: 'other' } }],
+    };
+    await expect(serviceFor(pushMoved).validateMutationContext(input))
+      .rejects.toMatchObject({ code: 'SOURCE_CONTROL_BINDING_STALE', status: 409 });
+  });
+
   it('preserves binding mismatch errors for mutation context', async () => {
     const service = createBindingService({
       store: { read: vi.fn(), compareAndSwap: vi.fn() },
@@ -1184,6 +1266,25 @@ describe('source-control binding service', () => {
       directory: '/repository', repositoryId: 'repo_one', provider: 'github', instance: 'github.com',
       accountId: 'github.com#other', bindingRevision: 3, primaryRemote: 'origin',
     })).rejects.toMatchObject({ code: 'SOURCE_CONTROL_BINDING_CONTEXT_MISMATCH' });
+  });
+
+  it('reads a host whose bound account is gone with the account signed in there now', async () => {
+    const binding = {
+      repositoryId: 'repo_one', revision: 3, state: 'needs-attention', configRevision: 'config_one', remotes: [], auxiliary: [],
+      providers: [{ provider: 'github', instance: 'github.com', accountId: 'github.com#gone', primaryRemote: 'origin', readiness: 'account-unavailable', endpoint: null }],
+    };
+    const service = createBindingService({
+      store: { read: vi.fn(async () => ({ revision: 3, binding })), compareAndSwap: vi.fn() },
+      resolveRepository: async () => repository,
+    });
+    const context = {
+      directory: '/repository', repositoryId: 'repo_one', provider: 'github', instance: 'github.com',
+      accountId: 'github.com#current', bindingRevision: 3, primaryRemote: 'origin',
+    };
+    await expect(service.validateReadContext(context)).resolves.toMatchObject({ accountId: 'github.com#current' });
+    // The gone account itself still needs attention rather than reading.
+    await expect(service.validateReadContext({ ...context, accountId: 'github.com#gone' }))
+      .rejects.toMatchObject({ code: 'SOURCE_CONTROL_BINDING_NEEDS_ATTENTION' });
   });
 
   it('rejects client-provided endpoint fields before persistence', async () => {
@@ -1352,5 +1453,31 @@ describe('source-control binding service', () => {
       accountId: 'account-one',
     })).resolves.toEqual([{ revision: 2 }]);
     expect(reconcileAccount).toHaveBeenCalledWith({ provider, instance: normalizedInstance, accountId: 'account-one' });
+  });
+});
+
+describe('binding readiness summary', () => {
+  const remote = (name, url) => {
+    const endpoint = { displayUrl: redactRemoteUrl(url), fingerprint: fingerprintRemoteUrl(url) };
+    return { name, fetch: endpoint, push: endpoint };
+  };
+  const origin = remote('origin', 'git@github.com:team/repo.git');
+  const binding = {
+    repositoryId: 'repo_one', revision: 3, state: 'bound', configRevision: 'config_one', providers: [], auxiliary: [],
+    remotes: [{ ...origin, mode: 'system', readiness: 'ready' }],
+  };
+  const repository = (remotes) => ({ repositoryId: 'repo_one', configRevision: 'config_two', bare: false, remotes });
+
+  it('stays bound when a remote is only added beside the bound ones', () => {
+    const read = resolveBindingReadiness(binding, repository([origin, remote('fork', 'git@github.com:someone/repo.git')]));
+    expect(read.state).toBe('bound');
+    expect(read.remotes[0].readiness).toBe('ready');
+  });
+
+  it('needs attention when a bound remote is repointed or removed', () => {
+    const repointed = resolveBindingReadiness(binding, repository([remote('origin', 'https://github.com/team/repo.git')]));
+    expect(repointed.state).toBe('needs-attention');
+    expect(repointed.remotes[0].readiness).toBe('config-changed');
+    expect(resolveBindingReadiness(binding, repository([])).state).toBe('needs-attention');
   });
 });

@@ -4,11 +4,12 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 import { Slot } from "@/components/ui/slot"
 
-// Flat tinted buttons: very pale tinted fill (a desaturated version of the
-// border tone) + saturated tinted border + saturated tinted text. No
-// elevation. Dark theme mixes into transparent over the surface so the tone
-// sits atop the dark background.
+// Tinted buttons: very pale tinted fill (a desaturated version of the border
+// tone) + saturated tinted border + saturated tinted text, lit like the other
+// controls (`oc-raised-button`). Dark theme mixes into transparent over the
+// surface so the tone sits atop the dark background.
 const TINT_PRIMARY = [
+  "oc-raised-button",
   "bg-[color-mix(in_srgb,var(--primary-base)_10%,var(--background))]",
   "text-[var(--primary-text)]",
   "border border-[color-mix(in_srgb,var(--primary-base)_12%,transparent)]",
@@ -21,6 +22,7 @@ const TINT_PRIMARY = [
 ].join(" ")
 
 const TINT_DESTRUCTIVE = [
+  "oc-raised-button",
   "bg-[color-mix(in_srgb,var(--status-error)_7%,var(--background))]",
   "text-[var(--error-text)]",
   "border border-[color-mix(in_srgb,var(--status-error)_9%,transparent)]",
@@ -33,6 +35,7 @@ const TINT_DESTRUCTIVE = [
 ].join(" ")
 
 const TINT_INFO = [
+  "oc-raised-button",
   "bg-[color-mix(in_srgb,var(--status-info)_4%,var(--background))]",
   "text-[var(--info-text)]",
   "border border-[color-mix(in_srgb,var(--status-info)_8%,transparent)]",
@@ -46,9 +49,8 @@ const TINT_INFO = [
 
 const buttonVariants = cva(
   [
-    "group relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[10px] [corner-shape:squircle] supports-[corner-shape:squircle]:rounded-[50px] typography-ui-label font-medium lowercase tracking-[0.01em] shrink-0 select-none",
+    "group relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md typography-ui-label font-medium shrink-0 select-none",
     "transition-[background-color,border-color,color,opacity] duration-150 ease-out outline-none",
-    "focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-[3px]",
     "aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
     "disabled:pointer-events-none disabled:opacity-50",
     "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
@@ -57,18 +59,18 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default: TINT_PRIMARY,
-        destructive: cn(
-          TINT_DESTRUCTIVE,
-          "focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40",
-        ),
+        destructive: TINT_DESTRUCTIVE,
         info: TINT_INFO,
          neutral:
-           "bg-secondary text-secondary-foreground border border-border/60 hover:[background-image:linear-gradient(var(--interactive-hover),var(--interactive-hover))] active:[background-image:linear-gradient(var(--interactive-active),var(--interactive-active))]",
+           "oc-raised bg-secondary text-secondary-foreground hover:[background-image:linear-gradient(var(--interactive-hover),var(--interactive-hover))] active:[background-image:linear-gradient(var(--interactive-active),var(--interactive-active))]",
         outline:
-           "oc-surface-elevated bg-surface-elevated text-foreground border border-border/60 hover:[background-image:linear-gradient(var(--interactive-hover),var(--interactive-hover))] active:[background-image:linear-gradient(var(--interactive-active),var(--interactive-active))]",
+           // Raised like the dropdown triggers: canvas-coloured in light themes,
+           // where elevated is darker than the page.
+           "oc-surface-elevated oc-raised bg-[var(--surface-background)] dark:bg-surface-elevated text-foreground hover:[background-image:linear-gradient(var(--interactive-hover),var(--interactive-hover))] active:[background-image:linear-gradient(var(--interactive-active),var(--interactive-active))]",
          // A chip represents selection, independently of the primary action.
         chip: cn(
-          "border border-border/60 bg-transparent text-foreground hover:bg-interactive-hover hover:text-foreground",
+          // Flat by tone, no border: a filter or a toggle, not a raised control.
+          "bg-[color-mix(in_srgb,var(--foreground)_5%,transparent)] text-foreground hover:bg-interactive-hover hover:text-foreground",
            "aria-pressed:bg-interactive-selection aria-pressed:text-interactive-selection-foreground",
            "aria-pressed:hover:bg-interactive-selection aria-pressed:hover:text-interactive-selection-foreground",
         ),
@@ -79,11 +81,11 @@ const buttonVariants = cva(
          link: "text-[var(--primary-text)] underline-offset-4 hover:underline",
       },
       size: {
-        default: "h-9 px-3.5 has-[>svg]:px-3",
-        sm: "h-8 gap-1.5 px-2.5 has-[>svg]:px-2 rounded-[9px] supports-[corner-shape:squircle]:rounded-[50px]",
-        xs: "h-6 gap-1 px-2 typography-micro has-[>svg]:px-1.5 rounded-[7px] supports-[corner-shape:squircle]:rounded-[50px]",
-        lg: "h-10 px-4 has-[>svg]:px-3.5 rounded-[12px] supports-[corner-shape:squircle]:rounded-[50px]",
-        icon: "size-9",
+        default: "h-8 px-3 has-[>svg]:px-2.5",
+        sm: "h-7 gap-1.5 px-2.5 has-[>svg]:px-2",
+        xs: "h-6 gap-1 px-2 typography-micro has-[>svg]:px-1.5 rounded-[5px]",
+        lg: "h-9 px-4 has-[>svg]:px-3.5 rounded-lg",
+        icon: "size-8",
       },
     },
     defaultVariants: {

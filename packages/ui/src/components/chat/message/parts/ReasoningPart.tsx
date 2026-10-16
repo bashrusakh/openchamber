@@ -22,8 +22,6 @@ const TOOL_ROW_DESCRIPTION_CLASS = cn('typography-meta', TOOL_ROW_TEXT_CLASS);
 
 type PartWithText = Part & { text?: string; content?: string; time?: { start?: number; end?: number } };
 
-type ReasoningVariant = 'thinking' | 'justification';
-
 const cleanReasoningText = (text: string): string => {
     if (typeof text !== 'string' || text.trim().length === 0) {
         return '';
@@ -84,14 +82,17 @@ const getReasoningSummary = (text: string): string => {
 
 type ReasoningTimelineBlockProps = {
     text: string;
-    variant: ReasoningVariant;
     blockId: string;
     time?: { start?: number; end?: number };
-    showDuration?: boolean;
     isStreaming?: boolean;
     actions?: React.ReactNode;
     /** Override the initial expanded state. Defaults to `isStreaming`. */
     defaultExpanded?: boolean;
+    /**
+     * Opens while it streams and folds when it ends. Off keeps a streaming
+     * block folded to its header, so a block closing does not move the chat.
+     */
+    expandWhileStreaming?: boolean;
     /** Opens the block whenever it changes to a new non-zero value (a search hit in it). */
     revealRequest?: number;
     /** The message this reasoning belongs to; search finds and highlights the block by it. */
@@ -119,19 +120,19 @@ type ExpansionState = {
 
 export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
     text,
-    variant,
     blockId,
     time,
     isStreaming = false,
     actions,
     defaultExpanded,
+    expandWhileStreaming = true,
     revealRequest = 0,
     reasoningMessageId,
     presentation,
 }) => {
     const { t } = useI18n();
     const hasEnded = typeof time?.end === 'number';
-    const canAutoExpand = isStreaming && !hasEnded;
+    const canAutoExpand = expandWhileStreaming && isStreaming && !hasEnded;
     const [expansion, setExpansion] = React.useState<ExpansionState>(() => {
         if (defaultExpanded === true) {
             return { expanded: true, source: 'user' };
@@ -222,8 +223,7 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
     const toggleAriaLabel = isExpanded
         ? presentation?.collapseLabel ?? t('chat.reasoningTrace.collapseAria')
         : presentation?.expandLabel ?? t('chat.reasoningTrace.expandAria');
-    const title = presentation?.title
-        ?? t(variant === 'justification' ? 'chat.reasoningTrace.justification' : 'chat.reasoningTrace.thinking');
+    const title = presentation?.title ?? t('chat.reasoningTrace.thinking');
 
     const handleToggle = React.useCallback(() => {
         setShouldRenderExpandedContent(true);
@@ -397,7 +397,7 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                 aria-controls={contentId}
                 aria-label={toggleAriaLabel}
                 className={cn(
-                    'group/tool flex gap-1.5 pr-2 pl-px py-1.5 rounded-xl cursor-pointer items-center',
+                    'group/tool flex gap-1.5 pe-2 ps-px py-1.5 rounded-xl cursor-pointer items-center',
                 )}
                 onClick={handleToggle}
                 onKeyDown={handleKeyDown}
@@ -468,7 +468,7 @@ export const ReasoningTimelineBlock: React.FC<ReasoningTimelineBlockProps> = ({
                     }}
                 >
                     <div
-                        className="relative ml-2 pl-3 pb-1 pt-0.5"
+                        className="relative ms-2 ps-3 pb-1 pt-0.5"
                         style={{
                             opacity: isExpanded ? 1 : 0,
                             transform: isExpanded ? 'translateY(0)' : 'translateY(-4px)',
@@ -510,7 +510,7 @@ const ReasoningPart = React.memo(({
     messageId,
     streamPhase,
 }: ReasoningPartProps) => {
-    const chatRenderMode = useUIStore((state) => state.chatRenderMode);
+    const expandWhileStreaming = useUIStore((state) => state.expandReasoningWhileStreaming);
     const revealRequest = useReasoningReveal(messageId);
     const partWithText = part as PartWithText;
     const rawText = partWithText.text || partWithText.content || '';
@@ -521,7 +521,7 @@ const ReasoningPart = React.memo(({
     // the message finished long ago (issue #2020). A part that has ended is
     // never streaming, even while the rest of the message still streams.
     const isLiveStreamPhase = streamPhase === 'streaming' || streamPhase === 'cooldown';
-    const isStreaming = chatRenderMode === 'live' && isLiveStreamPhase && typeof time?.end !== 'number';
+    const isStreaming = isLiveStreamPhase && typeof time?.end !== 'number';
     const throttledTextRaw = useStreamingTextThrottle({
         text: textContent,
         isStreaming,
@@ -542,10 +542,10 @@ const ReasoningPart = React.memo(({
     return (
         <ReasoningTimelineBlock
             text={throttledText}
-            variant="thinking"
             blockId={part.id || `${messageId}-reasoning`}
             time={time}
             isStreaming={isStreaming}
+            expandWhileStreaming={expandWhileStreaming}
             revealRequest={revealRequest}
             reasoningMessageId={messageId}
         />

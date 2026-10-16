@@ -4,12 +4,16 @@ import { runtimeFetch } from '@/lib/runtime-fetch';
 
 import { toast } from '@/components/ui';
 import { copyTextToClipboard } from '@/lib/clipboard';
+import { getDisambiguatingFolders } from '@/lib/path-utils';
 
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -30,12 +34,14 @@ import { GitignoredToggleButton } from '@/components/layout/GitignoredToggleButt
 import { MarkdownPreviewSearch } from './MarkdownPreviewSearch';
 import { PreviewToggleButton } from './PreviewToggleButton';
 import { createFileContentPoller } from './fileContentPoller';
-import { hasFileStatChanged } from './fileStatChange';
+import { hasFileStatChanged, openFilePollStep } from './fileStatChange';
+import { pendingFileNavigationStep } from './pendingFileNavigation';
 import { JsonTreeView } from '@/components/ui/JsonTreeView';
 import { SimpleMarkdownRenderer } from '@/components/chat/MarkdownRenderer';
 import { languageByExtension, loadLanguageByExtension } from '@/lib/codemirror/languageByExtension';
 import { createFlexokiCodeMirrorTheme } from '@/lib/codemirror/flexokiTheme';
 import { shikiHighlightExtension } from '@/lib/codemirror/shikiHighlight';
+import { syncVimMappings } from '@/lib/codemirror/vimModeExtension';
 import { getResolvedShikiTheme } from '@/lib/shiki/appThemeRegistry';
 import { File as PierreFile, VirtualizerContext, WorkerPoolContext } from '@pierre/diffs/react';
 import { useWorkerPool } from '@/contexts/DiffWorkerProvider';
@@ -60,6 +66,7 @@ import { getRuntimeUrlResolver } from '@/lib/runtime-url';
 import { acquireRuntimeUrlAuthToken, refreshRuntimeUrlAuthToken, subscribeRuntimeUrlAuthToken } from '@/lib/runtime-auth';
 import { getRuntimeApiBaseUrl, getRuntimeKey } from '@/lib/runtime-switch';
 import { subscribeToFileContentInvalidation } from '@/lib/fileContentInvalidation';
+import { isFilePathMoveInFlight, rebaseMovedPath, rebaseMovedPathKeys, subscribeToFilePathMoves } from '@/lib/filePathMoves';
 import { DiagramEditor } from '@/components/diagram';
 import { EMPTY_CANVAS_READ, shouldShowFileCanvas, type FileCanvasHandle } from '@/components/views/files/fileCanvas';
 import { GuestFileEditor } from '@/components/views/files/GuestFileEditor';
@@ -79,6 +86,7 @@ import { useFilesViewTabsStore } from '@/stores/useFilesViewTabsStore';
 import { useGitStatus, useGitStore } from '@/stores/useGitStore';
 import { DirectoryRequests } from './files/directoryRequests';
 import { useFileTreeUpload } from './files/useFileTreeUpload';
+import { moveWorkspacePath } from './files/moveWorkspacePath';
 import { areDirectoryNodesEqual, buildFileTreeStatusIndex } from './files/fileTreeStatus';
 import { BinaryArtifact } from './files/previews/BinaryArtifact';
 import { FontArtifact } from './files/previews/FontArtifact';
@@ -96,11 +104,24 @@ import { useFilesViewShowGitignored } from '@/lib/filesViewShowGitignored';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
+import { cancelWhenLayoutSettled, runWhenLayoutSettled } from '@/lib/layoutAnimation';
+import {
+  FileTreeChevron,
+  FileTreeFileMarkers,
+  FileTreeFolderBadge,
+  FileTreeIndentGuides,
+} from './files/FileTreeRowParts';
+import {
+  fileTreeRowPaddingLeft,
+  fileTreeRowStateClassName,
+  type FileTreeGitStatus,
+} from './files/fileTreeRow';
 import { Icon } from "@/components/icon/Icon";
 import { useMessageTTS } from '@/hooks/useMessageTTS';
 import { ensurePierreThemeRegistered } from '@/lib/shiki/appThemeRegistry';
 import { getDefaultTheme } from '@/lib/theme/themes';
-import { isBrowserClientRuntime, openDesktopFileInApp, openDesktopPath } from '@/lib/desktop';
+import { isBrowserClientRuntime, isDesktopLocalOriginActive, openDesktopFileInApp, openDesktopPath } from '@/lib/desktop';
+import { registerCloseTabTarget } from '@/lib/closeTabTarget';
 import { isFileMissingError } from '@/lib/api/files-errors';
 import { useOpenInAppsStore } from '@/stores/useOpenInAppsStore';
 import { useKeybind, useKeybinds } from '@/hooks/useKeybind';
@@ -172,7 +193,7 @@ const OpenInAppListIcon = ({ label, iconDataUrl }: { label: string; iconDataUrl?
     <span
       className={cn(
         'size-4 rounded-sm flex items-center justify-center',
-        'bg-[var(--surface-muted)] text-[9px] font-medium text-muted-foreground'
+        'oc-tile-inset text-[9px] font-medium text-muted-foreground'
       )}
     >
       {initial}
@@ -264,21 +285,14 @@ const getDisplayPath = (root: string | null, path: string): string => {
 
 const DEFAULT_IGNORED_DIR_NAMES = new Set(['node_modules']);
 
-type FileStatus = 'open' | 'modified' | 'git-modified' | 'git-added' | 'git-deleted';
+// A folder before the name tells apart open files that share it.
+const FileNameText: React.FC<{ name: string; folder?: string }> = ({ name, folder }) => (
+  folder ? (
+    <span dir="ltr"><span className="text-muted-foreground opacity-70">{folder}/</span>{name}</span>
+  ) : <>{name}</>
+);
 
-const FileStatusDot: React.FC<{ status: FileStatus }> = ({ status }) => {
-  const color = {
-    open: 'var(--status-info)',
-    modified: 'var(--status-warning)',
-    'git-modified': 'var(--status-warning)',
-    'git-added': 'var(--status-success)',
-    'git-deleted': 'var(--status-error)',
-  }[status];
-
-  return <span className="size-2 rounded-full" style={{ backgroundColor: color }} />;
-};
-
-const ScrollingFileName: React.FC<{ name: string }> = ({ name }) => {
+const ScrollingFileName: React.FC<{ name: string; folder?: string }> = ({ name, folder }) => {
   const containerRef = React.useRef<HTMLSpanElement | null>(null);
   const textRef = React.useRef<HTMLSpanElement | null>(null);
   const [overflowing, setOverflowing] = React.useState(false);
@@ -302,18 +316,19 @@ const ScrollingFileName: React.FC<{ name: string }> = ({ name }) => {
     return () => {
       resizeObserver.disconnect();
     };
-  }, [name]);
+  }, [name, folder]);
 
+  const text = <FileNameText name={name} folder={folder} />;
   return (
     <span ref={containerRef} className="relative block min-w-0 flex-1 overflow-hidden whitespace-nowrap">
-      <span ref={textRef} aria-hidden="true" className="invisible absolute whitespace-nowrap">{name}</span>
+      <span ref={textRef} aria-hidden="true" className="invisible absolute whitespace-nowrap">{text}</span>
       {overflowing ? (
         <span className="open-file-name-marquee-track">
-          <span className="open-file-name-marquee-item">{name}</span>
-          <span className="open-file-name-marquee-item" aria-hidden="true">{name}</span>
+          <span className="open-file-name-marquee-item">{text}</span>
+          <span className="open-file-name-marquee-item" aria-hidden="true">{text}</span>
         </span>
       ) : (
-        <span className="block min-w-0 truncate">{name}</span>
+        <span className="block min-w-0 truncate">{text}</span>
       )}
     </span>
   );
@@ -333,10 +348,6 @@ const isDirectoryReadError = (error: unknown): boolean => {
 };
 
 const MAX_CONTENT_POLL_BYTES = 200_000;
-
-const getFileIcon = (filePath: string, extension?: string): React.ReactNode => {
-  return <FileTypeIcon filePath={filePath} extension={extension} />;
-};
 
 const isMarkdownFile = (path: string): boolean => {
   if (!path) return false;
@@ -374,7 +385,10 @@ interface FileRowProps {
   isMobile: boolean;
   isBrowserClient: boolean;
   alwaysShowActions: boolean;
-  status?: FileStatus | null;
+  depth: number;
+  /** Open in a tab of this view. */
+  isOpen: boolean;
+  status?: FileTreeGitStatus | null;
   badge?: { modified: number; added: number } | null;
   permissions: {
     canRename: boolean;
@@ -404,6 +418,8 @@ const FileRow: React.FC<FileRowProps> = ({
   isMobile,
   isBrowserClient,
   alwaysShowActions,
+  depth,
+  isOpen,
   status,
   badge,
   permissions,
@@ -459,7 +475,7 @@ const FileRow: React.FC<FileRowProps> = ({
     <>
       {canRename && (
         <Item onClick={(e: React.MouseEvent) => { e.stopPropagation(); onOpenDialog('rename', node); }}>
-          <Icon name="edit" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.rename')}
+          <Icon name="edit" className="me-2 size-4" /> {t('sidebarFilesTree.menu.rename')}
         </Item>
       )}
       <Item onClick={(e: React.MouseEvent) => {
@@ -472,7 +488,7 @@ const FileRow: React.FC<FileRowProps> = ({
           toast.error(t('sidebarFilesTree.toast.copyFailed'));
         });
       }}>
-        <Icon name="file-copy" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.copyPath')}
+        <Icon name="file-copy" className="me-2 size-4" /> {t('sidebarFilesTree.menu.copyPath')}
       </Item>
       <Item onClick={(e: React.MouseEvent) => {
         e.stopPropagation();
@@ -485,7 +501,7 @@ const FileRow: React.FC<FileRowProps> = ({
           toast.error(t('sidebarFilesTree.toast.copyFailed'));
         });
       }}>
-        <Icon name="file-copy-2" className="mr-2 size-4" /> {t('filesView.tree.menu.copyRelativePath')}
+        <Icon name="file-copy-2" className="me-2 size-4" /> {t('filesView.tree.menu.copyRelativePath')}
       </Item>
       {!isDir && downloadFile && (
         <Item onClick={(e: React.MouseEvent) => {
@@ -495,12 +511,23 @@ const FileRow: React.FC<FileRowProps> = ({
             toast.error(t('sidebarFilesTree.toast.operationFailed'));
           });
         }}>
-          <Icon name="download" className="mr-2 size-4" /> {t(isBrowserClient ? 'sidebarFilesTree.menu.download' : 'sidebarFilesTree.menu.save')}
+          <Icon name="download" className="me-2 size-4" /> {t(isBrowserClient ? 'sidebarFilesTree.menu.download' : 'sidebarFilesTree.menu.save')}
         </Item>
       )}
       {canRevealPath && (
         <Item onClick={(e: React.MouseEvent) => { e.stopPropagation(); onRevealPath(node.path); }}>
-          <Icon name="folder-received" className="mr-2 size-4" /> {t(getRevealLabelKey())}
+          <Icon name="folder-received" className="me-2 size-4" /> {t(getRevealLabelKey())}
+        </Item>
+      )}
+      {/* The OS opens it with whatever app owns the type: Word for a .docx, Typora for a .md. */}
+      {!isDir && canRevealPath && isDesktopLocalOriginActive() && (
+        <Item onClick={(e: React.MouseEvent) => {
+          e.stopPropagation();
+          void openDesktopPath(node.path).then((opened) => {
+            if (!opened) toast.error(t('sidebarFilesTree.toast.operationFailed'));
+          });
+        }}>
+          <Icon name="external-link" className="me-2 size-4" /> {t('sidebarFilesTree.menu.openInDefaultApp')}
         </Item>
       )}
       {isDir && (canCreateFile || canCreateFolder || canUploadHere) && (
@@ -508,17 +535,17 @@ const FileRow: React.FC<FileRowProps> = ({
           <Separator />
           {canCreateFile && (
             <Item onClick={(e: React.MouseEvent) => { e.stopPropagation(); onOpenDialog('createFile', node); }}>
-              <Icon name="file-add" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.newFile')}
+              <Icon name="file-add" className="me-2 size-4" /> {t('sidebarFilesTree.menu.newFile')}
             </Item>
           )}
           {canCreateFolder && (
             <Item onClick={(e: React.MouseEvent) => { e.stopPropagation(); onOpenDialog('createFolder', node); }}>
-              <Icon name="folder-add" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.newFolder')}
+              <Icon name="folder-add" className="me-2 size-4" /> {t('sidebarFilesTree.menu.newFolder')}
             </Item>
           )}
           {canUploadHere && (
             <Item onClick={(e: React.MouseEvent) => { e.stopPropagation(); onPickFiles(node.path); }}>
-              <Icon name="upload-2" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.uploadFiles')}
+              <Icon name="upload-2" className="me-2 size-4" /> {t('sidebarFilesTree.menu.uploadFiles')}
             </Item>
           )}
         </>
@@ -530,7 +557,7 @@ const FileRow: React.FC<FileRowProps> = ({
             onClick={(e: React.MouseEvent) => { e.stopPropagation(); onOpenDialog('delete', node); }}
             className="text-destructive focus:text-destructive"
           >
-            <Icon name="delete-bin" className="mr-2 size-4" /> {t('sidebarFilesTree.menu.delete')}
+            <Icon name="delete-bin" className="me-2 size-4" /> {t('sidebarFilesTree.menu.delete')}
           </Item>
         </>
       )}
@@ -540,23 +567,21 @@ const FileRow: React.FC<FileRowProps> = ({
   return (
     <ContextMenu open={rightClickMenuPath === node.path} onOpenChange={(open) => setRightClickMenuPath(open ? node.path : null)}>
       <ContextMenuTrigger render={<div className="group relative flex items-center" onContextMenu={!isMobile ? handleContextMenu : undefined} />}>
+      <FileTreeIndentGuides depth={depth} />
       <button
         type="button"
         onClick={handleInteraction}
         onContextMenu={!isMobile ? handleContextMenu : undefined}
         className={cn(
-          'flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-foreground transition-colors pr-8 select-none',
-          isActive ? 'bg-interactive-selection/70' : 'hover:bg-interactive-hover/40'
+          'flex w-full items-center gap-1.5 rounded-md py-1 pe-8 text-start transition-colors select-none',
+          fileTreeRowStateClassName(isActive)
         )}
+        style={{ paddingLeft: fileTreeRowPaddingLeft(depth) }}
       >
         {isDir ? (
-          isExpanded ? (
-            <Icon name="folder-open" className="size-4 flex-shrink-0 text-muted-foreground" />
-          ) : (
-            <Icon name="folder-3" className="size-4 flex-shrink-0 text-muted-foreground" />
-          )
+          <FileTreeChevron expanded={isExpanded} />
         ) : (
-          getFileIcon(node.path, node.extension)
+          <FileTypeIcon filePath={node.path} extension={node.extension} className="ms-0.5 size-3.5" />
         )}
         <span
           className="min-w-0 flex-1 truncate typography-meta"
@@ -564,17 +589,12 @@ const FileRow: React.FC<FileRowProps> = ({
         >
           {node.name}
         </span>
-        {!isDir && status && <FileStatusDot status={status} />}
-        {isDir && badge && (
-          <span className="text-xs flex items-center gap-1 ml-auto mr-1">
-            {badge.modified > 0 && <span className="text-[var(--status-warning)]">M{badge.modified}</span>}
-            {badge.added > 0 && <span className="text-[var(--status-success)]">+{badge.added}</span>}
-          </span>
-        )}
+        {!isDir && <FileTreeFileMarkers isOpen={isOpen} status={status} />}
+        {isDir && badge && <FileTreeFolderBadge badge={badge} />}
       </button>
       {hasMenuActions && (
         <div className={cn(
-          "absolute right-1 top-1/2 -translate-y-1/2",
+          "absolute inset-e-1 top-1/2 -translate-y-1/2",
           alwaysShowActions ? "opacity-100" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100"
         )}>
           <DropdownMenu
@@ -684,6 +704,13 @@ const Dialogs: React.FC<DialogsProps> = ({
 interface FilesViewProps {
   visible?: boolean;
   mode?: 'full' | 'editor-only';
+  /**
+   * For a host whose tab strip owns the open files (the context panel):
+   * closing a file here, by Cmd/Ctrl+W or after the unsaved-changes prompt,
+   * closes the host's tab, which picks the next file the way its close
+   * button does. Without it the view closes the file in its own state.
+   */
+  onCloseFile?: (path: string) => void;
 }
 
 type FileEditorPosition = {
@@ -696,6 +723,9 @@ type FileEditorPosition = {
 // survives FilesView unmounts without retaining every file visited indefinitely.
 const fileEditorPositions = new Map<string, FileEditorPosition>();
 const MAX_FILE_EDITOR_POSITIONS = 100;
+
+type LineNumbersConfig = React.ComponentProps<typeof CodeMirrorEditor>['lineNumbersConfig'];
+type LineNumberHandlers = NonNullable<NonNullable<LineNumbersConfig>['domEventHandlers']>;
 
 const FilePositionEditor = ({
   positionKey,
@@ -795,7 +825,7 @@ const useAssetAuthRefresh = (
   return { readyKey, nonce };
 };
 
-export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = true }) => {
+export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = true, onCloseFile }) => {
   const { t } = useI18n();
   const { files, runtime, git } = useRuntimeAPIs();
   const { currentTheme, availableThemes, lightThemeId, darkThemeId } = useThemeSystem();
@@ -871,6 +901,51 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     );
   }, []);
 
+  // How many secondary buttons the docked toolbar row has room for; the rest
+  // go into its "More actions" menu. Every secondary button is the same 24px
+  // with a 4px gap, so only the row and its fixed groups need measuring. The
+  // file path to the left shrinks first.
+  const [dockedRowEl, setDockedRowEl] = React.useState<HTMLDivElement | null>(null);
+  const [dockedPrimaryEl, setDockedPrimaryEl] = React.useState<HTMLSpanElement | null>(null);
+  const [dockedTailEl, setDockedTailEl] = React.useState<HTMLSpanElement | null>(null);
+  const [dockedSecondaryFit, setDockedSecondaryFit] = React.useState({ all: Number.POSITIVE_INFINITY, withMenu: Number.POSITIVE_INFINITY });
+  React.useLayoutEffect(() => {
+    if (!dockedRowEl || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+    const slot = 28; // one 24px button plus the 4px gap before it
+    const measure = () => {
+      const rowStyle = window.getComputedStyle(dockedRowEl);
+      const rowGap = Number.parseFloat(rowStyle.columnGap) || 0;
+      const inner = dockedRowEl.clientWidth
+        - (Number.parseFloat(rowStyle.paddingLeft) || 0)
+        - (Number.parseFloat(rowStyle.paddingRight) || 0);
+      const hasPath = dockedRowEl.childElementCount > 1;
+      // The trailing group sits after one more 4px gap.
+      const fixed = (dockedPrimaryEl?.offsetWidth ?? 0) + (dockedTailEl?.offsetWidth ?? 0) + 4;
+      const available = inner - fixed - (hasPath ? rowGap : 0);
+      // `all`: how many fit with no menu button; `withMenu`: how many fit
+      // beside it. Only set on change, so a resize that keeps the counts
+      // does not re-render the editor.
+      const all = Math.max(0, Math.floor(available / slot));
+      const withMenu = Math.max(0, Math.floor((available - slot) / slot));
+      setDockedSecondaryFit((current) => (
+        current.all === all && current.withMenu === withMenu ? current : { all, withMenu }
+      ));
+    };
+    measure();
+    // A side column's animation (the sidebar, a zone beside a bottom-zone
+    // editor) resizes the row on every frame: measure once, at its end.
+    const observer = new ResizeObserver(() => runWhenLayoutSettled(measure));
+    observer.observe(dockedRowEl);
+    if (dockedPrimaryEl) observer.observe(dockedPrimaryEl);
+    if (dockedTailEl) observer.observe(dockedTailEl);
+    return () => {
+      observer.disconnect();
+      cancelWhenLayoutSettled(measure);
+    };
+  }, [dockedPrimaryEl, dockedRowEl, dockedTailEl]);
+
   type TextViewMode = 'view' | 'edit';
   type PreviewViewMode = 'preview' | 'edit';
 
@@ -917,6 +992,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   const expandedPathSet = React.useMemo(() => new Set(expandedPaths), [expandedPaths]);
   const removeOpenPath = useFilesViewTabsStore((state) => state.removeOpenPath);
   const removeOpenPathsByPrefix = useFilesViewTabsStore((state) => state.removeOpenPathsByPrefix);
+  const removeUnselectedOpenPath = useFilesViewTabsStore((state) => state.removeUnselectedOpenPath);
   const removeExpandedPathsByPrefix = useFilesViewTabsStore((state) => state.removeExpandedPathsByPrefix);
   const setSelectedPath = useFilesViewTabsStore((state) => state.setSelectedPath);
   const toggleExpandedPath = useFilesViewTabsStore((state) => state.toggleExpandedPath);
@@ -936,6 +1012,11 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   }, []);
 
   const openFiles = React.useMemo(() => openPaths.map(toFileNode), [openPaths, toFileNode]);
+  const openFileFolders = React.useMemo(
+    () => getDisambiguatingFolders(openPaths.map((path) => getDisplayPath(root, path))),
+    [openPaths, root],
+  );
+  const getOpenFileFolder = (path: string) => openFileFolders.get(getDisplayPath(root, path));
   const effectiveSelectedPath = React.useMemo(() => {
     if (selectedPath) {
       const comparableSelected = toComparablePath(selectedPath);
@@ -973,13 +1054,15 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
 
   // Editor tabs horizontal scroll fades
   const editorTabsScrollRef = React.useRef<HTMLDivElement>(null);
-  const [editorTabsOverflow, setEditorTabsOverflow] = React.useState<{ left: boolean; right: boolean }>({ left: false, right: false });
+  const [editorTabsOverflow, setEditorTabsOverflow] = React.useState<{ start: boolean; end: boolean }>({ start: false, end: false });
   const updateEditorTabsOverflow = React.useCallback(() => {
     const el = editorTabsScrollRef.current;
     if (!el) return;
+    // scrollLeft is negative in RTL; its magnitude is the distance from the start.
+    const fromStart = Math.abs(el.scrollLeft);
     setEditorTabsOverflow({
-      left: el.scrollLeft > 2,
-      right: el.scrollLeft + el.clientWidth < el.scrollWidth - 2,
+      start: fromStart > 2,
+      end: fromStart + el.clientWidth < el.scrollWidth - 2,
     });
   }, []);
   const updateEditorTabsOverflowRef = React.useRef(updateEditorTabsOverflow);
@@ -1014,7 +1097,25 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   const [desktopImageSrc, setDesktopImageSrc] = React.useState<string>('');
 
   const [loadedFilePath, setLoadedFilePath] = React.useState<string | null>(null);
-  const filePositionKey = JSON.stringify([getRuntimeKey(), root, loadedFilePath]);
+  const loadedFilePathRef = React.useRef(loadedFilePath);
+  loadedFilePathRef.current = loadedFilePath;
+  // Set when a move or rename lands on the loaded file (`lib/filePathMoves.ts`):
+  // once the tabs point at `to`, the editor adopts it with its unsaved edits
+  // instead of re-reading the file.
+  const pendingPathMoveRef = React.useRef<{ from: string; to: string } | null>(null);
+  // Editors are keyed by the path the file was opened under, so adopting a
+  // moved path does not remount them and drop their undo history or edits.
+  const [documentPathAlias, setDocumentPathAlias] = React.useState<{ path: string; documentPath: string } | null>(null);
+  const editorDocumentPath = documentPathAlias && documentPathAlias.path === loadedFilePath
+    ? documentPathAlias.documentPath
+    : loadedFilePath;
+  // The path whose last read failed. Requests waiting for that file to load
+  // (a line jump, a focus) end here instead of waiting forever.
+  const [failedFilePath, setFailedFilePath] = React.useState<string | null>(null);
+  // The path the open-file poll saw missing since its last load; only that
+  // observation lets the poll reload a failed file once it is back.
+  const missingSeenPathRef = React.useRef<string | null>(null);
+  const filePositionKey = JSON.stringify([getRuntimeKey(), root, editorDocumentPath]);
 
   const [draftContent, setDraftContent] = React.useState('');
   const [isSaving, setIsSaving] = React.useState(false);
@@ -1063,7 +1164,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   const canvasLastEditAtRef = React.useRef(0);
   const [editorViewReadyNonce, setEditorViewReadyNonce] = React.useState(0);
   const pendingNavigationRafRef = React.useRef<number | null>(null);
-  const pendingNavigationCycleRef = React.useRef<{ key: string; attempts: number }>({ key: '', attempts: 0 });
+  const pendingNavigationCycleRef = React.useRef<{ key: string; attempts: number; targetShown: boolean }>({ key: '', attempts: 0, targetShown: false });
 
   React.useEffect(() => {
     return () => {
@@ -1168,6 +1269,12 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   const pendingFileFocusPath = useUIStore((state) => state.pendingFileFocusPath);
   const setPendingFileFocusPath = useUIStore((state) => state.setPendingFileFocusPath);
   const fileEditorKeymap = useUIStore((state) => state.fileEditorKeymap);
+  const fileEditorVimMappings = useUIStore((state) => state.fileEditorVimMappings);
+  // Vim mappings live in the Vim keymap, which is global; editing them in
+  // Settings applies to open editors on the next key press.
+  React.useEffect(() => {
+    if (fileEditorKeymap === 'vim') syncVimMappings(fileEditorVimMappings);
+  }, [fileEditorKeymap, fileEditorVimMappings]);
   const settingsDefaultFileViewerPreview = useConfigStore((state) => state.settingsDefaultFileViewerPreview);
   const showMessageTTSButtons = useConfigStore((state) => state.showMessageTTSButtons);
 
@@ -1227,6 +1334,8 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   } = fileCommentController;
 
   React.useEffect(() => {
+    // A moved file is the same document under a new path: it keeps its draft.
+    if (pendingPathMoveRef.current?.to === selectedFile?.path) return;
     setLineSelection(null);
     reset();
     setDraftContent('');
@@ -1329,9 +1438,10 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     return directoryRequests.run(normalizedDir, async (ownsRequest) => {
       const isCurrentRequest = () => ownsRequest() && treeScopeRef.current === scope && getRuntimeKey() === requestRuntime;
       try {
+        const respectGitignore = !showGitignored;
         const entries = files.listDirectory
-          ? (await files.listDirectory(normalizedDir)).entries
-          : await opencodeClient.listLocalDirectory(normalizedDir);
+          ? (await files.listDirectory(normalizedDir, { respectGitignore })).entries
+          : await opencodeClient.listLocalDirectory(normalizedDir, { respectGitignore });
         if (!isCurrentRequest()) return;
         const mapped = mapDirectoryEntries(normalizedDir, entries);
         loadedDirsRef.current = new Set(loadedDirsRef.current);
@@ -1364,7 +1474,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
         }));
       }
     }, force);
-  }, [directoryRequests, files, mapDirectoryEntries, removeExpandedPathsByPrefix, root, treeActive]);
+  }, [directoryRequests, files, mapDirectoryEntries, removeExpandedPathsByPrefix, root, showGitignored, treeActive]);
 
   const refreshRoot = React.useCallback(async () => {
     if (!root) {
@@ -1570,33 +1680,29 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       const oldPath = dialogData.path;
       const parentDir = oldPath.split('/').slice(0, -1).join('/');
       const prefix = parentDir ? `${parentDir}/` : '';
-      const newPath = normalizePath(`${prefix}${dialogInputValue.trim()}`);
+      const newName = dialogInputValue.trim();
+      const newPath = normalizePath(`${prefix}${newName}`);
 
-      await files.rename(oldPath, newPath)
-        .then(async (result) => {
-          if (result.success) {
-            toast.success(t('sidebarFilesTree.toast.renamedSuccessfully'));
-            await refreshDirectory(parentDir);
-            if (root) {
-              removeOpenPathsByPrefix(root, oldPath);
-            }
-            if (selectedFile?.path === oldPath || selectedFile?.path.startsWith(`${oldPath}/`)) {
-              if (root) {
-                setSelectedPath(root, null);
-              }
-              setFileContent('');
-              setFileError(null);
-              setDesktopImageSrc('');
-              setLoadedFilePath(null);
-              if (isMobile) {
-                setShowMobilePageContent(false);
-              }
-            }
-          }
+      // Open tabs and the editor, unsaved edits included, follow the new name.
+      try {
+        const result = await moveWorkspacePath(files, root, oldPath, newPath);
+        if (result === 'moved') {
+          toast.success(t('sidebarFilesTree.toast.renamedSuccessfully'));
+          await refreshDirectory(parentDir);
           finishDialogOperation();
-        })
-        .catch(() => failDialogOperation(t('sidebarFilesTree.toast.operationFailed')))
-        .finally(done);
+        } else if (result === 'conflict') {
+          failDialogOperation(t('sidebarFilesTree.toast.nameTaken', {
+            name: newName,
+            folder: getDisplayPath(root, parentDir) || t('sidebarFilesTree.dialog.rootFallback'),
+          }));
+        } else {
+          failDialogOperation(t('sidebarFilesTree.toast.operationFailed'));
+        }
+      } catch {
+        failDialogOperation(t('sidebarFilesTree.toast.operationFailed'));
+      } finally {
+        done();
+      }
       return;
     }
 
@@ -1752,11 +1858,11 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
         const options = resolveFileReadOptions(path);
         const stat = await files.statFile?.(path, { ...options, directory: root || undefined });
         if (!cancelled && stat && !stat.isFile) {
-          removeOpenPathsByPrefix(root, path);
+          removeUnselectedOpenPath(root, path);
         }
       } catch (error) {
         if (!cancelled && isFileMissingError(error)) {
-          removeOpenPathsByPrefix(root, path);
+          removeUnselectedOpenPath(root, path);
         }
       }
     }));
@@ -1764,7 +1870,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     return () => {
       cancelled = true;
     };
-  }, [files, openPaths, removeOpenPathsByPrefix, resolveFileReadOptions, root]);
+  }, [files, openPaths, removeUnselectedOpenPath, resolveFileReadOptions, root]);
 
   const isDirty = draftContent !== fileContent || canvasDirty;
 
@@ -1816,6 +1922,12 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     // Clean draft: treat as success so discard/save dialogs and Ctrl+S are not stranded.
     if (!isDirty) {
       return true;
+    }
+
+    // The file is moving: a write now would recreate it at the old path. Once
+    // the editor adopts the new path, autosave runs again and saves there.
+    if (pendingPathMoveRef.current || isFilePathMoveInFlight(selectedFile.path)) {
+      return false;
     }
 
     setIsSaving(true);
@@ -2026,7 +2138,11 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       return activeFileLoadIdRef.current === loadId && currentPath === node.path;
     };
 
+    pendingPathMoveRef.current = null;
+    setDocumentPathAlias(null);
     setFileError(null);
+    setFailedFilePath(null);
+    missingSeenPathRef.current = null;
     setDesktopImageSrc('');
     setLoadedFilePath(null);
     setContentDetectedBinary(false);
@@ -2136,22 +2252,12 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
           }
           return;
         }
-        if (isFileMissingError(error)) {
-          if (root) {
-            removeOpenPathsByPrefix(root, node.path);
-          }
-          setFileContent('');
-          setDraftContent('');
-          setFileError(null);
-          lastLoadedFileStatRef.current = null;
-          if (isMobile) {
-            setShowMobilePageContent(false);
-          }
-          return;
-        }
+        // A missing file keeps its tab and shows the error like any other
+        // failed read; the host's tab still names this path.
         setFileContent('');
         setDraftContent('');
         setFileError(error instanceof Error ? error.message : t('filesView.error.readFileFailed'));
+        setFailedFilePath(node.path);
         lastLoadedFileStatRef.current = null;
       })
       .finally(() => {
@@ -2159,7 +2265,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
           setFileLoading(false);
         }
       });
-  }, [applyLoadedTextContent, expandPaths, isMobile, loadDirectory, readFile, readFileStat, removeOpenPathsByPrefix, root, runtime.isDesktop, searchQuery, setSelectedPath, t]);
+  }, [applyLoadedTextContent, expandPaths, isMobile, loadDirectory, readFile, readFileStat, root, runtime.isDesktop, searchQuery, setSelectedPath, t]);
 
   const ensurePathVisible = React.useCallback(async (targetPath: string, includeTarget: boolean) => {
     if (!visible || !root) {
@@ -2228,7 +2334,43 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     void ensurePathVisible(selectedFile.path, false);
   }, [ensurePathVisible, selectedFile?.path]);
 
+  React.useEffect(() => subscribeToFilePathMoves(({ runtimeKey, from, to }) => {
+    if (runtimeKey !== getRuntimeKey()) return;
+    // View modes (preview or source, table or text) follow the file.
+    textViewModeByPathRef.current = rebaseMovedPathKeys(textViewModeByPathRef.current, from, to);
+    mdViewModeByPathRef.current = rebaseMovedPathKeys(mdViewModeByPathRef.current, from, to);
+    htmlViewModeByPathRef.current = rebaseMovedPathKeys(htmlViewModeByPathRef.current, from, to);
+    svgViewModeByPathRef.current = rebaseMovedPathKeys(svgViewModeByPathRef.current, from, to);
+    mermaidViewModeByPathRef.current = rebaseMovedPathKeys(mermaidViewModeByPathRef.current, from, to);
+    tableViewModeByPathRef.current = rebaseMovedPathKeys(tableViewModeByPathRef.current, from, to);
+    drawioViewModeByPathRef.current = rebaseMovedPathKeys(drawioViewModeByPathRef.current, from, to);
+    canvasViewModeByPathRef.current = rebaseMovedPathKeys(canvasViewModeByPathRef.current, from, to);
+    const pending = pendingPathMoveRef.current;
+    const heldPath = pending?.to ?? loadedFilePathRef.current;
+    const movedPath = heldPath ? rebaseMovedPath(heldPath, from, to) : null;
+    if (heldPath && movedPath) {
+      pendingPathMoveRef.current = { from: pending?.from ?? heldPath, to: movedPath };
+    }
+  }), []);
+
   React.useEffect(() => {
+    // Adopt a moved file before anything reloads it, visible or not: the
+    // draft stays, only the path the editor saves to changes.
+    const pendingMove = pendingPathMoveRef.current;
+    if (pendingMove && selectedFile?.path === pendingMove.to) {
+      pendingPathMoveRef.current = null;
+      if (loadedFilePath === pendingMove.from) {
+        setDocumentPathAlias({ path: pendingMove.to, documentPath: editorDocumentPath ?? pendingMove.from });
+        setLoadedFilePath(pendingMove.to);
+        return;
+      }
+    } else if (pendingMove && loadedFilePath !== pendingMove.from) {
+      // Another file finished loading while the move landed (the user
+      // switched tabs mid-move): nothing is left to adopt, and a stale hold
+      // would block every save of the file now open.
+      pendingPathMoveRef.current = null;
+    }
+
     if (!visible) return;
     if (!selectedFile) {
       activeFileLoadIdRef.current += 1;
@@ -2249,7 +2391,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
         loadingFilePathRef.current = null;
       }
     });
-  }, [fileContentRevision, loadSelectedFile, loadedFilePath, selectedFile, visible]);
+  }, [editorDocumentPath, fileContentRevision, loadSelectedFile, loadedFilePath, selectedFile, visible]);
 
   // Sync isDirty to a ref so the polling interval can read the latest value
   // without isDirty in its dependency array (avoids interval restart on every edit/save).
@@ -2278,13 +2420,15 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
 
   // Poll open file for external changes. Metadata is compared first so an
   // unchanged file never reads content, and a changed text file swaps content
-  // in place; only other files fall back to a full reload.
+  // in place; only other files fall back to a full reload. A file that is
+  // missing shows the read error, and loads again once it is back.
   React.useEffect(() => {
-    if (!visible || !selectedFile?.path || loadedFilePath !== selectedFile.path) {
+    if (!visible || !selectedFile?.path || (loadedFilePath !== selectedFile.path && failedFilePath !== selectedFile.path)) {
       return;
     }
 
     const selectedPath = selectedFile.path;
+    const showsFailure = failedFilePath === selectedPath;
     const requestRuntime = getRuntimeKey();
     const requestScope = fileScopeRef.current;
     // draw.io preview edits live in the XML refs, not the draft buffer, so an
@@ -2326,6 +2470,18 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
             return;
           }
 
+          const sawMissing = missingSeenPathRef.current === selectedPath;
+          const step = openFilePollStep({ stat: 'found', showsFailure, sawMissing, hasUnsavedChanges: hasUnsavedChanges(), moving: false });
+          if (step === 'reload') {
+            lastLoadedFileStatRef.current = null;
+            setLoadedFilePath(null);
+            setFileContentRevision((revision) => revision + 1);
+            return;
+          }
+          if (step !== 'check-changes') {
+            return;
+          }
+
           const previousStat = lastLoadedFileStatRef.current;
           if (!previousStat || previousStat.path !== selectedPath) {
             lastLoadedFileStatRef.current = latestStat;
@@ -2354,7 +2510,22 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
           // Reset loadedFilePath so the effect above triggers a single reload.
           setLoadedFilePath(null);
         })
-        .catch(() => {})
+        .catch((error) => {
+          if (cancelled || getRuntimeKey() !== requestRuntime || fileScopeRef.current !== requestScope) return;
+          // Unsaved edits stay on screen; saving writes the file back.
+          const stat = isFileMissingError(error) ? 'missing' : 'failed';
+          const sawMissing = missingSeenPathRef.current === selectedPath;
+          const moving = isFilePathMoveInFlight(selectedPath) || pendingPathMoveRef.current !== null;
+          if (openFilePollStep({ stat, showsFailure, sawMissing, hasUnsavedChanges: hasUnsavedChanges(), moving }) !== 'show-missing') {
+            return;
+          }
+          missingSeenPathRef.current = selectedPath;
+          lastLoadedFileStatRef.current = null;
+          setFileContent('');
+          setDraftContent('');
+          setFileError(error instanceof Error ? error.message : t('filesView.error.readFileFailed'));
+          setFailedFilePath(selectedPath);
+        })
         .finally(() => {
           polling = false;
         });
@@ -2367,7 +2538,40 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       contentPoller?.dispose();
       window.clearInterval(interval);
     };
-  }, [applyLoadedTextContent, contentDetectedBinary, loadedFilePath, readFile, readFileStat, selectedFile?.path, visible]);
+  }, [applyLoadedTextContent, contentDetectedBinary, failedFilePath, loadedFilePath, readFile, readFileStat, selectedFile?.path, t, visible]);
+
+  // Closes `path` once nothing stands in the way (no unsaved edits, or the
+  // prompt was answered), moving to `nextFile` when it was the one on screen.
+  const closeOpenFile = React.useCallback((path: string, nextFile: FileNode | null) => {
+    if (onCloseFile) {
+      onCloseFile(path);
+      return;
+    }
+
+    if (root) {
+      removeOpenPath(root, path);
+    }
+
+    if (selectedFile?.path !== path) {
+      return;
+    }
+
+    if (nextFile) {
+      void handleSelectFile(nextFile);
+      return;
+    }
+
+    if (root) {
+      setSelectedPath(root, null);
+    }
+    setFileContent('');
+    setFileError(null);
+    setDesktopImageSrc('');
+    setLoadedFilePath(null);
+    if (isMobile) {
+      setShowMobilePageContent(false);
+    }
+  }, [handleSelectFile, isMobile, onCloseFile, removeOpenPath, root, selectedFile?.path, setSelectedPath]);
 
   const discardAndContinue = React.useCallback(() => {
     const nextFile = pendingSelectFileRef.current;
@@ -2387,25 +2591,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     setDraftContent(fileContent);
 
     if (closePath) {
-      if (root) {
-        removeOpenPath(root, closePath);
-      }
-      if (selectedFile?.path === closePath) {
-        if (nextFile) {
-          void handleSelectFile(nextFile);
-        } else {
-          if (root) {
-            setSelectedPath(root, null);
-          }
-          setFileContent('');
-          setFileError(null);
-          setDesktopImageSrc('');
-          setLoadedFilePath(null);
-          if (isMobile) {
-            setShowMobilePageContent(false);
-          }
-        }
-      }
+      closeOpenFile(closePath, nextFile);
       return;
     }
 
@@ -2414,7 +2600,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       return;
     }
 
-  }, [fileContent, handleSelectFile, isMobile, removeOpenPath, root, selectedFile?.path, setSelectedPath]);
+  }, [closeOpenFile, fileContent, handleSelectFile]);
 
   const saveAndContinue = React.useCallback(async () => {
     const nextFile = pendingSelectFileRef.current;
@@ -2435,25 +2621,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     setConfirmDiscardOpen(false);
 
     if (closePath) {
-      if (root) {
-        removeOpenPath(root, closePath);
-      }
-      if (selectedFile?.path === closePath) {
-        if (nextFile) {
-          await handleSelectFile(nextFile);
-        } else {
-          if (root) {
-            setSelectedPath(root, null);
-          }
-          setFileContent('');
-          setFileError(null);
-          setDesktopImageSrc('');
-          setLoadedFilePath(null);
-          if (isMobile) {
-            setShowMobilePageContent(false);
-          }
-        }
-      }
+      closeOpenFile(closePath, nextFile);
       return;
     }
 
@@ -2462,7 +2630,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       return;
     }
 
-  }, [handleSelectFile, isMobile, removeOpenPath, root, saveDraft, selectedFile?.path, setSelectedPath]);
+  }, [closeOpenFile, handleSelectFile, saveDraft]);
 
   const handleCloseFile = React.useCallback((path: string) => {
     const isActive = selectedFile?.path === path;
@@ -2475,41 +2643,27 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       return;
     }
 
-    if (root) {
-      removeOpenPath(root, path);
-    }
+    closeOpenFile(path, nextFile);
+  }, [closeOpenFile, getNextOpenFile, isDirty, openFiles, selectedFile?.path]);
 
-    if (!isActive) {
-      return;
-    }
-
-    if (nextFile) {
-      void handleSelectFile(nextFile);
-      return;
-    }
-
-    if (root) {
-      setSelectedPath(root, null);
-    }
-    setFileContent('');
-    setFileError(null);
-    setDesktopImageSrc('');
-    setLoadedFilePath(null);
-    if (isMobile) {
-      setShowMobilePageContent(false);
-    }
-  }, [getNextOpenFile, handleSelectFile, isDirty, isMobile, openFiles, removeOpenPath, root, selectedFile?.path, setSelectedPath]);
+  // While a file is open here, Cmd/Ctrl+W closes its tab (asking first when
+  // it has unsaved edits) instead of the whole window.
+  const handleCloseFileRef = React.useRef(handleCloseFile);
+  React.useEffect(() => {
+    handleCloseFileRef.current = handleCloseFile;
+  }, [handleCloseFile]);
+  const closeTargetPath = selectedFile?.path ?? null;
+  React.useEffect(() => {
+    if (!visible || !closeTargetPath) return;
+    return registerCloseTabTarget(() => handleCloseFileRef.current(closeTargetPath));
+  }, [closeTargetPath, visible]);
 
   const openPathSet = React.useMemo(() => new Set(openPaths), [openPaths]);
   const statusIndex = React.useMemo(() => buildFileTreeStatusIndex(treeEnabled ? gitStatus?.files ?? [] : []), [gitStatus?.files, treeEnabled]);
-  const getFileStatus = React.useCallback((path: string): FileStatus | null => {
-    // Check open status
-    if (openPathSet.has(path)) return 'open';
-
-    // Check git status
+  const getFileStatus = React.useCallback((path: string): FileTreeGitStatus | null => {
     const relative = path.startsWith(root + '/') ? path.slice(root.length + 1) : path;
     return statusIndex.statusByPath.get(relative) ?? null;
-  }, [openPathSet, statusIndex, root]);
+  }, [statusIndex, root]);
 
   const getFolderBadge = React.useCallback((dirPath: string): { modified: number; added: number } | null => {
     if (!gitStatus?.files) return null;
@@ -2536,22 +2690,13 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   function renderTree(dirPath: string, depth: number): React.ReactNode {
     const nodes = childrenByDir[dirPath] ?? [];
 
-    return nodes.map((node, index) => {
+    return nodes.map((node) => {
       const isDir = node.type === 'directory';
       const isExpanded = isDir && expandedPathSet.has(node.path);
       const isActive = selectedFile?.path === node.path;
-      const isLast = index === nodes.length - 1;
 
       return (
-        <li key={node.path} className="relative">
-          {depth > 0 && (
-            <>
-              <span className="absolute top-3.5 left-[-12px] w-3 h-px bg-border/40" />
-              {isLast && (
-                <span className="absolute top-3.5 bottom-0 left-[-13px] w-[2px] bg-background" />
-              )}
-            </>
-          )}
+        <li key={node.path}>
           <FileRow
             node={node}
             root={root}
@@ -2560,6 +2705,8 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
             isMobile={isMobile}
             isBrowserClient={isBrowserClient}
             alwaysShowActions={alwaysShowActions}
+            depth={depth}
+            isOpen={!isDir && openPathSet.has(node.path)}
             status={!isDir ? getFileStatus(node.path) : undefined}
             badge={isDir ? getFolderBadge(node.path) : undefined}
             permissions={fileRowPermissions}
@@ -2576,9 +2723,13 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
             onPickFiles={pickFiles}
           />
           {isDir && isExpanded && (
-            <ul className="flex flex-col gap-1 ml-3 pl-3 border-l border-border/40 relative">
+            <ul className="flex flex-col">
               {loadErrorsByDir[node.path] ? (
-                <li className="flex items-center gap-2 px-2 py-1 typography-meta text-muted-foreground">
+                <li
+                  className="relative flex items-center gap-2 py-1 pe-2 typography-meta text-muted-foreground"
+                  style={{ paddingLeft: fileTreeRowPaddingLeft(depth + 1) }}
+                >
+                  <FileTreeIndentGuides depth={depth + 1} />
                   <span className="min-w-0 flex-1 truncate text-[var(--status-error)]" title={loadErrorsByDir[node.path]}>{loadErrorsByDir[node.path]}</span>
                   <Button variant="ghost" size="xs" className="h-6 gap-1" onClick={() => void refreshDirectory(node.path)}>
                     <Icon name="refresh" className="size-3.5" />
@@ -2704,6 +2855,9 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     };
   }, [selectedFile?.path, staticLanguageExtension]);
 
+  // The selection effect below sets the mode again in the same commit, so a
+  // read-only text file still opens in the read-only code editor; a pending
+  // line jump relies on that editor (`pendingFileNavigationStep`).
   React.useEffect(() => {
     if (!canEdit && textViewMode === 'edit') {
       setTextViewMode('view');
@@ -2940,6 +3094,9 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     if (!files.writeFile || xml === diagramSavedXmlRef.current) {
       return false;
     }
+    if (pendingPathMoveRef.current || isFilePathMoveInFlight(path)) {
+      return false;
+    }
 
     const result = await files.writeFile(path, xml);
     if (!result?.success) {
@@ -3111,38 +3268,47 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     const targetPath = normalizePath(pendingFileNavigation.path);
     if (!targetPath) {
       setPendingFileNavigation(null);
-      pendingNavigationCycleRef.current = { key: '', attempts: 0 };
+      pendingNavigationCycleRef.current = { key: '', attempts: 0, targetShown: false };
       return;
     }
 
     const navigationKey = `${targetPath}:${pendingFileNavigation.line}:${pendingFileNavigation.column ?? 1}`;
     if (pendingNavigationCycleRef.current.key !== navigationKey) {
-      pendingNavigationCycleRef.current = { key: navigationKey, attempts: 0 };
+      pendingNavigationCycleRef.current = { key: navigationKey, attempts: 0, targetShown: false };
+    }
+    const selectedPath = selectedFile?.path ?? null;
+    if (selectedPath === targetPath) {
+      pendingNavigationCycleRef.current.targetShown = true;
     }
 
-    if (selectedFile?.path !== targetPath) {
-      if (confirmDiscardOpen) {
-        return;
+    const step = pendingFileNavigationStep({
+      selectedPath,
+      targetPath,
+      targetShown: pendingNavigationCycleRef.current.targetShown,
+      targetSettled: !fileLoading && (loadedFilePath === targetPath || failedFilePath === targetPath),
+      showsText: failedFilePath !== targetPath && !fileError && !isSelectedImage && !isSelectedPdf && !isUnsupportedBinary,
+      canEdit,
+      textViewMode,
+    });
+
+    if (step === 'select-target') {
+      if (!confirmDiscardOpen) {
+        void handleSelectFile(toFileNode(targetPath));
       }
-      void handleSelectFile(toFileNode(targetPath));
       return;
     }
 
-    if (fileLoading || loadedFilePath !== targetPath) {
+    if (step === 'wait') {
       return;
     }
 
-    if (fileError || isSelectedImage || isSelectedPdf || isUnsupportedBinary) {
+    if (step === 'end') {
       setPendingFileNavigation(null);
-      pendingNavigationCycleRef.current = { key: '', attempts: 0 };
+      pendingNavigationCycleRef.current = { key: '', attempts: 0, targetShown: false };
       return;
     }
 
-    if (!canEdit) {
-      return;
-    }
-
-    if (textViewMode !== 'edit') {
+    if (step === 'show-editor') {
       setTextViewMode('edit');
       return;
     }
@@ -3194,12 +3360,13 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     }
 
     setPendingFileNavigation(null);
-    pendingNavigationCycleRef.current = { key: '', attempts: 0 };
+    pendingNavigationCycleRef.current = { key: '', attempts: 0, targetShown: false };
   }, [
     canEdit,
     confirmDiscardOpen,
     draftContent,
     editorViewReadyNonce,
+    failedFilePath,
     fileError,
     fileLoading,
     isSelectedImage,
@@ -3234,7 +3401,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       return;
     }
 
-    if (fileLoading || loadedFilePath !== targetPath) {
+    if (fileLoading || (loadedFilePath !== targetPath && failedFilePath !== targetPath)) {
       return;
     }
 
@@ -3242,13 +3409,14 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     // JSON tree, images, PDFs) never mount a CodeMirror editor, so the request
     // must clear regardless — otherwise it lingers and replays on every
     // dependency change.
-    if (!fileError && !isSelectedImage && !isSelectedPdf && !isUnsupportedBinary && canEdit && textViewMode === 'edit') {
+    if (failedFilePath !== targetPath && !fileError && !isSelectedImage && !isSelectedPdf && !isUnsupportedBinary && canEdit && textViewMode === 'edit') {
       editorViewRef.current?.focus();
     }
 
     setPendingFileFocusPath(null);
   }, [
     canEdit,
+    failedFilePath,
     fileError,
     fileLoading,
     isSelectedImage,
@@ -3355,6 +3523,14 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   });
 
   const editorFontSize = useUIStore((state) => state.editorFontSize);
+  // The rendered preview follows the editor's font size, so zoom and the
+  // Editor Font Size setting resize both modes. At the default 13 px it
+  // renders at the old 14 px body and 12 px code.
+  // SAFETY: CSS custom properties are valid inline styles; React's type lists only standard ones.
+  const previewFontStyle = React.useMemo(() => ({
+    '--text-markdown': `${editorFontSize + 1}px`,
+    '--text-code': `${editorFontSize - 1}px`,
+  } as React.CSSProperties), [editorFontSize]);
 
   // Git change markers compare the open file with its HEAD version. The
   // server answers an empty original both for a new file and for one git does
@@ -3397,7 +3573,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       cancelled = true;
     };
     // gitBaselineKey carries the status fields that decide a refetch.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDirectory, git, gitBaselineKey, root]);
   const gitBaselineRef = React.useRef(gitBaseline);
   gitBaselineRef.current = gitBaseline;
@@ -3428,6 +3604,95 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       || transaction.isUserEvent('undo') || transaction.isUserEvent('redo') || transaction.isUserEvent('move')
     ));
     if (edited) pinPreviewOnEditRef.current();
+  }), []);
+
+  // Line-number gutter handlers read the latest render's state through a ref,
+  // so the config handed to CodeMirror keeps its identity: a new one would
+  // rebuild the gutter on every FilesView render.
+  const lineNumberHandlers: LineNumberHandlers = {
+    mousedown: (view, line, event) => {
+      if (!(event instanceof MouseEvent)) {
+        return false;
+      }
+      if (event.button !== 0) {
+        return false;
+      }
+      event.preventDefault();
+
+      const lineNumber = view.state.doc.lineAt(line.from).number;
+
+      if (
+        lineSelection &&
+        !event.shiftKey &&
+        Math.min(lineSelection.start, lineSelection.end) === lineNumber &&
+        Math.max(lineSelection.start, lineSelection.end) === lineNumber
+      ) {
+        setLineSelection(null);
+        cancel();
+        isSelectingRef.current = false;
+        selectionStartRef.current = null;
+        setIsDragging(false);
+        return true;
+      }
+
+      // Mobile: tap-to-extend selection
+      if (isMobile && lineSelection && !event.shiftKey) {
+        const start = Math.min(lineSelection.start, lineSelection.end, lineNumber);
+        const end = Math.max(lineSelection.start, lineSelection.end, lineNumber);
+        setLineSelection({ start, end });
+        isSelectingRef.current = false;
+        selectionStartRef.current = null;
+        setIsDragging(false);
+        return true;
+      }
+
+      isSelectingRef.current = true;
+      selectionStartRef.current = lineNumber;
+      setIsDragging(true);
+
+      if (lineSelection && event.shiftKey) {
+        const start = Math.min(lineSelection.start, lineNumber);
+        const end = Math.max(lineSelection.end, lineNumber);
+        setLineSelection({ start, end });
+      } else {
+        setLineSelection({ start: lineNumber, end: lineNumber });
+      }
+
+      return true;
+    },
+    mouseover: (view, line, event) => {
+      if (!(event instanceof MouseEvent)) {
+        return false;
+      }
+      if (event.buttons !== 1) {
+        return false;
+      }
+      if (!isSelectingRef.current || selectionStartRef.current === null) {
+        return false;
+      }
+
+      const lineNumber = view.state.doc.lineAt(line.from).number;
+      const start = Math.min(selectionStartRef.current, lineNumber);
+      const end = Math.max(selectionStartRef.current, lineNumber);
+      setLineSelection({ start, end });
+      setIsDragging(true);
+      return false;
+    },
+    mouseup: () => {
+      isSelectingRef.current = false;
+      selectionStartRef.current = null;
+      setIsDragging(false);
+      return false;
+    },
+  };
+  const lineNumberHandlersRef = React.useRef(lineNumberHandlers);
+  lineNumberHandlersRef.current = lineNumberHandlers;
+  const lineNumbersConfig = React.useMemo<LineNumbersConfig>(() => ({
+    domEventHandlers: {
+      mousedown: (view, line, event) => lineNumberHandlersRef.current.mousedown?.(view, line, event) ?? false,
+      mouseover: (view, line, event) => lineNumberHandlersRef.current.mouseover?.(view, line, event) ?? false,
+      mouseup: (view, line, event) => lineNumberHandlersRef.current.mouseup?.(view, line, event) ?? false,
+    },
   }), []);
 
   const editorExtensions = React.useMemo(() => {
@@ -3549,13 +3814,13 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       onClick={() => {
         const fn = files.downloadFile;
         if (!fn || !selectedFile) return;
-        void fn(selectedFile.path).catch((error) => {
+        void fn(selectedFile.path, selectedFileReadOptions).catch((error) => {
           console.error('Download failed:', error);
           toast.error(t('sidebarFilesTree.toast.operationFailed'));
         });
       }}
     >
-      <Icon name="download" className="mr-2 size-4" />
+      <Icon name="download" className="me-2 size-4" />
       {t('filesView.editor.saveFile')}
     </Button>
   ) : null;
@@ -3595,7 +3860,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
         <div className="h-full min-h-0 overflow-hidden">
           <ErrorBoundary
             fallback={
-              <div className="m-3 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2">
+              <div className="m-3 rounded-md bg-destructive/10 px-3 py-2">
                 <div className="mb-1 font-medium text-destructive">{t('filesView.error.previewUnavailable')}</div>
                 <div className="text-sm text-muted-foreground">{t('filesView.error.switchToEditMode')}</div>
               </div>
@@ -3839,7 +4104,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     const docked = layout === 'docked';
     const saveShortcut = formatShortcutForDisplay(getEffectiveShortcutCombo('save_file'));
     const wrapperCls = docked
-      ? 'pointer-events-auto flex flex-wrap items-center gap-1'
+      ? 'pointer-events-auto flex items-center gap-1'
       : 'pointer-events-auto flex items-center gap-1 rounded-lg border border-[var(--interactive-border)] bg-[var(--surface-elevated)] p-1 shadow-sm';
 
     const withTooltip = (label: React.ReactNode, trigger: React.ReactElement) => (
@@ -3853,8 +4118,321 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       </Tooltip>
     );
 
-    return (
-      <div className={wrapperCls}>
+    // `announce` is for the overflow menu: the menu closes on select, so the
+    // button's check-mark feedback would never be seen there.
+    const copyContents = async (announce: boolean) => {
+      const result = await copyTextToClipboard(fileContent);
+      if (!result.ok) {
+        toast.error(t('filesView.toast.copyFailed'));
+        return;
+      }
+      if (announce) {
+        toast.success(t('filesView.editor.toast.contentsCopied'));
+        return;
+      }
+      setCopiedContent(true);
+      if (copiedContentTimeoutRef.current !== null) {
+        window.clearTimeout(copiedContentTimeoutRef.current);
+      }
+      copiedContentTimeoutRef.current = window.setTimeout(() => {
+        setCopiedContent(false);
+      }, 1200);
+    };
+
+    const copyPath = async (announce: boolean) => {
+      const result = await copyTextToClipboard(displaySelectedPath);
+      if (!result.ok) {
+        toast.error(t('filesView.toast.copyFailed'));
+        return;
+      }
+      if (announce) {
+        toast.success(t('sidebarFilesTree.toast.pathCopied'));
+        return;
+      }
+      setCopiedPath(true);
+      if (copiedPathTimeoutRef.current !== null) {
+        window.clearTimeout(copiedPathTimeoutRef.current);
+      }
+      copiedPathTimeoutRef.current = window.setTimeout(() => {
+        setCopiedPath(false);
+      }, 1200);
+    };
+
+    const downloadSelectedFile = () => {
+      const fn = files.downloadFile;
+      if (fn) void fn(selectedFile.path, selectedFileReadOptions).catch((error) => {
+        console.error('Download failed:', error);
+        toast.error(t('sidebarFilesTree.toast.operationFailed'));
+      });
+    };
+
+    const toggleTTS = () => {
+      if (isTTSPlaying) {
+        stopTTS();
+      } else if (fileContent.trim()) {
+        void playTTS(fileContent);
+      }
+    };
+
+    const openInAppMenuItems = (
+      <>
+        {/* Always first: whatever app the OS has for this file type. */}
+        <DropdownMenuItem
+          className="flex items-center gap-2"
+          onClick={() => {
+            if (!selectedFile?.path) return;
+            void openDesktopPath(selectedFile.path).then((opened) => {
+              if (!opened) toast.error(t('sidebarFilesTree.toast.operationFailed'));
+            });
+          }}
+        >
+          <Icon name="external-link" className="size-4" />
+          <span className="typography-ui-label text-foreground">{t('sidebarFilesTree.menu.openInDefaultApp')}</span>
+        </DropdownMenuItem>
+        {openInApps.length > 0 ? <DropdownMenuSeparator /> : null}
+        {openInApps.map((app) => (
+          <DropdownMenuItem
+            key={app.id}
+            className="flex items-center gap-2"
+            onClick={() => void handleOpenInApp(app)}
+          >
+            <OpenInAppListIcon label={app.label} iconDataUrl={app.iconDataUrl} />
+            <span className="typography-ui-label text-foreground">{app.label}</span>
+          </DropdownMenuItem>
+        ))}
+        {openInCacheStale ? (
+          <DropdownMenuItem
+            className="flex items-center gap-2"
+            onClick={() => void loadOpenInApps(true)}
+          >
+            <Icon name="refresh" className="size-4" />
+            <span className="typography-ui-label text-foreground">{t('filesView.editor.refreshApps')}</span>
+          </DropdownMenuItem>
+        ) : null}
+      </>
+    );
+
+    // Secondary actions, most useful first. In the docked toolbar the ones
+    // that do not fit move, from the end, into the "More actions" menu; each
+    // describes both its button and its menu item.
+    type SecondaryAction = {
+      id: string;
+      label: string;
+      icon: React.ReactNode;
+      button: React.ReactElement;
+      onSelect?: () => void;
+      submenu?: React.ReactNode;
+    };
+    const secondaryActions: SecondaryAction[] = [];
+
+    if (!isSelectedNonText) {
+      const wrapLabel = wrapLines ? t('filesView.editor.disableLineWrap') : t('filesView.editor.enableLineWrap');
+      secondaryActions.push({
+        id: 'wrap',
+        label: wrapLabel,
+        icon: <Icon name="text-wrap" className="size-4" />,
+        onSelect: () => setWrapLines(!wrapLines),
+        button: withTooltip(wrapLabel,
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setWrapLines(!wrapLines)}
+            className={cn(
+              'size-6 p-0 transition-opacity hover:bg-transparent focus-visible:bg-transparent active:bg-transparent',
+              wrapLines ? 'text-foreground opacity-100' : 'text-muted-foreground opacity-65 hover:opacity-100'
+            )}
+            title={wrapLabel}
+          >
+            <Icon name="text-wrap" className="size-4" />
+          </Button>
+        ),
+      });
+      if (textViewMode === 'edit') {
+        secondaryActions.push({
+          id: 'go-to-line',
+          label: t('filesView.editor.goToLine'),
+          icon: <Icon name="menu-fold-2" className="size-4" />,
+          onSelect: () => setIsGoToLineOpen(true),
+          button: withTooltip(t('filesView.editor.goToLine'),
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(event) => {
+                setIsGoToLineOpen((open) => !open);
+                event.currentTarget.blur();
+              }}
+              data-go-to-line-toggle
+              className="size-6 p-0 text-foreground opacity-100 transition-opacity hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+              title={t('filesView.editor.goToLine')}
+            >
+              <Icon name="menu-fold-2" className="size-4" />
+            </Button>
+          ),
+        });
+        if (!isMobile) {
+          secondaryActions.push({
+            id: 'symbols',
+            label: t('filesView.editor.symbols'),
+            icon: <Icon name="list-unordered" className="size-4" />,
+            onSelect: () => setIsSymbolsOpen(true),
+            button: withTooltip(t('filesView.editor.symbols'),
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={(event) => {
+                  setIsSymbolsOpen((open) => !open);
+                  event.currentTarget.blur();
+                }}
+                data-document-symbols-toggle
+                className="size-6 p-0 text-foreground opacity-100 transition-opacity hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+                aria-label={t('filesView.editor.symbols')}
+              >
+                <Icon name="list-unordered" className="size-4" />
+              </Button>
+            ),
+          });
+        }
+      }
+    }
+
+    secondaryActions.push({
+      id: 'open-in-app',
+      label: t('filesView.editor.openInDesktopApp'),
+      icon: <Icon name="file-transfer" className="size-4" />,
+      submenu: openInAppMenuItems,
+      button: (
+        <DropdownMenu onOpenChange={handleToolbarDropdownOpenChange}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="size-6 p-0 text-foreground opacity-100 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+                    title={t('filesView.editor.openInDesktopApp')}
+                    aria-label={t('filesView.editor.openInDesktopApp')}
+                  >
+                    <Icon name="file-transfer" className="size-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" sideOffset={6}>{t('filesView.editor.openInDesktopApp')}</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="end" className="w-56 max-h-[70vh] overflow-y-auto">
+            {openInAppMenuItems}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ),
+    });
+
+    if (isMarkdown && getMdViewMode() === 'preview' && showMessageTTSButtons) {
+      const ttsLabel = isTTSPlaying ? t('filesView.tts.stopSpeaking') : t('filesView.tts.readAloud');
+      secondaryActions.push({
+        id: 'tts',
+        label: ttsLabel,
+        icon: <Icon name="volume-up" className="size-4" />,
+        onSelect: toggleTTS,
+        button: (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="size-6 p-0 text-muted-foreground opacity-65 hover:bg-transparent hover:opacity-100 focus-visible:bg-transparent active:bg-transparent"
+                aria-label={ttsLabel}
+                onClick={toggleTTS}
+              >
+                <Icon name="volume-up" className={cn('size-4', isTTSPlaying && 'animate-pulse text-[var(--primary-text)]')} />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent sideOffset={8}>{ttsLabel}</TooltipContent>
+          </Tooltip>
+        ),
+      });
+    }
+
+    if (canCopy) {
+      secondaryActions.push({
+        id: 'copy-contents',
+        label: t('filesView.editor.copyFileContents'),
+        icon: <Icon name="clipboard" className="size-4" />,
+        onSelect: () => void copyContents(true),
+        button: withTooltip(t('filesView.editor.copyFileContents'),
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void copyContents(false)}
+            className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+            title={t('filesView.editor.copyFileContents')}
+            aria-label={t('filesView.editor.copyFileContents')}
+          >
+            {copiedContent ? (
+              <Icon name="check" className="size-4 text-[color:var(--status-success)]" />
+            ) : (
+              <Icon name="clipboard" className="size-4" />
+            )}
+          </Button>
+        ),
+      });
+    }
+
+    if (canCopyPath) {
+      const copyPathLabel = t('filesView.editor.copyFilePathTitle', { path: displaySelectedPath });
+      secondaryActions.push({
+        id: 'copy-path',
+        label: copyPathLabel,
+        icon: <Icon name="file-copy-2" className="size-4" />,
+        onSelect: () => void copyPath(true),
+        button: withTooltip(copyPathLabel,
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void copyPath(false)}
+            className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+            title={copyPathLabel}
+            aria-label={copyPathLabel}
+          >
+            {copiedPath ? (
+              <Icon name="check" className="size-4 text-[color:var(--status-success)]" />
+            ) : (
+              <Icon name="file-copy-2" className="size-4" />
+            )}
+          </Button>
+        ),
+      });
+    }
+
+    if (files.downloadFile) {
+      secondaryActions.push({
+        id: 'download',
+        label: t('filesView.editor.saveFile'),
+        icon: <Icon name="download" className="size-4" />,
+        onSelect: downloadSelectedFile,
+        button: withTooltip(t('filesView.editor.saveFile'),
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={downloadSelectedFile}
+            className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+            title={t('filesView.editor.saveFile')}
+            aria-label={t('filesView.editor.saveFile')}
+          >
+            <Icon name="download" className="size-4" />
+          </Button>
+        ),
+      });
+    }
+
+    const inlineCount = !docked || secondaryActions.length <= dockedSecondaryFit.all
+      ? secondaryActions.length
+      : dockedSecondaryFit.withMenu;
+    const inlineActions = secondaryActions.slice(0, inlineCount);
+    const overflowActions = secondaryActions.slice(inlineCount);
+
+    const primaryControls = (
+      <>
         {canEdit && isEditingFile && (
           <>
             {isSaving ? (
@@ -3897,118 +4475,30 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
           </>
         )}
 
-        <DropdownMenu onOpenChange={handleToolbarDropdownOpenChange}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="size-6 p-0 text-foreground opacity-100 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
-                    title={t('filesView.editor.openInDesktopApp')}
-                    aria-label={t('filesView.editor.openInDesktopApp')}
-                  >
-                    <Icon name="file-transfer" className="size-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-              </span>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" sideOffset={6}>{t('filesView.editor.openInDesktopApp')}</TooltipContent>
-          </Tooltip>
-          <DropdownMenuContent align="end" className="w-56 max-h-[70vh] overflow-y-auto">
-            {openInApps.map((app) => (
-              <DropdownMenuItem
-                key={app.id}
-                className="flex items-center gap-2"
-                onClick={() => void handleOpenInApp(app)}
-              >
-                <OpenInAppListIcon label={app.label} iconDataUrl={app.iconDataUrl} />
-                <span className="typography-ui-label text-foreground">{app.label}</span>
-              </DropdownMenuItem>
-            ))}
-            {openInCacheStale ? (
-              <DropdownMenuItem
-                className="flex items-center gap-2"
-                onClick={() => void loadOpenInApps(true)}
-              >
-                <Icon name="refresh" className="size-4" />
-                <span className="typography-ui-label text-foreground">{t('filesView.editor.refreshApps')}</span>
-              </DropdownMenuItem>
-            ) : null}
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        {!isSelectedNonText && (
+        {!isSelectedNonText && textViewMode === 'edit' && (
           <>
-            {withTooltip(wrapLines ? t('filesView.editor.disableLineWrap') : t('filesView.editor.enableLineWrap'),
+            {withTooltip(t('filesView.editor.findInFile'),
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setWrapLines(!wrapLines)}
-                className={cn(
-                  'size-6 p-0 transition-opacity hover:bg-transparent focus-visible:bg-transparent active:bg-transparent',
-                  wrapLines ? 'text-foreground opacity-100' : 'text-muted-foreground opacity-65 hover:opacity-100'
-                )}
-                title={wrapLines ? t('filesView.editor.disableLineWrap') : t('filesView.editor.enableLineWrap')}
+                onClick={(event) => {
+                  setIsSearchOpen(!isSearchOpen);
+                  event.currentTarget.blur();
+                }}
+                className="size-6 p-0 text-foreground opacity-100 transition-opacity hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+                title={t('filesView.editor.findInFile')}
               >
-                <Icon name="text-wrap" className="size-4" />
+                <Icon name="search" className="size-4" />
               </Button>
             )}
-            {textViewMode === 'edit' && (
-              <>
-                {withTooltip(t('filesView.editor.findInFile'),
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={(event) => {
-                      setIsSearchOpen(!isSearchOpen);
-                      event.currentTarget.blur();
-                    }}
-                    className="size-6 p-0 text-foreground opacity-100 transition-opacity hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
-                    title={t('filesView.editor.findInFile')}
-                  >
-                    <Icon name="search" className="size-4" />
-                  </Button>
-                )}
-                {withTooltip(t('filesView.editor.goToLine'),
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={(event) => {
-                      setIsGoToLineOpen((open) => !open);
-                      event.currentTarget.blur();
-                    }}
-                    data-go-to-line-toggle
-                    className="size-6 p-0 text-foreground opacity-100 transition-opacity hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
-                    title={t('filesView.editor.goToLine')}
-                  >
-                    <Icon name="menu-fold-2" className="size-4" />
-                  </Button>
-                )}
-                {!isMobile && withTooltip(t('filesView.editor.symbols'),
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={(event) => {
-                      setIsSymbolsOpen((open) => !open);
-                      event.currentTarget.blur();
-                    }}
-                    data-document-symbols-toggle
-                    className="size-6 p-0 text-foreground opacity-100 transition-opacity hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
-                    aria-label={t('filesView.editor.symbols')}
-                  >
-                    <Icon name="list-unordered" className="size-4" />
-                  </Button>
-                )}
-                <GoToLineDialog
-                  open={isGoToLineOpen}
-                  onOpenChange={setIsGoToLineOpen}
-                  view={editorViewRef.current}
-                  variant="inline"
-                />
-              </>
-            )}
+            {/* Rendered with search, not with its own button, so it still
+                opens when that button has moved into the overflow menu. */}
+            <GoToLineDialog
+              open={isGoToLineOpen}
+              onOpenChange={setIsGoToLineOpen}
+              viewRef={editorViewRef}
+              variant="inline"
+            />
           </>
         )}
 
@@ -4101,31 +4591,6 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
           )
         )}
 
-        {isMarkdown && getMdViewMode() === 'preview' && showMessageTTSButtons && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="size-6 p-0 text-muted-foreground opacity-65 hover:bg-transparent hover:opacity-100 focus-visible:bg-transparent active:bg-transparent"
-                aria-label={isTTSPlaying ? t('filesView.tts.stopSpeaking') : t('filesView.tts.readAloud')}
-                onClick={() => {
-                  if (isTTSPlaying) {
-                    stopTTS();
-                  } else if (fileContent.trim()) {
-                    void playTTS(fileContent);
-                  }
-                }}
-              >
-                <Icon name="volume-up" className={cn('size-4', isTTSPlaying && 'animate-pulse text-[var(--primary-text)]')} />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent sideOffset={8}>
-              {isTTSPlaying ? t('filesView.tts.stopSpeaking') : t('filesView.tts.readAloud')}
-            </TooltipContent>
-          </Tooltip>
-        )}
-
         {hasCanvas && (
           <>
             {/* Bytes have no source view. */}
@@ -4211,123 +4676,103 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
             </Button>
           )
         )}
+      </>
+    );
 
-        {canCopy && (
-          withTooltip(t('filesView.editor.copyFileContents'),
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={async () => {
-                const result = await copyTextToClipboard(fileContent);
-                if (result.ok) {
-                  setCopiedContent(true);
-                  if (copiedContentTimeoutRef.current !== null) {
-                    window.clearTimeout(copiedContentTimeoutRef.current);
-                  }
-                  copiedContentTimeoutRef.current = window.setTimeout(() => {
-                    setCopiedContent(false);
-                  }, 1200);
-                } else {
-                  toast.error(t('filesView.toast.copyFailed'));
-                }
-              }}
-              className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
-              title={t('filesView.editor.copyFileContents')}
-              aria-label={t('filesView.editor.copyFileContents')}
-            >
-              {copiedContent ? (
-                <Icon name="check" className="size-4 text-[color:var(--status-success)]" />
-              ) : (
-                <Icon name="clipboard" className="size-4" />
-              )}
-            </Button>
-          )
-        )}
+    const fullscreenControl = exitFullscreenOnly ? (
+      withTooltip(t('filesView.editor.exitFullscreen'),
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => changeFullscreen(false)}
+          className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+          title={t('filesView.editor.exitFullscreen')}
+          aria-label={t('filesView.editor.exitFullscreen')}
+        >
+          <Icon name="fullscreen-exit" className="size-4" />
+        </Button>
+      )
+    ) : (!isMobile && mode === 'full' ? (
+      withTooltip(isFullscreen ? t('filesView.editor.exitFullscreen') : t('filesView.editor.fullscreen'),
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => changeFullscreen(!isFullscreen)}
+          className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+          title={isFullscreen ? t('filesView.editor.exitFullscreen') : t('filesView.editor.fullscreen')}
+          aria-label={isFullscreen ? t('filesView.editor.exitFullscreen') : t('filesView.editor.fullscreen')}
+        >
+          {isFullscreen ? (
+            <Icon name="fullscreen-exit" className="size-4" />
+          ) : (
+            <Icon name="fullscreen" className="size-4" />
+          )}
+        </Button>
+      )
+    ) : null);
 
-        {canCopyPath && (
-          withTooltip(t('filesView.editor.copyFilePathTitle', { path: displaySelectedPath }),
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={async () => {
-                const result = await copyTextToClipboard(displaySelectedPath);
-                if (result.ok) {
-                  setCopiedPath(true);
-                  if (copiedPathTimeoutRef.current !== null) {
-                    window.clearTimeout(copiedPathTimeoutRef.current);
-                  }
-                  copiedPathTimeoutRef.current = window.setTimeout(() => {
-                    setCopiedPath(false);
-                  }, 1200);
-                } else {
-                  toast.error(t('filesView.toast.copyFailed'));
-                }
-              }}
-              className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
-              title={t('filesView.editor.copyFilePathTitle', { path: displaySelectedPath })}
-              aria-label={t('filesView.editor.copyFilePathTitle', { path: displaySelectedPath })}
-            >
-              {copiedPath ? (
-                <Icon name="check" className="size-4 text-[color:var(--status-success)]" />
-              ) : (
-                <Icon name="file-copy-2" className="size-4" />
-              )}
-            </Button>
-          )
-        )}
+    const overflowMenu = overflowActions.length > 0 ? (
+      <DropdownMenu onOpenChange={handleToolbarDropdownOpenChange}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex">
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="size-6 p-0 text-foreground hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
+                  aria-label={t('filesView.editor.moreActions')}
+                >
+                  <Icon name="more" className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" sideOffset={6}>{t('filesView.editor.moreActions')}</TooltipContent>
+        </Tooltip>
+        <DropdownMenuContent align="end" className="w-56">
+          {overflowActions.map((action) => action.submenu ? (
+            <DropdownMenuSub key={action.id}>
+              <DropdownMenuSubTrigger className="flex items-center gap-2">
+                {action.icon}
+                <span className="typography-ui-label text-foreground">{action.label}</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-56 max-h-[70vh] overflow-y-auto">
+                {action.submenu}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          ) : (
+            <DropdownMenuItem key={action.id} className="flex items-center gap-2" onClick={action.onSelect}>
+              {action.icon}
+              <span className="min-w-0 truncate typography-ui-label text-foreground">{action.label}</span>
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    ) : null;
 
-        {files.downloadFile && (
-          withTooltip(t('filesView.editor.saveFile'),
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                const fn = files.downloadFile;
-                if (fn) void fn(selectedFile.path).catch((error) => {
-                  console.error('Download failed:', error);
-                  toast.error(t('sidebarFilesTree.toast.operationFailed'));
-                });
-              }}
-              className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
-              title={t('filesView.editor.saveFile')}
-              aria-label={t('filesView.editor.saveFile')}
-            >
-              <Icon name="download" className="size-4" />
-            </Button>
-          )
-        )}
+    if (!docked) {
+      return (
+        <div className={wrapperCls}>
+          {primaryControls}
+          {secondaryActions.map((action) => <React.Fragment key={action.id}>{action.button}</React.Fragment>)}
+          {fullscreenControl}
+        </div>
+      );
+    }
 
-        {exitFullscreenOnly ? (
-          withTooltip(t('filesView.editor.exitFullscreen'),
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => changeFullscreen(false)}
-              className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
-              title={t('filesView.editor.exitFullscreen')}
-              aria-label={t('filesView.editor.exitFullscreen')}
-            >
-              <Icon name="fullscreen-exit" className="size-4" />
-            </Button>
-          )
-        ) : (!isMobile && mode === 'full' && (
-          withTooltip(isFullscreen ? t('filesView.editor.exitFullscreen') : t('filesView.editor.fullscreen'),
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => changeFullscreen(!isFullscreen)}
-              className="size-6 p-0 hover:bg-transparent focus-visible:bg-transparent active:bg-transparent"
-              title={isFullscreen ? t('filesView.editor.exitFullscreen') : t('filesView.editor.fullscreen')}
-              aria-label={isFullscreen ? t('filesView.editor.exitFullscreen') : t('filesView.editor.fullscreen')}
-            >
-              {isFullscreen ? (
-                <Icon name="fullscreen-exit" className="size-4" />
-              ) : (
-                <Icon name="fullscreen" className="size-4" />
-              )}
-            </Button>
-          )
-        ))}
+    // The leading and trailing groups are measured (see `dockedSecondaryFit`)
+    // to work out how many secondary buttons the row has room for.
+    return (
+      <div className={wrapperCls}>
+        <span ref={setDockedPrimaryEl} className="flex shrink-0 items-center gap-1 empty:hidden">
+          {primaryControls}
+        </span>
+        {inlineActions.map((action) => <React.Fragment key={action.id}>{action.button}</React.Fragment>)}
+        {overflowMenu}
+        <span ref={setDockedTailEl} className="flex shrink-0 items-center gap-1 empty:hidden">
+          {fullscreenControl}
+        </span>
       </div>
     );
   };
@@ -4369,7 +4814,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
 
   const canvasInFullscreen = mode === 'full' && isFullscreen;
   const canvasKey = selectedFile
-    ? `${selectedFile.path}:${canvasRemountNonce}:${canvasInFullscreen ? 'fullscreen' : 'docked'}`
+    ? `${editorDocumentPath ?? selectedFile.path}:${canvasRemountNonce}:${canvasInFullscreen ? 'fullscreen' : 'docked'}`
     : '';
   const canvasElement = showCanvas && selectedFile && guestFileEditor ? (
     <div ref={canvasWrapperRef} className="h-full overflow-hidden" style={{ minHeight: '400px' }}>
@@ -4439,7 +4884,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
               type="button"
               onClick={() => setShowMobilePageContent(false)}
               aria-label={t('filesView.editor.back')}
-              className="inline-flex size-7 flex-shrink-0 items-center justify-center mr-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="inline-flex size-7 flex-shrink-0 items-center justify-center me-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <Icon name="arrow-left-s" className="size-5" />
             </button>
@@ -4451,11 +4896,11 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
-                    className="inline-flex min-w-0 max-w-full items-center gap-1 text-left typography-ui-label font-medium"
+                    className="inline-flex min-w-0 max-w-full items-center gap-1 text-start typography-ui-label font-medium"
                     aria-label={t('filesView.editor.openFilesAria')}
                   >
                     <FileTypeIcon filePath={selectedFile.path} extension={selectedFile.extension} className="size-3.5 flex-shrink-0" />
-                    <ScrollingFileName name={selectedFile.name} />
+                    <ScrollingFileName name={selectedFile.name} folder={getOpenFileFolder(selectedFile.path)} />
                     <Icon name="arrow-down-s" className="size-4 flex-shrink-0 text-muted-foreground" />
                   </button>
                 </DropdownMenuTrigger>
@@ -4482,7 +4927,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                       >
                         <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
                           <FileTypeIcon filePath={file.path} extension={file.extension} className="size-3.5 flex-shrink-0" />
-                          <ScrollingFileName name={file.name} />
+                          <ScrollingFileName name={file.name} folder={getOpenFileFolder(file.path)} />
                         </span>
                         <button
                           type="button"
@@ -4512,11 +4957,11 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
           ) : (
             openFiles.length > 0 ? (
               <div className="relative min-w-0 flex-1">
-                {editorTabsOverflow.left && (
-                  <div className="pointer-events-none absolute left-0 top-0 bottom-0 w-6 z-10 bg-gradient-to-r from-background to-transparent" />
+                {editorTabsOverflow.start && (
+                  <div className="pointer-events-none absolute inset-s-0 top-0 bottom-0 w-6 z-10 bg-gradient-to-r rtl:bg-gradient-to-l from-background to-transparent" />
                 )}
-                {editorTabsOverflow.right && (
-                  <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-6 z-10 bg-gradient-to-l from-background to-transparent" />
+                {editorTabsOverflow.end && (
+                  <div className="pointer-events-none absolute inset-e-0 top-0 bottom-0 w-6 z-10 bg-gradient-to-l rtl:bg-gradient-to-r from-background to-transparent" />
                 )}
                 <div
                   ref={editorTabsScrollRef}
@@ -4525,6 +4970,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                 >
                   {openFiles.map((file) => {
                     const isActive = selectedFile?.path === file.path;
+                    const folder = getOpenFileFolder(file.path);
                     return (
                       <div
                         key={file.path}
@@ -4544,9 +4990,9 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                               void handleSelectFile(file);
                             }
                           }}
-                          className="max-w-[12rem] truncate text-left"
+                          className={cn(!folder && 'max-w-[12rem]', 'truncate text-start')}
                         >
-                          {file.name}
+                          <FileNameText name={file.name} folder={folder} />
                         </button>
                         <button
                           type="button"
@@ -4574,9 +5020,10 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
         </div>
         ) : null}
 
-        {/* Row 2: Docked editor toolbar. */}
+        {/* Row 2: Docked editor toolbar. 40px with 24px buttons, the same band
+            the context panel's file tree draws beside it, so the two line up. */}
         {selectedFile ? (
-          <div className="flex min-w-0 items-center gap-3 border-t border-border/40 bg-[var(--surface-subtle)] px-3 py-1">
+          <div ref={setDockedRowEl} className="flex h-8 min-w-0 shrink-0 items-center gap-3 border-t border-border/40 px-2">
             {/* Mobile hosts already show the file name in their own header;
                 a truncated duplicate here just eats toolbar width. */}
             {displaySelectedPath && !isMobile ? (
@@ -4587,7 +5034,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                 {displaySelectedPath}
               </span>
             ) : null}
-            <div className="ml-auto min-w-0 shrink-0 overflow-x-auto">
+            <div className="ms-auto min-w-0 shrink-0 overflow-x-auto">
               {renderFloatingFileControls({ layout: 'docked' })}
             </div>
           </div>
@@ -4628,7 +5075,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
           ) : selectedFile && isDrawio && drawioViewMode === 'preview' ? (
             <div className="h-full overflow-hidden" style={{ minHeight: '400px' }}>
               <DiagramEditor
-                key={`${selectedFile.path}:${drawioRemountNonce}`}
+                key={`${editorDocumentPath ?? selectedFile.path}:${drawioRemountNonce}`}
                 ref={diagramEditorRef}
                 xml={diagramEditorXml}
                 onChange={handleDiagramChange}
@@ -4637,7 +5084,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
           ) : selectedFile && isJson && jsonViewMode === 'tree' ? (
             <ErrorBoundary
               fallback={
-                <div className="rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2">
+                <div className="rounded-md bg-destructive/10 px-3 py-2">
                   <div className="mb-1 font-medium text-destructive">{t('filesView.error.jsonViewerUnavailable')}</div>
                   <div className="text-sm text-muted-foreground">
                     {t('filesView.error.switchToTextMode')}
@@ -4648,6 +5095,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
               <div className="h-full overflow-auto">
                 <JsonTreeView
                   jsonString={fileContent}
+                  format={selectedFile.path.toLowerCase().endsWith('.jsonc') ? 'jsonc' : 'json'}
                   maxHeight="100%"
                   initiallyExpandedDepth={2}
                 />
@@ -4670,13 +5118,13 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                   fileContent={fileContent}
                 />
                 {fileContent.length > 500 * 1024 && (
-                  <div className="mb-3 rounded-md border border-status-warning/20 bg-status-warning/10 px-3 py-2 text-sm text-status-warning">
+                  <div className="mb-3 rounded-md bg-status-warning/10 px-3 py-2 text-sm text-status-warning">
                     {t('filesView.warning.largeFilePreviewLimited', { sizeKb: Math.round(fileContent.length / 1024) })}
                   </div>
                 )}
                 <ErrorBoundary
                   fallback={
-                    <div className="rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2">
+                    <div className="rounded-md bg-destructive/10 px-3 py-2">
                       <div className="mb-1 font-medium text-destructive">{t('filesView.error.previewUnavailable')}</div>
                       <div className="text-sm text-muted-foreground">
                         {t('filesView.error.switchToEditMode')}
@@ -4684,13 +5132,15 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                     </div>
                   }
                 >
-                  <SimpleMarkdownRenderer
-                    content={fileContent}
-                    className="typography-markdown-body"
-                    stripFrontmatter
-                    enableFileReferences={false}
-                    allowRawHtml
-                  />
+                  <div style={previewFontStyle}>
+                    <SimpleMarkdownRenderer
+                      content={fileContent}
+                      className="typography-markdown-body"
+                      frontmatter="properties"
+                      enableFileReferences={false}
+                      allowRawHtml
+                    />
+                  </div>
                 </ErrorBoundary>
               </div>
               {!isFullscreen && (
@@ -4731,12 +5181,13 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
               ref={editorWrapperRef}
             >
               {!isFullscreen && (
-                <DocumentSymbolsPanel open={isSymbolsOpen} onOpenChange={setIsSymbolsOpen} view={editorViewRef.current} />
+                <DocumentSymbolsPanel open={isSymbolsOpen} onOpenChange={setIsSymbolsOpen} viewRef={editorViewRef} />
               )}
               <div className={cn('h-full', shouldMaskEditorForPendingNavigation && 'invisible')}>
                 <FilePositionEditor
                   key={filePositionKey}
                   positionKey={filePositionKey}
+                  detached={!visible}
                   value={draftContent}
                   onChange={setDraftContent}
                   readOnly={!canEdit}
@@ -4767,84 +5218,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                       end: Math.max(lineSelection.start, lineSelection.end),
                     }
                     : undefined}
-                  lineNumbersConfig={{
-                    domEventHandlers: {
-                      mousedown: (view: EditorView, line: { from: number; to: number }, event: Event) => {
-                        if (!(event instanceof MouseEvent)) {
-                          return false;
-                        }
-                        if (event.button !== 0) {
-                          return false;
-                        }
-                        event.preventDefault();
-
-                        const lineNumber = view.state.doc.lineAt(line.from).number;
-
-                        if (
-                          lineSelection &&
-                          !event.shiftKey &&
-                          Math.min(lineSelection.start, lineSelection.end) === lineNumber &&
-                          Math.max(lineSelection.start, lineSelection.end) === lineNumber
-                        ) {
-                          setLineSelection(null);
-                          cancel();
-                          isSelectingRef.current = false;
-                          selectionStartRef.current = null;
-                          setIsDragging(false);
-                          return true;
-                        }
-
-                        // Mobile: tap-to-extend selection
-                          if (isMobile && lineSelection && !event.shiftKey) {
-                            const start = Math.min(lineSelection.start, lineSelection.end, lineNumber);
-                            const end = Math.max(lineSelection.start, lineSelection.end, lineNumber);
-                            setLineSelection({ start, end });
-                            isSelectingRef.current = false;
-                            selectionStartRef.current = null;
-                            setIsDragging(false);
-                            return true;
-                          }
-
-                          isSelectingRef.current = true;
-                          selectionStartRef.current = lineNumber;
-                          setIsDragging(true);
-
-                          if (lineSelection && event.shiftKey) {
-                          const start = Math.min(lineSelection.start, lineNumber);
-                          const end = Math.max(lineSelection.end, lineNumber);
-                          setLineSelection({ start, end });
-                        } else {
-                          setLineSelection({ start: lineNumber, end: lineNumber });
-                        }
-
-                        return true;
-                      },
-                      mouseover: (view: EditorView, line: { from: number; to: number }, event: Event) => {
-                        if (!(event instanceof MouseEvent)) {
-                          return false;
-                        }
-                        if (event.buttons !== 1) {
-                          return false;
-                        }
-                        if (!isSelectingRef.current || selectionStartRef.current === null) {
-                          return false;
-                        }
-
-                        const lineNumber = view.state.doc.lineAt(line.from).number;
-                          const start = Math.min(selectionStartRef.current, lineNumber);
-                          const end = Math.max(selectionStartRef.current, lineNumber);
-                          setLineSelection({ start, end });
-                          setIsDragging(true);
-                          return false;
-                        },
-                        mouseup: () => {
-                          isSelectingRef.current = false;
-                          selectionStartRef.current = null;
-                          setIsDragging(false);
-                          return false;
-                        },
-                      },
-                  }}
+                  lineNumbersConfig={lineNumbersConfig}
                 />
               </div>
               {shouldMaskEditorForPendingNavigation && (
@@ -4864,6 +5238,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
 
   const hasTree = Boolean(root && childrenByDir[root]);
   const rootLoadError = root ? loadErrorsByDir[root] : null;
+  const isSearchActive = debouncedSearchQuery.trim().length > 0;
 
   const treePanel = treeEnabled ? (
     <section className={cn(
@@ -4873,19 +5248,19 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       <div className={cn("flex flex-col gap-2 py-2", isMobile ? "px-3" : "px-2")}>
         <div className="flex items-center gap-2">
           <div className="relative flex-1 min-w-0">
-            <Icon name="search" className="pointer-events-none absolute left-2 top-2 size-4 text-muted-foreground" />
+            <Icon name="search" className="pointer-events-none absolute inset-s-2 top-2 size-4 text-muted-foreground" />
             <Input
               ref={searchInputRef}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={t('filesView.tree.search.placeholder')}
-              className="h-8 pl-8 pr-8 typography-meta"
+              className="h-8 ps-8 pe-8 typography-meta"
             />
             {searchQuery.trim().length > 0 && (
               <button
                 type="button"
                 aria-label={t('filesView.tree.search.clearAria')}
-                className="absolute right-2 top-2 inline-flex size-4 items-center justify-center text-muted-foreground hover:text-foreground"
+                className="absolute inset-e-2 top-2 inline-flex size-4 items-center justify-center text-muted-foreground hover:text-foreground"
                 onClick={() => {
                   setSearchQuery('');
                   searchInputRef.current?.focus();
@@ -4970,6 +5345,8 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
               <Icon name="loader-4" className="size-4 animate-spin" />
               {t('filesView.tree.search.searching')}
             </li>
+          ) : isSearchActive && searchResults.length === 0 ? (
+            <li className="px-2 py-1 typography-meta text-muted-foreground">{t('mobile.files.search.empty')}</li>
           ) : searchResults.length > 0 ? (
             searchResults.map((node) => {
               const isActive = selectedFile?.path === node.path;
@@ -4979,14 +5356,14 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                     type="button"
                     onClick={() => void handleSelectFile(node)}
                     className={cn(
-                      'flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-foreground transition-colors',
-                      isActive ? 'bg-interactive-selection/70' : 'hover:bg-interactive-hover/40'
+                      'flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-start transition-colors',
+                      fileTreeRowStateClassName(isActive)
                     )}
                   >
-                    {getFileIcon(node.path, node.extension)}
+                    <FileTypeIcon filePath={node.path} extension={node.extension} className="size-3.5" />
                     <span
-                      className="min-w-0 flex-1 truncate typography-meta"
-                      style={{ direction: 'rtl', textAlign: 'left' }}
+                      className="oc-ui-start-align min-w-0 flex-1 truncate typography-meta"
+                      style={{ direction: 'rtl' }}
                       title={node.path}
                     >
                       {node.relativePath ?? node.path}
@@ -5018,7 +5395,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     <div className="absolute inset-0 z-50 flex flex-col bg-background">
       {/* Fullscreen content */}
       <div className="flex-1 min-h-0 min-w-0 relative">
-        <div className="absolute right-4 top-4 z-30">
+        <div className="absolute inset-e-4 top-4 z-30">
           {renderFloatingFileControls({ exitFullscreenOnly: true })}
         </div>
         <ScrollableOverlay ref={setFullscreenPreviewScroller} outerClassName="h-full min-w-0" className={cn('h-full min-w-0', isLargeFile && '[overflow-anchor:none]')}>
@@ -5056,13 +5433,13 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                 />
               ) : null}
               {fileContent.length > 500 * 1024 && (
-                  <div className="mb-3 rounded-md border border-status-warning/20 bg-status-warning/10 px-3 py-2 text-sm text-status-warning">
+                  <div className="mb-3 rounded-md bg-status-warning/10 px-3 py-2 text-sm text-status-warning">
                     {t('filesView.warning.largeFilePreviewLimited', { sizeKb: Math.round(fileContent.length / 1024) })}
                   </div>
                 )}
               <ErrorBoundary
                 fallback={
-                  <div className="rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2">
+                  <div className="rounded-md bg-destructive/10 px-3 py-2">
                     <div className="mb-1 font-medium text-destructive">{t('filesView.error.previewUnavailable')}</div>
                     <div className="text-sm text-muted-foreground">
                       {t('filesView.error.switchToEditMode')}
@@ -5070,13 +5447,15 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                   </div>
                 }
               >
-                <SimpleMarkdownRenderer
-                  content={fileContent}
-                  className="typography-markdown-body"
-                  stripFrontmatter
-                  enableFileReferences={false}
-                  allowRawHtml
-                />
+                <div style={previewFontStyle}>
+                  <SimpleMarkdownRenderer
+                    content={fileContent}
+                    className="typography-markdown-body"
+                    frontmatter="properties"
+                    enableFileReferences={false}
+                    allowRawHtml
+                  />
+                </div>
               </ErrorBoundary>
             </div>
               <MarkdownPreviewSearch
@@ -5084,14 +5463,14 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                 open={mdPreviewFindOpen}
                 onOpenChange={setMdPreviewFindOpen}
                 focusNonce={mdPreviewFindFocusNonce}
-                className="right-4 top-16"
+                className="inset-e-4 top-16"
               />
             </div>
           ) : canUseShikiFileView && textViewMode === 'view' ? (
             renderShikiFileView(selectedFile, draftContent, fullscreenViewVirtualizer, restoreFullscreenCodeScroll)
           ) : (
             <div className={cn('relative h-full', shouldMaskEditorForPendingNavigation && 'overflow-hidden')}>
-              <DocumentSymbolsPanel open={isSymbolsOpen} onOpenChange={setIsSymbolsOpen} view={editorViewRef.current} />
+              <DocumentSymbolsPanel open={isSymbolsOpen} onOpenChange={setIsSymbolsOpen} viewRef={editorViewRef} />
               <div className={cn('h-full', shouldMaskEditorForPendingNavigation && 'invisible')}>
               <FilePositionEditor
                 key={`${filePositionKey}:fullscreen`}

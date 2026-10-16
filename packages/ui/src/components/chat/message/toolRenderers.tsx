@@ -165,7 +165,7 @@ interface ParsedReadOutputLine {
     isInfo: boolean;
 }
 
-export interface ParsedReadToolOutput {
+interface ParsedReadToolOutput {
     type: 'file' | 'directory' | 'unknown';
     lines: ParsedReadOutputLine[];
 }
@@ -261,7 +261,7 @@ export const renderGrepOutput = (output: string, isMobile: boolean, options?: { 
             <div
                 className={cn(
                     'space-y-2 w-full min-w-0',
-                    options?.unstyled ? null : 'p-3 bg-muted/20 rounded-xl border border-border/30'
+                    options?.unstyled ? null : 'p-3 oc-tile rounded-xl'
                 )}
                 style={typography.tool.popup}
             >
@@ -273,7 +273,7 @@ export const renderGrepOutput = (output: string, isMobile: boolean, options?: { 
                         <div className={cn('font-medium text-muted-foreground', isMobile ? 'typography-micro' : 'typography-code')}>
                             {filepath}
                         </div>
-                        <div className="pl-4 space-y-1">
+                        <div className="ps-4 space-y-1">
                             {matches.map((match, idx) => {
                                 if (!match.lineNum && !match.content) {
                                     return null;
@@ -330,7 +330,7 @@ export const renderGlobOutput = (output: string, isMobile: boolean, options?: { 
             <div
                 className={cn(
                     'space-y-2 w-full min-w-0',
-                    options?.unstyled ? null : 'p-3 bg-muted/20 rounded-xl border border-border/30'
+                    options?.unstyled ? null : 'p-3 oc-tile rounded-xl'
                 )}
                 style={typography.tool.popup}
             >
@@ -342,7 +342,7 @@ export const renderGlobOutput = (output: string, isMobile: boolean, options?: { 
                         <div className={cn('font-medium text-muted-foreground', isMobile ? 'typography-micro' : 'typography-code')}>
                             {dir}/
                         </div>
-                        <div className={cn('pl-4 grid gap-1', isMobile ? 'grid-cols-1' : 'grid-cols-2')}>
+                        <div className={cn('ps-4 grid gap-1', isMobile ? 'grid-cols-1' : 'grid-cols-2')}>
                             {groups[dir].sort().map((filename) => (
                                 <div key={filename} className={cn('flex items-center gap-2 min-w-0', isMobile ? 'typography-micro' : 'typography-code')}>
                                     <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={GLOB_DOT_STYLE} />
@@ -364,7 +364,7 @@ export const renderWebSearchOutput = (output: string, options?: { unstyled?: boo
         const parsed = parseWebSearchOutput(output);
         if (parsed) {
             return (
-                <div className={cn('w-full min-w-0', options?.unstyled ? null : 'p-2 bg-muted/20 rounded-xl border border-border/20')}>
+                <div className={cn('w-full min-w-0', options?.unstyled ? null : 'p-2 oc-tile rounded-xl')}>
                     <WebSearchResults output={parsed} providerId={null} />
                 </div>
             );
@@ -373,7 +373,7 @@ export const renderWebSearchOutput = (output: string, options?: { unstyled?: boo
             <div
                 className={cn(
                     'typography-code max-w-none w-full min-w-0',
-                    options?.unstyled ? null : 'p-3 bg-muted/20 rounded-xl border border-border/20'
+                    options?.unstyled ? null : 'p-3 oc-tile rounded-xl'
                 )}
                 style={typography.tool.popup}
             >
@@ -393,7 +393,7 @@ interface UnifiedDiffLine {
     content: string;
 }
 
-export interface UnifiedDiffHunk {
+interface UnifiedDiffHunk {
     file: string;
     oldStart: number;
     newStart: number;

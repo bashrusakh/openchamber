@@ -9,7 +9,6 @@ import type {
   LinearIssueLabel,
   LinearIssuePriority,
   LinearIssueGetResult,
-  LinearIssueSummariesResult,
   LinearIssueState,
   LinearIssueStatesResult,
   LinearIssueUpdateInput,
@@ -24,29 +23,14 @@ import type {
   LinearPreferences,
   LinearSessionStatusPostInput,
   LinearSessionStatusPostResult,
+  LinearSubIssueProgress,
   LinearTeamMapping,
   LinearWorkflowState,
   LinearUserSummary,
   LinearWorkspaceSummary,
 } from '@openchamber/ui/lib/api/types';
 import { runtimeFetch } from '@openchamber/ui/lib/runtime-fetch';
-import { z } from 'zod';
 
-const issueSummariesSchema = z.union([
-  z.object({ connected: z.literal(false) }),
-  z.object({
-    connected: z.literal(true),
-    issues: z.array(z.object({
-      identifier: z.string(),
-      title: z.string(),
-      state: z.object({
-        name: z.string(),
-        type: z.enum(['triage', 'backlog', 'unstarted', 'started', 'completed', 'canceled']),
-      }),
-    // One issue in a state type Linear adds later must not drop the rest.
-    }).nullable().catch(null)).transform((issues) => issues.filter((issue) => issue !== null)),
-  }),
-]);
 
 type LinearJson = {
   connected?: boolean;
@@ -224,7 +208,8 @@ function parseLabels(payload: LinearIssueSummary['labels']): LinearIssueLabel[] 
   return payload.map(parseLabel).filter((label): label is LinearIssueLabel => label != null);
 }
 
-function parseIssueSummary(payload: LinearIssueSummary | null | undefined): LinearIssueSummary | null {
+/** A parent or a sub-issue: the issue's own fields, without labels. */
+function parseRelatedIssue(payload: LinearIssueSummary | null | undefined): LinearIssueSummary | null {
   if (!payload) return null;
   const id = payload?.id?.trim();
   const identifier = payload?.identifier?.trim();
@@ -240,8 +225,25 @@ function parseIssueSummary(payload: LinearIssueSummary | null | undefined): Line
     assignee: parseAssignee(payload.assignee),
     team: parseTeam(payload.team),
     priority: parsePriority(payload.priority),
-    labels: parseLabels(payload.labels),
     updatedAt: readRawString(payload.updatedAt)?.trim() || null,
+  };
+}
+
+function parseSubIssueProgress(payload: LinearIssueSummary['subIssueProgress']): LinearSubIssueProgress | null {
+  const total = readFiniteNumber(payload?.total);
+  const done = readFiniteNumber(payload?.done);
+  if (!total || total < 1 || done == null) return null;
+  return { total, done: Math.min(Math.max(done, 0), total), more: payload?.more === true };
+}
+
+function parseIssueSummary(payload: LinearIssueSummary | null | undefined): LinearIssueSummary | null {
+  const related = parseRelatedIssue(payload);
+  if (!payload || !related) return null;
+  return {
+    ...related,
+    labels: parseLabels(payload.labels),
+    parent: parseRelatedIssue(payload.parent),
+    subIssueProgress: parseSubIssueProgress(payload.subIssueProgress),
   };
 }
 
@@ -270,10 +272,15 @@ function parseIssue(payload: LinearIssue | null | undefined): LinearIssue | null
     ? payload.comments.map(parseComment).filter((comment): comment is LinearIssueComment => comment != null)
     : [];
   const description = payload?.description;
+  const subIssues = Array.isArray(payload?.subIssues)
+    ? payload.subIssues.map(parseRelatedIssue).filter((issue): issue is LinearIssueSummary => issue != null)
+    : [];
   return {
     ...summary,
     description: readRawString(description),
     comments,
+    subIssues,
+    subIssuesMore: payload?.subIssuesMore === true,
   };
 }
 
@@ -505,20 +512,6 @@ export const createWebLinearAPI = (): LinearAPI => ({
       throw new Error(readErrorMessage(payload, response.statusText || 'Failed to load Linear issue'));
     }
     return result;
-  },
-
-  async issueSummaries(identifiers: string[]): Promise<LinearIssueSummariesResult> {
-    const params = new URLSearchParams({ ids: identifiers.join(',') });
-    const response = await runtimeFetch(`/api/linear/issues/summaries?${params.toString()}`, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-    });
-    const payload = await response.json().catch(() => null);
-    const parsed = issueSummariesSchema.safeParse(payload);
-    if (!response.ok || !parsed.success) {
-      throw new Error(response.statusText || 'Failed to load Linear issue states');
-    }
-    return parsed.data;
   },
 
   async issueStates(teamId: string): Promise<LinearIssueStatesResult> {

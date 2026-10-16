@@ -1,5 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
+import { isIMECompositionEvent } from '@/lib/ime';
 
 import { Icon } from '@/components/icon/Icon';
 import { McpIcon } from '@/components/icons/McpIcon';
@@ -114,7 +115,7 @@ export const MobileWorkspaceDrawer: React.FC<{
   onOpenMcpSettings: () => void;
   variant?: 'drawer' | 'panel';
 }> = ({ open, onClose, tab, onTabChange, pendingChangesDiff, onOpenPlan, onOpenMcpSettings, variant = 'drawer' }) => {
-  const { t } = useI18n();
+  const { t, direction } = useI18n();
   const rootRef = React.useRef<HTMLElement | null>(null);
   const drawerRef = React.useRef<HTMLElement>(null);
   const [entered, setEntered] = React.useState(false);
@@ -129,13 +130,14 @@ export const MobileWorkspaceDrawer: React.FC<{
     tabRef.current = tab;
   }, [tab]);
 
-  // Swipe from the drawer's left edge back toward the right = close, the
-  // reverse of the right-edge swipe that opened it from the chat. Only the
+  // Swipe from the drawer's start edge back toward its end = close, the
+  // reverse of the end-edge swipe that opened it from the chat. Only the
   // full-cover drawer has an edge to grab; the tablet panel is closed from the
   // header instead.
+  const closeFromEdge = () => onCloseRef.current();
   useEdgeSwipe(drawerRef, {
     enabled: variant === 'drawer' && open,
-    onLeftEdgeSwipe: () => onCloseRef.current(),
+    ...(direction === 'rtl' ? { onRightEdgeSwipe: closeFromEdge } : { onLeftEdgeSwipe: closeFromEdge }),
   });
 
   // Tabs the user has actually opened — their panes stay mounted afterwards.
@@ -180,9 +182,11 @@ export const MobileWorkspaceDrawer: React.FC<{
     const handleKeyDown = (event: KeyboardEvent) => {
       // The terminal owns Escape (it goes to the PTY) — don't hijack it.
       // The same goes for the file editor on the Vim keymap, where Escape
-      // leaves INSERT mode (hardware keyboards on tablets and phones).
+      // leaves INSERT mode (hardware keyboards on tablets and phones), and
+      // for an IME composition, where it dismisses the candidate window.
       if (event.key !== 'Escape' || tabRef.current === 'terminal') return;
       if (isVimEditorEventTarget(event.target)) return;
+      if (isIMECompositionEvent(event)) return;
       onCloseRef.current();
     };
     document.addEventListener('keydown', handleKeyDown);
@@ -195,7 +199,7 @@ export const MobileWorkspaceDrawer: React.FC<{
   if (variant === 'drawer' && !rootRef.current) return null;
 
   const tabItems: SortableTabsStripItem[] = [
-    { id: 'changes', label: t('mobile.menu.changes'), icon: <Icon name="git-branch" className="h-3.5 w-3.5" /> },
+    { id: 'changes', label: t('mobile.menu.git'), icon: <Icon name="git-branch" className="h-3.5 w-3.5" /> },
     { id: 'files', label: t('mobile.menu.files'), icon: <Icon name="file-text" className="h-3.5 w-3.5" /> },
     { id: 'terminal', label: t('mobile.menu.terminal'), icon: <Icon name="terminal" className="h-3.5 w-3.5" /> },
     { id: 'notes', label: t('contextRail.surface.notes'), icon: <Icon name="sticky-note" className="h-3.5 w-3.5" /> },
@@ -226,7 +230,7 @@ export const MobileWorkspaceDrawer: React.FC<{
         </div>
         <button
           type="button"
-          className="-mr-1 flex size-10 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="-me-1 flex size-10 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           aria-label={t('mobile.surface.closeAria')}
           onClick={onClose}
           style={{ touchAction: 'manipulation' }}
@@ -271,7 +275,7 @@ export const MobileWorkspaceDrawer: React.FC<{
         {visitedTabs.has('notes') ? (
           <div className={cn('h-full', tab !== 'notes' && 'hidden')}>
             <ErrorBoundary>
-              <ProjectContextPanel onActionComplete={onClose} onOpenPlan={onOpenPlan} />
+              <ProjectContextPanel visible={open && tab === 'notes'} onActionComplete={onClose} onOpenPlan={onOpenPlan} />
             </ErrorBoundary>
           </div>
         ) : null}
@@ -306,7 +310,7 @@ export const MobileWorkspaceDrawer: React.FC<{
         paddingTop: 'var(--oc-safe-area-top, 0px)',
         // Settled state drops the transform entirely so the drawer isn't kept
         // on a compositing layer (iOS clips those to the safe-area viewport).
-        transform: entered ? 'none' : 'translateX(100%)',
+        transform: entered ? 'none' : direction === 'rtl' ? 'translateX(-100%)' : 'translateX(100%)',
         transition: `transform ${ENTER_DURATION_MS}ms ${DRAWER_EASING}`,
         visibility: visible ? 'visible' : 'hidden',
         pointerEvents: open ? 'auto' : 'none',

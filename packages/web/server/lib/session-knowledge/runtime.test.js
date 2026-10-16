@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
-import { SESSION_LINK_GUIDANCE, buildKnowledgeSignature, buildKnowledgeText, createSessionKnowledgeRuntime } from './runtime.js';
+import { SESSION_KNOWLEDGE_HEADER } from '../../../../ui/src/lib/sessionKnowledgeApi.ts';
+import { KNOWLEDGE_HEADER, RENDER_PAGE_GUIDANCE, SESSION_LINK_GUIDANCE, WORKTREE_MOVE_GUIDANCE, buildKnowledgeSignature, buildKnowledgeText, createSessionKnowledgeRuntime } from './runtime.js';
 
 const DIRECTORY = '/work/project';
 const PROJECT_ID = 'path_project';
@@ -16,7 +17,8 @@ const memory = (overrides = {}) => ({
   id: 'm1', title: 'Uses bun', body: 'Full text.', type: 'fact', createdAt: 1, updatedAt: 1, ...overrides,
 });
 
-const createRuntime = (overrides = {}) => createSessionKnowledgeRuntime({
+const createRuntime = (overrides = {}) => {
+  const dependencies = {
   resolveProjectId: async () => PROJECT_ID,
   projectContextRuntime: {
     readContext: async () => ({ notes: [note()], todos: [], plans: [plan()] }),
@@ -31,7 +33,11 @@ const createRuntime = (overrides = {}) => createSessionKnowledgeRuntime({
   ...('persistSessionMetadata' in overrides ? { persistSessionMetadata: overrides.persistSessionMetadata } : {}),
   ...('isAgentMemoryEnabled' in overrides ? { isAgentMemoryEnabled: overrides.isAgentMemoryEnabled } : {}),
   ...('isSessionLinkingAvailable' in overrides ? { isSessionLinkingAvailable: overrides.isSessionLinkingAvailable } : {}),
-});
+  };
+  if ('isWorktreeMoveWithoutAsking' in overrides) dependencies.isWorktreeMoveWithoutAsking = overrides.isWorktreeMoveWithoutAsking;
+  if ('isPageRenderingAvailable' in overrides) dependencies.isPageRenderingAvailable = overrides.isPageRenderingAvailable;
+  return createSessionKnowledgeRuntime(dependencies);
+};
 
 /** An in-memory stand-in for `session-metadata-store.js`. */
 const createMetadataStub = (initial = {}) => {
@@ -59,8 +65,9 @@ describe('when to link', () => {
     });
     const { text, signature } = await runtime.resolvePending(DIRECTORY, '', { notes: [], plans: [] });
 
-    expect(text).toBe(SESSION_LINK_GUIDANCE);
-    expect(signature).toBe('l:on');
+    // The worktree rule rides with the tool, in its asking form by default.
+    expect(text).toBe(`${KNOWLEDGE_HEADER}\n\n${SESSION_LINK_GUIDANCE}\n\n${WORKTREE_MOVE_GUIDANCE.ask}`);
+    expect(signature).toBe('l:on|w:ask');
     expect((await runtime.resolvePending(DIRECTORY, signature, { notes: [], plans: [] })).text).toBe('');
   });
 
@@ -68,9 +75,59 @@ describe('when to link', () => {
     for (const isSessionLinkingAvailable of [async () => false, async () => { throw new Error('settings unreadable'); }]) {
       const { text } = await createRuntime({ isSessionLinkingAvailable }).resolvePending(DIRECTORY, '', PINS);
       expect(text).not.toContain(SESSION_LINK_GUIDANCE);
+      expect(text).not.toContain('session.moveToWorktree');
     }
     expect(buildKnowledgeText(empty)).toBe('');
     expect(buildKnowledgeSignature(empty)).toBe('');
+  });
+});
+
+describe('when to draw a page', () => {
+  const bare = {
+    isAgentMemoryEnabled: async () => false,
+    projectContextRuntime: { readContext: async () => ({ notes: [], todos: [], plans: [] }) },
+  };
+
+  test('is told in a session whose agent has the render tool, once', async () => {
+    const runtime = createRuntime({ ...bare, isPageRenderingAvailable: async () => true });
+    const { text, signature } = await runtime.resolvePending(DIRECTORY, '', { notes: [], plans: [] });
+
+    expect(text).toBe(`${KNOWLEDGE_HEADER}\n\n${RENDER_PAGE_GUIDANCE}`);
+    expect(text).toContain('Do not use it for a few numbers');
+    expect(signature).toBe('r:on:3');
+    expect((await runtime.resolvePending(DIRECTORY, signature, { notes: [], plans: [] })).text).toBe('');
+  });
+
+  test('is left out without the tool, or when the check fails', async () => {
+    for (const isPageRenderingAvailable of [async () => false, async () => { throw new Error('settings unreadable'); }]) {
+      const { text } = await createRuntime({ ...bare, isPageRenderingAvailable }).resolvePending(DIRECTORY, '', { notes: [], plans: [] });
+      expect(text).toBe('');
+    }
+  });
+});
+
+describe('when to move into a worktree', () => {
+  const runtimeWith = (overrides) => createRuntime({
+    isSessionLinkingAvailable: async () => true,
+    isAgentMemoryEnabled: async () => false,
+    projectContextRuntime: { readContext: async () => ({ notes: [], todos: [], plans: [] }) },
+    ...overrides,
+  });
+
+  test('asks by default, and when the setting cannot be read', async () => {
+    for (const isWorktreeMoveWithoutAsking of [undefined, async () => false, async () => { throw new Error('settings unreadable'); }]) {
+      const { text, signature } = await runtimeWith({ isWorktreeMoveWithoutAsking }).resolvePending(DIRECTORY, '', { notes: [], plans: [] });
+      expect(text).toBe(`${KNOWLEDGE_HEADER}\n\n${SESSION_LINK_GUIDANCE}\n\n${WORKTREE_MOVE_GUIDANCE.ask}`);
+      expect(signature).toBe('l:on|w:ask');
+    }
+  });
+
+  test('moves unasked when the user chose that, and the change re-sends the rule', async () => {
+    const runtime = runtimeWith({ isWorktreeMoveWithoutAsking: async () => true });
+    const { text, signature } = await runtime.resolvePending(DIRECTORY, 'l:on|w:ask', { notes: [], plans: [] });
+    expect(text).toContain(WORKTREE_MOVE_GUIDANCE.auto);
+    expect(text).not.toContain(WORKTREE_MOVE_GUIDANCE.ask);
+    expect(signature).toBe('l:on|w:auto');
   });
 });
 
@@ -78,6 +135,8 @@ describe('what the session is owed', () => {
   test('carries pinned notes, pinned plan bodies, and the memory index', async () => {
     const { text } = await createRuntime().resolvePending(DIRECTORY, '', PINS);
 
+    // It arrives as a user message of its own, so it says first that it is no request (#4877).
+    expect(text.startsWith(`${KNOWLEDGE_HEADER}\n\n`)).toBe(true);
     expect(text).toContain('Pinned note body.');
     expect(text).toContain('Migration plan');
     expect(text).toContain('Plan body.');
@@ -311,6 +370,28 @@ describe('reading what a session was told', () => {
       directory: DIRECTORY,
       patch: { openchamber: { knowledge_context_delivered: 'sig-1' } },
     }]);
+  });
+
+  test('a revert that hid the block makes the session owe it again', async () => {
+    const store = createMetadataStub();
+    const runtime = createRuntime(store);
+    const first = await runtime.resolvePendingForSession('ses_a', DIRECTORY);
+    await runtime.recordDelivered('ses_a', DIRECTORY, first.signature);
+    expect((await runtime.resolvePendingForSession('ses_a', DIRECTORY)).text).toBe('');
+
+    await runtime.forgetDelivered('ses_a', DIRECTORY);
+
+    // Pins are kept: only the delivery record goes.
+    expect(store.patches.at(-1)).toEqual({
+      sessionId: 'ses_a',
+      directory: DIRECTORY,
+      patch: { openchamber: { knowledge_context_delivered: '' } },
+    });
+    expect((await runtime.resolvePendingForSession('ses_a', DIRECTORY)).text).toBe(first.text);
+  });
+
+  test('the client spots the block by the same first line the server writes', () => {
+    expect(SESSION_KNOWLEDGE_HEADER).toBe(KNOWLEDGE_HEADER);
   });
 
   test('says so plainly when no metadata store is wired', async () => {

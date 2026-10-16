@@ -48,6 +48,11 @@ describe('settings registry', () => {
       useUIStore.setState(original, true);
     }
   });
+  test('accepts only interface languages the UI ships', () => {
+    expect(parseSettingsDocument({ locale: 'zh-CN' })).toEqual({ locale: 'zh-CN' });
+    expect(parseSettingsDocument({ locale: 'xx' })).toEqual({});
+    expect(parseSettingsDocument({ locale: 3 })).toEqual({});
+  });
   test('project paths retain absolute Windows roots across parsing and serialization', () => {
     const parsed = parseSettingsDocument({ projects: [
       { path: 'c:\\', label: 'Drive' },
@@ -161,6 +166,17 @@ describe('settings registry', () => {
     });
     expect(parseSettingsDocument(null)).toBeNull();
     expect(parseSettingsDocument([])).toBeNull();
+  });
+
+  test('reads the removed Sorted chat mode as collapsed activity until the user picks a mode', () => {
+    expect(parseSettingsDocument({ chatRenderMode: 'sorted', activityRenderMode: 'summary' }))
+      .toEqual({ chatRenderMode: 'sorted', activityRenderMode: 'collapsed' });
+    expect(parseSettingsDocument({ chatRenderMode: 'sorted' }))
+      .toEqual({ chatRenderMode: 'sorted', activityRenderMode: 'collapsed' });
+    // Picking a mode in Settings writes chatRenderMode 'live' along with it.
+    expect(parseSettingsDocument({ chatRenderMode: 'live', activityRenderMode: 'summary' }))
+      .toEqual({ chatRenderMode: 'live', activityRenderMode: 'summary' });
+    expect(parseSettingsDocument({ activityRenderMode: 'summary' })).toEqual({ activityRenderMode: 'summary' });
   });
 
   test('applies only the fields a snapshot carries and leaves the rest alone', () => {

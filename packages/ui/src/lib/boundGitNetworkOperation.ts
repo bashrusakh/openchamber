@@ -12,7 +12,7 @@ import type {
 } from '@/lib/api/types';
 import { effectiveRepositoryBinding } from '@/lib/source-control/types';
 import { getRuntimeKey } from '@/lib/runtime-switch';
-import { gitOperationRecoveryOwner } from '@/lib/source-control/git-operation-recovery';
+import { gitOperationRecoveryOwner, isCompleteSyncSuccess } from '@/lib/source-control/git-operation-recovery';
 import { notifyGitPush } from '@/lib/gitPushEvents';
 
 type BoundGitNetworkAction = 'fetch' | 'pull' | 'sync';
@@ -97,8 +97,7 @@ const acceptOperation = (read: GitOperationRead, operation: GitNetworkOperation,
     throw new GitOperationResultError({ ...read, availability: 'unavailable' }, 'invalid-terminal-state');
   }
   if (operation.state === 'succeeded' && operation.target.operation === 'sync') {
-    const steps = operation.stepResults;
-    if (!steps || steps.length !== 3 || !['fetch', 'pull', 'push'].every((step) => steps.some((result) => result.step === step && result.status === 'succeeded'))) {
+    if (!isCompleteSyncSuccess(operation.stepResults)) {
       throw new GitOperationResultError({ ...read, availability: 'unavailable' }, 'invalid-terminal-state');
     }
   }
@@ -482,7 +481,7 @@ export type GitPublishTargets = {
   fetch?: { remoteName: string; ref: string };
 };
 
-export type GitFetchTarget = {
+type GitFetchTarget = {
   remoteName: string;
   sourceRef: string;
   destinationRef: string;
@@ -517,7 +516,9 @@ export const readGitPublishContext = async ({
 }): Promise<GitPublishContext> => {
   const runtime = runtimeKey();
   const [bindingRead, status, branches] = await Promise.all([
-    sourceControl.repositoryBinding(directory), git.getGitStatus(directory), git.getGitBranches(directory),
+    // Local refs only: publishing needs the checked-out branch and its commit,
+    // and asking every remote over the network made each push wait seconds.
+    sourceControl.repositoryBinding(directory), git.getGitStatus(directory), git.getGitBranches(directory, { remote: 'local' }),
   ]);
   requireCurrentRuntime(runtimeKey, runtime);
   const remotes = effectiveRepositoryBinding(bindingRead).remotes;
@@ -620,10 +621,7 @@ export const interpretGitNetworkTerminalOperation = (
     return { status: 'failed', state: operation.state, message: operation.error.message };
   }
   if (action === 'sync') {
-    const steps = operation.stepResults;
-    if (!steps || steps.length !== 3 || steps.some((step) => step.status !== 'succeeded')) {
-      fail('invalid-terminal-state');
-    }
+    if (!isCompleteSyncSuccess(operation.stepResults)) fail('invalid-terminal-state');
   }
   return { status: 'succeeded' };
 };
@@ -838,4 +836,26 @@ export const runContributorAwarePush = async ({
     runtimeKey,
     onOperation,
   });
+};
+
+/**
+ * What a finished sync did, for the message that reports it. The server marks
+ * a step `skipped` when there was nothing for it to do: a pull that brought
+ * nothing in, or a push of a commit the remote already held.
+ */
+export type GitSyncOutcome =
+  | { kind: 'up-to-date' }
+  | { kind: 'pulled'; remoteName: string }
+  | { kind: 'pushed'; remoteName: string }
+  | { kind: 'synced' };
+
+export const describeGitSyncOutcome = (operation: GitNetworkOperation | null): GitSyncOutcome => {
+  if (!operation || operation.target.operation !== 'sync' || !operation.stepResults) return { kind: 'synced' };
+  const did = (step: 'pull' | 'push') => operation.stepResults?.find((entry) => entry.step === step)?.status === 'succeeded';
+  const pulled = did('pull');
+  const pushed = did('push');
+  if (!pulled && !pushed) return { kind: 'up-to-date' };
+  if (pulled && !pushed) return { kind: 'pulled', remoteName: operation.target.fetch.name };
+  if (pushed && !pulled) return { kind: 'pushed', remoteName: operation.target.push.name };
+  return { kind: 'synced' };
 };

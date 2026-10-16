@@ -4,7 +4,8 @@ import type { SyncEvent } from "@/lib/opencode/events"
 import { adoptRelayTunnel, deactivateRelayTunnel } from "@/lib/relay/runtime-tunnel"
 import type { RelayTunnelClient, RelayTunnelWebSocket } from "@/lib/relay/tunnel-client"
 import { clearRuntimeUrlAuthToken, setRuntimeUrlAuthToken } from "@/lib/runtime-auth"
-import { createEventPipeline } from "./event-pipeline"
+import { useAuthSessionStore } from "@/lib/runtime-auth-expiry"
+import { classifyStreamPayload, createEventPipeline } from "./event-pipeline"
 
 const failAfter = (ms: number) => new Promise<never>((_, reject) => {
   setTimeout(() => reject(new Error("Timed out waiting for event pipeline flush")), ms)
@@ -174,6 +175,18 @@ describe("createEventPipeline", () => {
     expect(events[1]).toEqual({ type: "openchamber.permission-auto-accept", properties: { sessions: { ses_1: true }, modes: { ses_1: "safety" }, revision: 3 } })
   })
 
+  test("passes the server's waiting-page announcements through typed", async () => {
+    const { events } = await collect(
+      [
+        { type: "openchamber:page-waiting", properties: { sessionID: "ses_1", directory: "/repo", page: { id: "call_1", title: "Pick a layout" } } as never },
+        { type: "openchamber:page-settled", properties: { sessionID: "ses_1", pageID: "call_1" } },
+      ],
+      2,
+    )
+    expect(events[0]).toEqual({ type: "openchamber.page-waiting", properties: { sessionID: "ses_1", directory: "/repo", page: { id: "call_1", title: "Pick a layout" } } })
+    expect(events[1]).toEqual({ type: "openchamber.page-settled", properties: { sessionID: "ses_1", pageID: "call_1" } })
+  })
+
   test("ignores payloads that are neither wire events nor bridge events", async () => {
     const { events } = await collect([{ type: "something.else", properties: {} }, textEnded("x")], 1)
     expect(events.map(describeEvent)).toEqual(["updated:x"])
@@ -303,6 +316,71 @@ describe("createEventPipeline", () => {
     }
     expect(activity).toBe(0)
   })
+
+  describe("while the OpenChamber session is expired", () => {
+    afterEach(() => {
+      useAuthSessionStore.getState().markAuthenticated()
+    })
+
+    /**
+     * Every attempt is refused, and the first refusal confirms the expiry. The failure carries no
+     * HTTP status, as a refused SSE request or WebSocket upgrade does in a browser, so the
+     * pipeline's normal retry backoff applies.
+     */
+    const createUnauthorizedSdk = (onAttempt: () => void): OpenCodeClient => {
+      const client: Pick<OpenCodeClient, "event"> = {
+        event: {
+          subscribe: () => ({
+            [Symbol.asyncIterator]: () => ({
+              next: async () => {
+                onAttempt()
+                useAuthSessionStore.getState().markExpired()
+                throw new Error("UI authentication required")
+              },
+            }),
+          }),
+        },
+      }
+      // SAFETY: the pipeline only touches `event.subscribe` on the client.
+      return client as OpenCodeClient
+    }
+
+    test("stops reconnecting until the user logs in, then reconnects at once", async () => {
+      let attempts = 0
+      const pipeline = createEventPipeline({
+        sdk: createUnauthorizedSdk(() => { attempts += 1 }),
+        onEvents: () => undefined,
+        transport: "sse",
+        heartbeatTimeoutMs: 60_000,
+      })
+      try {
+        // The retry backoff starts at 250 ms and doubles; three more attempts would fit here.
+        await new Promise((resolve) => setTimeout(resolve, 2_000))
+        expect(attempts).toBe(1)
+
+        useAuthSessionStore.getState().markAuthenticated()
+        for (let i = 0; i < 20 && attempts < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+        expect(attempts).toBe(2)
+      } finally {
+        pipeline.cleanup()
+      }
+    })
+
+    test("a pipeline cleaned up while waiting for the login never reconnects", async () => {
+      let attempts = 0
+      const pipeline = createEventPipeline({
+        sdk: createUnauthorizedSdk(() => { attempts += 1 }),
+        onEvents: () => undefined,
+        transport: "sse",
+        heartbeatTimeoutMs: 60_000,
+      })
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      pipeline.cleanup()
+      useAuthSessionStore.getState().markAuthenticated()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(attempts).toBe(1)
+    })
+  })
 })
 
 /** A relay tunnel socket the test drives by hand. */
@@ -349,6 +427,7 @@ describe("createEventPipeline over the WebSocket transport", () => {
       },
       getStatus: () => ({ state: "connected" }),
       subscribeStatus: () => () => undefined,
+      retry: () => undefined,
       close: () => undefined,
     }
     adoptRelayTunnel({ relayUrl: "wss://relay.test", serverId: "fixture", hostEncPubJwk: {} }, tunnel)
@@ -377,5 +456,36 @@ describe("createEventPipeline over the WebSocket transport", () => {
     // The ready frame and the heartbeat frame both prove the socket is alive. Neither is an event.
     expect(activity).toBe(2)
     expect(delivered).toEqual([])
+  })
+})
+
+describe("classifyStreamPayload", () => {
+  test("classifies each payload kind by its type", () => {
+    expect(classifyStreamPayload(textDelta("a"), undefined)).toMatchObject({ kind: "events", events: [{ directory: "/repo" }] })
+    expect(classifyStreamPayload({ type: "openchamber:space-setup", properties: { spaceId: "0123456789ab" } }, undefined))
+      .toEqual({ kind: "space-setup", spaceId: "0123456789ab" })
+    expect(classifyStreamPayload({ type: "openchamber:space-setup", properties: { spaceId: "bad" } }, undefined))
+      .toEqual({ kind: "events", events: [] })
+    expect(classifyStreamPayload({ type: "openchamber:session-archived", properties: { sessionID: "ses_1", archivedAt: 5 } }, "/frame"))
+      .toMatchObject({ kind: "events", events: [{ directory: "/frame", event: { type: "session.patched" } }] })
+    expect(classifyStreamPayload({ nothing: true }, undefined)).toEqual({ kind: "events", events: [] })
+    expect(classifyStreamPayload("text", undefined)).toEqual({ kind: "events", events: [] })
+  })
+
+  // Each delta used to be tried against nine OpenChamber schemas before the
+  // wire schema; failed zod parses build issue objects, so this cost ~37us per
+  // delta (750ms for 20k on an M-series laptop). Dispatching on `type` brings
+  // it under 1us. The bound is loose enough for slow CI and far below the old cost.
+  test("classifies a stream of text deltas without trying unrelated schemas", () => {
+    const payloads = Array.from({ length: 20_000 }, (_, index) => textDelta(`chunk ${index}`))
+    const started = performance.now()
+    let events = 0
+    for (const payload of payloads) {
+      const classified = classifyStreamPayload(payload, undefined)
+      if (classified.kind === "events") events += classified.events.length
+    }
+    const elapsed = performance.now() - started
+    expect(events).toBe(20_000)
+    expect(elapsed).toBeLessThan(300)
   })
 })

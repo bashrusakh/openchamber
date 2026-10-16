@@ -4,8 +4,9 @@ import { registerGitHubRoutes } from '../github/routes.js';
 import { registerGitLabRoutes } from '../gitlab/routes.js';
 import { createBindingService } from './binding-service.js';
 import { createBindingStore } from './binding-storage.js';
+import { createChangeRequestWorktreeSource } from './change-request-worktree.js';
 import { createGitIdentityProvisioning } from '../git/identity-provisioning.js';
-import * as gitIdentityStore from '../git/identity-storage.js';
+import { createProfile, getProfiles, updateProfile } from '../git/identity-storage.js';
 import { resolveRepositoryIdentity } from './repository-identity.js';
 import { redactSensitiveText } from './url-redaction.js';
 import { createOAuthFlowRegistry } from './oauth-flow-registry.js';
@@ -73,7 +74,7 @@ export function registerSourceControlRoutes(app, dependencies = {}) {
   // Connecting an account is the moment every part of an identity is known, so
   // the identity is made there instead of being asked for again later.
   const identityProvisioning = dependencies.identityProvisioning ?? createGitIdentityProvisioning({
-    store: gitIdentityStore,
+    store: { createProfile, getProfiles, updateProfile },
   });
   const listGitHubAccounts = dependencies.listGitHubAccounts ?? getGitHubAuthAccounts;
   const oauthFlowRegistry = dependencies.oauthFlowRegistry ?? createOAuthFlowRegistry();
@@ -114,6 +115,17 @@ export function registerSourceControlRoutes(app, dependencies = {}) {
     auditStore: dependencies.auditStore,
     runtimeIdentity: dependencies.runtimeIdentity,
   });
+  // Signing in again as a new credential leaves bindings on the gone one; the
+  // new account takes them over, Git transport grants included, so pushes and
+  // fetches keep working without reconfiguring the repository.
+  const adoptConnectedAccount = (account, credential) => {
+    if (!credential?.providerUserId || !Number.isSafeInteger(credential.credentialRevision)) return;
+    // Only who the account is travels on; the credential's secret never does.
+    const { credentialRevision, providerUserId } = credential;
+    bindingService.accountConnected({ ...account, credentialRevision, providerUserId }).catch((error) => {
+      console.warn('Failed to move repository bindings to the connected account:', error?.message ?? error);
+    });
+  };
   const accountUnavailable = async (identity, callback) => {
     await bindingService.accountUnavailable(identity);
     if (callback) await callback(identity);
@@ -121,13 +133,14 @@ export function registerSourceControlRoutes(app, dependencies = {}) {
   const github = registerGitHubRoutes(app, {
     ...dependencies.github,
     oauthFlowRegistry,
-    onAccountConnected: ({ account, user, renews = [] }) => {
+    onAccountConnected: ({ account, user, renews = [], credential }) => {
       try {
         for (const previous of renews) identityProvisioning.repointAccountIdentities({ from: previous, to: account });
         identityProvisioning.ensureAccountIdentity({ account, user });
       } catch (error) {
         console.warn('Failed to provision a Git identity for the connected account:', error?.message ?? error);
       }
+      adoptConnectedAccount(account, credential);
     },
     onAccountInvalidated: (identity) => accountUnavailable(identity, dependencies.github?.onAccountInvalidated),
     onAccountRemoved: (identity) => accountUnavailable(identity, dependencies.github?.onAccountRemoved),
@@ -139,13 +152,14 @@ export function registerSourceControlRoutes(app, dependencies = {}) {
     ...dependencies.gitlab,
     store: gitlabStore,
     oauthFlowRegistry,
-    onAccountConnected: ({ account, user, renews = [] }) => {
+    onAccountConnected: ({ account, user, renews = [], credential }) => {
       try {
         for (const previous of renews) identityProvisioning.repointAccountIdentities({ from: previous, to: account });
         identityProvisioning.ensureAccountIdentity({ account, user });
       } catch (error) {
         console.warn('Failed to provision a Git identity for the connected account:', error?.message ?? error);
       }
+      adoptConnectedAccount(account, credential);
     },
     onAccountInvalidated: (identity) => accountUnavailable(identity, dependencies.gitlab?.onAccountInvalidated),
     onAccountRemoved: (identity) => accountUnavailable(identity, dependencies.gitlab?.onAccountRemoved),
@@ -247,9 +261,29 @@ export function registerSourceControlRoutes(app, dependencies = {}) {
       return sendBindingError(res, error);
     }
   });
+  // Bindings left on a gone account before connected accounts took them over
+  // are repaired once at start; repeating it changes nothing.
+  void (async () => {
+    for (const account of await getGitHubAuthAccounts()) {
+      if (account?.status !== 'valid' || !account?.credentialId) continue;
+      adoptConnectedAccount({ provider: 'github', instance: 'github.com', accountId: account.credentialId }, account);
+    }
+    for (const origin of (await gitlabStore.listInstances?.()) ?? []) {
+      for (const account of (await gitlabStore.listAccounts?.(origin)) ?? []) {
+        if (account?.status !== 'valid') continue;
+        adoptConnectedAccount({ provider: 'gitlab', instance: origin, accountId: account.credentialId }, account);
+      }
+    }
+  })().catch((error) => console.warn('Failed to repair repository bindings of connected accounts:', error?.message ?? error));
+
   return Object.freeze({
     ...bindingService,
     backfillConnectedIdentities,
+    // GitLab merge request reads for the comparison view and walkthroughs; the
+    // caller passes a read context it has already validated.
+    readGitLabChangeRequestPatch: (input) => gitlab.readChangeRequestPatch(input),
+    readGitLabLiveSummaries: (input) => gitlab.readLiveSummaries(input),
+    readGitLabChangeRequestFile: (input) => gitlab.readChangeRequestFile(input),
     resolveChangeRequestSource: async (input) => {
       const provider = input?.context?.provider;
       if (provider === 'github') return github.resolveChangeRequestSource(input);
@@ -258,5 +292,16 @@ export function registerSourceControlRoutes(app, dependencies = {}) {
         code: 'INVALID_SOURCE_CONTROL_READ_CONTEXT', status: 400,
       });
     },
+    // A worktree from a pull or merge request given by number (session.create).
+    resolveChangeRequestWorktreeSource: createChangeRequestWorktreeSource({
+      readBinding: bindingService.get,
+      listGitLabInstances: gitlab.listInstances,
+      readCurrentAccountId: ({ provider, instance }) => (provider === 'github'
+        ? github.readCurrentAccountId()
+        : gitlab.readCurrentAccountId(instance)),
+      readChangeRequestHead: (input) => (input.context.provider === 'github'
+        ? github.readChangeRequestHead(input)
+        : gitlab.readChangeRequestHead(input)),
+    }),
   });
 }

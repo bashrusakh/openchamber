@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { OPENCODE_CONFIG_DIR } from './opencodeConfigPaths';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
@@ -12,6 +13,7 @@ import {
   getAgentSources,
   getAgentConfig,
   getAgentPermissions,
+  listDisabledAgents,
   getCommandSources,
   getCommandConfig,
   getSnippet,
@@ -67,6 +69,7 @@ import {
 } from './skillsCatalog';
 import { buildAppliedResponse } from './config-mutation-response';
 import type { BridgeContext, BridgeResponse } from './bridge';
+import { appendInstalledSources, removeInstalledSources } from '../../web/server/lib/skills-catalog/installed-sources.js';
 
 type BridgeMessageInput = {
   id: string;
@@ -253,6 +256,11 @@ export async function handleConfigBridgeMessage(
     case 'api:config/reload': {
       await ctx?.manager?.restart();
       return { id, type, success: true, data: { restarted: true } };
+    }
+
+    case 'api:config/disabled-agents': {
+      const { directory } = (payload || {}) as { directory?: string };
+      return { id, type, success: true, data: { agents: listDisabledAgents(resolveWorkingDirectory(ctx, directory)) } };
     }
 
     case 'api:config/agents': {
@@ -715,6 +723,12 @@ export async function handleConfigBridgeMessage(
 
       if (normalizedMethod === 'DELETE') {
         deleteSkill(skillName, workingDirectory);
+        try {
+          removeInstalledSources(skillName);
+        } catch (error) {
+          // Provenance only refines the Installed badge; the skill is gone either way.
+          console.error('Failed to forget skill install provenance:', error);
+        }
         return {
           id,
           type,
@@ -749,6 +763,7 @@ export async function handleConfigBridgeMessage(
       const body = (payload || {}) as {
         source?: string;
         subpath?: string;
+        sourceId?: string;
         scope?: 'user' | 'project';
         targetSource?: 'opencode' | 'agents';
         selections?: Array<{ skillDir: string }>;
@@ -773,6 +788,15 @@ export async function handleConfigBridgeMessage(
         const installed = data.installed || [];
         const skipped = data.skipped || [];
         const installedAny = installed.length > 0;
+        const sourceId = z.string().trim().min(1).safeParse(body.sourceId).data;
+        if (installedAny && sourceId) {
+          try {
+            appendInstalledSources(installed.map((entry) => ({ ...entry, sourceId, sourceRef: String(body.source || '') })));
+          } catch (error) {
+            // Provenance only refines the Installed badge; the install already succeeded.
+            console.error('Failed to record skill install provenance:', error);
+          }
+        }
 
         return {
           id,

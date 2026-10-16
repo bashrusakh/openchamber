@@ -1,10 +1,12 @@
 import fs from 'fs';
+import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import os from 'os';
 import path from 'path';
 import { readMergedSettingsSync } from '../opencode/settings-files.js';
 import {
   findModelInfo,
+  getConfiguredSmallModelRef,
   getDefaultModelInfo,
   getSmallModelClient,
   listModelInfos,
@@ -115,10 +117,7 @@ const noClientError = () => Object.assign(
  * `packages/core/src/catalog.ts`); OpenCode does not expose that lookup over
  * HTTP, so the scan is repeated here on `GET /api/model`.
  */
-export const SMALL_MODEL_FAMILY_PRIORITY = ['gpt-luna', 'gemini-flash-lite', 'gemini-flash', 'claude-haiku', 'gpt-nano', 'gpt-mini'];
-// The last two are not on OpenCode's list; v1 counted them as small and a
-// provider with nothing else cheap (Copilot's utility models, for one)
-// would otherwise fall through to the session's big model.
+export const SMALL_MODEL_FAMILY_PRIORITY = ['gpt-luna', 'gemini-flash-lite', 'gemini-flash', 'claude-haiku'];
 
 /**
  * A model's family: the catalog's `family` (models.dev) when it has one,
@@ -132,8 +131,6 @@ export const familyOf = (model) => {
   if (id.includes('flash-lite') || id.includes('flash_lite')) return 'gemini-flash-lite';
   if (id.includes('flash')) return 'gemini-flash';
   if (id.includes('haiku')) return 'claude-haiku';
-  if (id.includes('nano')) return 'gpt-nano';
-  if (id.includes('mini') && !id.includes('minimax')) return 'gpt-mini';
   return null;
 };
 
@@ -164,36 +161,79 @@ const pickSmallModel = (models, accept) => {
  *
  * 1. An explicit request model.
  * 2. OpenChamber's settings override (Settings → Sessions → Small Model).
- * 3. The small model of the caller's provider — the session's, or the one
- *    in the composer (family scan above) — `session-provider-small`. A caller
- *    that must not leave that provider then takes its own model
- *    (`session-model`): costlier, but never someone else's subscription.
- * 4. `GET /api/model/default`: OpenCode's default model — `default`. This is
- *    the chat default, not a small model; OpenCode's own small-model chain is
- *    not reachable over HTTP, which is why step 3 lives here.
+ * 3. The small model configured for OpenCode itself: the `title` agent's
+ *    model (`agents.title.model`, or v1 `small_model`) — `config`.
+ * 4. The small model of the caller's provider — the session's, or the one
+ *    in the composer (family scan above) — `session-provider-small`. Without
+ *    one the caller's own model (`session-model`): costlier, but never
+ *    someone else's subscription.
+ * 5. `GET /api/model/default`: OpenCode's default model — `default`, only
+ *    when the caller named no provider or it is on that provider. This is
+ *    the chat default, not a small model; OpenCode's own family scan is not
+ *    reachable over HTTP, which is why step 4 lives here.
  *
  * There is no step that picks a small model from whichever other provider
  * happens to be connected: the content (diffs, replies, session text) goes
  * only where the user sent their own work or configured on purpose.
  */
-const resolveSmallModel = async ({ client, directory, model, preferredProviderID, preferredModelID, restrictToPreferredProvider }) => {
+const resolveSmallModel = async ({ client, directory, model, preferredProviderID, preferredModelID }) => {
   const explicit = parseModelRef(model);
   if (explicit) return { ...explicit, source: 'request' };
 
   const fromSettings = parseModelRef(readSmallModelSettingsOverride());
   if (fromSettings) return { ...fromSettings, source: 'settings' };
 
+  // A config can outlive the login behind it. OpenCode's own titles then move
+  // on to another model, so a model it lists as disabled is skipped here too;
+  // one it does not list (a plugin model still loading) is kept.
+  const fromConfig = await getConfiguredSmallModelRef(client);
+  if (fromConfig) {
+    const info = findModelInfo(await listModelInfos(client, directory), fromConfig.providerID, fromConfig.modelID);
+    if (info?.enabled !== false) return { ...fromConfig, source: 'config' };
+  }
+
   if (preferredProviderID) {
     const small = pickSmallModelInProvider(await listModelInfos(client, directory), preferredProviderID);
     if (small) return { ...small, source: 'session-provider-small' };
-  }
-  if (restrictToPreferredProvider && preferredProviderID && preferredModelID) {
-    return { providerID: preferredProviderID, modelID: preferredModelID, source: 'session-model' };
+    // OpenCode's own titles end here too: the model the user works with.
+    if (preferredModelID) return { providerID: preferredProviderID, modelID: preferredModelID, source: 'session-model' };
   }
 
   const fallback = await getDefaultModelInfo(client);
   if (!fallback) return null;
+  // Without a configured default, OpenCode answers with its first available
+  // model, from any provider. A caller that named its provider stays on it.
+  if (preferredProviderID && fallback.providerID !== preferredProviderID) return null;
   return { providerID: fallback.providerID, modelID: fallback.id, source: 'default' };
+};
+
+const LOCAL_NETWORKS = new net.BlockList();
+for (const [address, prefix] of [['0.0.0.0', 32], ['127.0.0.0', 8], ['10.0.0.0', 8], ['172.16.0.0', 12], ['192.168.0.0', 16], ['169.254.0.0', 16], ['100.64.0.0', 10]]) {
+  LOCAL_NETWORKS.addSubnet(address, prefix, 'ipv4');
+}
+for (const [address, prefix] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10]]) {
+  LOCAL_NETWORKS.addSubnet(address, prefix, 'ipv6');
+}
+const LOCAL_HOST_SUFFIXES = ['.localhost', '.local', '.lan', '.internal', '.home.arpa'];
+
+/**
+ * Whether the model is served from this machine or the local network, read
+ * from the endpoint OpenCode reports for it (`settings.baseURL`). Covers
+ * loopback, private and CGNAT (Tailscale) ranges, and LAN-style host names.
+ * A model whose endpoint OpenCode does not report is not local.
+ */
+const isLocalModelEndpoint = (modelInfo) => {
+  const endpoint = modelInfo?.settings?.baseURL ?? modelInfo?.settings?.endpoint;
+  if (typeof endpoint !== 'string' || !endpoint) return false;
+  let host;
+  try {
+    host = new URL(endpoint).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  } catch {
+    return false;
+  }
+  const family = net.isIP(host);
+  if (family) return LOCAL_NETWORKS.check(host, family === 6 ? 'ipv6' : 'ipv4');
+  return host === 'localhost' || !host.includes('.') || LOCAL_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix));
 };
 
 const JSON_FENCE = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/;
@@ -229,7 +269,7 @@ const requestOptions = ({ timeoutMs, signal }) => {
  * Generates text with the user's small model through the running OpenCode.
  * Credentials stay inside OpenCode; this server only sends a prompt.
  */
-export async function generateSmallModelText({ prompt, system, maxOutputTokens, model, directory, preferredProviderID, preferredModelID, restrictToPreferredProvider = false, responseSchema, timeoutMs, signal, onOverflow = 'truncate' }) {
+export async function generateSmallModelText({ prompt, system, maxOutputTokens, model, directory, preferredProviderID, preferredModelID, responseSchema, timeoutMs, signal, onOverflow = 'truncate' }) {
   if (typeof prompt !== 'string' || !prompt.trim()) {
     throw Object.assign(new Error('prompt is required'), { statusCode: 400 });
   }
@@ -243,24 +283,13 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
     model,
     preferredProviderID,
     preferredModelID,
-    restrictToPreferredProvider,
   });
 
   if (!resolved) {
     throw Object.assign(
-      new Error('No small model available — OpenCode reports no default model'),
-      { statusCode: 404 },
-    );
-  }
-
-  // A caller that must stay on its session's provider is only overruled by an
-  // explicit user choice (the settings override or a request model).
-  if (restrictToPreferredProvider
-    && !['settings', 'request'].includes(resolved.source)
-    && preferredProviderID
-    && resolved.providerID !== preferredProviderID) {
-    throw Object.assign(
-      new Error('No small model available within the session provider'),
+      new Error(preferredProviderID
+        ? 'No small model available within the session provider'
+        : 'No small model available — OpenCode reports no default model'),
       { statusCode: 404 },
     );
   }
@@ -348,19 +377,21 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
 /**
  * Provider ids the small model can actually call. A provider counts when
  * OpenCode has at least one enabled model for it — that is the same test
- * OpenCode applies before letting a chat turn use it.
+ * OpenCode applies before letting a chat turn use it. The model list is
+ * directory-scoped, so `directory` scopes this answer the same way
+ * `describeSmallModel` scopes its own; without one the server default applies.
  *
  * The provider list alone is not enough: it comes back empty on setups where
  * models are perfectly usable, so the model list is the authority and the
  * provider list only contributes names.
  */
-export async function listAuthenticatedProviders() {
-  const client = getSmallModelClient();
+export async function listAuthenticatedProviders(directory) {
+  const client = getSmallModelClient(directory);
   if (!client) return [];
   try {
     const [providers, models] = await Promise.all([
       listProviderInfos(client),
-      listModelInfos(client),
+      listModelInfos(client, directory),
     ]);
     const enabled = new Set();
     for (const model of models) {
@@ -410,7 +441,6 @@ export async function describeSmallModel({ directory, preferredProviderID, prefe
     model: overrideModel,
     preferredProviderID,
     preferredModelID,
-    restrictToPreferredProvider: false,
   });
   if (!resolved) return null;
 
@@ -433,6 +463,7 @@ export async function describeSmallModel({ directory, preferredProviderID, prefe
   return {
     ...resolved,
     hasLogin,
+    localEndpoint: isLocalModelEndpoint(modelInfo),
     inputCharBudget: maxChars,
     contextTokens,
     contextKnown,

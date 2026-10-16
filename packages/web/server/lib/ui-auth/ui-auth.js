@@ -13,8 +13,20 @@ import { createUiPasskeys } from './ui-passkeys.js';
 import { sessionCookieNameForRequest } from './session-cookie.js';
 
 const SESSION_COOKIE_NAME = 'oc_ui_session';
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-const TRUSTED_DEVICE_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+
+// A positive number of hours or days from the environment, else the default.
+export const readSessionTtlMs = (raw, unitMs, fallbackMs) => {
+  const value = Number(String(raw ?? '').trim());
+  return Number.isFinite(value) && value > 0 ? Math.round(value * unitMs) : fallbackMs;
+};
+
+const SESSION_TTL_MS = readSessionTtlMs(process.env.OPENCHAMBER_UI_SESSION_TTL_HOURS, HOUR_MS, 12 * HOUR_MS);
+const TRUSTED_DEVICE_SESSION_TTL_MS = readSessionTtlMs(
+  process.env.OPENCHAMBER_UI_TRUSTED_SESSION_TTL_DAYS,
+  24 * HOUR_MS,
+  7 * 24 * HOUR_MS,
+);
 const URL_AUTH_TOKEN_TTL_MS = 60 * 1000;
 const URL_AUTH_TOKEN_PREFIX = 'oc_url_';
 
@@ -323,6 +335,8 @@ const isUrlAuthReadableHttpPath = (pathname) => {
     || pathname === '/api/openchamber/realtime-proxy/sse'
     || pathname === '/api/notifications/stream'
     || pathname === '/api/fs/raw'
+    // GitLab pictures and clips in an issue or merge request, loaded by `img` and `video`.
+    || pathname.startsWith('/api/source-control/gitlab/uploads/')
     || pathname.startsWith('/api/preview/proxy/')
     || /^\/api\/projects\/[^/]+\/icon$/.test(pathname)
     || pathname === '/api/guests'
@@ -440,6 +454,7 @@ export const createUiAuth = ({
   password,
   cookieName = SESSION_COOKIE_NAME,
   sessionTtlMs = SESSION_TTL_MS,
+  trustedSessionTtlMs = TRUSTED_DEVICE_SESSION_TTL_MS,
   readSettingsFromDiskMigrated,
   clientAuthController = null,
   requireClientAuth = false,
@@ -657,7 +672,7 @@ export const createUiAuth = ({
   const expectedHash = crypto.scryptSync(normalizedPassword, salt, 64);
   let jwtSecret = getOrCreateJwtSecret();
   let passwordBinding = crypto.createHmac('sha256', jwtSecret).update(normalizedPassword).digest('hex');
-  const resolveSessionTtlMs = (trustDevice) => (trustDevice ? TRUSTED_DEVICE_SESSION_TTL_MS : sessionTtlMs);
+  const resolveSessionTtlMs = (trustDevice) => (trustDevice ? trustedSessionTtlMs : sessionTtlMs);
   let passkeyController = createUiPasskeys({
     passwordBinding,
     readSettingsFromDiskMigrated,
@@ -855,7 +870,8 @@ export const createUiAuth = ({
     return res.json(issueUrlAuthTokenForSession(sessionToken, scope));
   };
 
-  const handleSessionCreate = async (req, res) => {
+  // Password and passkey sign-in share one attempt budget per client.
+  const admitLoginAttempt = async (req, res) => {
     const rateLimitResult = await checkRateLimit(req);
 
     res.setHeader('X-RateLimit-Limit', rateLimitResult.limit);
@@ -864,10 +880,17 @@ export const createUiAuth = ({
 
     if (!rateLimitResult.allowed) {
       res.setHeader('Retry-After', rateLimitResult.retryAfter);
-      res.status(429).json({ 
+      res.status(429).json({
         error: 'Too many login attempts, please try again later',
-        retryAfter: rateLimitResult.retryAfter 
+        retryAfter: rateLimitResult.retryAfter,
       });
+      return false;
+    }
+    return true;
+  };
+
+  const handleSessionCreate = async (req, res) => {
+    if (!(await admitLoginAttempt(req, res))) {
       return;
     }
 
@@ -947,8 +970,22 @@ export const createUiAuth = ({
   };
 
   const handlePasskeyAuthenticationVerify = async (req, res) => {
+    if (!(await admitLoginAttempt(req, res))) {
+      return;
+    }
+
+    // Only a rejected assertion counts against the attempt budget, not a
+    // failure after the passkey was accepted.
     try {
       await passkeyController.finishAuthentication(req.body);
+    } catch (error) {
+      await recordFailedAttempt(req);
+      respondPasskeyError(res, error);
+      return;
+    }
+    await clearRateLimit(req);
+
+    try {
       const trustDevice = isTrustedDeviceRequest(req.body?.trustDevice);
       const ttlMs = resolveSessionTtlMs(trustDevice);
       await issueSession(req, res, { trustDevice });
@@ -966,6 +1003,7 @@ export const createUiAuth = ({
           appVersion: req.body?.appVersion,
         });
       }
+      res.setHeader('Cache-Control', 'no-store');
       res.json({
         authenticated: true,
         ...(clientTokenResult?.token ? { clientToken: clientTokenResult.token, client: clientTokenResult.client } : {}),

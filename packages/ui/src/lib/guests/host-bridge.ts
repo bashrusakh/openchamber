@@ -2,15 +2,21 @@ import {
   HostRequestError,
   type GuestStorageRequest,
   type GuestStorageResult,
+  type GuestStatusControl,
   type GuestWorkspaceQuery,
   type GuestWorkspaceSnapshot,
   type GuestWorkspaceSubscription,
+  type GuestShellsSubscription,
+  type GuestShellOutputRequest,
+  type GuestShellOutputResult,
+  type GuestShellStopResult,
   GUEST_SESSION_AGENT_MAX,
   GUEST_SESSION_MODEL_MAX,
   OPENCHAMBER_SDK_API_VERSION,
   OPENCHAMBER_SDK_CHANNEL,
   type AttachIssueRequest,
   type GuestItem,
+  type GuestPopoverRequest,
   type PromptRequest,
   type PromptResult,
   type SessionLifecycleEvent,
@@ -42,7 +48,12 @@ type HostBridgeEffects = {
   workspaceRead: (query: GuestWorkspaceQuery) => GuestWorkspaceSnapshot;
   workspaceSubscribe: (subscription: GuestWorkspaceSubscription) => void;
   workspaceUnsubscribe: (subscriptionId: string) => void;
+  shellsSubscribe: (subscription: GuestShellsSubscription) => void;
+  shellsUnsubscribe: (subscriptionId: string) => void;
+  shellOutput: (request: GuestShellOutputRequest) => Promise<GuestShellOutputResult>;
+  shellStop: (request: { shellId: string }) => Promise<GuestShellStopResult>;
   storage: (request: GuestStorageRequest) => Promise<GuestStorageResult>;
+  setStatusControls: (controls: GuestStatusControl[]) => void;
   openSession: (sessionId: string) => void;
   toast: (request: ToastRequest) => void;
   openUrl: (url: string) => Promise<boolean>;
@@ -84,6 +95,9 @@ type HostBridgeEffects = {
   resize: (height: number) => void;
   /** The guest answered a host `resolve` with this id. Not a request, so no `result` goes back. */
   resolveResult: (id: string, payload: ResolveResultPayload) => void;
+  openPopover?: (request: GuestPopoverRequest) => void;
+  closePopover?: (id: string, reason: 'closed' | 'escape' | undefined) => void;
+  setPopoverAnchorActive?: (id: string, active: boolean) => void;
 };
 
 export const buildReadyMessage = (payload: HostReadyContext): HostMessage => ({
@@ -158,7 +172,7 @@ export const guestSessionLifecyclePhase = (
   return null;
 };
 
-export type GuestSessionSource = {
+type GuestSessionSource = {
   id: string;
   title?: string | null;
   busy?: boolean;
@@ -244,7 +258,12 @@ export const answerGuestMessage = async (
     case 'workspace-read': return okResult(message.id, effects.workspaceRead(message.payload));
     case 'workspace-subscribe': effects.workspaceSubscribe(message.payload); return okResult(message.id);
     case 'workspace-unsubscribe': effects.workspaceUnsubscribe(message.payload.subscriptionId); return okResult(message.id);
+    case 'shells-subscribe': effects.shellsSubscribe(message.payload); return okResult(message.id);
+    case 'shells-unsubscribe': effects.shellsUnsubscribe(message.payload.subscriptionId); return okResult(message.id);
+    case 'shell-output': return okResult(message.id, await effects.shellOutput(message.payload));
+    case 'shell-stop': return okResult(message.id, await effects.shellStop(message.payload));
     case 'storage': return okResult(message.id, await effects.storage(message.payload));
+    case 'status-controls': effects.setStatusControls(message.payload.controls); return okResult(message.id);
     case 'open-session': effects.openSession(message.payload.sessionId); return okResult(message.id);
     // No answer: the pane handles these itself. File editor traffic belongs to
     // its file channel, not to a request/result pair.
@@ -376,6 +395,18 @@ export const answerGuestMessage = async (
     case 'resolve-result':
       effects.resolveResult(message.id, message.payload);
       return null;
+    case 'popover-open':
+      if (!effects.openPopover) return errorResult(message.id, 'This host does not support popovers.', 'UNSUPPORTED');
+      effects.openPopover(message.payload);
+      return okResult(message.id);
+    case 'popover-close':
+      if (!effects.closePopover) return errorResult(message.id, 'This host does not support popovers.', 'UNSUPPORTED');
+      effects.closePopover(message.payload.id, message.payload.reason);
+      return okResult(message.id);
+    case 'popover-anchor':
+      if (!effects.setPopoverAnchorActive) return errorResult(message.id, 'This host does not support popovers.', 'UNSUPPORTED');
+      effects.setPopoverAnchorActive(message.payload.id, message.payload.active);
+      return okResult(message.id);
   }
   } catch (error) {
     if (!('id' in message)) return null;

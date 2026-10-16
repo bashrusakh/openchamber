@@ -111,6 +111,8 @@ export const registerServerStatusRoutes = (app, dependencies) => {
       'realtime.sse.v1',
       'realtime.websocket.global-events.v1',
       'terminal.websocket.v1',
+      // Message pages honour `x-openchamber-part-shells` (message-shells.js).
+      'api.message-part-shells.v1',
     ],
   };
 
@@ -1163,6 +1165,7 @@ export const registerCommonRequestMiddleware = (app, dependencies) => {
       req.path.startsWith('/api/goals') ||
       req.path.startsWith('/api/text') ||
       req.path.startsWith('/api/voice') ||
+      req.path.startsWith('/api/environment') ||
       req.path.startsWith('/api/tts') ||
       req.path.startsWith('/api/openchamber/tunnel') ||
       req.path.startsWith('/api/openchamber/spaces')

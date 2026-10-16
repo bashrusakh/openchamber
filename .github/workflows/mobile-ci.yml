@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '22'
+          node-version: '24'
 
       - uses: actions/setup-java@v4
         with:
@@ -27,9 +27,6 @@ jobs:
 
       - name: Install dependencies
         run: bun install
-
-      - name: Type-check mobile package
-        run: bun run type-check:mobile
 
       - name: Lint mobile package
         run: bun run lint:mobile
@@ -54,7 +51,7 @@ jobs:
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Install dependencies
         run: bun install

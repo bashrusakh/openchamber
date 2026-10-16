@@ -4,6 +4,7 @@ import {
   areFilesEqual,
   areOptionsEqual,
   FileDiff as PierreFileDiff,
+  parseDiffFromFile,
   VirtualizedFileDiff,
   Virtualizer,
   type FileContents,
@@ -33,7 +34,10 @@ import { getDefaultTheme } from '@/lib/theme/themes';
 import { useDeviceInfo } from '@/lib/device';
 import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { hideWhitespaceChanges } from '@/lib/diff/hideWhitespaceChanges';
 import type { PatchHunkAnchor } from '@/lib/diff/patchFileDiff';
+import { getDiffLinesText } from '@/lib/diff/selectedDiffLines';
+import { PIERRE_DIFF_TINT_CSS } from '@/lib/shiki/pierreDiffTint';
 
 /**
  * A click on a collapsed-context expander of a partial (patch-only) diff.
@@ -76,6 +80,11 @@ interface PierreDiffViewerProps {
   wrapLines?: boolean;
   layout?: 'fill' | 'inline';
   enableComments?: boolean;
+  /**
+   * Shows lines that changed only by whitespace as unchanged. Hunk actions are
+   * dropped meanwhile: they act on the whole hunk, whitespace included.
+   */
+  hideWhitespace?: boolean;
   hunkActions?: DiffHunkActions;
   /**
    * Present when the owner can replace a partial diff with full file contents.
@@ -124,6 +133,7 @@ const PIERRE_RUNTIME_BASE_CSS = `
 // as they break resize behavior.
 const WEBKIT_SCROLL_FIX_CSS = `
   ${PIERRE_RUNTIME_BASE_CSS}
+  ${PIERRE_DIFF_TINT_CSS}
 
   /* While a multi-line content drag is being mapped to a line selection the
      row highlight is the feedback; the native blue text selection on top of
@@ -150,6 +160,23 @@ const WEBKIT_SCROLL_FIX_CSS = `
     --diffs-bg-separator-override: var(--surface-elevated);
   }
 
+  /* Selected rows: Pierre mixes the selection colour in at 18-25%, and the
+     theme's selection is a soft neutral, so the selection barely showed on
+     dark themes. Half the selection colour stays readable while added and
+     deleted rows keep their tint. */
+  [data-line][data-selected-line],
+  [data-line-annotation][data-selected-line],
+  [data-no-newline][data-selected-line] {
+    --mix-selection-light: 62%;
+    --mix-selection-dark: 50%;
+  }
+
+  [data-gutter-buffer][data-selected-line],
+  [data-column-number][data-selected-line] {
+    --mix-selection-light: 55%;
+    --mix-selection-dark: 40%;
+  }
+
   [data-diff-header],
   [data-diff] {
     [data-separator] {
@@ -157,10 +184,25 @@ const WEBKIT_SCROLL_FIX_CSS = `
     }
   }
 
+  /* A faint tint and hairlines above and below, across every column of both
+     sides, so two hunks read as two even where the label shows on one side
+     only. Inset shadows, not borders: the row keeps the height Pierre lays
+     out with. */
   [data-separator="line-info-basic"] {
     height: 24px !important;
-    background: var(--diffs-bg) !important;
+    background: color-mix(in srgb, var(--diffs-fg) 2%, var(--diffs-bg)) !important;
     position: relative;
+    box-shadow:
+      inset 0 1px 0 var(--interactive-border),
+      inset 0 -1px 0 var(--interactive-border);
+  }
+
+  [data-separator="line-info-basic"][data-separator-first] {
+    box-shadow: inset 0 -1px 0 var(--interactive-border);
+  }
+
+  [data-separator="line-info-basic"][data-separator-last] {
+    box-shadow: inset 0 1px 0 var(--interactive-border);
   }
 
   [data-diff-type="single"] [data-gutter],
@@ -404,19 +446,14 @@ const extractSelectedCode = (
 ): string => {
   // Default to modified if side is ambiguous, as users mostly comment on new code
   const isOriginal = range.side === 'deletions';
-  const content = fileDiff
-    ? (isOriginal ? fileDiff.deletionLines : fileDiff.additionLines).join('')
-    : (isOriginal ? original : modified);
-  const lines = content.split('\n');
-
-  // Ensure bounds
   const from = Math.min(range.start, range.end);
   const to = Math.max(range.start, range.end);
+  if (fileDiff) return getDiffLinesText(fileDiff, isOriginal ? 'deletions' : 'additions', from, to);
+
+  const lines = (isOriginal ? original : modified).split('\n');
   const startLine = Math.max(1, from);
   const endLine = Math.min(lines.length, to);
-
   if (startLine > endLine) return '';
-
   return lines.slice(startLine - 1, endLine).join('\n');
 };
 
@@ -702,7 +739,36 @@ const wakeVirtualizer = (
   };
 };
 
-export const PierreDiffViewer: React.FC<PierreDiffViewerProps> = ({
+export const PierreDiffViewer: React.FC<PierreDiffViewerProps> = ({ hideWhitespace = false, ...props }) => {
+  const { t } = useI18n();
+  const { original, modified, fileDiff, fileName } = props;
+  const sourceDiff = useMemo(() => {
+    if (!hideWhitespace || fileDiff) return fileDiff;
+    return parseDiffFromFile({ name: fileName ?? '', contents: original }, { name: fileName ?? '', contents: modified });
+  }, [fileDiff, fileName, hideWhitespace, modified, original]);
+  const visibleDiff = useMemo(
+    () => (hideWhitespace && sourceDiff ? hideWhitespaceChanges(sourceDiff) : fileDiff),
+    [fileDiff, hideWhitespace, sourceDiff],
+  );
+
+  if (hideWhitespace && sourceDiff && sourceDiff.hunks.length > 0 && visibleDiff?.hunks.length === 0) {
+    return (
+      <div className="px-3 py-2 typography-meta text-muted-foreground">
+        {t('diffView.state.whitespaceOnly')}
+      </div>
+    );
+  }
+
+  return (
+    <PierreDiffViewerBody
+      {...props}
+      fileDiff={visibleDiff}
+      hunkActions={hideWhitespace ? undefined : props.hunkActions}
+    />
+  );
+};
+
+const PierreDiffViewerBody: React.FC<Omit<PierreDiffViewerProps, 'hideWhitespace'>> = ({
   original,
   modified,
   fileDiff: incomingFileDiff,
@@ -872,6 +938,9 @@ export const PierreDiffViewer: React.FC<PierreDiffViewerProps> = ({
           let bounds = columns.get(column);
           if (!bounds) {
             bounds = column.getBoundingClientRect();
+            // Wrapped split view lays the column out as `display: contents`,
+            // which has no box. Its content grid spans the same rows.
+            if (bounds.height === 0) bounds = slot.closest('[data-content]')?.getBoundingClientRect() ?? bounds;
             columns.set(column, bounds);
           }
           const markerTop = target.getBoundingClientRect().top;

@@ -18,7 +18,7 @@ import { getSessionMetadata, type SessionMetadataRecord } from './sessionReviewM
  * free.
  */
 
-export type LinkedRepositoryIssue = {
+type LinkedRepositoryIssue = {
   /**
    * `owner/repo#number` on github.com, `host:owner/repo#number` on any other
    * instance, unique per session and stable across renames. Entries stored
@@ -34,7 +34,7 @@ export type LinkedRepositoryIssue = {
   linkedAt: number;
 };
 
-export type LinkedLinearIssue = {
+type LinkedLinearIssue = {
   /** `linear:{identifier}`, unique per session. */
   id: string;
   identifier: string;
@@ -70,10 +70,11 @@ const isGuestPull = (entry: { thread?: 'issue' | 'pull' }): boolean => (
 
 /**
  * A thread on any other service, linked by an agent through `session.link`
- * (`packages/web/server/lib/github/session-link.js`): a GitLab merge request,
- * a Jira ticket. Shown by identifier and opened by URL; no live state.
+ * (`packages/web/server/lib/openchamber-sessions/session-link.js`): a GitLab merge request,
+ * a Jira ticket. Shown by identifier and opened by URL; a GitLab one gets live
+ * state from its instance (`getGitLabThreadRef`), others have none.
  */
-export type LinkedExternalItem = {
+type LinkedExternalItem = {
   /** `link:{url}`, unique per session. */
   id: string;
   kind: 'external';
@@ -274,18 +275,6 @@ export const buildLinkedLinearIssue = (input: {
   linkedAt: input.linkedAt,
 });
 
-export const canOpenLinearIssueInContextPanel = (options: {
-  linearAvailable: boolean;
-  linearConnected: boolean;
-  inDedicatedMobileShell: boolean;
-  directory: string | null | undefined;
-}): boolean => (
-  options.linearAvailable
-  && options.linearConnected
-  && !options.inDedicatedMobileShell
-  && Boolean(options.directory?.trim())
-);
-
 export const getLinkedIssues = (session: Session | null | undefined): LinkedIssue[] => {
   const openchamber = getSessionMetadata(session).openchamber;
   if (!isRecord(openchamber) || !Array.isArray(openchamber.linked_issues)) return [];
@@ -306,7 +295,7 @@ const LINKED_ISSUE_ID_PATTERN = /^([^/\s]+)\/([^/#\s]+)#(\d+)$/;
 const GITHUB_THREAD_URL_PATTERN = /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+)\/(pull|issues)\/(\d+)(?:[/?#]|$)/i;
 
 /** A linked thread that lives on github.com, wherever the link came from. */
-export type GitHubThreadRef = { key: string; owner: string; repo: string; number: number; thread: 'pull' | 'issue' };
+type GitHubThreadRef = { key: string; owner: string; repo: string; number: number; thread: 'pull' | 'issue' };
 
 /**
  * The GitHub thread behind a link, or null. A GitHub entry carries it in its
@@ -330,6 +319,40 @@ export const getGitHubThreadRef = (entry: LinkedIssue): GitHubThreadRef | null =
   return { key: buildLinkedIssueId(match[1], match[2], number), owner: match[1], repo: match[2], number, thread: match[3].toLowerCase() === 'pull' ? 'pull' : 'issue' };
 };
 
+/** A linked thread on a GitLab instance: `owner` is the namespace path, subgroups included. */
+export type GitLabThreadRef = { key: string; instance: string; owner: string; repo: string; number: number; thread: 'pull' | 'issue' };
+
+// GitLab puts its own routes behind `/-/`, so the project path is everything
+// before it, however deep the subgroups go.
+const GITLAB_THREAD_URL_PATTERN = /^(https?:\/\/[^/\s]+)\/(.+)\/([^/\s]+)\/-\/(merge_requests|issues|work_items)\/(\d+)(?:[/?#]|$)/i;
+
+/**
+ * The GitLab thread behind a link, or null: a merge request or issue attached
+ * from a GitLab project, or an agent's link to one. Read from the address, the
+ * one field every such link carries.
+ */
+export const getGitLabThreadRef = (entry: LinkedIssue): GitLabThreadRef | null => {
+  if (entry.kind === 'linear' || entry.kind === 'guest' || getGitHubThreadRef(entry)) return null;
+  const match = GITLAB_THREAD_URL_PATTERN.exec(entry.url.trim());
+  if (!match) return null;
+  const number = Number(match[5]);
+  if (!Number.isSafeInteger(number) || number < 1) return null;
+  const instance = match[1].toLowerCase();
+  const thread = match[4].toLowerCase() === 'merge_requests' ? 'pull' : 'issue';
+  return { key: `${instance}/${match[2]}/${match[3]}${thread === 'pull' ? '!' : '#'}${number}`.toLowerCase(), instance, owner: match[2], repo: match[3], number, thread };
+};
+
+/** Each GitLab merge request and issue linked to a session, once. */
+export const getLinkedGitLabThreads = (session: Session | null | undefined): GitLabThreadRef[] => {
+  const seen = new Set<string>();
+  return getLinkedIssues(session).flatMap((entry) => {
+    const ref = getGitLabThreadRef(entry);
+    if (!ref || seen.has(ref.key)) return [];
+    seen.add(ref.key);
+    return [ref];
+  });
+};
+
 // Each GitHub thread once, however many times and by whom it was linked.
 const uniqueGitHubThreads = (session: Session | null | undefined, thread: GitHubThreadRef['thread']) => {
   const seen = new Set<string>();
@@ -342,13 +365,13 @@ const uniqueGitHubThreads = (session: Session | null | undefined, thread: GitHub
 };
 
 /**
- * The session's links as a list shows them: each GitHub thread once, at its
- * first link, however many times and by whom it was linked.
+ * The session's links as a list shows them: each GitHub or GitLab thread once,
+ * at its first link, however many times and by whom it was linked.
  */
 export const getDistinctLinkedIssues = (session: Session | null | undefined): LinkedIssue[] => {
   const seen = new Set<string>();
   return getLinkedIssues(session).filter((entry) => {
-    const key = getGitHubThreadRef(entry)?.key.toLowerCase();
+    const key = getGitHubThreadRef(entry)?.key.toLowerCase() ?? getGitLabThreadRef(entry)?.key;
     if (!key) return true;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -363,40 +386,63 @@ export const getLinkedGitHubPullRequests = (session: Session | null | undefined)
   ))
 );
 
-/** A code change linked to a session from a service without live state here. */
-export type LinkedSidebarChange = { key: string; identifier: string; url: string; title: string };
+/** A code change linked to a session from a service other than GitHub. */
+export type LinkedSidebarChange = {
+  key: string;
+  identifier: string;
+  url: string;
+  title: string;
+  /** Set for a GitLab merge request, whose live state is looked up by it. */
+  gitlab?: GitLabThreadRef;
+};
 
 /**
  * Pull and merge requests linked from services other than GitHub (an
  * extension's PR, a GitLab merge request attached in the composer or linked by
- * an agent), in link order. The sidebar
- * lists them beside GitHub PRs, by identifier and without a state colour.
+ * an agent), in link order, each GitLab merge request once. The sidebar lists
+ * them beside GitHub PRs; GitLab ones carry their thread for live state, the
+ * rest show by identifier, uncoloured.
  */
-export const getLinkedSidebarChanges = (session: Session | null | undefined): LinkedSidebarChange[] => (
-  getLinkedIssues(session).flatMap((entry) => {
+export const getLinkedSidebarChanges = (session: Session | null | undefined): LinkedSidebarChange[] => {
+  const seen = new Set<string>();
+  return getLinkedIssues(session).flatMap((entry): LinkedSidebarChange[] => {
     if (!isLinkedChange(entry) || getGitHubThreadRef(entry)) return [];
+    const gitlab = getGitLabThreadRef(entry);
+    if (gitlab) {
+      if (seen.has(gitlab.key)) return [];
+      seen.add(gitlab.key);
+      return [{ key: entry.id, identifier: `!${gitlab.number}`, url: entry.url, title: entry.title, gitlab }];
+    }
     // A merge request attached from a GitLab repository.
     if (entry.kind === 'pull') return [{ key: entry.id, identifier: `!${entry.number}`, url: entry.url, title: entry.title }];
     return entry.kind === 'guest' || entry.kind === 'external'
       ? [{ key: entry.id, identifier: entry.identifier, url: entry.url, title: entry.title }]
       : [];
-  })
-);
+  });
+};
 
 /** An issue linked to a session, as the sidebar shows it. */
 export type LinkedSidebarIssue =
   | { source: 'github'; key: string; owner: string; repo: string; number: number; url: string; title: string }
+  | { source: 'gitlab'; key: string; ref: GitLabThreadRef; identifier: string; url: string; title: string }
   | { source: 'linear' | 'guest' | 'external'; key: string; identifier: string; url: string; title: string };
 
 /**
  * Issues linked to a session, in link order. GitHub issues carry their
- * repository (read from the entry id) so their state can be looked up;
- * GitLab issues, Linear and extension trackers are shown by identifier only. Pull requests,
+ * repository (read from the entry id) and GitLab issues their thread, so their
+ * state can be looked up; Linear and extension trackers are shown by identifier. Pull requests,
  * including extension ones, are not issues here.
  */
 export const getLinkedSidebarIssues = (session: Session | null | undefined): LinkedSidebarIssue[] => {
   const githubIssues = new Map(uniqueGitHubThreads(session, 'issue').map(({ ref, entry }) => [entry.id, ref]));
+  const seenGitLab = new Set<string>();
   return getLinkedIssues(session).flatMap((entry): LinkedSidebarIssue[] => {
+    const gitlab = isLinkedChange(entry) ? null : getGitLabThreadRef(entry);
+    if (gitlab) {
+      if (seenGitLab.has(gitlab.key)) return [];
+      seenGitLab.add(gitlab.key);
+      return [{ source: 'gitlab', key: entry.id, ref: gitlab, identifier: `#${gitlab.number}`, url: entry.url, title: entry.title }];
+    }
     const ref = getGitHubThreadRef(entry);
     if (ref) {
       // A GitHub issue, or a duplicate of one listed earlier; never a PR.

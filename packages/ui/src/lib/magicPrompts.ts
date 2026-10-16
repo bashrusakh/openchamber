@@ -9,8 +9,6 @@ export type MagicPromptId =
   | 'git.conflict.resolve.instructions'
   | 'git.integrate.cherrypick.resolve.visible'
   | 'git.integrate.cherrypick.resolve.instructions'
-  | 'linear.issue.review.visible'
-  | 'linear.issue.review.instructions'
   | 'plan.todo.visible'
   | 'plan.todo.instructions'
   | 'plan.improve.visible'
@@ -43,18 +41,20 @@ export type MagicPromptId =
   | 'session.explore.instructions'
   | 'session.fusion.visible'
   | 'session.fusion.instructions'
-  | 'session.fusion.codeInstructions';
+  | 'session.fusion.codeInstructions'
+  | 'memory.tidy.visible'
+  | 'memory.tidy.instructions';
 
-export interface MagicPromptDefinition {
+interface MagicPromptDefinition {
   id: MagicPromptId;
   title: string;
   description: string;
-  group: 'Git' | 'GitHub' | 'Linear' | 'Planning' | 'Session';
+  group: 'Git' | 'GitHub' | 'Linear' | 'Planning' | 'Session' | 'Memory';
   template: string;
   placeholders?: Array<{ key: string; description: string }>;
 }
 
-export interface MagicPromptOverridesPayload {
+interface MagicPromptOverridesPayload {
   version: number;
   overrides: Record<string, string>;
 }
@@ -103,7 +103,10 @@ Selected files:
     title: 'PR Generation Visible Prompt',
     group: 'Git',
     description: 'Visible user message for PR title/body generation.',
-    template: 'You are drafting GitHub Pull Request title and body using session context, commit list, and changed files.',
+    placeholders: [
+      { key: 'change_request', description: 'What the change request is called where it lives: "GitHub pull request" or "GitLab merge request".' },
+    ],
+    template: 'You are drafting a {{change_request}} title and body using session context, commit list, and changed files.',
   },
   {
     id: 'git.pr.generate.instructions',
@@ -116,7 +119,7 @@ Selected files:
       { key: 'commits', description: 'Bullet list of commits in base...head.' },
       { key: 'changed_files', description: 'Bullet list of changed files in base...head.' },
       { key: 'additional_context_block', description: 'Optional Additional context block (already formatted).' },
-      { key: 'pr_template_block', description: 'Optional repository pull request template block (already formatted, empty when the repo has none).' },
+      { key: 'pr_template_block', description: 'Optional repository pull/merge request template block (already formatted, empty when the repo has none).' },
     ],
     template: `Return exactly one JSON object and nothing else. Do not include prose, markdown outside JSON, explanations, or code fences.
 
@@ -125,7 +128,7 @@ The JSON object must have exactly this shape:
 
 Rules:
 - title: concise, outcome-first, conventional style
-- body, when a repository pull request template is included below: reuse the template as the body. Keep its headings, their order, its wording and its checklists, drop its HTML comments, and fill every section from the commits and changed files. Leave a section empty rather than inventing content for it
+- body, when a repository description template is included below: reuse the template as the body. Keep its headings, their order, its wording and its checklists, drop its HTML comments, and fill every section from the commits and changed files. Leave a section empty rather than inventing content for it
 - body, when no template is included: markdown with sections ## Summary, ## Why, ## Testing
 - keep output concrete and user-facing
 - put all markdown inside the body string
@@ -140,61 +143,6 @@ Commits in range (base...head):
 
 Files changed across these commits:
 {{changed_files}}{{additional_context_block}}{{pr_template_block}}`,
-  },
-  {
-    id: 'linear.issue.review.visible',
-    title: 'Linear Issue Review Visible Prompt',
-    group: 'Linear',
-    description: 'Visible user message when creating a session from a Linear issue.',
-    placeholders: [
-      { key: 'identifier', description: 'Linear issue identifier, such as ENG-12.' },
-    ],
-    template: 'Review this Linear issue {{identifier}} using the provided issue context',
-  },
-  {
-    id: 'linear.issue.review.instructions',
-    title: 'Linear Issue Review Instructions',
-    group: 'Linear',
-    description: 'Hidden instructions attached when generating a Linear issue review response.',
-    template: `Review this Linear issue using the provided issue context.
-
-Process:
-- First classify the issue type (bug / feature request / question/support / refactor / ops) and state it as: Type: <one label>.
-- Gather any needed repository context (code, config, docs) to validate assumptions.
-- After gathering, if anything is still unclear or cannot be verified, do not speculate — state what's missing and ask targeted questions.
-
-Mode selection by type:
-- Bug / Question/Support / Ops: deliver the response directly using the matching template below. Do not bombard me with questions for straightforward diagnosis; use "Missing info" / "Repro/diagnostics needed" fields instead.
-- Feature request / Refactor with substantive unknowns: this is effectively a planning session. Do not emit the Feature template on the first turn. Instead, ask me focused clarifying questions in batches of at most 3, one topic at a time (scope, constraints, tradeoffs, UX, etc.), wait for answers, drop questions that became irrelevant, and repeat until you have no more substantive questions. Only then emit the Feature template.
-
-Output rules:
-- Compact output; pick ONE template below and omit the others.
-- No emojis. No code snippets. No fenced blocks.
-- Short inline code identifiers allowed.
-- Reference evidence with file paths and line ranges when applicable; if exact lines are not available, cite the file and say "approx" + why.
-- Keep the entire response under ~300 words (applies to the final template output, not to clarifying-question turns).
-
-Templates (choose one):
-Bug:
-- Summary (1-2 sentences)
-- Likely cause (max 2)
-- Repro/diagnostics needed (max 3)
-- Fix approach (max 4 steps)
-- Verification (max 3)
-
-Feature:
-- Summary (1-2 sentences)
-- Requirements (max 4)
-- Unknowns/questions (max 4)
-- Proposed plan (max 5 steps)
-- Verification (max 3)
-
-Question/Support:
-- Summary (1-2 sentences)
-- Answer/guidance (max 6 lines)
-- Missing info (max 4)
-
-Do not implement changes until I confirm; end with: "Next actions: <1 sentence>".`,
   },
   {
     id: 'git.conflict.resolve.visible',
@@ -439,7 +387,7 @@ Respond in the same language the user used most in the conversation.`,
     id: 'session.review.instructions',
     title: 'Workspace Review Instructions',
     group: 'Session',
-    description: 'Hidden instructions attached to the /workspace-review command. Reviews the workspace diff for intent, correctness, and adequacy, with severity-classified findings.',
+    description: 'Hidden instructions attached to the /workspace-review command and to the first message of every review session. Reviews the workspace diff for intent, correctness, and adequacy, with severity-classified findings.',
     template: `Review the changes in this workspace and judge whether they are correct and adequate — not just whether they contain catastrophic bugs.
 
 The diff is the source of truth. Read the relevant code around the diff too, not only the diff itself, so you understand the change in context.
@@ -510,14 +458,15 @@ Keep the review concise and practical. Respond in the same language the user use
     title: 'Review Handoff Instructions',
     group: 'Session',
     description: 'Hidden instructions attached to the /handoff-review command. Produces a handoff for a separate review agent.',
-    template: `Produce a review handoff for another agent. Do not compact or mutate session history. Your output is an assistant message that OpenChamber will send to a separate reviewer agent.
+    template: `Produce a review handoff for another agent. Your output is an assistant message that OpenChamber will send to a separate reviewer agent, who checks whether the work actually came out right.
 
 Include:
 - The user's original intent and any later clarifications that changed the intent
+- Decisions the user made in this session and anything deliberately left out of scope, so the reviewer does not report them as gaps
 - What was implemented and why
-- Files changed, with brief purpose per file
+- Where the work lives: the files changed, with a brief purpose per file, or the commit range when the work is already committed. Say that other uncommitted changes in the workspace are not part of this work
 - Important design decisions and tradeoffs
-- Validation/tests run, if known
+- Validation: the exact checks and tests that ran with their results, and what was not checked
 - Known gaps, uncertainty, or areas the reviewer should inspect closely
 
 Formatting:
@@ -561,7 +510,7 @@ Focus on correctness, regressions, missing implementation, missing tests, and wh
     ],
     template: `Another agent reviewed your changes and left the feedback below.
 
-Please review the feedback, resolve the relevant issues, and explain what you changed.
+Fix the findings you agree with. When you think a finding is wrong, leave the code as it is and explain why. Then list what you changed and which findings you declined, with the reason for each.
 
 {{review_feedback}}`,
   },
@@ -575,7 +524,7 @@ Please review the feedback, resolve the relevant issues, and explain what you ch
     ],
     template: `The agent implementing the changes has responded to the previous review feedback.
 
-Please review the latest state again and report any remaining issues.
+Review the current diff again. For each earlier finding, say whether it is fixed, declined for a reason you accept, or still open; when you disagree with a decline, explain why. Report new findings only for problems the latest changes introduced.
 
 {{implementation_response}}`,
   },
@@ -607,7 +556,7 @@ Use the \`question\` tool only for clarifying decisions that have a small set of
 
 5. Do not write code or begin implementing during this phase. Planning is for understanding and deciding only.
 
-6. When everything is settled, produce the final implementation plan: a clear, ordered breakdown of the work, the files and areas affected, the decisions that were made (and why), known risks, and any remaining assumptions flagged explicitly. The plan must reflect the user's actual answers — never fill gaps with guesses.
+6. When everything is settled, produce the final implementation plan: a clear, ordered breakdown of the work, the files and areas affected, the decisions that were made (and why), known risks, and any remaining assumptions flagged explicitly. The plan must reflect the user's actual answers — never fill gaps with guesses. If the \`openchamber_knowledge\` tool is available, save the plan there and show it to the user, so they can read it, comment on it and send it to a session from the plan itself.
 
 7. After presenting the plan, if the \`openchamber\` tool is available, offer to start a separate session yourself to implement it; do so only after the user explicitly confirms, and include the full plan in that session's prompt because the new session cannot see this conversation.
 
@@ -891,6 +840,51 @@ How to work:
 Read diffs selectively, file by file; do not print every attempt in full.
 
 --- FUSION INPUTS START ---`,
+  },
+  {
+    id: 'memory.tidy.visible',
+    title: 'Memory Tidy-up Visible Prompt',
+    group: 'Memory',
+    description: 'Visible user message sent by the Tidy up button in the Memory panel.',
+    template: 'Tidy up my memory: drop what is outdated, merge duplicates, and fix what has changed.',
+  },
+  {
+    id: 'memory.tidy.instructions',
+    title: 'Memory Tidy-up Instructions',
+    group: 'Memory',
+    description: 'Hidden instructions for the memory tidy-up session, followed by every stored entry with its full text.',
+    placeholders: [
+      { key: 'memory_entries', description: 'Every stored memory entry in both scopes: id, scope, type, dates, title and body.' },
+    ],
+    template: `You are tidying up the memory you keep through the openchamber_memory tool. Agents save entries as they work and rarely revisit them, while the code and the decisions behind them keep moving. Your job is to bring the store back in line with what is true now. Every stored entry is listed in full below, so you do not need memory.read or memory.list.
+
+During this session, save no new memories: you only restructure what is already stored, whatever the usual memory rules say.
+
+1. Go through every entry. For project entries, check the files, flags, commands, routes and decisions they name against the project: the code, git history, docs, instructions and skills, plans and notes, and whatever else you can reach, such as issues and linked trackers. A reference to something that is gone is a sign the entry is stale, not proof: a decision can outlive renamed code.
+
+2. Decide what changes. The first test for every entry: would an agent that reads the relevant code, docs and skills learn everything this entry says, including why it is so and whether it may be changed? If yes, the entry only duplicates the project and drifts from it over time: delete it. Where the entry and a doc or skill disagree, the doc or skill is current. Code shows what was done, not why, nor that it was deliberate: an entry that holds a decision, its reason, a rejected alternative or a "leave this as it is" that the project does not state stays, trimmed to that part if the rest is readable elsewhere. Do not move anything into docs or skills; this session changes memory only.
+- Obsolete: what it describes is gone or was reversed. Delete it.
+- Duplicates and overlapping entries: merge them into one entry, rewritten with memory.save and the surviving entry's memoryId, then delete the rest.
+- Partly outdated: rewrite it by memoryId with what is true now.
+- Wrong scope: something about this project filed under the user (global), or the other way round. Save it in the right scope, then delete the original.
+- One-off task state and anything the save rules exclude: delete.
+- A date in a title that only records when a decision was made: keep the decision; drop the date if the title needs the room.
+- Entries marked flagged: leave them alone; the user decides on those.
+An entry nothing contradicts still holds. Leave it as it is.
+
+3. Ask the user only about a real discrepancy you cannot settle from the project: two entries that contradict each other, or an entry the project contradicts while it may record a decision the project has not caught up with yet. Put all such questions in one question form, a handful at most. Never ask the user to re-confirm a standing preference or fact that nothing contradicts; assume it still holds. Entries about the user can rarely be checked against anything, so this applies to them most of all.
+
+4. Apply every change.
+
+5. Reply with a short report in the language the user works in, as their instructions or memory say:
+- removed: each title with one line on why;
+- merged: which entries went into which;
+- rewritten: each title and what changed;
+- how many entries stayed as they were.
+Nothing waits for approval. Keep the original text of what you changed in mind: if the user disagrees with something, you restore it from there.
+
+--- STORED MEMORY ---
+{{memory_entries}}`,
   },
 ] as const;
 

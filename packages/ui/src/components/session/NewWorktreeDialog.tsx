@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useSourceControlAuthEntry } from '@/stores/useSourceControlAuthStore';
 import { formatChangeRequestReference, GITHUB_SOURCE_CONTROL_IDENTITY } from '@/lib/source-control/identity';
+import { changeRequestCopy } from '@/lib/source-control/changeRequestCopy';
 import { useLinearAuthStore } from '@/stores/useLinearAuthStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
@@ -36,7 +37,7 @@ import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useGitBranches, useGitStore, useGitLoadingBranches } from '@/stores/useGitStore';
 import { ReferencePickerDialog, type ReferencePickerConfirmFailure } from '@/components/references/ReferencePickerDialog';
 import { referencePickerItemKey, type ReferencePickerSelection } from '@/components/references/referencePickerItems';
-import { readLinearIssueDetail, useGitHubReadContext } from '@/components/references/referenceSources';
+import { readLinearIssueDetail, useGitHubReadContext, useRepositoryReferenceProvider } from '@/components/references/referenceSources';
 import { resolveComposerReferences } from '@/components/references/resolveComposerReferences';
 import { usePendingComposerReferences } from '@/components/chat/composer/pendingComposerReferences';
 import { useInputStore } from '@/sync/input-store';
@@ -46,7 +47,7 @@ import type { SourceControlReadContext } from '@/lib/api/types';
 import { resolvePrWorktreeConfig, type PrWorktreeSource } from './prWorktreeConfig';
 import { useConfirmDialog } from '@/components/ui/confirm-dialog';
 import type { CreateWorktreeArgs, ProjectRef } from '@/lib/worktrees/worktreeManager';
-import { useI18n } from '@/lib/i18n';
+import { useI18n, type I18nKey } from '@/lib/i18n';
 
 /** The dialog's tabs: a fresh branch, a branch that exists, or the branch of an issue or PR. */
 type Mode = 'new-branch' | 'existing-branch' | 'from-item';
@@ -120,6 +121,8 @@ interface NewWorktreeDialogProps {
   project?: { id: string; path: string };
   /** The dialog is closed by then; a chosen issue or PR follows as a composer chip. */
   onWorktreeCreated?: (worktreePath: string) => void;
+  /** Opens on "PR or issue" with this item already chosen. */
+  initialSelection?: ReferencePickerSelection;
 }
 
 export function NewWorktreeDialog({
@@ -127,6 +130,7 @@ export function NewWorktreeDialog({
   onOpenChange,
   project,
   onWorktreeCreated,
+  initialSelection,
 }: NewWorktreeDialogProps) {
   const { t } = useI18n();
   const { sourceControl, git, linear } = useRuntimeAPIs();
@@ -218,11 +222,27 @@ export function NewWorktreeDialog({
   });
   const [isCreating, setIsCreating] = React.useState(false);
   const [validationAbortController, setValidationAbortController] = React.useState<AbortController | null>(null);
+  // The random name this open started with. Folder names stay ASCII, so a
+  // branch name without Latin letters or digits (`测试分支`) leaves no slug and
+  // the folder keeps this name instead of going empty.
+  const [fallbackFolderName, setFallbackFolderName] = React.useState('');
+  const folderNameForBranch = React.useCallback(
+    (branch: string) => slugifyWorktreeName(branch) || fallbackFolderName,
+    [fallbackFolderName],
+  );
   const initializedForCurrentOpen = React.useRef(false);
+  // The item the dialog was opened with, until it is chosen.
+  const pendingInitialSelection = React.useRef<ReferencePickerSelection | null>(null);
 
   const linkedPr = mode === 'from-item' && linked?.kind === 'pr' ? linked.pr : null;
   const linkedPrContext = mode === 'from-item' && linked?.kind === 'pr' ? linked.context : null;
   const githubContext = useGitHubReadContext(open ? projectDirectory : null);
+  // A GitLab project's items are merge requests: the PR-or-issue copy says so.
+  const itemProvider = useRepositoryReferenceProvider(open ? projectDirectory : null);
+  const tItem = React.useCallback(
+    (key: I18nKey) => t(changeRequestCopy(key, itemProvider)),
+    [itemProvider, t],
+  );
   // The fields the visible tab edits.
   const draft = mode === 'from-item' ? itemBranch : newBranch;
   const setDraft = mode === 'from-item' ? setItemBranch : setNewBranch;
@@ -255,26 +275,28 @@ export function NewWorktreeDialog({
     initializedForCurrentOpen.current = true;
 
     const uniqueSlug = generateUniqueSlug();
-    setMode('new-branch');
+    pendingInitialSelection.current = initialSelection ?? null;
+    setFallbackFolderName(uniqueSlug);
+    setMode(initialSelection ? 'from-item' : 'new-branch');
     setNewBranch({ branchName: uniqueSlug, worktreeName: uniqueSlug, isSyncingWorktreeName: true });
     setItemBranch(EMPTY_DRAFT);
     setLinked(null);
     setExistingBranch({ selectedBranch: '', worktreeName: '' });
     setSourceBranch('');
     setValidation({ isValidating: false, branchError: null, worktreeError: null, touched: false });
-  }, [open, generateUniqueSlug]);
+  }, [open, generateUniqueSlug, initialSelection]);
 
   // The folder follows the branch name until the user renames the folder.
   React.useEffect(() => {
     if (!newBranch.isSyncingWorktreeName) return;
-    const synced = slugifyWorktreeName(normalizeBranchName(newBranch.branchName));
+    const synced = folderNameForBranch(newBranch.branchName);
     if (synced !== newBranch.worktreeName) setNewBranch((prev) => ({ ...prev, worktreeName: synced }));
-  }, [newBranch.branchName, newBranch.isSyncingWorktreeName, newBranch.worktreeName]);
+  }, [folderNameForBranch, newBranch.branchName, newBranch.isSyncingWorktreeName, newBranch.worktreeName]);
   React.useEffect(() => {
     if (!itemBranch.isSyncingWorktreeName) return;
-    const synced = slugifyWorktreeName(normalizeBranchName(itemBranch.branchName));
+    const synced = folderNameForBranch(itemBranch.branchName);
     if (synced !== itemBranch.worktreeName) setItemBranch((prev) => ({ ...prev, worktreeName: synced }));
-  }, [itemBranch.branchName, itemBranch.isSyncingWorktreeName, itemBranch.worktreeName]);
+  }, [folderNameForBranch, itemBranch.branchName, itemBranch.isSyncingWorktreeName, itemBranch.worktreeName]);
 
   // Validation - only runs after fields are touched
   const validateInputs = React.useCallback(async () => {
@@ -406,7 +428,7 @@ export function NewWorktreeDialog({
       let sourceLabel = '';
       const args: CreateWorktreeArgs = (() => {
         if (linkedPr) {
-          if (!linkedPrContext) throw new Error(t('session.newWorktree.error.changeRequestAuthorityMissing'));
+          if (!linkedPrContext) throw new Error(tItem('session.newWorktree.error.changeRequestAuthorityMissing'));
           // The server fetches the PR's head through the repository's account
           // and checks it is still the revision the picker showed.
           const prConfig = resolvePrWorktreeConfig(linkedPr, linkedPrContext, branches?.branches ?? {});
@@ -450,6 +472,7 @@ export function NewWorktreeDialog({
             title: t('session.newWorktree.trust.title'),
             message: t('session.newWorktree.trust.confirmation', { actions: trust.actions.map((action) => action.label).join('\n') }),
             action: t('session.newWorktree.trust.run'),
+            decline: t('session.newWorktree.trust.skip'),
           });
           await git.decideCheckoutTrust(metadata.path, trust.digest, run ? 'run' : 'skip');
         }
@@ -484,7 +507,7 @@ export function NewWorktreeDialog({
   // A chosen item names the branch the worktree gets; a PR brings its own.
   const linkItem = (item: LinkedItem, branch: string) => {
     setLinked(item);
-    setItemBranch({ branchName: branch, worktreeName: slugifyWorktreeName(branch), isSyncingWorktreeName: true });
+    setItemBranch({ branchName: branch, worktreeName: folderNameForBranch(branch), isSyncingWorktreeName: true });
     setValidation(prev => ({ ...prev, touched: false, branchError: null, worktreeError: null }));
   };
 
@@ -523,7 +546,7 @@ export function NewWorktreeDialog({
       }
     }
     if (!githubContext || githubContext === 'missing') {
-      return { failedKeys: [referencePickerItemKey(choice)], message: t('session.newWorktree.error.changeRequestAuthorityMissing') };
+      return { failedKeys: [referencePickerItemKey(choice)], message: tItem('session.newWorktree.error.changeRequestAuthorityMissing') };
     }
     const pr: PrWorktreeSource & { title: string; url: string } = {
       number: reference.number,
@@ -541,6 +564,20 @@ export function NewWorktreeDialog({
     linkItem({ kind: 'pr', pr, context: githubContext, includeDiff: choice.includeDiff, selection: choice }, reference.head);
     return null;
   };
+
+  // A PR is chosen once the project's read context is known: its branch is
+  // fetched through it. Issues need none.
+  const handleReferenceConfirmRef = React.useRef(handleReferenceConfirm);
+  handleReferenceConfirmRef.current = handleReferenceConfirm;
+  React.useEffect(() => {
+    const choice = pendingInitialSelection.current;
+    if (!open || !choice) return;
+    if (choice.source === 'github' && choice.reference.kind === 'pull' && githubContext === null) return;
+    pendingInitialSelection.current = null;
+    void handleReferenceConfirmRef.current([choice]).then((failure) => {
+      if (failure) toast.error(failure.message);
+    });
+  }, [githubContext, open]);
 
   const handleGuestSelect = (issue: AttachIssueRequest): void => {
     const kind = issue.kind === 'pull' ? 'pull' : 'issue';
@@ -678,8 +715,8 @@ export function NewWorktreeDialog({
         selected={mode === 'from-item'}
         onSelect={() => handleModeChange('from-item')}
         disabled={!canLinkItems}
-        label={t('session.newWorktree.mode.fromItem')}
-        description={canLinkItems ? t('session.newWorktree.start.fromItemHint') : t('session.newWorktree.start.fromItemUnavailable')}
+        label={tItem('session.newWorktree.mode.fromItem')}
+        description={canLinkItems ? tItem('session.newWorktree.start.fromItemHint') : tItem('session.newWorktree.start.fromItemUnavailable')}
       />
     </SettingsRadioGroup>
   );
@@ -698,7 +735,7 @@ export function NewWorktreeDialog({
           isLoading={isLoadingBranches}
           isMobile={isMobile}
           onSelect={(branch) => {
-            setExistingBranch({ selectedBranch: branch.value, worktreeName: slugifyWorktreeName(branch.label) });
+            setExistingBranch({ selectedBranch: branch.value, worktreeName: folderNameForBranch(branch.label) });
             setValidation(prev => ({ ...prev, touched: true }));
           }}
         />
@@ -777,7 +814,7 @@ export function NewWorktreeDialog({
   const choiceBlocks = (
     <>
       {fieldBlock(t('session.newWorktree.start.title'), startOptions)}
-      {canLinkItems ? fieldBlock(t('session.newWorktree.item.title'), itemPicker) : null}
+      {canLinkItems ? fieldBlock(tItem('session.newWorktree.item.title'), itemPicker) : null}
     </>
   );
   const branchBlocks = (

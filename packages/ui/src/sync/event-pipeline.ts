@@ -21,6 +21,7 @@ import { GLOBAL_EVENT_DIRECTORY, routeWireEvent, syncEventSessionID, type SyncEv
 import type { Metadata } from "@/lib/opencode/model"
 import { getRuntimeUrlResolver } from "@/lib/runtime-url"
 import { clearRuntimeUrlAuthToken, refreshRuntimeUrlAuthToken } from "@/lib/runtime-auth"
+import { useAuthSessionStore, waitForAuthSession } from "@/lib/runtime-auth-expiry"
 import { type RelayTunnelWebSocket } from "@/lib/relay/tunnel-client"
 import { openRuntimeWebSocket } from "@/lib/relay/runtime-socket"
 import { isVSCodeRuntime } from "@/lib/desktop"
@@ -151,6 +152,22 @@ const openchamberNotificationSchema = z.object({
     .partial(),
 })
 
+// A page an agent showed that waits for the user's answer; the server holds
+// the waiting call, so it announces both ends of the wait.
+const openchamberPageWaitingSchema = z.object({
+  type: z.literal("openchamber:page-waiting"),
+  properties: z.object({
+    sessionID: z.string().min(1),
+    directory: z.string().min(1).nullable().catch(null),
+    page: z.object({ id: z.string().min(1), title: z.string() }),
+  }),
+})
+
+const openchamberPageSettledSchema = z.object({
+  type: z.literal("openchamber:page-settled"),
+  properties: z.object({ sessionID: z.string().min(1), pageID: z.string().min(1) }),
+})
+
 // The host's announcement of an isolated space's event connection. It is not an event of any
 // session, so it never enters a directory queue; the pipeline hands it to its owner.
 const openchamberSpaceStreamSchema = z.object({
@@ -209,29 +226,12 @@ const wireEventSchema = z.object({
   location: z.object({ directory: z.string() }).partial().optional(),
 })
 
-function translateOpenchamberArchived(payload: unknown): SyncEvent | null {
-  const parsed = openchamberArchivedSchema.safeParse(payload)
-  if (!parsed.success) return null
-  const { sessionID, archivedAt } = parsed.data.properties
-  return { type: "session.patched", properties: { sessionID, patch: { time: { archived: archivedAt } } } }
-}
+// Only the discriminator is read before dispatch: a streamed reply delivers
+// one payload per delta, and trying every OpenChamber schema in turn cost
+// eleven zod parses per delta, nine of them certain to fail.
+const payloadTypeSchema = z.object({ type: z.string() })
 
-function translateOpenchamberNative(payload: unknown): SyncEvent | null {
-  const metadata = openchamberMetadataSchema.safeParse(payload)
-  if (metadata.success) {
-    const { sessionID } = metadata.data.properties
-    // SAFETY: the server serialises this object from JSON, so every value is a JsonValue.
-    const value = metadata.data.properties.metadata as Metadata
-    return { type: "session.patched", properties: { sessionID, patch: { metadata: value } } }
-  }
-  const notification = openchamberNotificationSchema.safeParse(payload)
-  if (notification.success) return { type: "openchamber.notification", properties: notification.data.properties }
-  const autoAccept = openchamberAutoAcceptSchema.safeParse(payload)
-  if (autoAccept.success) return { type: "openchamber.permission-auto-accept", properties: autoAccept.data.properties }
-  const leftForUser = openchamberLeftForUserSchema.safeParse(payload)
-  if (leftForUser.success) return { type: "openchamber.permission-left-for-user", properties: leftForUser.data.properties }
-  return null
-}
+const OPENCHAMBER_TYPE_PREFIX = "openchamber:"
 
 function translateOpenchamberStatus(payload: unknown): SyncEvent | null {
   const parsed = openchamberStatusSchema.safeParse(payload)
@@ -249,14 +249,56 @@ function translateOpenchamberStatus(payload: unknown): SyncEvent | null {
   return { type: "session.status", properties: { sessionID: id, status: { type: status } } }
 }
 
+/** Translates an `openchamber:*` bridge payload into a sync event, or null when it is not a valid one. */
+function translateOpenchamberEvent(type: string, payload: unknown): SyncEvent | null {
+  switch (type) {
+    case "openchamber:session-status":
+      return translateOpenchamberStatus(payload)
+    case "openchamber:session-archived": {
+      const parsed = openchamberArchivedSchema.safeParse(payload)
+      if (!parsed.success) return null
+      const { sessionID, archivedAt } = parsed.data.properties
+      return { type: "session.patched", properties: { sessionID, patch: { time: { archived: archivedAt } } } }
+    }
+    case "openchamber:session-metadata": {
+      const parsed = openchamberMetadataSchema.safeParse(payload)
+      if (!parsed.success) return null
+      const { sessionID } = parsed.data.properties
+      // SAFETY: the server serialises this object from JSON, so every value is a JsonValue.
+      const value = parsed.data.properties.metadata as Metadata
+      return { type: "session.patched", properties: { sessionID, patch: { metadata: value } } }
+    }
+    case "openchamber:notification": {
+      const parsed = openchamberNotificationSchema.safeParse(payload)
+      return parsed.success ? { type: "openchamber.notification", properties: parsed.data.properties } : null
+    }
+    case "openchamber:permission-auto-accept.updated": {
+      const parsed = openchamberAutoAcceptSchema.safeParse(payload)
+      return parsed.success ? { type: "openchamber.permission-auto-accept", properties: parsed.data.properties } : null
+    }
+    case "openchamber:page-waiting": {
+      const parsed = openchamberPageWaitingSchema.safeParse(payload)
+      return parsed.success ? { type: "openchamber.page-waiting", properties: parsed.data.properties } : null
+    }
+    case "openchamber:page-settled": {
+      const parsed = openchamberPageSettledSchema.safeParse(payload)
+      return parsed.success ? { type: "openchamber.page-settled", properties: parsed.data.properties } : null
+    }
+    case "openchamber:permission-auto-accept.left-for-user": {
+      const parsed = openchamberLeftForUserSchema.safeParse(payload)
+      return parsed.success ? { type: "openchamber.permission-left-for-user", properties: parsed.data.properties } : null
+    }
+    default:
+      return null
+  }
+}
+
 /**
- * Turns one raw stream payload into routed sync events. `frameDirectory` is
+ * Turns one raw wire payload into routed sync events. `frameDirectory` is
  * the directory the server bridge attached, used when the event itself does
  * not name a location.
  */
-function translatePayload(payload: unknown, frameDirectory: string | undefined): Array<{ directory: string; event: SyncEvent }> {
-  const bridged = translateOpenchamberStatus(payload) ?? translateOpenchamberArchived(payload) ?? translateOpenchamberNative(payload)
-  if (bridged) return [{ directory: frameDirectory ?? GLOBAL_EVENT_DIRECTORY, event: bridged }]
+function translateWirePayload(payload: unknown, frameDirectory: string | undefined): Array<{ directory: string; event: SyncEvent }> {
   if (!wireEventSchema.safeParse(payload).success) return []
   // SAFETY: the discriminator and location were validated above; the rest of
   // the shape is the server's generated contract, narrowed per `type` by the
@@ -264,6 +306,46 @@ function translatePayload(payload: unknown, frameDirectory: string | undefined):
   const routed = routeWireEvent(payload as OpenCodeEvent)
   if (!frameDirectory) return routed
   return routed.map((entry) => (entry.directory === GLOBAL_EVENT_DIRECTORY ? { ...entry, directory: frameDirectory } : entry))
+}
+
+type ClassifiedStreamPayload =
+  | { kind: "space-stream"; properties: z.infer<typeof openchamberSpaceStreamSchema>["properties"] }
+  | { kind: "space-progress"; properties: SpaceProgress }
+  | { kind: "space-setup"; spaceId: string }
+  | { kind: "events"; events: Array<{ directory: string; event: SyncEvent }> }
+
+const NO_EVENTS: ClassifiedStreamPayload = { kind: "events", events: [] }
+
+/**
+ * Sorts one raw stream payload: an isolated-space announcement for its owner,
+ * or the sync events it translates to. Dispatches on `type`, so each payload
+ * is validated only against the schema its type names.
+ */
+export function classifyStreamPayload(payload: unknown, frameDirectory: string | undefined): ClassifiedStreamPayload {
+  const typed = payloadTypeSchema.safeParse(payload)
+  if (!typed.success) return NO_EVENTS
+  const { type } = typed.data
+  if (!type.startsWith(OPENCHAMBER_TYPE_PREFIX)) return { kind: "events", events: translateWirePayload(payload, frameDirectory) }
+
+  switch (type) {
+    case "openchamber:space-stream": {
+      const parsed = openchamberSpaceStreamSchema.safeParse(payload)
+      return parsed.success ? { kind: "space-stream", properties: parsed.data.properties } : NO_EVENTS
+    }
+    case "openchamber:space-progress": {
+      const parsed = openchamberSpaceProgressSchema.safeParse(payload)
+      return parsed.success ? { kind: "space-progress", properties: parsed.data.properties } : NO_EVENTS
+    }
+    case "openchamber:space-setup": {
+      const parsed = openchamberSpaceSetupSchema.safeParse(payload)
+      return parsed.success ? { kind: "space-setup", spaceId: parsed.data.properties.spaceId } : NO_EVENTS
+    }
+  }
+  const bridged = translateOpenchamberEvent(type, payload)
+  if (bridged) return { kind: "events", events: [{ directory: frameDirectory ?? GLOBAL_EVENT_DIRECTORY, event: bridged }] }
+  // An OpenChamber type this client does not know may still be a wire event
+  // shape; the wire translator ignores types it does not handle.
+  return { kind: "events", events: translateWirePayload(payload, frameDirectory) }
 }
 
 function buildGlobalEventWsUrl(lastEventId?: string): string {
@@ -465,6 +547,7 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
    * Wait between reconnect attempts. Resolves early when:
    *   - the browser fires `online` (network came back — probe immediately),
    *   - the tab becomes visible (user came back — probe immediately),
+   *   - an expired OpenChamber session becomes usable (the user logged in),
    *   - the pipeline is being torn down (cleanup aborts).
    * Otherwise resolves after `ms` like a plain timer.
    */
@@ -486,6 +569,7 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
         document.removeEventListener("visibilitychange", onVisibilityInterrupt)
       }
       abort.signal.removeEventListener("abort", onInterrupt)
+      unsubscribeAuthSession()
     }
     const onInterrupt = () => {
       cleanup()
@@ -505,6 +589,9 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
       document.addEventListener("visibilitychange", onVisibilityInterrupt)
     }
     abort.signal.addEventListener("abort", onInterrupt, { once: true })
+    const unsubscribeAuthSession = useAuthSessionStore.subscribe((store, previous) => {
+      if (store.state === "ok" && previous.state !== "ok") onInterrupt()
+    })
   })
 
   const computeRetryDelay = (failures: number): number => {
@@ -595,22 +682,20 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
   }
 
   const enqueuePayload = (payload: unknown, frameDirectory: string | undefined) => {
-    const spaceStream = openchamberSpaceStreamSchema.safeParse(payload)
-    if (spaceStream.success) {
-      onSpaceStream?.(spaceStream.data.properties)
+    const classified = classifyStreamPayload(payload, frameDirectory)
+    if (classified.kind === "space-stream") {
+      onSpaceStream?.(classified.properties)
       return
     }
-    const spaceProgress = openchamberSpaceProgressSchema.safeParse(payload)
-    if (spaceProgress.success) {
-      onSpaceProgress?.(spaceProgress.data.properties)
+    if (classified.kind === "space-progress") {
+      onSpaceProgress?.(classified.properties)
       return
     }
-    const spaceSetup = openchamberSpaceSetupSchema.safeParse(payload)
-    if (spaceSetup.success) {
-      onSpaceSetup?.(spaceSetup.data.properties.spaceId)
+    if (classified.kind === "space-setup") {
+      onSpaceSetup?.(classified.spaceId)
       return
     }
-    for (const { directory, event } of translatePayload(payload, frameDirectory)) {
+    for (const { directory, event } of classified.events) {
       enqueueEvent(directory, event)
     }
   }
@@ -853,6 +938,10 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
 
   void (async () => {
     while (!abort.signal.aborted) {
+      // An expired OpenChamber session refuses every attempt; wait for the
+      // user to log in rather than retrying into 401s.
+      await waitForAuthSession(abort.signal)
+      if (abort.signal.aborted) return
       attempt = new AbortController()
       lastEventAt = Date.now()
       attemptAbortReason = null

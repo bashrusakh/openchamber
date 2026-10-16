@@ -1,5 +1,5 @@
 // OpenChamber private relay protocol constants and shared types.
-// Spec: .opencode/plans/private-relay/01-protocol-spec.md
+// Overview: packages/web/server/lib/relay/DOCUMENTATION.md
 // Three layers: relay routing (Layer 1), E2EE channel (Layer 2), tunnel mux (Layer 3).
 // This module is isomorphic: browser, Node, and Cloudflare Workers.
 
@@ -30,9 +30,16 @@ export const BATCH_FRAME_LENGTH_BYTES = 4;
 // Worst-case per-frame envelope overhead inside a batch (tag + length prefix).
 // Reserved from the tunnel payload budget so any single frame — even at the
 // maximum size — still fits inside one 64 KiB encrypted plaintext once wrapped.
-export const BATCH_ENVELOPE_RESERVED_BYTES = 1 + BATCH_FRAME_LENGTH_BYTES;
+const BATCH_ENVELOPE_RESERVED_BYTES = 1 + BATCH_FRAME_LENGTH_BYTES;
 export const MAX_TUNNEL_PAYLOAD_BYTES =
   MAX_PLAINTEXT_FRAME_BYTES - TUNNEL_FRAME_HEADER_BYTES - BATCH_ENVELOPE_RESERVED_BYTES;
+
+// Tunnel body compression, negotiated per request. A client that can gunzip
+// sends the accept header; the host gzips whole-body text responses for it
+// and marks them with the content header. A peer that knows neither sends and
+// receives plain bodies. Mirrored in packages/web/server/lib/relay/tunnel-host.js.
+export const TUNNEL_ACCEPT_ENCODING_HEADER = 'x-openchamber-tunnel-accept-encoding';
+export const TUNNEL_CONTENT_ENCODING_HEADER = 'x-openchamber-tunnel-content-encoding';
 
 export const TunnelFrameType = {
   HttpRequest: 1,

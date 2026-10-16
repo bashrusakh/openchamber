@@ -1,8 +1,11 @@
+import { asNonEmptyString, isBoolean } from '../shared/guards.js';
 import path from 'node:path';
 import { OpenCode } from '@opencode/client';
 import { OpenChamberControlError, asControlError } from './error.js';
-import { OPENCHAMBER_ALL_ACTIONS } from './actions.js';
+import { OPENCHAMBER_ALL_ACTIONS, OPENCHAMBER_KNOWLEDGE_ACTIONS } from './actions.js';
 import { writeScreenshot } from './screenshots.js';
+import { createProjectKnowledgeActions } from './project-knowledge.js';
+import { createPageAnswers, createRenderPageAction } from './render-page.js';
 
 const DEFAULT_WAIT_TIMEOUT_SECONDS = 600;
 const MAX_WAIT_TIMEOUT_SECONDS = 86_400;
@@ -10,16 +13,11 @@ const WAIT_POLL_INTERVAL_MS = 500;
 // One service, both capabilities: which tool asked is the caller's concern.
 const CONTROL_ACTIONS = new Set(OPENCHAMBER_ALL_ACTIONS);
 const SCHEDULE_TASK_ID_ACTIONS = new Set([
+  'schedule.update',
   'schedule.run',
   'schedule.delete',
   'schedule.toggle',
 ]);
-
-const asNonEmptyString = (value) => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-};
 
 const positiveInteger = (value, fallback, field) => {
   if (value === undefined || value === null) return fallback;
@@ -120,7 +118,8 @@ const buildScheduledTask = (input) => {
   const prompt = asNonEmptyString(input.prompt);
   if (!name) throw new OpenChamberControlError('name is required', 400);
   if (!prompt) throw new OpenChamberControlError('prompt is required', 400);
-  const model = parseModel(input.model);
+  const targetSessionId = asNonEmptyString(input.targetSessionId);
+  const model = targetSessionId && input.model === undefined ? { useDefaults: !asNonEmptyString(input.agent) } : parseModel(input.model);
   const goalTokenBudget = input.goalTokenBudget;
   if (goalTokenBudget !== undefined && input.goal !== true) {
     throw new OpenChamberControlError('goalTokenBudget requires goal', 400);
@@ -128,7 +127,7 @@ const buildScheduledTask = (input) => {
   if (goalTokenBudget !== undefined && (!Number.isSafeInteger(goalTokenBudget) || goalTokenBudget < 1000 || goalTokenBudget > 100_000_000)) {
     throw new OpenChamberControlError('goalTokenBudget must be from 1000 to 100000000', 400);
   }
-  return {
+  const task = {
     name,
     enabled: input.disabled !== true,
     schedule: buildSchedule(input),
@@ -140,6 +139,70 @@ const buildScheduledTask = (input) => {
       ...(input.goal === true ? { goalEnabled: true } : {}),
       ...(goalTokenBudget !== undefined ? { goalTokenBudget } : {}),
     },
+  };
+  if (input.targetSessionId !== undefined) task.targetSessionId = targetSessionId ?? input.targetSessionId;
+  return task;
+};
+
+/**
+ * `schedule.update`: the stored task with only the fields the call names
+ * changed. The id and the run state stay, so history and references survive;
+ * the scheduler re-arms from the new schedule on save.
+ */
+const patchScheduledTask = (existing, input) => {
+  if (existing.loopFile) {
+    throw new OpenChamberControlError(`This task comes from ${existing.loopFile}; change that file instead`, 409);
+  }
+  const execution = { ...existing.execution };
+  if (input.prompt !== undefined) {
+    const prompt = asNonEmptyString(input.prompt);
+    if (!prompt) throw new OpenChamberControlError('prompt cannot be empty', 400);
+    execution.prompt = prompt;
+  }
+  if (input.model !== undefined) {
+    Object.assign(execution, parseModel(input.model));
+    // A thinking level belongs to the model it was chosen for.
+    delete execution.variant;
+    delete execution.useDefaults;
+  }
+  for (const field of ['variant', 'agent']) {
+    if (input[field] === undefined) continue;
+    const value = asNonEmptyString(input[field]);
+    if (value) execution[field] = value;
+    else delete execution[field];
+    if (field === 'agent' && value && (input.targetSessionId || existing.targetSessionId)) delete execution.useDefaults;
+  }
+  if (typeof input.goal === 'boolean') {
+    if (input.goal) execution.goalEnabled = true;
+    else {
+      delete execution.goalEnabled;
+      delete execution.goalTokenBudget;
+    }
+  }
+  if (input.goalTokenBudget !== undefined) {
+    if (!execution.goalEnabled) throw new OpenChamberControlError('goalTokenBudget requires goal', 400);
+    if (!Number.isSafeInteger(input.goalTokenBudget) || input.goalTokenBudget < 1000 || input.goalTokenBudget > 100_000_000) {
+      throw new OpenChamberControlError('goalTokenBudget must be from 1000 to 100000000', 400);
+    }
+    execution.goalTokenBudget = input.goalTokenBudget;
+  }
+  let name = existing.name;
+  if (input.name !== undefined) {
+    name = asNonEmptyString(input.name);
+    if (!name) throw new OpenChamberControlError('name cannot be empty', 400);
+  }
+  const replacesSchedule = ['daily', 'weekly', 'once', 'cron'].some((key) => asNonEmptyString(input[key]));
+  const timezone = asNonEmptyString(input.timezone);
+  const schedule = replacesSchedule
+    ? buildSchedule(input)
+    : (timezone ? { ...existing.schedule, timezone } : existing.schedule);
+  return {
+    id: existing.id,
+    targetSessionId: input.targetSessionId === undefined ? existing.targetSessionId : input.targetSessionId,
+    name,
+    enabled: typeof input.disabled === 'boolean' ? !input.disabled : existing.enabled,
+    schedule,
+    execution,
   };
 };
 
@@ -157,6 +220,15 @@ export const createOpenChamberControlService = (dependencies) => {
     notifyUser = null,
     agentMemoryActions = null,
     sessionLinks = null,
+    projectContextRuntime = null,
+    resolveProjectContextId = null,
+    isKnowledgeToolEnabled = async () => true,
+    isRenderToolEnabled = async () => true,
+    // Hears when a page an agent shows starts and stops waiting for the
+    // user's answer (render.page with awaitAnswer).
+    onPageWaitChange = () => {},
+    // Puts a plan in front of the user; answers how many windows it reached.
+    showPlan = null,
     // Delivers a dispatched session's result back to the session that asked
     // (`returnResult`); absent means the server cannot offer it.
     dispatchResults = null,
@@ -234,6 +306,17 @@ export const createOpenChamberControlService = (dependencies) => {
     return sessionService.resolveDirectory({ projectId: projectID });
   };
 
+  const knowledgeActions = createProjectKnowledgeActions({
+    projectContextRuntime,
+    resolveProjectContextId,
+    isEnabled: isKnowledgeToolEnabled,
+    showPlan,
+    resolveDirectory: (input) => sessionService.resolveDirectory(input),
+  });
+
+  const pageAnswers = createPageAnswers({ onWaitChange: onPageWaitChange });
+  const renderPage = createRenderPageAction({ isEnabled: isRenderToolEnabled, pageAnswers });
+
   const models = async () => {
     const settings = await readSettingsFromDiskMigrated();
     return {
@@ -262,18 +345,36 @@ export const createOpenChamberControlService = (dependencies) => {
     return asPublicStatus(statuses[sessionID]);
   };
 
-  // `order: 'desc'` puts the newest messages in the limited page;
-  // extractTextMessages re-sorts them oldest-first for the caller.
+  // The message list is cursor-paginated and `order: 'desc'` puts the newest
+  // messages in the page, so a single call returns only the recent tail.
+  // `all: true` walks `cursor.next` until the history is exhausted; a bounded
+  // `limit` stops once enough text messages are collected. Later pages carry
+  // the order inside the cursor, and OpenCode rejects a cursor combined with
+  // `order`, so only the first page sends it. An empty page or a repeated
+  // cursor ends the walk. `extractTextMessages` sorts the gathered records
+  // oldest-first for the caller.
+  const MESSAGE_PAGE_LIMIT = 200;
   const sessionMessages = async (client, sessionID, role, limit) => {
     const fetchLimit = limit === undefined ? undefined : Math.max(100, limit * 4);
-    let response = await client.message.list({ sessionID, ...(fetchLimit ? { limit: fetchLimit, order: 'desc' } : {}) });
-    let raw = Array.isArray(response?.data) ? response.data : [];
-    let messages = extractTextMessages(raw, role);
-    if (limit !== undefined && messages.length < limit && raw.length >= fetchLimit) {
-      response = await client.message.list({ sessionID });
-      raw = Array.isArray(response?.data) ? response.data : [];
-      messages = extractTextMessages(raw, role);
+    const collected = [];
+    const seenCursors = new Set();
+    let cursor;
+    for (;;) {
+      const response = await client.message.list({
+        sessionID,
+        limit: fetchLimit ?? MESSAGE_PAGE_LIMIT,
+        ...(cursor ? { cursor } : fetchLimit ? { order: 'desc' } : {}),
+      });
+      const raw = Array.isArray(response?.data) ? response.data : [];
+      collected.push(...raw);
+      const next = asNonEmptyString(response?.cursor?.next);
+      if (!next || raw.length === 0 || seenCursors.has(next)) break;
+      // A bounded read only needs enough pages to project `limit` text messages.
+      if (limit !== undefined && extractTextMessages(collected, role).length >= limit) break;
+      seenCursors.add(next);
+      cursor = next;
     }
+    const messages = extractTextMessages(collected, role);
     return limit === undefined ? messages : messages.slice(-limit);
   };
 
@@ -310,10 +411,18 @@ export const createOpenChamberControlService = (dependencies) => {
   const resolveSessionDirectory = async (sessionID) => {
     try {
       const client = await getClient();
-      const response = await client.session.list({});
-      const sessions = Array.isArray(response?.data) ? response.data : [];
-      const session = sessions.find((item) => item?.id === sessionID);
-      return asNonEmptyString(session?.location?.directory) || null;
+      const seenCursors = new Set();
+      let cursor;
+      for (;;) {
+        const response = await client.session.list(cursor ? { cursor } : {});
+        const sessions = Array.isArray(response?.data) ? response.data : [];
+        const session = sessions.find((item) => item?.id === sessionID);
+        if (session) return asNonEmptyString(session?.location?.directory) || null;
+        const next = asNonEmptyString(response?.cursor?.next);
+        if (!next || seenCursors.has(next)) return null;
+        seenCursors.add(next);
+        cursor = next;
+      }
     } catch {
       return null;
     }
@@ -365,9 +474,24 @@ export const createOpenChamberControlService = (dependencies) => {
   };
 
   const executeSessionAction = async (action, input, contextDirectory, signal, contextSessionId) => {
+    // The tool path forwards raw JSON, so a boolean parameter can arrive as the
+    // string "true". Both of these are compared with `=== true` below, which
+    // would read a string as false and silently drop the behavior: a dispatch
+    // whose result is never delivered, or a call that returns before the turn
+    // it asked to wait for. Reject a non-boolean loudly instead.
+    if (input.wait !== undefined && !isBoolean(input.wait)) {
+      throw new OpenChamberControlError('wait must be a boolean', 400);
+    }
+    if (input.returnResult !== undefined && !isBoolean(input.returnResult)) {
+      throw new OpenChamberControlError('returnResult must be a boolean', 400);
+    }
     if (input.timeout !== undefined && input.wait !== true) throw new OpenChamberControlError('timeout requires wait', 400);
     if (input.lastAssistant === true && input.wait !== true) throw new OpenChamberControlError('lastAssistant requires wait', 400);
     assertSingleScope(input);
+    // Only a new session gets a worktree; elsewhere the number would be ignored.
+    if (input.pullRequest !== undefined && action !== 'session.create') {
+      throw new OpenChamberControlError('pullRequest applies only to session.create', 400);
+    }
     const sessionID = asNonEmptyString(input.sessionId);
     const parentSessionID = asNonEmptyString(contextSessionId);
     const returnResult = input.returnResult === true;
@@ -395,6 +519,16 @@ export const createOpenChamberControlService = (dependencies) => {
       ...(typeof input.setUpstream === 'boolean' ? { setUpstream: input.setUpstream } : {}),
       ...(asNonEmptyString(input.messageId) ? { messageId: input.messageId.trim() } : {}),
     };
+    // A pull request makes a worktree of its own, so its branch name (and a
+    // start ref the session service refuses) travel without a worktree name.
+    if (input.pullRequest !== undefined) {
+      payload.pullRequest = input.pullRequest;
+      if (!payload.worktree) {
+        payload.worktree = {};
+        if (asNonEmptyString(input.branch)) payload.worktree.branchName = input.branch.trim();
+        if (asNonEmptyString(input.startRef)) payload.worktree.startRef = input.startRef.trim();
+      }
+    }
     const startedAt = now();
     let result;
     if (action === 'session.create') {
@@ -487,7 +621,6 @@ export const createOpenChamberControlService = (dependencies) => {
       }
       parameters.url = parsed.toString();
     }
-
 
     if (action === 'browser.click') {
       const selector = asNonEmptyString(input.selector);
@@ -586,6 +719,9 @@ export const createOpenChamberControlService = (dependencies) => {
       if (!CONTROL_ACTIONS.has(action)) {
         throw new OpenChamberControlError(`Unsupported OpenChamber action: ${action || 'missing'}`, 400);
       }
+      if (OPENCHAMBER_KNOWLEDGE_ACTIONS.includes(action)) {
+        return await knowledgeActions.execute(action, input, contextDirectory, options.contextSessionId);
+      }
       if (action.startsWith('memory.')) {
         if (!agentMemoryActions) {
           throw new OpenChamberControlError('Agent memory is not available on this server', 503);
@@ -613,6 +749,14 @@ export const createOpenChamberControlService = (dependencies) => {
           throw new OpenChamberControlError(result.body.error, result.status);
         }
         return result.body;
+      }
+      if (action === 'render.page') {
+        return await renderPage(input, {
+          sessionId: asNonEmptyString(options.contextSessionId),
+          callId: asNonEmptyString(options.contextCallId),
+          directory: asNonEmptyString(contextDirectory),
+          signal: options.signal,
+        });
       }
       if (action === 'file.open') {
         if (!fileOpen) {
@@ -648,6 +792,12 @@ export const createOpenChamberControlService = (dependencies) => {
             const result = await scheduledTaskService.upsert(projectID, buildScheduledTask(input));
             return { task: result.task, created: result.created };
           }
+          case 'schedule.update': {
+            const existing = (await scheduledTaskService.list(projectID)).find((task) => task.id === taskID);
+            if (!existing) throw new OpenChamberControlError(`Scheduled task not found: ${taskID}`, 404);
+            const result = await scheduledTaskService.upsert(projectID, patchScheduledTask(existing, input));
+            return { task: result.task, updated: true };
+          }
           case 'schedule.run':
             return scheduledTaskService.run(projectID, taskID);
           case 'schedule.delete':
@@ -656,8 +806,9 @@ export const createOpenChamberControlService = (dependencies) => {
             if (typeof input.disabled !== 'boolean') {
               throw new OpenChamberControlError('disabled is required for schedule.toggle', 400);
             }
-            const enabled = input.disabled === false;
-            return { task: await scheduledTaskService.setEnabled(projectID, taskID, enabled), enabled };
+            const task = await scheduledTaskService.setEnabled(projectID, taskID, input.disabled === false);
+            // What was saved, which is what the scheduler acts on.
+            return { task, enabled: task?.enabled === true };
           }
         }
       }
@@ -679,6 +830,27 @@ export const createOpenChamberControlService = (dependencies) => {
         const link = input.link ?? { url: input.url, title: input.title, kind: input.kind, identifier: input.identifier };
         return sessionLinks.link({ sessionId: sessionID, directory, link });
       }
+      if (action === 'session.moveToWorktree') {
+        assertSingleScope(input);
+        // The calling session by default: the agent moves its own work.
+        const explicitSessionID = asNonEmptyString(input.sessionId);
+        const sessionID = explicitSessionID || asNonEmptyString(options.contextSessionId);
+        if (!sessionID) throw new OpenChamberControlError('sessionId is required', 400);
+        // Where the session lives now, which is where the changes are taken
+        // from; never a directory of the caller's choosing, so the action
+        // cannot carry away another checkout's changes.
+        const directory = (await resolveSessionDirectory(sessionID)) || asNonEmptyString(contextDirectory);
+        const worktree = { name: asNonEmptyString(input.worktree)?.trim() };
+        const branch = asNonEmptyString(input.branch);
+        if (branch) worktree.branchName = branch.trim();
+        const startRef = asNonEmptyString(input.startRef);
+        if (startRef) worktree.startRef = startRef.trim();
+        const existingBranch = asNonEmptyString(input.existingBranch);
+        if (existingBranch) worktree.existingBranch = existingBranch.trim();
+        const payload = { worktree };
+        if (directory) payload.directory = directory;
+        return sessionService.moveToWorktree(sessionID, payload);
+      }
       if (action.startsWith('session.')) {
         const sessionID = asNonEmptyString(input.sessionId);
         if (action !== 'session.list' && !sessionID) throw new OpenChamberControlError('sessionId is required', 400);
@@ -686,15 +858,42 @@ export const createOpenChamberControlService = (dependencies) => {
         const client = await getClient(directory);
         if (action === 'session.list') {
           const limit = positiveInteger(input.limit, 10, 'limit');
-          const response = await client.session.list(directory ? { directory } : {});
-          // Archive is OpenChamber state; overlay it so callers keep reading
-          // it off the session the way OpenCode used to report it.
-          let sessions = await Promise.all((Array.isArray(response?.data) ? response.data : []).map(async (session) => {
-            const archived = await archivedAt(session?.id);
-            return archived ? { ...session, time: { ...session.time, archived } } : session;
-          }));
-          if (input.all !== true) sessions = sessions.filter((session) => !session?.time?.archived);
-          sessions = sessions.slice(0, limit);
+          // Session reads are cursor-paginated: one upstream page is not the
+          // collection. Collect only until the limit is satisfied, skip ids a
+          // repeated page already contributed, and stop on a cursor seen twice
+          // so a pathological server cannot spin the walk.
+          const collected = [];
+          const seenCursors = new Set();
+          const seenSessionIds = new Set();
+          let cursor;
+          for (;;) {
+            const listInput = {};
+            if (directory) listInput.directory = directory;
+            if (cursor) listInput.cursor = cursor;
+            const response = await client.session.list(listInput);
+            // Archive is OpenChamber state; overlay it so callers keep reading
+            // it off the session the way OpenCode used to report it.
+            const page = await Promise.all((Array.isArray(response?.data) ? response.data : []).map(async (session) => {
+              const archived = await archivedAt(session?.id);
+              return archived ? { ...session, time: { ...session.time, archived } } : session;
+            }));
+            for (const session of page) {
+              const id = asNonEmptyString(session?.id);
+              if (id) {
+                if (seenSessionIds.has(id)) continue;
+                seenSessionIds.add(id);
+              }
+              if (input.all !== true && session?.time?.archived) continue;
+              collected.push(session);
+              if (collected.length >= limit) break;
+            }
+            if (collected.length >= limit) break;
+            const next = asNonEmptyString(response?.cursor?.next);
+            if (!next || page.length === 0 || seenCursors.has(next)) break;
+            seenCursors.add(next);
+            cursor = next;
+          }
+          let sessions = collected.slice(0, limit);
           if (input.withStatus === true) {
             // One global call now: v2 reports active sessions across directories.
             const statuses = await activeSessions(client).catch(() => null);
@@ -732,5 +931,7 @@ export const createOpenChamberControlService = (dependencies) => {
   // The managed agent-tool plugin can no longer report the session's directory
   // (v2 dropped `context.directory` from a tool call), so it sends the session
   // id and the directory is resolved here, where it is authoritative.
-  return { execute, resolveSessionDirectory };
+  // `answerPage` is the chat's side of a page that waits (render.page with
+  // awaitAnswer).
+  return { execute, resolveSessionDirectory, answerPage: pageAnswers.answer };
 };

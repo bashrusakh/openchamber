@@ -45,14 +45,6 @@ const PROMPT_PAGE_MAP: Record<string, PromptPageConfig> = {
       { id: 'git.pr.generate.instructions', titleKey: 'settings.magicPrompts.page.block.instructions' },
     ],
   },
-  'linear.issue.review': {
-    titleKey: 'settings.magicPrompts.page.group.linearIssueReview.title',
-    descriptionKey: 'settings.magicPrompts.page.group.linearIssueReview.description',
-    blocks: [
-      { id: 'linear.issue.review.visible', titleKey: 'settings.magicPrompts.page.block.visiblePrompt' },
-      { id: 'linear.issue.review.instructions', titleKey: 'settings.magicPrompts.page.block.instructions' },
-    ],
-  },
   'git.conflict.resolve': {
     titleKey: 'settings.magicPrompts.page.group.gitConflictResolve.title',
     descriptionKey: 'settings.magicPrompts.page.group.gitConflictResolve.description',
@@ -164,6 +156,14 @@ const PROMPT_PAGE_MAP: Record<string, PromptPageConfig> = {
       { id: 'session.fusion.visible', titleKey: 'settings.magicPrompts.page.block.visiblePrompt' },
       { id: 'session.fusion.instructions', titleKey: 'settings.magicPrompts.page.block.instructions' },
       { id: 'session.fusion.codeInstructions', titleKey: 'settings.magicPrompts.page.block.codeFusionInstructions' },
+    ],
+  },
+  'memory.tidy': {
+    titleKey: 'settings.magicPrompts.page.group.memoryTidy.title',
+    descriptionKey: 'settings.magicPrompts.page.group.memoryTidy.description',
+    blocks: [
+      { id: 'memory.tidy.visible', titleKey: 'settings.magicPrompts.page.block.visiblePrompt' },
+      { id: 'memory.tidy.instructions', titleKey: 'settings.magicPrompts.page.block.instructions' },
     ],
   },
 };

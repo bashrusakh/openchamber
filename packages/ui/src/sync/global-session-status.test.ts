@@ -258,6 +258,14 @@ describe("background subagent keeps its parent's turn open", () => {
     expect(timing().settledMs.has("parent")).toBe(true)
   })
 
+  test("a caller can resolve nested lineage without changing the display resolver", () => {
+    const parents = new Map([["grandchild", "nested-child"], ["nested-child", "nested-parent"]])
+    const active = new Set(["grandchild"])
+    expect(hasActiveSubagent("nested-parent", active, (id) => parents.get(id))).toBe(true)
+    expect(hasActiveSubagent("nested-parent", active)).toBe(false)
+    expect(hasActiveSubagent("parent", new Set(["child"]))).toBe(true)
+  })
+
   test("a subagent ending while the parent runs again leaves the parent's timer alone", () => {
     applyGlobalSessionStatusEvents("/repo", [busy("parent"), busy("child")])
     applyGlobalSessionStatusEvents("/repo", [idle("parent")])
@@ -282,7 +290,7 @@ describe("a background command keeps its session's turn open", () => {
     type: "shell.started",
     properties: { shell: { id: "sh_1", sessionID: "session", command: "sleep 300", file: "/tmp/sh_1.out", startedAt: 1 } },
   }
-  const ended: SyncEvent = { type: "shell.ended", properties: { shellID: "sh_1" } }
+  const ended: SyncEvent = { type: "shell.ended", properties: { shellID: "sh_1", end: { kind: "exited", status: "exited", exit: 0 }, endedAt: 2 } }
   const timing = () => useSessionActivityTimingStore.getState()
 
   beforeEach(() => resetBackgroundShells())

@@ -103,6 +103,23 @@ function canonicalMutationOptions(overrides = {}) {
     ready: vi.fn(async () => ({ ready: true })),
     reconcileCreate: vi.fn(async () => ({ state: 'succeeded', result: {} })),
     reconcileExisting: vi.fn(async () => ({ state: 'outcome-unknown' })),
+    comment: vi.fn(async () => undefined),
+    commentIssue: vi.fn(async () => undefined),
+    review: vi.fn(async () => ({ commented: true })),
+    setPullState: vi.fn(async (payload) => ({ state: payload.state })),
+    setIssueState: vi.fn(async (payload) => ({ state: payload.state })),
+    reconcileState: vi.fn(async (_target, _kind, state) => ({ state: 'succeeded', result: { state } })),
+    setLabels: vi.fn(async () => ({})),
+    setReviewers: vi.fn(async () => ({})),
+    startThread: vi.fn(async () => ({})),
+    replyToThread: vi.fn(async () => ({})),
+    resolveThread: vi.fn(async () => ({})),
+    listLabels: vi.fn(async () => [{ name: 'bug', color: 'd73a4a' }]),
+    listReviewers: vi.fn(async () => [{ id: '7', login: 'ann' }]),
+    resolveIssue: vi.fn(async (context) => ({
+      providerTarget: { projectId: '2', number: context.target.number },
+      target: { repositoryId: target.repositoryId, bindingRevision: target.bindingRevision, primaryRemote: target.primaryRemote, project: target.project, number: context.target.number },
+    })),
   };
   const service = {
     resolveCreateMutation: calls.resolveCreate,
@@ -117,6 +134,22 @@ function canonicalMutationOptions(overrides = {}) {
     readyChangeRequest: calls.ready,
     reconcileCreateMutation: calls.reconcileCreate,
     reconcileChangeRequestMutation: calls.reconcileExisting,
+    commentChangeRequest: calls.comment,
+    commentIssue: calls.commentIssue,
+    reviewChangeRequest: calls.review,
+    resolveIssueMutation: calls.resolveIssue,
+    setChangeRequestState: calls.setPullState,
+    setIssueState: calls.setIssueState,
+    reconcileStateMutation: calls.reconcileState,
+    setLabels: calls.setLabels,
+    setReviewers: calls.setReviewers,
+    reconcileSetMutation: vi.fn(async () => ({ state: 'outcome-unknown' })),
+    startThread: calls.startThread,
+    replyToThread: calls.replyToThread,
+    resolveThread: calls.resolveThread,
+    reconcileThreadResolve: vi.fn(async () => ({ state: 'succeeded', result: {} })),
+    listLabels: calls.listLabels,
+    listReviewerCandidates: calls.listReviewers,
   };
   return {
     account,
@@ -403,6 +436,124 @@ describe('GitLab routes', () => {
     expect(setup.calls.create).toHaveBeenCalledOnce();
   });
 
+  it('comments, reviews and comments on issues through the canonical executor', async () => {
+    const setup = canonicalMutationOptions();
+    const app = appWith(setup.options);
+    const existing = (key, number, extra = {}) => ({
+      ...mutationBody({ idempotencyKey: key, target: { project: { owner: 'team', name: 'repo' }, number, ...extra } }),
+    });
+
+    const commented = await request(app).post('/api/source-control/gitlab/pr/comment')
+      .send({ ...existing('comment-one', 5), body: 'Looks good' }).expect(200);
+    const reviewed = await request(app).post('/api/source-control/gitlab/pr/review')
+      .send({ ...existing('review-one', 5, { headSha: 'abc' }), verdict: 'request-changes', body: 'Rename it' }).expect(200);
+    const issue = await request(app).post('/api/source-control/gitlab/issues/comment')
+      .send({ ...existing('issue-one', 3), body: 'On it' }).expect(200);
+
+    expect(commented.body.result).toEqual({});
+    expect(reviewed.body.result).toEqual({ commented: true });
+    expect(issue.body.target).toMatchObject({ number: 3 });
+    expect(setup.calls.comment).toHaveBeenCalledWith({ providerTarget: { projectId: '2', number: 5 }, body: 'Looks good' });
+    expect(setup.calls.review).toHaveBeenCalledWith(expect.objectContaining({
+      verdict: 'request-changes', body: 'Rename it', expectedTarget: expect.objectContaining({ number: 5, headSha: 'abc' }),
+    }));
+    expect(setup.calls.commentIssue).toHaveBeenCalledWith({ providerTarget: { projectId: '2', number: 3 }, body: 'On it' });
+    expect(setup.calls.resolveIssue).toHaveBeenCalledOnce();
+
+    await request(app).post('/api/source-control/gitlab/pr/comment').send({ ...existing('comment-two', 5), body: ' ' }).expect(400);
+    await request(app).post('/api/source-control/gitlab/pr/review').send({ ...existing('review-two', 5, { headSha: 'abc' }), verdict: 'merge' }).expect(400);
+    await request(app).post('/api/source-control/gitlab/pr/review').send({ ...existing('review-three', 5), verdict: 'approve' }).expect(400);
+    expect(setup.calls.review).toHaveBeenCalledOnce();
+    expect(setup.calls.comment).toHaveBeenCalledOnce();
+  });
+
+  it('starts, answers and resolves merge request threads through the canonical executor', async () => {
+    const setup = canonicalMutationOptions();
+    const app = appWith(setup.options);
+    const existing = (key) => mutationBody({ idempotencyKey: key, target: { project: { owner: 'team', name: 'repo' }, number: 5 } });
+    const providerTarget = { projectId: '2', number: 5 };
+
+    await request(app).post('/api/source-control/gitlab/pr/thread/start').send({ ...existing('thread-one'), body: 'Please rename' }).expect(200);
+    await request(app).post('/api/source-control/gitlab/pr/thread/reply').send({ ...existing('thread-two'), threadId: 'abc123', body: 'Done' }).expect(200);
+    await request(app).post('/api/source-control/gitlab/pr/thread/resolve').send({ ...existing('thread-three'), threadId: 'abc123', resolved: true }).expect(200);
+
+    expect(setup.calls.startThread).toHaveBeenCalledWith({ providerTarget, body: 'Please rename' });
+    expect(setup.calls.replyToThread).toHaveBeenCalledWith({ providerTarget, threadId: 'abc123', body: 'Done' });
+    expect(setup.calls.resolveThread).toHaveBeenCalledWith({ providerTarget, threadId: 'abc123', resolved: true });
+
+    await request(app).post('/api/source-control/gitlab/pr/thread/reply').send({ ...existing('thread-four'), threadId: '../x', body: 'Done' }).expect(400);
+    await request(app).post('/api/source-control/gitlab/pr/thread/resolve').send({ ...existing('thread-five'), threadId: 'abc123' }).expect(400);
+    expect(setup.calls.replyToThread).toHaveBeenCalledOnce();
+    expect(setup.calls.resolveThread).toHaveBeenCalledOnce();
+  });
+
+  it('closes and reopens through the canonical executor and reconciles by state after a restart', async () => {
+    let failCompletion = false;
+    const mutationStore = makeMutationStore([], async () => {
+      if (failCompletion) {
+        failCompletion = false;
+        throw new Error('disk unavailable');
+      }
+    });
+    const setup = canonicalMutationOptions({ mutationExecutor: createMutationExecutor({ store: mutationStore }) });
+    const app = appWith(setup.options);
+    const pull = { ...mutationBody({ idempotencyKey: 'state-one', target: { project: { owner: 'team', name: 'repo' }, number: 5 } }), state: 'closed' };
+    const issue = { ...mutationBody({ idempotencyKey: 'state-two', target: { project: { owner: 'team', name: 'repo' }, number: 3 } }), state: 'open' };
+
+    const closed = await request(app).post('/api/source-control/gitlab/pr/state').send(pull).expect(200);
+    failCompletion = true;
+    await request(app).post('/api/source-control/gitlab/issues/state').send(issue).expect(409);
+    setup.options.mutationExecutor = createMutationExecutor({ store: mutationStore });
+    const recovered = await request(appWith(setup.options)).post('/api/source-control/gitlab/issues/state').send(issue).expect(200);
+    await request(app).post('/api/source-control/gitlab/pr/state').send({ ...pull, idempotencyKey: 'state-three', state: 'merged' }).expect(400);
+
+    expect(closed.body.result).toEqual({ state: 'closed' });
+    expect(recovered.body).toMatchObject({ replayed: true, result: { state: 'open' } });
+    expect(setup.calls.setPullState).toHaveBeenCalledWith(expect.objectContaining({ state: 'closed', providerTarget: { projectId: '2', number: 5 } }));
+    expect(setup.calls.setIssueState).toHaveBeenCalledOnce();
+    expect(setup.calls.reconcileState).toHaveBeenCalledWith({ projectId: '2', number: 3 }, 'issue-state', 'open');
+  });
+
+  it('sets labels and reviewers as sorted sets and reads the choices for the pickers', async () => {
+    const setup = canonicalMutationOptions();
+    const app = appWith(setup.options);
+    const target = (number) => ({ project: { owner: 'team', name: 'repo' }, number });
+
+    await request(app).post('/api/source-control/gitlab/pr/labels')
+      .send({ ...mutationBody({ idempotencyKey: 'labels-one', target: target(5) }), labels: ['docs', 'bug', 'bug'] }).expect(200);
+    await request(app).post('/api/source-control/gitlab/issues/labels')
+      .send({ ...mutationBody({ idempotencyKey: 'labels-two', target: target(3) }), labels: [] }).expect(200);
+    await request(app).post('/api/source-control/gitlab/pr/reviewers')
+      .send({ ...mutationBody({ idempotencyKey: 'reviewers-one', target: target(5) }), reviewers: ['9', '7'] }).expect(200);
+    await request(app).post('/api/source-control/gitlab/pr/reviewers')
+      .send({ ...mutationBody({ idempotencyKey: 'reviewers-two', target: target(5) }), reviewers: ['ann'] }).expect(400);
+
+    expect(setup.calls.setLabels).toHaveBeenNthCalledWith(1, expect.objectContaining({ kind: 'change-request-labels', labels: ['bug', 'docs'] }));
+    expect(setup.calls.setLabels).toHaveBeenNthCalledWith(2, expect.objectContaining({ kind: 'issue-labels', labels: [], providerTarget: { projectId: '2', number: 3 } }));
+    expect(setup.calls.setReviewers).toHaveBeenCalledOnce();
+    expect(setup.calls.setReviewers).toHaveBeenCalledWith(expect.objectContaining({ reviewers: ['7', '9'] }));
+
+    const read = { instance: origin, directory: '/repo', repositoryId: 'repo_one', accountId: `${origin}#9`, bindingRevision: 3, primaryRemote: 'origin', owner: 'team', repo: 'repo' };
+    const labels = await request(app).get('/api/source-control/gitlab/references/labels').query(read).expect(200);
+    const reviewers = await request(app).get('/api/source-control/gitlab/references/reviewers').query(read).expect(200);
+    expect(labels.body).toEqual({ connected: true, items: [{ name: 'bug', color: 'd73a4a' }] });
+    expect(reviewers.body).toEqual({ connected: true, items: [{ id: '7', login: 'ann' }] });
+    expect(setup.calls.listLabels).toHaveBeenCalledWith('/repo', { owner: 'team', name: 'repo' }, 'origin');
+  });
+
+  it('never posts a comment twice when its outcome was lost', async () => {
+    const setup = canonicalMutationOptions();
+    setup.calls.comment.mockRejectedValueOnce(Object.assign(new Error('socket closed'), { code: 'ECONNRESET' }));
+    const app = appWith(setup.options);
+    const body = { ...mutationBody({ target: { project: { owner: 'team', name: 'repo' }, number: 5 } }), body: 'Looks good' };
+
+    await request(app).post('/api/source-control/gitlab/pr/comment').send(body).expect(409);
+    const replay = await request(app).post('/api/source-control/gitlab/pr/comment').send(body).expect(409);
+
+    expect(replay.body.code).toBe('SOURCE_CONTROL_MUTATION_OUTCOME_UNKNOWN');
+    expect(setup.calls.comment).toHaveBeenCalledOnce();
+  });
+
   it('reconciles a durable create after restart without repeating the write', async () => {
     let failCompletion = true;
     const mutationStore = makeMutationStore([], async () => {
@@ -497,6 +648,38 @@ describe('GitLab routes', () => {
       .query({ instance: origin, directory: '/repo' }).expect(501);
     await request(app).get('/api/source-control/gitlab/repo/branches')
       .query({ instance: origin, directory: '/repo', owner: 'team', repo: 'repo' }).expect(501);
+  });
+
+  it('streams a picture or a clip attached on GitLab, and nothing a page could run from', async () => {
+    const account = { id: `${origin}#9`, token: 'stored', user: { id: 9, login: 'user' }, source: 'pat', scope: '' };
+    const secret = '66dbcd21ec5d24ed6ea225176098d52b';
+    const readUpload = vi.fn(async (_directory, _project, _remote, { filename }) => (filename === 'page.html'
+      ? new Response('<script>alert(1)</script>', { headers: { 'content-type': 'text/html' } })
+      : new Response('clip', { status: 206, headers: { 'content-type': 'video/mp4', 'content-range': 'bytes 0-3/9' } })));
+    const app = appWith({ store: makeStore(account), createResourceService: vi.fn(() => ({ readUpload })) });
+    const query = {
+      instance: origin, directory: '/repo', repositoryId: 'repo_one', bindingRevision: 3,
+      accountId: account.id, primaryRemote: 'origin', owner: 'team', repo: 'repo',
+    };
+
+    const uploads = '/api/source-control/gitlab/uploads';
+    const clip = await request(app).get(`${uploads}/${secret}/demo%20clip.mp4`)
+      .query(query).set('range', 'bytes=0-3').expect(206);
+    expect(clip.headers['content-type']).toBe('video/mp4');
+    expect(clip.headers['content-range']).toBe('bytes 0-3/9');
+    expect(clip.headers['content-security-policy']).toContain('sandbox');
+    expect(readUpload).toHaveBeenCalledWith('/repo', { owner: 'team', name: 'repo' }, 'origin', expect.objectContaining({
+      secret, filename: 'demo clip.mp4', range: 'bytes=0-3',
+    }));
+
+    await request(app).get(`${uploads}/${secret}/page.html`).query(query).expect(415);
+    await request(app).get(`${uploads}/short/x.png`).query(query).expect(400);
+    await request(app).get(`${uploads}/${secret}/a%2Fb.png`).query(query).expect(400);
+    // Clients may resolve `..` before sending; either way GitLab is not asked.
+    const parent = await request(app).get(`${uploads}/${secret}/%2E%2E`).query(query);
+    expect(parent.status).toBeGreaterThanOrEqual(400);
+    await request(app).get(`${uploads}/${secret}/x.png`).query({ ...query, owner: '' }).expect(400);
+    expect(readUpload).toHaveBeenCalledTimes(2);
   });
 
   it('uses matching bound context and rejects it before provider creation when stale', async () => {
@@ -638,10 +821,11 @@ describe('GitLab routes', () => {
 
     expect(createClient).toHaveBeenCalledTimes(2);
     expect(createClient).toHaveBeenCalledWith({ origin, token: 'bound-token', tokenType: 'oauth' });
-    expect(listChangeRequests).toHaveBeenCalledWith('/repo', { page: 1, query: undefined, remote: 'upstream' });
+    expect(listChangeRequests).toHaveBeenCalledWith('/repo', { page: 1, query: undefined, state: 'open', people: 'any', remote: 'upstream' });
     expect(changeRequestContext).toHaveBeenCalledWith('/repo', 5, {
       includeDiff: true,
       includeCIDetails: true,
+      includeTimeline: false,
       project: { owner: 'team', name: 'repo' },
       remote: 'upstream',
       constrainToPrimary: true,
@@ -715,7 +899,7 @@ describe('GitLab routes', () => {
     expect(createClient).toHaveBeenCalledTimes(5);
     expect(createClient).toHaveBeenCalledWith({ origin, token: 'bound-token', tokenType: 'oauth' });
     expect(createResourceService).toHaveBeenCalledWith(expect.objectContaining({ canonicalReads: true }));
-    expect(listIssues).toHaveBeenCalledWith('/repo', { page: 2, query: 'bug', remote: 'upstream' });
+    expect(listIssues).toHaveBeenCalledWith('/repo', { page: 2, query: 'bug', state: 'open', people: 'any', remote: 'upstream' });
     expect(getIssue).toHaveBeenCalledWith('/repo', 3, { owner: 'team', name: 'repo' }, 'upstream');
     expect(issueComments).toHaveBeenCalledWith('/repo', 3, { owner: 'team', name: 'repo' }, 'upstream');
     expect(projectUpstream).toHaveBeenCalledWith('/repo', 'upstream');
@@ -826,6 +1010,8 @@ describe('GitLab routes', () => {
       account: { provider: 'gitlab', instance: origin, accountId: `${origin}#9` },
       user: expect.objectContaining({ id: 9 }),
       renews: [],
+      // Who the account is, so bindings left on this user's gone account move to it.
+      credential: { credentialRevision: 1, providerUserId: `${origin}#9` },
     });
     const response = await request(app).get('/api/source-control/gitlab/issues/list')
       .query({ instance: origin, directory: '/repo' }).expect(200);
@@ -1083,5 +1269,64 @@ describe('GitLab routes', () => {
       .send({ accountId: `${origin}#cli:${available.body.cli.user.id}` }).expect(200);
     const active = await request(app).get('/api/source-control/gitlab/auth/status').query({ instance: origin }).expect(200);
     expect(active.body).toMatchObject({ connected: true, cli: { available: true, active: true } });
+  });
+});
+
+
+describe('merge request head for a worktree made by number', () => {
+  const account = { id: `${origin}#2`, token: 'bound-token', user: { id: 2 }, source: 'oauth', scope: 'api', status: 'valid' };
+  const register = (changeRequest, store = makeStore(account)) => {
+    const changeRequestContext = vi.fn(async () => ({ changeRequest }));
+    const gitlab = registerGitLabRoutes(express(), {
+      authFile: '/unused/source-control-auth.json',
+      execFile: async () => ({ stdout: '' }),
+      store,
+      createClient: vi.fn(() => ({})),
+      createResourceService: vi.fn(() => ({ changeRequestContext })),
+      validateReadContext: async (context) => ({ ...context, primaryRemote: 'upstream' }),
+    });
+    return { gitlab, changeRequestContext };
+  };
+  const context = {
+    provider: 'gitlab', instance: origin, directory: '/repo', repositoryId: 'repo_one',
+    accountId: account.id, bindingRevision: 3, primaryRemote: 'upstream',
+  };
+
+  it('answers the active account, and none once it is invalid', async () => {
+    const store = makeStore(account);
+    const { gitlab } = register(null, store);
+    await expect(gitlab.readCurrentAccountId(origin)).resolves.toBe(account.id);
+    await store.markAccountInvalid(origin, account.id);
+    await expect(gitlab.readCurrentAccountId(origin)).resolves.toBeNull();
+  });
+
+  it('falls back to the active account when the glab login it was switched to stopped working', async () => {
+    const store = makeStore(account);
+    await store.setCliActive(origin, true);
+    const { gitlab } = register(null, store);
+    await expect(gitlab.readCurrentAccountId(origin)).resolves.toBe(account.id);
+  });
+
+  it('reads the target project and the fork head on the primary project network', async () => {
+    const { gitlab, changeRequestContext } = register({
+      number: 7, head: 'feature/fix', headSha: 'C'.repeat(40),
+      project: { id: '11', owner: 'team', name: 'repo' },
+      headProject: { id: '22', owner: 'alice', name: 'repo' },
+    });
+
+    await expect(gitlab.readChangeRequestHead({ context, number: 7 })).resolves.toEqual({
+      project: { id: '11', owner: 'team', name: 'repo' },
+      headSha: 'c'.repeat(40),
+      headBranch: 'feature/fix',
+      headOwner: 'alice',
+    });
+    expect(changeRequestContext).toHaveBeenCalledExactlyOnceWith('/repo', 7, { remote: 'upstream', constrainToPrimary: true });
+  });
+
+  it('refuses a merge request answer without a usable head', async () => {
+    const { gitlab } = register({ number: 7, head: 'feature/fix', headSha: '', project: { id: '11', owner: 'team', name: 'repo' } });
+
+    await expect(gitlab.readChangeRequestHead({ context, number: 7 }))
+      .rejects.toMatchObject({ code: 'MALFORMED_PROVIDER_RESPONSE' });
   });
 });

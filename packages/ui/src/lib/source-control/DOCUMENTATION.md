@@ -14,6 +14,9 @@ performs its own fresh safety reads through RuntimeAPIs, outside this UI owner.
 - `idle`, `loading`, `ready`, `stale` and `error` distinguish an unresolved read, an actual
   request, successful empty binding and failure. Refresh failure retains the last
   complete `read` as stale, along with the original Error and its metadata.
+- A read of a worktree whose checkout is still running waits for its `git-ready`
+  phase first and stays `loading` meanwhile. Reading earlier fails, and that
+  error would stay until a manual retry. A failed checkout settles as `error`.
 - `contexts` grants provider-read demand only while the owner read is ready and
   the selected association's readiness is `ready` with a matching approved fetch
   fingerprint. Aggregate `needs-attention` does not suppress healthy siblings.
@@ -79,7 +82,7 @@ Anonymous HTTPS is a transport an identity may carry; identity pickers label it 
 
 ## Managed SSH onboarding
 
-`ManagedSshCredentials.tsx` is the key picker inside the identity editor — the one place a managed SSH key is chosen — through the optional `GitAPI.managedSshCredentials` operation. It starts no inventory, discovery, import, or provider authentication on mount. Explicit inventory returns safe labels, public fingerprints and opaque managed references. Explicit discovery returns short-lived opaque candidates from the connected server. Ready candidates show their exact fingerprint, require a keyboard/touch-capable confirmation checkbox, and keep Import disabled until confirmation. Import selects the returned managed credential in the current local draft when a selector is present, but never saves a repository grant, binds a provider, or changes author identity. Transport Save or clone execution remains the separate authorization action.
+`ManagedSshCredentials.tsx` is the key picker inside the identity editor — the one place a managed SSH key is chosen — through the optional `GitAPI.managedSshCredentials` operation. The editor mounts it only while the SSH method is chosen, and mounting reads the inventory so the saved key can be named; it starts no discovery, import, or provider authentication on mount. The editor draws the field's label, so the picker renders only the control column. Inventory returns safe labels, public fingerprints and opaque managed references. Explicit discovery returns short-lived opaque candidates from the connected server. Ready candidates show their exact fingerprint, require a keyboard/touch-capable confirmation checkbox, and keep Import disabled until confirmation. Import selects the returned managed credential in the current local draft when a selector is present, but never saves a repository grant, binds a provider, or changes author identity. Transport Save or clone execution remains the separate authorization action.
 
 Reads distinguish failure from empty success. Failed operations retain data but disable stale inventory selection; explicit buttons remain available for retry. Typed expiry, source-change, mismatch, unavailable, and capacity rejections tell the user to rediscover or repair host state. Runtime-will-change and unmount invalidate pending inventory, discovery, and import results. Runtime changes clear candidates, confirmation, and selection without loading the new host automatically.
 
@@ -114,10 +117,18 @@ repository as it is signed today, its own local author included, and writes
 nothing unless the person picked an identity themselves: adding a directory
 never rewrites an author or binds an account on its own.
 
-Applying an identity grants every remote it can serve, so a fork answers
-beside its upstream without being named twice; an address the identity cannot
+Applying an identity grants its own remote; every other remote follows it
+through a grant the server derives on each read and transfer (`inherited: true`
+on the binding read, never persisted): all of them for the System identity,
+those on the identity's host and protocol for any other, so a fork answers
+beside its upstream without being named twice and a remote added later is
+covered too. Applying an identity removes grants an earlier identity saved on
+other remotes so they follow the new one. An address the identity cannot
 reach — another instance, a scheme its transport does not speak — keeps no
-grant and is offered in the repository configuration. System Git needs no
+grant and is offered in the repository configuration with a choice of the
+identities that can reach it; a remote's own grant wins over the derived one.
+A new branch is pushed to the identity's remote unless someone picks another
+in the publish dialog. System Git needs no
 confirmation: it is what a repository uses until something else is chosen.
 Git in a terminal or the agent's shell follows the same grants through the
 repository's own `.git/config`, which the server writes; the UI records no
@@ -261,12 +272,14 @@ storage context.
 
 ## Tests
 
-`repository-binding.test.ts` covers deferred failure, successful empty, concurrent
+`repository-binding.test.ts` covers deferred failure, successful empty, a read
+waiting for a worktree checkout, concurrent
 demand, mutation overlays, aliases, scope invalidation, conflict reconciliation
 and retention. The 100-consumer regression permits one initial request and no
 additional requests or notifications for 10,000 warm snapshot reads.
 `applyIdentity.test.ts` covers the provider/transport/author writes an identity
-produces, that every remote the identity can serve follows it, and instance and scheme applicability;
+produces, that grants an earlier identity saved on other remotes are removed so
+they follow the new one, and instance and scheme applicability;
 `identity.test.ts` covers remote traits and host proposal. Account cases in
 `sourceControlOAuthPolling.test.tsx` cover localized retry and runtime switching.
 These tests do not validate a packaged runtime, real credentials or browser paint.

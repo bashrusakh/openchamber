@@ -10,6 +10,8 @@ import { useGitStatus, useGitBranches, useGitStore, useIsGitRepo } from '@/store
 import { useShallow } from 'zustand/react/shallow';
 import { getRootBranch } from '@/lib/worktrees/worktreeStatus';
 import { useI18n } from '@/lib/i18n';
+import { changeRequestCopy } from '@/lib/source-control/changeRequestCopy';
+import { useRepositoryHost } from '@/components/references/referenceSources';
 import { normalizePath } from '@/lib/pathNormalization';
 import { ScrollShadow } from '@/components/ui/ScrollShadow';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
@@ -171,12 +173,15 @@ export const PullRequestView: React.FC = () => {
     worktreeMetadata?.createdFromBranch,
   ]);
 
+  // Empty states name the host's own kind of change request.
+  const repositoryProvider = useRepositoryHost(currentDirectory ?? null)?.provider;
+
   if (!currentDirectory) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
         <Icon name="git-pull-request" className="h-12 w-12 text-muted-foreground/50" />
-        <div className="typography-ui-header text-foreground">{t('gitView.pullRequest.title')}</div>
-        <div className="max-w-sm typography-micro text-muted-foreground">{t('gitView.pullRequest.createHint')}</div>
+        <div className="typography-ui-header text-foreground">{t(changeRequestCopy('gitView.pullRequest.title', repositoryProvider))}</div>
+        <div className="max-w-sm typography-micro text-muted-foreground">{t(changeRequestCopy('gitView.pullRequest.createHint', repositoryProvider))}</div>
       </div>
     );
   }
@@ -187,6 +192,7 @@ export const PullRequestView: React.FC = () => {
   if (rootIsGitRepo === false && isGitRepo !== true) {
     return (
       <NestedRepoResolutionStates
+        root={currentDirectory}
         rootIsGitRepo={rootIsGitRepo}
         resolvedIsGitRepo={isGitRepo}
         nestedRepos={nestedRepos}
@@ -201,8 +207,8 @@ export const PullRequestView: React.FC = () => {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
         <Icon name="git-pull-request" className="h-12 w-12 text-muted-foreground/50" />
-        <div className="typography-ui-header text-foreground">{t('gitView.pullRequest.title')}</div>
-        <div className="max-w-sm typography-micro text-muted-foreground">{t('gitView.pullRequest.createHint')}</div>
+        <div className="typography-ui-header text-foreground">{t(changeRequestCopy('gitView.pullRequest.title', repositoryProvider))}</div>
+        <div className="max-w-sm typography-micro text-muted-foreground">{t(changeRequestCopy('gitView.pullRequest.createHint', repositoryProvider))}</div>
       </div>
     );
   }
@@ -229,7 +235,8 @@ export const PullRequestView: React.FC = () => {
       <ScrollableOverlay
         as={ScrollShadow}
         outerClassName="h-full min-h-0 flex-1"
-        className="px-4 py-3"
+        // The section pads its own form; an open PR's preview fills the panel.
+        className="h-full"
         disableHorizontal
         preventOverscroll
       >
@@ -238,6 +245,7 @@ export const PullRequestView: React.FC = () => {
           branch={currentBranch}
           baseBranch={baseBranch}
           trackingBranch={status?.tracking ?? undefined}
+          ahead={status?.ahead ?? 0}
           remoteBranches={remoteBranches}
         />
       </ScrollableOverlay>

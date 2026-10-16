@@ -1,9 +1,8 @@
 import React from 'react';
-import { cn, fuzzyMatch } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useChatSessionSelection } from './chatColumnSession';
 import { selectCommandsForDirectory, useCommandsStore } from '@/stores/useCommandsStore';
-import { selectSkillsForDirectory, useSkillsStore } from '@/stores/useSkillsStore';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import { Icon } from "@/components/icon/Icon";
@@ -11,11 +10,12 @@ import { useI18n } from '@/lib/i18n';
 import { useUIStore } from '@/stores/useUIStore';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { useMobileAutocompleteMaxHeight } from './useMobileAutocompleteMaxHeight';
-import { commandMatchesSearch, mergeCommandAutocompleteItems } from './commandAutocompleteItems';
+import { mergeCommandAutocompleteItems, rankCommandAutocompleteItems } from './commandAutocompleteItems';
 import { useGuestCommands } from '@/hooks/useGuestSurfaces';
 import { AutocompleteRowTooltip } from './composer/ui/AutocompleteRowTooltip';
 
-type CommandSource = 'openchamber' | 'opencode' | 'skill' | 'extension';
+// Skills are not here: they have their own `$` picker.
+type CommandSource = 'openchamber' | 'opencode' | 'extension';
 
 export interface CommandInfo {
   id: string;
@@ -27,7 +27,6 @@ export interface CommandInfo {
   model?: string;
   isBuiltIn?: boolean;
   isOpenChamber?: boolean;
-  isSkill?: boolean;
   scope?: string;
   /** Name of the extension that contributed the command; shown as its badge. */
   extensionName?: string;
@@ -83,18 +82,13 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
   const isMobile = useUIStore((state) => state.isMobile);
   const canUseReviewHandoffFlow = hasSession && !isMobile && !isVSCodeRuntime();
 
-  const [commands, setCommands] = React.useState<CommandInfo[]>([]);
-  const [loading, setLoading] = React.useState(false);
-  // Commands and skills belong to the directory the composer sends to — the
-  // session's own directory, or the Chats root for a chat draft — not to the
-  // project the app was on last.
+  // Commands belong to the directory the composer sends to — the session's
+  // own directory, or the Chats root for a chat draft — not to the project
+  // the app was on last.
   const effectiveDirectory = useEffectiveDirectory();
   const commandsWithMetadata = useCommandsStore((s) => selectCommandsForDirectory(s, effectiveDirectory));
   const loadCommandsForDirectory = useCommandsStore((s) => s.loadCommands);
-  const skills = useSkillsStore((s) => selectSkillsForDirectory(s, effectiveDirectory));
-  const loadSkillsForDirectory = useSkillsStore((s) => s.loadSkills);
   const refreshCommands = React.useCallback(() => loadCommandsForDirectory(effectiveDirectory), [effectiveDirectory, loadCommandsForDirectory]);
-  const refreshSkills = React.useCallback(() => loadSkillsForDirectory(effectiveDirectory), [effectiveDirectory, loadSkillsForDirectory]);
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const selectedIndexRef = React.useRef(0);
   const keyboardNavigationRef = React.useRef(false);
@@ -126,211 +120,108 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
   React.useEffect(() => {
     // Force refresh to get latest project context when mounting
     void refreshCommands();
-    void refreshSkills();
-  }, [refreshCommands, refreshSkills]);
+  }, [refreshCommands]);
 
   const reservedCommandNames = React.useMemo(() => {
     const names = new Set<string>(LOCAL_COMMAND_NAMES);
     for (const command of commandsWithMetadata) names.add(command.name.toLowerCase());
-    for (const skill of skills) names.add(skill.name.toLowerCase());
     return names;
-  }, [commandsWithMetadata, skills]);
+  }, [commandsWithMetadata]);
   const guestCommands = useGuestCommands(reservedCommandNames);
 
-  React.useEffect(() => {
-    const loadCommands = async () => {
-      setLoading(true);
-      try {
-        const skillNames = new Set(skills.map((skill) => skill.name));
-        const customCommands: CommandInfo[] = commandsWithMetadata.map((cmd, index) => ({
-          id: `opencode:${cmd.scope ?? 'global'}:${cmd.name}:${cmd.agent ?? ''}:${cmd.model ?? ''}:${index}`,
-          name: cmd.name,
-          source: 'opencode',
-          description: cmd.description,
-          agent: cmd.agent ?? undefined,
-          model: cmd.model ?? undefined,
-          isBuiltIn: cmd.name === 'init' || cmd.name === 'review',
-          isSkill: cmd.source === 'skill' || skillNames.has(cmd.name),
-          scope: cmd.scope,
-        }));
-        const skillCommands: CommandInfo[] = skills.map((skill, index) => ({
-          id: `skill:${skill.scope}:${skill.source ?? 'opencode'}:${skill.name}:${index}`,
-          name: skill.name,
-          source: 'skill',
-          description: skill.description,
-          isSkill: true,
-          scope: skill.scope,
-        }));
+  // The list depends on the registries, not on what is typed: it is built
+  // once per registry change, and only the ranking follows the query.
+  const allCommands = React.useMemo<CommandInfo[]>(() => {
+    const customCommands: CommandInfo[] = commandsWithMetadata.map((cmd, index) => ({
+      id: `opencode:${cmd.scope ?? 'global'}:${cmd.name}:${cmd.agent ?? ''}:${cmd.model ?? ''}:${index}`,
+      name: cmd.name,
+      source: 'opencode',
+      description: cmd.description,
+      agent: cmd.agent ?? undefined,
+      model: cmd.model ?? undefined,
+      isBuiltIn: cmd.name === 'init' || cmd.name === 'review',
+      scope: cmd.scope,
+    }));
 
-        const builtInCommands: CommandInfo[] = [
-          ...(hasSession
-            ? [{ id: 'openchamber:init', name: 'init', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.initDescription'), isBuiltIn: true }]
-            : []
-          ),
-          ...(hasSession  // Show when session exists, not when hasMessages
-            ? [
-                { id: 'openchamber:undo', name: 'undo', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.undoDescription'), isBuiltIn: true },
-                { id: 'openchamber:redo', name: 'redo', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.redoDescription'), isBuiltIn: true },
-                { id: 'openchamber:timeline', name: 'timeline', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.timelineDescription'), isBuiltIn: true },
-                { id: 'openchamber:compact', name: 'compact', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.compactDescription'), isBuiltIn: true },
-              ]
-            : []
-          ),
-          ...(hasSession
-            ? [{ id: 'openchamber:btw', name: 'btw', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.btwDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(hasSession
-            ? [{ id: 'openchamber:fork', name: 'fork', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.forkDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(hasSession
-            ? [{ id: 'openchamber:summary', name: 'summary', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.summaryDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:workspace-review', name: 'workspace-review', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.workspaceReviewDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canUseReviewHandoffFlow
-            ? [{ id: 'openchamber:handoff-review', name: 'handoff-review', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.handoffReviewDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:plan-feature', name: 'plan-feature', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.featurePlanDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:craft-goal', name: 'craft-goal', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.craftGoalDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:schedule-task', name: 'schedule-task', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.scheduleTaskDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:catch-up', name: 'catch-up', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.catchUpDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:debug', name: 'debug', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.debugDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:weigh', name: 'weigh', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.weighDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:explore', name: 'explore', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.exploreDescription'), isOpenChamber: true }]
-            : []
-          ),
-        ];
-        const extensionCommands: CommandInfo[] = guestCommands.map((entry) => ({
-          id: `extension:${entry.guestId}:${entry.command.name}`,
-          name: entry.command.name,
-          source: 'extension',
-          description: entry.command.description,
-          extensionName: entry.guestName,
-        }));
-        const allCommands = [
-          ...mergeCommandAutocompleteItems(builtInCommands, customCommands, skillCommands),
-          ...extensionCommands,
-        ];
-
-        const filtered = searchQuery
-          ? allCommands.filter(cmd => commandMatchesSearch(cmd, searchQuery))
-          : allCommands;
-
-        filtered.sort((a, b) => {
-          const aStartsWith = a.name.toLowerCase().startsWith(searchQuery.toLowerCase());
-          const bStartsWith = b.name.toLowerCase().startsWith(searchQuery.toLowerCase());
-          if (aStartsWith && !bStartsWith) return -1;
-          if (!aStartsWith && bStartsWith) return 1;
-          return a.name.localeCompare(b.name);
-        });
-
-        setCommands(filtered);
-      } catch {
-
-        const builtInCommands: CommandInfo[] = [
-          ...(hasSession
-            ? [{ id: 'openchamber:init', name: 'init', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.initDescription'), isBuiltIn: true }]
-            : []
-          ),
-          ...(hasSession  // Show when session exists, not when hasMessages
-            ? [
-                { id: 'openchamber:undo', name: 'undo', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.undoDescription'), isBuiltIn: true },
-                { id: 'openchamber:redo', name: 'redo', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.redoDescription'), isBuiltIn: true },
-                { id: 'openchamber:timeline', name: 'timeline', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.timelineDescription'), isBuiltIn: true },
-              ]
-            : []
-          ),
-          { id: 'openchamber:compact', name: 'compact', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.compactDescription'), isBuiltIn: true },
-          ...(hasSession
-            ? [{ id: 'openchamber:btw', name: 'btw', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.btwDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(hasSession
-            ? [{ id: 'openchamber:fork', name: 'fork', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.forkDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(hasSession
-            ? [{ id: 'openchamber:summary', name: 'summary', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.summaryDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:workspace-review', name: 'workspace-review', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.workspaceReviewDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canUseReviewHandoffFlow
-            ? [{ id: 'openchamber:handoff-review', name: 'handoff-review', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.handoffReviewDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:plan-feature', name: 'plan-feature', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.featurePlanDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:craft-goal', name: 'craft-goal', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.craftGoalDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:schedule-task', name: 'schedule-task', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.scheduleTaskDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:catch-up', name: 'catch-up', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.catchUpDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:debug', name: 'debug', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.debugDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:weigh', name: 'weigh', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.weighDescription'), isOpenChamber: true }]
-            : []
-          ),
-          ...(canStartSessionCommand
-            ? [{ id: 'openchamber:explore', name: 'explore', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.exploreDescription'), isOpenChamber: true }]
-            : []
-          ),
-        ];
-
-        const filtered = searchQuery
-          ? builtInCommands.filter(cmd =>
-              fuzzyMatch(cmd.name, searchQuery) ||
-              (cmd.description && fuzzyMatch(cmd.description, searchQuery))
-            )
-          : builtInCommands;
-
-        setCommands(filtered);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadCommands();
-  }, [searchQuery, hasSession, canStartSessionCommand, canUseReviewHandoffFlow, commandsWithMetadata, guestCommands, skills, t]);
+    const builtInCommands: CommandInfo[] = [
+      ...(hasSession
+        ? [{ id: 'openchamber:init', name: 'init', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.initDescription'), isBuiltIn: true }]
+        : []
+      ),
+      ...(hasSession  // Show when session exists, not when hasMessages
+        ? [
+            { id: 'openchamber:undo', name: 'undo', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.undoDescription'), isBuiltIn: true },
+            { id: 'openchamber:redo', name: 'redo', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.redoDescription'), isBuiltIn: true },
+            { id: 'openchamber:timeline', name: 'timeline', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.timelineDescription'), isBuiltIn: true },
+            { id: 'openchamber:compact', name: 'compact', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.compactDescription'), isBuiltIn: true },
+          ]
+        : []
+      ),
+      ...(hasSession
+        ? [{ id: 'openchamber:btw', name: 'btw', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.btwDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(hasSession
+        ? [{ id: 'openchamber:fork', name: 'fork', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.forkDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(hasSession
+        ? [{ id: 'openchamber:summary', name: 'summary', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.summaryDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(canStartSessionCommand
+        ? [{ id: 'openchamber:workspace-review', name: 'workspace-review', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.workspaceReviewDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(canUseReviewHandoffFlow
+        ? [{ id: 'openchamber:handoff-review', name: 'handoff-review', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.handoffReviewDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(canStartSessionCommand
+        ? [{ id: 'openchamber:plan-feature', name: 'plan-feature', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.featurePlanDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(canStartSessionCommand
+        ? [{ id: 'openchamber:craft-goal', name: 'craft-goal', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.craftGoalDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(canStartSessionCommand
+        ? [{ id: 'openchamber:schedule-task', name: 'schedule-task', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.scheduleTaskDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(canStartSessionCommand
+        ? [{ id: 'openchamber:catch-up', name: 'catch-up', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.catchUpDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(canStartSessionCommand
+        ? [{ id: 'openchamber:debug', name: 'debug', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.debugDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(canStartSessionCommand
+        ? [{ id: 'openchamber:weigh', name: 'weigh', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.weighDescription'), isOpenChamber: true }]
+        : []
+      ),
+      ...(canStartSessionCommand
+        ? [{ id: 'openchamber:explore', name: 'explore', source: 'openchamber' as const, description: t('chat.commandAutocomplete.command.exploreDescription'), isOpenChamber: true }]
+        : []
+      ),
+    ];
+    const extensionCommands: CommandInfo[] = guestCommands.map((entry) => ({
+      id: `extension:${entry.guestId}:${entry.command.name}`,
+      name: entry.command.name,
+      source: 'extension',
+      description: entry.command.description,
+      extensionName: entry.guestName,
+    }));
+    return [
+      ...mergeCommandAutocompleteItems(builtInCommands, customCommands),
+      ...extensionCommands,
+    ];
+  }, [hasSession, canStartSessionCommand, canUseReviewHandoffFlow, commandsWithMetadata, guestCommands, t]);
+  const commands = React.useMemo(
+    () => rankCommandAutocompleteItems(allCommands, searchQuery),
+    [allCommands, searchQuery],
+  );
 
   React.useEffect(() => {
     setSelectedIndex(0);
@@ -413,15 +304,10 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
   return (
     <div
       ref={containerRef}
-      className="absolute z-[100] min-w-0 w-full max-w-[450px] max-h-64 oc-glass-popover border-2 border-border/60 rounded-xl shadow-none bottom-full mb-2 left-0 flex flex-col"
+      className="absolute z-[100] min-w-0 w-full max-w-[450px] max-h-64 oc-glass-popover oc-glass-floating rounded-xl bottom-full mb-2 inset-s-0 flex flex-col"
       style={mobileMaxHeight !== undefined ? { ...style, maxHeight: mobileMaxHeight } : style}
     >
       <ScrollableOverlay preventOverscroll outerClassName="flex-1 min-h-0" className="px-0 pb-2">
-        {loading ? (
-          <div className="flex items-center justify-center py-4">
-            <Icon name="refresh" className="h-4 w-4 animate-spin text-muted-foreground" />
-          </div>
-        ) : (
           <div>
             {commands.map((command, index) => {
               const isSystem = command.isBuiltIn;
@@ -495,15 +381,9 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="typography-ui-label font-medium">/{command.name}</span>
-                      {command.isSkill ? (
-                        <span className={TYPE_BADGE_CLASS}>
-                          {t('chat.commandAutocomplete.badge.skill')}
-                        </span>
-                      ) : (
-                        <span className={TYPE_BADGE_CLASS}>
-                          {t('chat.commandAutocomplete.badge.command')}
-                        </span>
-                      )}
+                      <span className={TYPE_BADGE_CLASS}>
+                        {t('chat.commandAutocomplete.badge.command')}
+                      </span>
                       {command.extensionName ? (
                         <span className={NEUTRAL_BADGE_CLASS}>
                           {command.extensionName}
@@ -538,7 +418,6 @@ export const CommandAutocomplete = React.forwardRef<CommandAutocompleteHandle, C
               </div>
             )}
           </div>
-        )}
       </ScrollableOverlay>
       {!isMobile && (
         <div className="px-3 pt-1 pb-1.5 border-t typography-meta text-muted-foreground">

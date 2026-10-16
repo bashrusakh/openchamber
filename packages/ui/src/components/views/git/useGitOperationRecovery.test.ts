@@ -118,7 +118,7 @@ const withoutSubtle = async <T>(run: () => Promise<T>): Promise<T> => {
   const real = globalThis.crypto;
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
   const stub = {
-    getRandomValues: <A extends ArrayBufferView>(array: A): A => real.getRandomValues(array),
+    getRandomValues: <A extends ArrayBufferView<ArrayBuffer>>(array: A): A => real.getRandomValues(array),
     randomUUID: () => real.randomUUID(),
   };
   Object.defineProperty(globalThis, 'crypto', { configurable: true, writable: true, value: stub });
@@ -190,7 +190,6 @@ describe('mounted Git action recovery', () => {
     const handle = fixture.start();
     act(() => {
       handle.onOperation({ runtimeKey, operation: plan, availability: 'available' });
-      handle.commitCreated();
       handle.finish();
     });
     expect(fixture.recovery.blocked).toBe(true);
@@ -198,13 +197,11 @@ describe('mounted Git action recovery', () => {
     fixture.setOffline(true);
     await act(async () => { await fixture.recovery.refresh(); });
     expect(fixture.recovery.entry?.reads[0].availability).toBe('unavailable');
-    expect(fixture.recovery.entry?.localCommit).toBe(true);
     expect(fixture.recovery.start()).toBeNull();
     fixture.setOffline(false);
     fixture.setOperation({ ...plan, state: 'failed', completedSteps: ['validated', 'transferred'], error: { code: 'TRANSPORT_FAILED', message: 'Rejected' } });
     await act(async () => { await fixture.recovery.refresh(); });
     expect(fixture.recovery.blocked).toBe(false);
-    expect(fixture.recovery.entry?.localCommit).toBe(true);
     expect(fixture.recovery.entry?.reads[0].operation.completedSteps).toEqual(['validated', 'transferred']);
     expect(fixture.calls).toEqual(['repository:/repo', 'get:git_original', 'repository:/repo', 'get:git_original']);
     act(() => { expect(fixture.recovery.start()).not.toBeNull(); });

@@ -1,3 +1,4 @@
+import { isPlainObject, isString } from '../shared/guards.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -20,11 +21,11 @@ const ERROR_CODES = new Set([
   'INVALID_REQUEST', 'NOT_FOUND', 'STALE_REPOSITORY', 'STALE_BINDING', 'STALE_CONFIG',
   'REMOTE_CHANGED', 'AUTHENTICATION_REQUIRED', 'AUTHENTICATION_FAILED', 'TRANSPORT_FAILED',
   'CONFLICT', 'CANCELLED', 'TIMEOUT', 'OUTCOME_UNKNOWN', 'RUNTIME_UNSUPPORTED', 'UNKNOWN',
-  'GIT_LFS_CLIENT_MISSING',
+  'GIT_LFS_CLIENT_MISSING', 'CHECKOUT_TOO_LARGE',
 ]);
 const FAILURE_ERROR_CODES = new Set([
   'INVALID_REQUEST', 'AUTHENTICATION_REQUIRED', 'AUTHENTICATION_FAILED', 'TRANSPORT_FAILED',
-  'RUNTIME_UNSUPPORTED', 'GIT_LFS_CLIENT_MISSING', 'UNKNOWN',
+  'RUNTIME_UNSUPPORTED', 'GIT_LFS_CLIENT_MISSING', 'CHECKOUT_TOO_LARGE', 'UNKNOWN',
 ]);
 const STATE_ERROR_CODES = Object.freeze({
   partial: FAILURE_ERROR_CODES,
@@ -54,12 +55,9 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   RUNTIME_UNSUPPORTED: 'Git operation is unsupported by this runtime',
   UNKNOWN: 'Git operation failed; inspect repository state before retrying',
   GIT_LFS_CLIENT_MISSING: 'Git LFS is required but unavailable',
+  CHECKOUT_TOO_LARGE: 'Checkout has too many files to inspect',
 });
 
-const isPlainObject = (value) => value === Object(value)
-  && !Array.isArray(value)
-  && Object.getPrototypeOf(value) === Object.prototype;
-const isString = (value) => Object.prototype.toString.call(value) === '[object String]';
 const exactKeys = (value, required, optional = []) => {
   const keys = Object.keys(value);
   return required.every((key) => keys.includes(key))
@@ -210,11 +208,13 @@ const isTransport = (value) => {
     && isVerification(value.verification, value.mode);
 };
 const isRef = (value) => isIdentifier(value, 4096) && value.startsWith('refs/');
+// Revision 0 is a repository nobody bound: its remotes use system Git, and the
+// planner and binding service accept it, so its operations are stored too.
 const isRepositoryTargetBase = (value, operation, required = [], optional = []) => isPlainObject(value)
   && exactKeys(value, ['operation', 'repositoryId', 'bindingRevision', 'configRevision', 'remote', ...required], optional)
   && value.operation === operation
   && isIdentifier(value.repositoryId)
-  && Number.isSafeInteger(value.bindingRevision) && value.bindingRevision >= 1
+  && Number.isSafeInteger(value.bindingRevision) && value.bindingRevision >= 0
   && isIdentifier(value.configRevision)
   && isRemote(value.remote);
 const isTarget = (value) => {
@@ -226,7 +226,7 @@ const isTarget = (value) => {
     if (exactKeys(value, ['operation'])) return true;
     return exactKeys(value, ['operation', 'repositoryId', 'bindingRevision', 'configRevision', 'remote', 'requirements'])
       && isIdentifier(value.repositoryId)
-      && Number.isSafeInteger(value.bindingRevision) && value.bindingRevision >= 1
+      && Number.isSafeInteger(value.bindingRevision) && value.bindingRevision >= 0
       && isIdentifier(value.configRevision)
       && isRemote(value.remote)
       && Array.isArray(value.requirements) && value.requirements.length <= 256
@@ -244,7 +244,7 @@ const isTarget = (value) => {
     return isPlainObject(value)
       && exactKeys(value, ['operation', 'repositoryId', 'bindingRevision', 'configRevision', 'fetch', 'pull', 'push'])
       && isIdentifier(value.repositoryId)
-      && Number.isSafeInteger(value.bindingRevision) && value.bindingRevision >= 1
+      && Number.isSafeInteger(value.bindingRevision) && value.bindingRevision >= 0
       && isIdentifier(value.configRevision)
       && isPlainObject(value.fetch) && exactKeys(value.fetch, ['name', 'endpoint', 'sourceRef', 'destinationRef'])
       && isIdentifier(value.fetch.name, 512) && isEndpoint(value.fetch.endpoint)

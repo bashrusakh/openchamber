@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import type { ProjectTodoChange } from '@/lib/projectContextApi';
 
 interface NotePayload {
   id: string;
@@ -51,6 +52,7 @@ const handlers = {
   }),
   updateNote: async (): Promise<NotePayload | null> => note(),
   deleteNote: async (): Promise<ContextPayload> => emptyPayload(),
+  writeTodo: async (_change: ProjectTodoChange): Promise<ContextPayload | null> => emptyPayload(),
   create: async (): Promise<{ plan: ContextPayload['plans'][number]; context: ContextPayload }> => ({
     plan: planLink(),
     context: { notes: [], todos: [], plans: [planLink()] },
@@ -63,7 +65,7 @@ const handlers = {
   remove: async (): Promise<ContextPayload> => emptyPayload(),
 };
 
-const calls = { fetch: 0, saveTodos: 0, createNote: 0, updateNote: 0, deleteNote: 0, create: 0, update: 0, pinPlan: 0, remove: 0 };
+const calls = { fetch: 0, saveTodos: 0, writeTodo: 0, createNote: 0, updateNote: 0, deleteNote: 0, create: 0, update: 0, pinPlan: 0, remove: 0 };
 
 mock.module('@/lib/projectContextApi', () => ({
   fetchProjectContext: () => {
@@ -73,6 +75,10 @@ mock.module('@/lib/projectContextApi', () => ({
   saveProjectTodos: (_project: unknown, todos: ContextPayload['todos']) => {
     calls.saveTodos += 1;
     return handlers.saveTodos(todos);
+  },
+  writeProjectTodo: (_project: { path?: string }, change: ProjectTodoChange) => {
+    calls.writeTodo += 1;
+    return handlers.writeTodo(change);
   },
   createProjectNote: () => {
     calls.createNote += 1;
@@ -86,6 +92,7 @@ mock.module('@/lib/projectContextApi', () => ({
     calls.deleteNote += 1;
     return handlers.deleteNote();
   },
+  linkProjectPlanSession: async () => null,
   shareProjectPlan: async () => null,
   unshareProjectPlan: async () => null,
   setProjectPlanPinned: () => {
@@ -117,8 +124,9 @@ const entry = () => store().getEntry(PROJECT);
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => { resolve = res; });
-  return { promise, resolve };
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 };
 
 const failWith = (message: string) => async (): Promise<never> => {
@@ -129,6 +137,7 @@ beforeEach(() => {
   store().reset();
   calls.fetch = 0;
   calls.saveTodos = 0;
+  calls.writeTodo = 0;
   calls.createNote = 0;
   calls.updateNote = 0;
   calls.deleteNote = 0;
@@ -142,6 +151,7 @@ beforeEach(() => {
   handlers.createNote = async () => ({ note: note(), context: { notes: [note()], todos: [], plans: [] } });
   handlers.updateNote = async () => note();
   handlers.deleteNote = async () => emptyPayload();
+  handlers.writeTodo = async () => emptyPayload();
   handlers.create = async () => ({ plan: planLink(), context: { notes: [], todos: [], plans: [planLink()] } });
   handlers.update = async () => ({ plan: planLink(), raw: '# A' });
   handlers.pinPlan = async () => planLink({ pinned: true });
@@ -213,6 +223,99 @@ describe('load', () => {
     await Promise.all([store().load(PROJECT), store().load(PROJECT), store().load(PROJECT)]);
     expect(calls.fetch).toBe(1);
   });
+
+  test('coalesces refreshes requested during a load into one authoritative trailing read', async () => {
+    const gate = deferred<ContextPayload>();
+    handlers.fetch = () => calls.fetch === 1
+      ? gate.promise
+      : Promise.resolve({ notes: [note({ body: 'peer change' })], todos: [], plans: [] });
+
+    const initial = store().load(PROJECT);
+    await Promise.resolve();
+    const firstRefresh = store().load(PROJECT, { force: true });
+    const secondRefresh = store().load(PROJECT, { force: true });
+    gate.resolve(emptyPayload());
+    await Promise.all([initial, firstRefresh, secondRefresh]);
+
+    expect(entry().notes.map((item) => item.body)).toEqual(['peer change']);
+    expect(calls.fetch).toBe(2);
+  });
+
+  test('a refresh cannot undo a local write that completed after the read began', async () => {
+    handlers.fetch = async () => ({ notes: [note()], todos: [], plans: [] });
+    await store().load(PROJECT);
+    const gate = deferred<ContextPayload>();
+    handlers.fetch = () => gate.promise;
+    const refresh = store().load(PROJECT, { force: true });
+    await Promise.resolve();
+    handlers.updateNote = async () => note({ body: 'new local body', updatedAt: 2 });
+    await store().saveNoteBody(PROJECT, 'n1', 'new local body');
+    gate.resolve({ notes: [note()], todos: [], plans: [] });
+    await refresh;
+
+    expect(entry().notes[0].body).toBe('new local body');
+  });
+
+  test('a peer change during a local note save is read after that save settles', async () => {
+    handlers.fetch = async () => ({ notes: [note()], todos: [], plans: [] });
+    await store().load(PROJECT);
+    const gate = deferred<NotePayload | null>();
+    handlers.updateNote = () => gate.promise;
+    const saving = store().saveNoteBody(PROJECT, 'n1', 'local edit');
+    handlers.fetch = async () => ({
+      notes: [note({ body: 'local edit' }), note({ id: 'peer', body: 'peer note' })],
+      todos: [],
+      plans: [],
+    });
+    const refresh = store().load(PROJECT, { force: true });
+    await Promise.resolve();
+    gate.resolve(note({ body: 'local edit' }));
+    await Promise.all([saving, refresh]);
+
+    expect(entry().notes.map((item) => item.body)).toEqual(['local edit', 'peer note']);
+  });
+
+  for (const failureOrder of ['before the read', 'after the read']) {
+    test(`a local write failing ${failureOrder} cannot hide the peer snapshot`, async () => {
+      handlers.fetch = async () => ({ notes: [note()], todos: [], plans: [] });
+      await store().load(PROJECT);
+      const reading = deferred<ContextPayload>();
+      handlers.fetch = () => reading.promise;
+      const refresh = store().load(PROJECT, { force: true });
+      await Promise.resolve();
+      const writing = deferred<NotePayload | null>();
+      handlers.updateNote = () => writing.promise;
+      const saving = store().saveNoteBody(PROJECT, 'n1', 'rejected local edit');
+      await Promise.resolve();
+      const peer = { notes: [note(), note({ id: 'peer', body: 'peer note' })], todos: [], plans: [] };
+      handlers.fetch = async () => peer;
+      if (failureOrder === 'after the read') {
+        reading.resolve(peer);
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+      writing.reject(new Error('save failed'));
+      expect(await saving).toBe(false);
+      if (failureOrder === 'before the read') reading.resolve(peer);
+      await refresh;
+
+      expect(entry().notes.map((item) => item.body)).toEqual(['body', 'peer note']);
+    });
+  }
+
+  test('reset rejects an old runtime read even when the project id is reused', async () => {
+    const gate = deferred<ContextPayload>();
+    handlers.fetch = () => gate.promise;
+    const obsolete = store().load(PROJECT);
+    await Promise.resolve();
+    store().reset();
+    handlers.fetch = async () => ({ notes: [note({ body: 'new runtime' })], todos: [], plans: [] });
+    await store().load(PROJECT);
+    gate.resolve({ notes: [note({ body: 'old runtime' })], todos: [], plans: [] });
+    await obsolete;
+
+    expect(entry().notes[0].body).toBe('new runtime');
+  });
 });
 
 describe('saveTodos', () => {
@@ -273,6 +376,53 @@ describe('saveTodos', () => {
 
     gate.resolve({ notes: [], todos: [{ id: 'local', text: 'local', completed: false, createdAt: 1 }], plans: [] });
     await pending;
+  });
+
+  test('sends one todo when the change names it and shows the list the server committed', async () => {
+    const mine = { id: 'mine', text: 'mine', completed: false, createdAt: 1 };
+    const agents = { id: 'agent', text: 'from an agent', completed: false, createdAt: 2 };
+    await store().saveTodos(PROJECT, [mine]);
+    const sent: ProjectTodoChange[] = [];
+    const gate = deferred<ContextPayload>();
+    handlers.writeTodo = (change) => {
+      sent.push(change);
+      return gate.promise;
+    };
+
+    const pending = store().saveTodos(PROJECT, [{ ...mine, completed: true }], { kind: 'complete', id: 'mine', completed: true });
+    expect(entry().todos).toEqual([{ ...mine, completed: true }]);
+
+    gate.resolve({ notes: [], todos: [agents, { ...mine, completed: true }], plans: [] });
+    expect(await pending).toBe(true);
+    expect(sent).toEqual([{ kind: 'complete', id: 'mine', completed: true }]);
+    expect(calls.saveTodos).toBe(1);
+    expect(entry().todos.map((todo) => todo.id)).toEqual(['agent', 'mine']);
+  });
+
+  test('a todo someone already removed is no failure: the list is re-read', async () => {
+    const mine = { id: 'mine', text: 'mine', completed: false, createdAt: 1 };
+    await store().saveTodos(PROJECT, [mine]);
+    handlers.writeTodo = async () => null;
+    handlers.fetch = async () => emptyPayload();
+    const fetchesBefore = calls.fetch;
+
+    expect(await store().saveTodos(PROJECT, [{ ...mine, completed: true }], { kind: 'complete', id: 'mine', completed: true })).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await store().load(PROJECT);
+
+    expect(calls.fetch).toBeGreaterThan(fetchesBefore);
+    expect(entry().todos).toEqual([]);
+    expect(entry().error).toBeNull();
+  });
+
+  test('rolls a failed single-todo write back like a whole-list one', async () => {
+    const mine = { id: 'mine', text: 'mine', completed: false, createdAt: 1 };
+    await store().saveTodos(PROJECT, [mine]);
+    handlers.writeTodo = failWith('Todo not found');
+
+    expect(await store().saveTodos(PROJECT, [], { kind: 'delete', id: 'mine' })).toBe(false);
+    expect(entry().todos).toEqual([mine]);
+    expect(entry().error).toBe('Todo not found');
   });
 
   test('ignores a project without a resolvable path', async () => {

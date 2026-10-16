@@ -13,9 +13,9 @@
 
 import express from 'express';
 
-const parseJsonBody = express.json({ limit: '1mb' });
+import { isRecord } from '../shared/guards.js';
 
-const isRecord = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const parseJsonBody = express.json({ limit: '1mb' });
 
 const asNonEmptyString = (value) => (
   typeof value === 'string' && value.trim().length > 0 ? value.trim() : ''
@@ -102,6 +102,26 @@ export const registerSessionKnowledgeRoutes = (app, dependencies) => {
       // The message is already sent; failing here only means the block may be
       // sent once more, which is far better than reporting the send as failed.
       return res.json({ recorded: false, reason: error?.message ?? 'unknown' });
+    }
+  });
+
+  /** A revert hid the block, so the next send must carry it again. */
+  app.post('/api/session-knowledge/forget', parseJsonBody, async (req, res) => {
+    const body = req.body;
+    if (!isRecord(body)) {
+      return res.status(400).json({ error: 'Body must be an object' });
+    }
+    const sessionId = asNonEmptyString(body.sessionId);
+    const directory = asNonEmptyString(body.directory);
+    if (!sessionId || !directory) {
+      return res.status(400).json({ error: 'sessionId and directory are required' });
+    }
+
+    try {
+      await sessionKnowledgeRuntime.forgetDelivered(sessionId, directory);
+      return res.json({ forgotten: true });
+    } catch (error) {
+      return res.status(500).json({ error: error?.message ?? 'Unable to reset delivery' });
     }
   });
 };

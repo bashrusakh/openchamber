@@ -4,7 +4,7 @@ import { parseGitLabRemoteUrl } from './repo.js';
 const text = (value) => isString(value) ? value : '';
 const integer = (value) => Number.isInteger(value) && value >= 0 ? value : null;
 
-function mapGitLabUser(value, identity) {
+export function mapGitLabUser(value, identity) {
   if (!isPlainObject(value) || integer(value.id) === null || !text(value.username)) return null;
   const user = { ...identity, id: String(value.id), username: value.username };
   if (text(value.avatar_url)) user.avatarUrl = value.avatar_url;
@@ -66,6 +66,7 @@ export function mapGitLabMergeRequest(value, identity, project) {
   if (text(value.created_at)) request.createdAt = value.created_at;
   if (text(value.updated_at)) request.updatedAt = value.updated_at;
   if (text(value.references?.full)) request.headLabel = value.references.full;
+  request.labels = mapLabels(value.labels);
   const mergeState = text(value.detailed_merge_status || value.merge_status);
   if (mergeState) {
     request.mergeableState = mergeState;
@@ -116,6 +117,14 @@ export function mapGitLabNote(value, identity, fallbackUrl = '') {
   if (author) note.author = author;
   if (text(value.created_at)) note.createdAt = value.created_at;
   if (text(value.updated_at)) note.updatedAt = value.updated_at;
+  // Set by the resource service when the note was read with its discussion.
+  const thread = value.discussionThread;
+  if (isPlainObject(thread) && text(thread.id)) {
+    note.thread = { id: thread.id, resolved: thread.resolved === true, resolvable: thread.resolvable === true, first: thread.first === true };
+    // This account's permissions, when GitLab said.
+    if (thread.canResolve === true || thread.canResolve === false) note.thread.canResolve = thread.canResolve;
+    if (thread.canReply === true || thread.canReply === false) note.thread.canReply = thread.canReply;
+  }
   const position = isPlainObject(value.position) ? value.position : null;
   if (position && text(position.new_path || position.old_path)) {
     note.path = position.new_path || position.old_path;
@@ -125,13 +134,54 @@ export function mapGitLabNote(value, identity, fallbackUrl = '') {
   return note;
 }
 
+// GitLab writes a review verdict as a system note on the merge request.
+const VERDICT_NOTES = new Map([
+  ['approved this merge request', 'approved'],
+  ['requested changes', 'changes_requested'],
+]);
+
+/** A system note that records an approval or a change request; null for any other note. */
+export function mapGitLabVerdictNote(value, identity, fallbackUrl = '') {
+  if (!isPlainObject(value) || value.system !== true || !isString(value.body)) return null;
+  const state = VERDICT_NOTES.get(value.body.trim().toLowerCase());
+  if (!state) return null;
+  const verdict = { state, url: text(value.web_url) || fallbackUrl, createdAt: text(value.created_at) ? value.created_at : null };
+  const author = mapGitLabUser(value.author, identity);
+  if (author) verdict.author = author;
+  return verdict;
+}
+
+/** A merge request commit as the preview's timeline shows it. */
+export function mapGitLabCommit(value) {
+  if (!isPlainObject(value) || !text(value.id)) return null;
+  return {
+    sha: value.id,
+    headline: text(value.title) || '',
+    authorName: text(value.author_name) || null,
+    committedAt: text(value.committed_date) || text(value.created_at) || null,
+    url: text(value.web_url) || null,
+  };
+}
+
 export function mapGitLabDiff(value) {
   if (!isPlainObject(value) || (!text(value.new_path) && !text(value.old_path))) return null;
   const file = {
     path: value.new_path || value.old_path,
     status: value.new_file ? 'added' : value.deleted_file ? 'removed' : value.renamed_file ? 'renamed' : 'modified',
   };
-  if (isString(value.diff)) file.patch = value.diff;
+  if (isString(value.diff)) {
+    file.patch = value.diff;
+    // GitLab sends only the hunks, without `---`/`+++` headers, so every line
+    // that opens with a sign is a changed line.
+    let additions = 0;
+    let deletions = 0;
+    for (const line of value.diff.split('\n')) {
+      if (line.startsWith('+')) additions += 1;
+      else if (line.startsWith('-')) deletions += 1;
+    }
+    file.additions = additions;
+    file.deletions = deletions;
+  }
   return file;
 }
 

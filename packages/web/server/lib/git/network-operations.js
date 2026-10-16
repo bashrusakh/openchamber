@@ -1,3 +1,4 @@
+import { isString } from '../shared/guards.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -12,7 +13,7 @@ import { createNetworkOperationPlanner } from './network-operation-plan.js';
 import { createNetworkOperationRegistry } from './network-operation-registry.js';
 import { createGitRedactor, redactGitText } from './redaction.js';
 import { parseSubmoduleManifest, SUBMODULE_DISCOVERY_LIMITS } from './submodule-discovery.js';
-import { discoverLfs, scanLfsFiles, scanLfsPushObjects, resolveLfsPushConfig, LFS_DISCOVERY_LIMITS } from './lfs-discovery.js';
+import { discoverLfs, parseTreeObjects, scanLfsFiles, scanLfsPushObjects, resolveLfsPushConfig, LFS_DISCOVERY_LIMITS } from './lfs-discovery.js';
 import { resolveGitRelativeEndpoint } from './discovery-endpoint.js';
 import { fingerprintRemoteUrl, redactRemoteUrl } from '../source-control/url-redaction.js';
 
@@ -41,11 +42,25 @@ const MANAGED_ENV_NAMES = new Set([
   'NO_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'NETRC',
 ]);
 const SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
-const isString = (value) => Object.prototype.toString.call(value) === '[object String]';
 
-const operationError = (code, message, status = 500, details = {}) => Object.assign(new Error(message), { code, status, ...details });
+// The details are often a Git process result, whose `code` is the exit
+// status; the operation's own code and status are applied over them.
+const operationError = (code, message, status = 500, details = {}) => Object.assign(new Error(message), details, { code, status });
 const publicError = (code, message) => ({ code, message });
+// `ls-tree -l` adds each object's size before the tab; the submodule parser
+// reads gitlinks in the short form, so their size column (always `-`) goes.
+const readTreeListing = (treeOutput) => ({
+  gitlinks: treeOutput.split('\0').filter((record) => record.startsWith('160000 '))
+    .map((record) => `${record.replace(/^(160000 commit [0-9a-f]+) +-\t/, '$1\t')}\0`).join(''),
+  treeObjects: parseTreeObjects(treeOutput),
+});
 const terminal = (state, code, message) => ({ state, error: publicError(code, message) });
+// A remote-tracking ref mirrors the remote, so it follows a force-pushed
+// branch the way `git fetch` with the default refspec does. A local branch
+// destination is never moved backwards.
+const singleRefFetchRefspec = (sourceRef, destinationRef) => (
+  `${destinationRef.startsWith('refs/remotes/') ? '+' : ''}${sourceRef}:${destinationRef}`
+);
 const fileIdentity = (stats) => `${stats.dev}:${stats.ino}`;
 // Linux reuses an inode number when a directory is removed and recreated in the
 // same parent, so device and inode alone cannot tell a replaced directory from
@@ -105,6 +120,83 @@ const managedEnvironment = (source, platform) => {
   result.GIT_CONFIG_NOSYSTEM = '1';
   result.GIT_CONFIG_GLOBAL = platform === 'win32' ? 'NUL' : '/dev/null';
   return result;
+};
+
+const TRUSTED_DIRECTORIES_READ_TIMEOUT_MS = 5_000;
+// A Git configuration value written back as one: quoted, backslashes and quotes escaped.
+const gitConfigValue = (value) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+/**
+ * The `safe.directory` exceptions the person keeps in their system and global
+ * Git configuration, as a configuration file that holds nothing else.
+ *
+ * Managed Git reads neither of those files, so nothing in them (a credential
+ * helper, a proxy, a URL rewrite) can stand in for the selected credential.
+ * Git takes `safe.directory` only from those files, though, so a repository
+ * Git does not consider this user's own (a WSL checkout opened from Windows,
+ * a container mount, a clone another account made) stopped every managed
+ * transfer at "dubious ownership" even after the person trusted it. Managed
+ * Git reads this file as its global configuration instead of none.
+ *
+ * The returned function answers the file's path, or null when the person
+ * trusts no directory. The file is rewritten on every call, so an exception
+ * added or removed since applies to the next transfer.
+ */
+export const createTrustedDirectoriesConfig = ({
+  gitBinary = 'git',
+  inheritedEnv = process.env,
+  spawnImpl = spawn,
+  fsImpl = fs,
+  pathImpl = path,
+  tmpdir = os.tmpdir,
+} = {}) => {
+  let directory = null;
+  const readValues = () => new Promise((resolve) => {
+    let child;
+    try {
+      // Outside any repository Git reads only the system and global files.
+      child = spawnImpl(gitBinary, ['config', '--null', '--includes', '--get-all', 'safe.directory'], {
+        cwd: tmpdir(), env: { ...inheritedEnv }, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      resolve([]);
+      return;
+    }
+    const chunks = [];
+    const timer = setTimeout(() => child.kill(), TRUSTED_DIRECTORIES_READ_TIMEOUT_MS);
+    timer.unref?.();
+    child.stdout.on('data', (chunk) => chunks.push(chunk));
+    child.once('error', () => {
+      clearTimeout(timer);
+      resolve([]);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      // Exit 1 is "not set"; every value ends in a NUL.
+      resolve(code === 0 ? Buffer.concat(chunks).toString('utf8').split('\0').slice(0, -1) : []);
+    });
+  });
+  const write = async (content) => {
+    directory ??= await fsImpl.mkdtemp(pathImpl.join(tmpdir(), 'openchamber-git-trust-'));
+    const target = pathImpl.join(directory, 'config');
+    const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+    await fsImpl.writeFile(temporary, content, { encoding: 'utf8', mode: 0o600 });
+    await fsImpl.rename(temporary, target);
+    return target;
+  };
+  return async () => {
+    const values = (await readValues()).filter((value) => !/[\r\n]/.test(value));
+    if (values.length === 0) return null;
+    const content = `[safe]\n${values.map((value) => `\tdirectory = ${gitConfigValue(value)}\n`).join('')}`;
+    try {
+      return await write(content);
+    } catch (error) {
+      // The system's temporary-file cleanup may have removed the directory.
+      if (error?.code !== 'ENOENT') throw error;
+      directory = null;
+      return write(content);
+    }
+  };
 };
 
 const HTTP_CONFIG_RESETS = new Map([
@@ -182,6 +274,8 @@ const appendBounded = (chunks, chunk, state, limit) => {
 };
 
 const authorityCode = (error) => {
+  // A grant whose account needs attention is an access problem the user fixes.
+  if (error?.reason === 'needs-attention') return 'AUTHENTICATION_REQUIRED';
   if (error?.code === 'SOURCE_CONTROL_BINDING_STALE') return 'STALE_BINDING';
   if (error?.code === 'UNSUPPORTED_SOURCE_CONTROL_REPOSITORY') return 'STALE_REPOSITORY';
   if (error?.code === 'INVALID_GIT_TRANSPORT_CONTEXT') return 'INVALID_REQUEST';
@@ -269,10 +363,20 @@ export function createNetworkOperations({
   auditStore,
   operationStore,
   onCheckoutHydrated,
+  trustedDirectoriesConfig,
 } = {}) {
   if (!(validateGitTransportContext instanceof Function) || !(credentialResolver?.resolve instanceof Function)) {
     throw new TypeError('Git network operation dependencies are invalid');
   }
+  /** `managedEnvironment` that still trusts the directories the person trusted (`createTrustedDirectoriesConfig`). */
+  const managedGitEnvironment = async () => {
+    const env = managedEnvironment(inheritedEnv, platform);
+    const trusted = trustedDirectoriesConfig instanceof Function
+      ? await trustedDirectoriesConfig().catch(() => null)
+      : null;
+    if (trusted) env.GIT_CONFIG_GLOBAL = trusted;
+    return env;
+  };
 
   const cancelChild = (child) => terminateProcessTree(child, { platform, spawnImpl, escalationMs });
   const operationRegistry = registry ?? createNetworkOperationRegistry({ cancelChild, store: operationStore });
@@ -563,13 +667,17 @@ export function createNetworkOperations({
       if (!match) return false;
       gitDirectory = pathImpl.resolve(directory, match[1]);
     }
-    try {
-      await fsImpl.stat(pathImpl.join(gitDirectory, 'MERGE_HEAD'));
-      return true;
-    } catch (error) {
-      if (error?.code === 'ENOENT') return false;
-      throw error;
+    // Pull integrates by rebasing, so a stopped integration is a rebase in
+    // progress; MERGE_HEAD still counts for a merge someone started by hand.
+    for (const marker of ['rebase-merge', 'rebase-apply', 'MERGE_HEAD']) {
+      try {
+        await fsImpl.stat(pathImpl.join(gitDirectory, marker));
+        return true;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
     }
+    return false;
   });
 
   const transport = async (plan, controls, deadline) => {
@@ -597,7 +705,7 @@ export function createNetworkOperations({
       if (error?.cancelled || error?.timedOut || error?.code === 'CANCELLED' || error?.code === 'TIMEOUT') throw error;
       throw operationError('AUTHENTICATION_REQUIRED', 'Managed Git credential is unavailable', 409);
     }
-    const env = managedEnvironment(inheritedEnv, platform);
+    const env = await managedGitEnvironment();
     if (anonymous || credential.transport === 'https') {
       // Git's Curl transport also consults netrc outside Git configuration;
       // an ambient ~/.netrc entry must not authenticate as another account
@@ -735,7 +843,7 @@ export function createNetworkOperations({
 
   const localIntegrationContext = async (directory, controls, deadline) => {
     const env = {
-      ...managedEnvironment(inheritedEnv, platform),
+      ...await managedGitEnvironment(),
       GIT_ALLOW_PROTOCOL: '', GIT_NO_LAZY_FETCH: '1', GIT_NO_REPLACE_OBJECTS: '1', GIT_LFS_SKIP_SMUDGE: '1',
     };
     const configArgs = [
@@ -782,6 +890,12 @@ export function createNetworkOperations({
     }
     if (error?.code === 'GIT_AUXILIARY_AUTHORIZATION_REQUIRED') {
       return { status: 'authorization-required', error: publicError('AUTHENTICATION_REQUIRED', 'This checkout endpoint requires an explicit credential grant') };
+    }
+    // An LFS discovery bound trips on the number of tracked files. It gets its
+    // own code so the message names that; the configuration message sent
+    // people to fix settings that were fine.
+    if (error?.code === 'LFS_DISCOVERY_LIMIT_EXCEEDED') {
+      return { status: 'invalid', error: publicError('CHECKOUT_TOO_LARGE', 'Checkout has too many files to inspect') };
     }
     if (String(error?.code || '').includes('INVALID') || String(error?.code || '').includes('LIMIT_EXCEEDED')
       || error?.code === 'UNSAFE_LFS_EXECUTABLE_CONFIG') {
@@ -976,9 +1090,9 @@ export function createNetworkOperations({
     const configOutput = await localGit(directory, [
       'config', '--blob', 'HEAD:.gitmodules', '--null', '--get-regexp', '^submodule\\..*\\.(path|url|update)$',
     ], controls, deadline, { allowedCodes: [0, 1, 128] });
-    const treeOutput = await localGit(directory, ['ls-tree', '-rz', '--full-tree', 'HEAD'], controls, deadline,
-      { maxOutputBytes: LFS_DISCOVERY_LIMITS.maxFilesBytes });
-    const gitlinks = treeOutput.split('\0').filter((record) => record.startsWith('160000 ')).map((record) => `${record}\0`).join('');
+    // One listing serves both: gitlinks for submodules, and object sizes for the LFS scan.
+    const { gitlinks, treeObjects } = readTreeListing(await localGit(directory, ['ls-tree', '-rz', '-l', '--full-tree', 'HEAD'], controls, deadline,
+      { maxOutputBytes: LFS_DISCOVERY_LIMITS.maxFilesBytes }));
     const manifest = parseSubmoduleManifest({ gitmodulesConfig: configOutput, gitlinks, recursionDepth: 0 });
     const children = manifest.modules.map((module) => {
       if (!parentEndpoint || !parentRemoteName) return { path: module.path, gitlink: module.gitlink };
@@ -990,7 +1104,7 @@ export function createNetworkOperations({
     const filesOutput = await localGit(directory, ['ls-files', '-z'], controls, deadline,
       { maxOutputBytes: LFS_DISCOVERY_LIMITS.maxFilesBytes, rawOutput: true });
     const scan = await scanLfsFiles(filesOutput, (args, input) => localGit(directory, args, controls, deadline,
-      { input, maxOutputBytes: LFS_DISCOVERY_LIMITS.maxBatchBytes, rawOutput: true }), manifest.modules.map((module) => module.path));
+      { input, maxOutputBytes: LFS_DISCOVERY_LIMITS.maxBatchBytes, rawOutput: true }), manifest.modules.map((module) => module.path), treeObjects);
     if ((scan.attributesOutput || scan.pointerSamples.length || !scan.pointerScanComplete)
       && (!parentEndpoint || !parentRemoteName)) {
       sourceRequired = true;
@@ -1119,9 +1233,9 @@ export function createNetworkOperations({
       const configOutput = await localGit(directory, [
         'config', '--blob', 'HEAD:.gitmodules', '--null', '--get-regexp', '^submodule\\..*\\.(path|url|update)$',
       ], controls, deadline, { allowedCodes: [0, 1, 128] });
-      const treeOutput = await localGit(directory, ['ls-tree', '-rz', '--full-tree', 'HEAD'], controls, deadline,
-        { maxOutputBytes: LFS_DISCOVERY_LIMITS.maxFilesBytes });
-      const gitlinks = treeOutput.split('\0').filter((record) => record.startsWith('160000 ')).map((record) => `${record}\0`).join('');
+      // One listing serves both: gitlinks for submodules, and object sizes for the LFS scan.
+      const { gitlinks, treeObjects } = readTreeListing(await localGit(directory, ['ls-tree', '-rz', '-l', '--full-tree', 'HEAD'], controls, deadline,
+        { maxOutputBytes: LFS_DISCOVERY_LIMITS.maxFilesBytes }));
       const manifest = parseSubmoduleManifest({ gitmodulesConfig: configOutput, gitlinks, recursionDepth: depth });
       for (const module of hydrationPlan.hydrateSubmodules === false ? [] : manifest.modules) {
         if (phaseError(controls, deadline)) throw phaseError(controls, deadline);
@@ -1217,7 +1331,7 @@ export function createNetworkOperations({
       const filesOutput = await localGit(directory, ['ls-files', '-z'], controls, deadline,
         { maxOutputBytes: LFS_DISCOVERY_LIMITS.maxFilesBytes, rawOutput: true });
       const scan = await scanLfsFiles(filesOutput, (args, input) => localGit(directory, args, controls, deadline,
-        { input, maxOutputBytes: LFS_DISCOVERY_LIMITS.maxBatchBytes, rawOutput: true }), manifest.modules.map((module) => module.path));
+        { input, maxOutputBytes: LFS_DISCOVERY_LIMITS.maxBatchBytes, rawOutput: true }), manifest.modules.map((module) => module.path), treeObjects);
       const lfsPath = prefix || '.';
       if (!scan.attributesOutput && !scan.pointerSamples.length && scan.pointerScanComplete) {
         lfs.push({ path: lfsPath, status: 'not-needed' });
@@ -1515,7 +1629,7 @@ export function createNetworkOperations({
           temporaryRef = plan.target.operation === 'pull' ? `refs/openchamber/network/${plan.operationId}` : plan.target.destinationRef;
           await commandResult(plan, controls, [
             'fetch', '--no-tags', ...(plan.target.operation === 'pull' ? ['--no-recurse-submodules'] : []),
-            '--', plan.rawEndpoint, `${plan.target.sourceRef}:${temporaryRef}`,
+            '--', plan.rawEndpoint, singleRefFetchRefspec(plan.target.sourceRef, temporaryRef),
           ], context, deadline, { transfer: true });
           await controls.markStepCompleted('transferred');
           if (plan.target.operation === 'fetch') result = { state: 'succeeded' };
@@ -1538,7 +1652,8 @@ export function createNetworkOperations({
             await recordRemoteTrackingRef(plan, controls, integrationContext, deadline, fetchedSha, plan.target.sourceRef);
             mergeStarted = true;
             await controls.markIntegrationStarted();
-            await commandResult(plan, controls, ['merge', '--no-edit', '--no-verify', fetchedSha], integrationContext, deadline);
+            // Local commits are replayed on top of the fetched ones, as pull always did here.
+            await commandResult(plan, controls, ['rebase', '--no-verify', '--no-autostash', fetchedSha], integrationContext, deadline);
             mergeStarted = false;
             await controls.markStepCompleted('updated-local-repository');
             result = { state: 'succeeded' };
@@ -1555,8 +1670,8 @@ export function createNetworkOperations({
         result = terminal('partial', 'TRANSPORT_FAILED', 'Push succeeded, but local upstream configuration failed');
       } else if (plan.target.operation === 'push' && plan.target.forceWithLease && isLeaseConflict(output)) {
         result = terminal('conflicted', 'CONFLICT', 'Push force lease no longer matches the remote ref');
-      } else if (plan.target.operation === 'pull' && /\bCONFLICT\b|automatic merge failed|unmerged files/i.test(output)) {
-        result = terminal('conflicted', 'CONFLICT', 'Pull left merge conflicts in the local repository');
+      } else if (plan.target.operation === 'pull' && /\bCONFLICT\b|automatic merge failed|unmerged files|could not apply/i.test(output)) {
+        result = terminal('conflicted', 'CONFLICT', 'Pull left conflicts in the local repository; resolve them and continue the rebase');
       } else if (mergeStarted && (error.cancelled || error.timedOut || controls.isCancellationRequested())) {
         let mergeInProgress = false;
         try { mergeInProgress = await hasMergeState(plan.directory); } catch {}
@@ -1579,7 +1694,7 @@ export function createNetworkOperations({
     if (temporaryRef && plan.target.operation === 'pull') {
       try {
         const cleanupContext = integrationContext ?? context ?? {
-          env: { ...managedEnvironment(inheritedEnv, platform), GIT_ALLOW_PROTOCOL: '', GIT_NO_LAZY_FETCH: '1' },
+          env: { ...await managedGitEnvironment(), GIT_ALLOW_PROTOCOL: '', GIT_NO_LAZY_FETCH: '1' },
           configArgs: ['-c', `core.hooksPath=${platform === 'win32' ? 'NUL' : '/dev/null'}`], secrets: [],
         };
         await commandResult(plan, controls, ['update-ref', '-d', temporaryRef], cleanupContext,
@@ -1638,7 +1753,7 @@ export function createNetworkOperations({
       await revalidatePullHead(headPlan, controls, deadline);
       await commandResult(fetchPlan, controls, [
         'fetch', '--no-tags', '--no-recurse-submodules', '--', fetchPlan.rawEndpoint,
-        `${fetchPlan.target.sourceRef}:${fetchPlan.target.destinationRef}`,
+        singleRefFetchRefspec(fetchPlan.target.sourceRef, fetchPlan.target.destinationRef),
       ], context, deadline, { transfer: true, transferRole: 'fetch' });
       await controls.markStepCompleted('transferred');
       if (await safeRevoke(context, plan.operationId)) {
@@ -1657,9 +1772,14 @@ export function createNetworkOperations({
         () => resolveRefImpl(plan.directory, fetchPlan.target.destinationRef, { controls, deadline }), controls, deadline,
       )).trim();
       if (!SHA_PATTERN.test(fetchedSha)) throw operationError('STALE_CONFIG', 'Fetched ref is invalid', 409);
+      // What the branch was before integrating, so the result can say whether
+      // the pull brought anything in.
+      const headBefore = String(await awaitPhase(
+        () => resolveRefImpl(plan.directory, headPlan.target.destinationRef, { controls, deadline }), controls, deadline,
+      )).trim().toLowerCase();
       mergeStarted = true;
       await controls.markIntegrationStarted();
-      await commandResult(fetchPlan, controls, ['merge', '--no-edit', '--no-verify', fetchedSha], integrationContext, deadline);
+      await commandResult(fetchPlan, controls, ['rebase', '--no-verify', '--no-autostash', fetchedSha], integrationContext, deadline);
       mergeStarted = false;
       await controls.markStepCompleted('updated-local-repository');
       const hydrated = await hydrateIntegration(fetchPlan, controls, deadline);
@@ -1668,7 +1788,12 @@ export function createNetworkOperations({
         step('pull', hydrated.state === 'cancelled' ? 'cancelled' : 'failed', hydrated.error);
         return completion(hydrated.state === 'cancelled' ? 'cancelled' : 'partial', hydrated.error);
       }
-      step('pull', 'succeeded');
+      // `skipped` here means there was nothing to bring in: the rebase left
+      // the branch where it was.
+      const headAfter = String(await awaitPhase(
+        () => resolveRefImpl(plan.directory, headPlan.target.destinationRef, { controls, deadline }), controls, deadline,
+      )).trim().toLowerCase();
+      step('pull', headAfter === headBefore ? 'skipped' : 'succeeded');
 
       activeStep = 'push';
       const blockedPush = phaseError(controls, deadline);
@@ -1677,6 +1802,15 @@ export function createNetworkOperations({
         () => resolveRefImpl(plan.directory, pushPlan.target.sourceRef, { controls, deadline }), controls, deadline,
       )).toLowerCase();
       if (!SHA_PATTERN.test(pushSha)) throw operationError('STALE_CONFIG', 'Git push source ref is invalid', 409);
+      // The fetch just read the push destination itself (same endpoint, same
+      // ref) and it already holds this commit: there is nothing to publish, so
+      // no second connection to the remote is opened for it.
+      if (pushSha === fetchedSha.toLowerCase() && !pushPlan.target.forceWithLease
+        && pushPlan.rawEndpoint === fetchPlan.rawEndpoint
+        && pushPlan.target.destinationRef === fetchPlan.target.sourceRef) {
+        step('push', 'skipped');
+        return completion('succeeded');
+      }
       pushPlan = { ...pushPlan, sourceSha: pushSha };
       // The pull just moved HEAD, and the transport revision hashes what HEAD
       // says about submodules, LFS and attributes. A change the merge brought
@@ -1709,8 +1843,8 @@ export function createNetworkOperations({
       const redacted = createGitRedactor({
         secrets: [...(context?.secrets ?? []), plan.directory],
       }).error(error);
-      if (activeStep === 'pull' && /\bCONFLICT\b|automatic merge failed|unmerged files/i.test(output)) {
-        const publicFailure = publicError('CONFLICT', 'Sync pull left merge conflicts in the local repository');
+      if (activeStep === 'pull' && /\bCONFLICT\b|automatic merge failed|unmerged files|could not apply/i.test(output)) {
+        const publicFailure = publicError('CONFLICT', 'Sync pull left conflicts in the local repository; resolve them and continue the rebase');
         step('pull', 'conflicted', publicFailure);
         return completion('conflicted', publicFailure);
       }
@@ -1946,8 +2080,9 @@ export function createNetworkOperations({
               await controls.markStepCompleted('updated-local-repository');
               if (['succeeded', 'not-needed'].includes(hydration.status)) result = { state: 'succeeded', hydration };
               else {
-                const unsupported = [...hydration.submodules, ...hydration.lfs].find((entry) => entry.error?.code === 'RUNTIME_UNSUPPORTED');
-                const failure = unsupported?.error ?? (hydration.status === 'client-missing'
+                const specific = [...hydration.submodules, ...hydration.lfs]
+                  .find((entry) => ['RUNTIME_UNSUPPORTED', 'CHECKOUT_TOO_LARGE'].includes(entry.error?.code));
+                const failure = specific?.error ?? (hydration.status === 'client-missing'
                   ? publicError('GIT_LFS_CLIENT_MISSING', 'Git LFS is required for this checkout; install git-lfs and retry')
                   : hydration.status === 'authorization-required'
                     ? publicError('AUTHENTICATION_REQUIRED', 'Checkout hydration requires an explicit endpoint grant')
@@ -2036,7 +2171,10 @@ export function createNetworkOperations({
         }
         const code = ['STALE_REPOSITORY', 'STALE_BINDING', 'STALE_CONFIG', 'REMOTE_CHANGED'].includes(error?.code)
           ? error.code : authorityCode(error);
-        return terminal('conflicted', code, 'Checkout hydration authority changed; plan again');
+        // An access problem is the user's to fix, not authority that moved.
+        return code === 'AUTHENTICATION_REQUIRED'
+          ? terminal('failed', code, 'Checkout hydration needs the repository access fixed')
+          : terminal('conflicted', code, 'Checkout hydration authority changed; plan again');
       }
     }
     const hydration = await hydrateCheckout(plan, controls, deadline);
@@ -2063,7 +2201,8 @@ export function createNetworkOperations({
       return { state: 'failed', error: publicError('AUTHENTICATION_REQUIRED', 'Checkout hydration requires an explicit endpoint grant'), hydration };
     }
     if (hydration.status === 'invalid') {
-      return { state: 'failed', error: publicError('INVALID_REQUEST', 'Checkout hydration configuration is invalid'), hydration };
+      const tooLarge = [...hydration.submodules, ...hydration.lfs].find((entry) => entry.error?.code === 'CHECKOUT_TOO_LARGE');
+      return { state: 'failed', error: tooLarge?.error ?? publicError('INVALID_REQUEST', 'Checkout hydration configuration is invalid'), hydration };
     }
     const unsupported = [...hydration.submodules, ...hydration.lfs].find((entry) => entry.error?.code === 'RUNTIME_UNSUPPORTED');
     return { state: 'failed', error: unsupported?.error ?? publicError('TRANSPORT_FAILED', 'Checkout hydration failed'), hydration };
@@ -2094,7 +2233,7 @@ export function createNetworkOperations({
       await controls.markStepCompleted('authenticated');
       await revalidateContributorSource(plan, controls, deadline);
       await commandResult(plan, controls, [
-        'fetch', '--no-tags', '--', plan.rawEndpoint, `${plan.target.sourceRef}:${plan.target.destinationRef}`,
+        'fetch', '--no-tags', '--', plan.rawEndpoint, singleRefFetchRefspec(plan.target.sourceRef, plan.target.destinationRef),
       ], context, deadline, { transfer: true });
       await controls.markStepCompleted('transferred');
       const fetchedSha = String(await awaitPhase(
@@ -2107,6 +2246,9 @@ export function createNetworkOperations({
       if (error.code === 'STALE_CONFIG') return terminal('conflicted', 'STALE_CONFIG', error.message);
       if (error.code === 'RUNTIME_UNSUPPORTED') return terminal('failed', 'RUNTIME_UNSUPPORTED', error.message);
       if (error.code === 'UNKNOWN') return terminal('failed', 'UNKNOWN', 'Change request source resolution failed');
+      // Git's own reason, redacted, for a fetch that failed on anything but
+      // access: blaming the account would send the user to fix the wrong thing.
+      if (error.code === 'TRANSPORT_FAILED') return terminal('failed', 'TRANSPORT_FAILED', error.message);
       return terminal('failed', 'AUTHENTICATION_REQUIRED',
         'The selected account does not authorize the change request head repository');
     } finally {

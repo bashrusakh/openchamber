@@ -55,6 +55,16 @@ const createService = (overrides = {}) => {
 };
 
 describe('OpenChamber control service', () => {
+  it('creates a target task with inherited selection and accepts retargeting on update', async () => {
+    const { service, scheduledTaskService } = createService();
+    scheduledTaskService.upsert.mockImplementation(async (_project, task) => ({ task }));
+    const created = await service.execute('schedule.create', { name: 'Reuse', prompt: 'Continue', daily: '09:00', targetSessionId: 'ses_target' }, '/repo');
+    expect(created.task).toMatchObject({ targetSessionId: 'ses_target', execution: { useDefaults: true } });
+    scheduledTaskService.list.mockResolvedValue([{ ...created.task, id: 'task-1' }]);
+    await service.execute('schedule.update', { taskId: 'task-1', targetSessionId: 'ses_second', agent: 'plan' }, '/repo');
+    expect(scheduledTaskService.upsert.mock.calls[1][1]).toMatchObject({ targetSessionId: 'ses_second', execution: { agent: 'plan' } });
+    expect(scheduledTaskService.upsert.mock.calls[1][1].execution.useDefaults).toBeUndefined();
+  });
   it('serves project and model projections without an HTTP or CLI round trip', async () => {
     const { service } = createService();
     await expect(service.execute('projects.list')).resolves.toEqual({
@@ -86,6 +96,46 @@ describe('OpenChamber control service', () => {
     }));
   });
 
+  it('updates a scheduled task in place, changing only the named fields', async () => {
+    const { service, scheduledTaskService } = createService();
+    const existing = {
+      id: 'task-1',
+      name: 'Nightly',
+      enabled: true,
+      schedule: { kind: 'daily', times: ['09:00'], timezone: 'UTC' },
+      execution: { prompt: 'Old', providerID: 'a', modelID: 'm', variant: 'high', agent: 'build' },
+      state: { lastRunAt: 5, lastStatus: 'success' },
+    };
+    scheduledTaskService.list.mockResolvedValue([existing]);
+    scheduledTaskService.upsert.mockImplementation(async (_project, task) => ({ task, created: false }));
+
+    await service.execute('schedule.update', { taskId: 'task-1', prompt: 'New', model: 'b/n', cron: '0 * * * *' }, '/repo');
+    const saved = scheduledTaskService.upsert.mock.calls[0][1];
+    expect(saved).toEqual({
+      id: 'task-1',
+      name: 'Nightly',
+      enabled: true,
+      schedule: { kind: 'cron', cron: '0 * * * *' },
+      execution: { prompt: 'New', providerID: 'b', modelID: 'n', agent: 'build' },
+    });
+    // No state in the patch: the stored run history is kept.
+    expect(saved.state).toBeUndefined();
+
+    await service.execute('schedule.update', { taskId: 'task-1', timezone: 'Europe/Kyiv', disabled: true }, '/repo');
+    expect(scheduledTaskService.upsert.mock.calls[1][1]).toMatchObject({
+      enabled: false,
+      schedule: { kind: 'daily', times: ['09:00'], timezone: 'Europe/Kyiv' },
+      execution: existing.execution,
+    });
+  });
+
+  it('refuses to update a missing task or one driven by a loop file', async () => {
+    const { service, scheduledTaskService } = createService();
+    await expect(service.execute('schedule.update', { taskId: 'nope', prompt: 'x' }, '/repo')).rejects.toThrow('Scheduled task not found');
+    scheduledTaskService.list.mockResolvedValue([{ id: 'loop:project:x', loopFile: '/repo/.agents/loops/x.md', name: 'x', execution: {}, schedule: {} }]);
+    await expect(service.execute('schedule.update', { taskId: 'loop:project:x', prompt: 'x' }, '/repo')).rejects.toThrow('change that file instead');
+  });
+
   it('does not combine an explicit schedule project with the tool context directory', async () => {
     const { service, scheduledTaskService } = createService();
     await service.execute('schedule.list', { projectId: ' project-1 ' }, '/current-session');
@@ -112,6 +162,15 @@ describe('OpenChamber control service', () => {
     expect(scheduledTaskService.setEnabled).toHaveBeenCalledWith('project-1', 'task-1', false);
   });
 
+  it('reports the enabled state that was saved, not the one requested', async () => {
+    const { service, scheduledTaskService } = createService();
+    scheduledTaskService.setEnabled.mockResolvedValue({ id: 'task-1', enabled: false });
+    await expect(service.execute('schedule.toggle', { taskId: 'task-1', disabled: false }, '/repo')).resolves.toEqual({
+      task: { id: 'task-1', enabled: false },
+      enabled: false,
+    });
+  });
+
   it('returns an actionable taskId error before resolving schedule scope', async () => {
     const { service, scheduledTaskService } = createService();
     await expect(service.execute('schedule.run', {}, '/repo')).rejects.toThrow('taskId is required');
@@ -129,6 +188,23 @@ describe('OpenChamber control service', () => {
     const { service, sessionService } = createService();
     await service.execute('session.create', { title: 'From tool' }, '/repo');
     expect(sessionService.create).toHaveBeenCalledWith({ directory: '/repo', title: 'From tool' });
+  });
+
+  it('hands a pull request number to session creation with the folder and branch names it may carry', async () => {
+    const { service, sessionService } = createService();
+    await service.execute('session.create', { pullRequest: 42 }, '/repo');
+    await service.execute('session.create', { pullRequest: 42, worktree: ' review ', branch: 'review-42' }, '/repo');
+    expect(sessionService.create.mock.calls).toEqual([
+      [{ directory: '/repo', worktree: {}, pullRequest: 42 }],
+      [{ directory: '/repo', worktree: { name: 'review', branchName: 'review-42' }, pullRequest: 42 }],
+    ]);
+  });
+
+  it('refuses a pull request number on a send or fork, which would ignore it', async () => {
+    const { service, sessionService } = createService();
+    await expect(service.execute('session.send', { sessionId: 'ses_1', prompt: 'Go', pullRequest: 42 }, '/repo'))
+      .rejects.toThrow('pullRequest applies only to session.create');
+    expect(sessionService.send).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -156,6 +232,89 @@ describe('OpenChamber control service', () => {
     await service.execute('session.send', { sessionId: 'ses_target', prompt: 'Continue' }, '/repo');
 
     expect(sessionService.send).toHaveBeenCalledWith('ses_target', { directory: '/repo/worktrees/target', prompt: 'Continue' });
+  });
+
+  it('moves the calling session into a worktree from the directory the call came from', async () => {
+    const moveToWorktree = vi.fn(async () => ({ sessionId: 'ses_me', directory: '/repo/worktrees/fix' }));
+    const { service } = createService({ sessionService: { moveToWorktree } });
+
+    const result = await service.execute('session.moveToWorktree', { worktree: ' fix ', branch: 'iuliia/fix' }, '/repo', { contextSessionId: 'ses_me' });
+
+    expect(result).toEqual({ sessionId: 'ses_me', directory: '/repo/worktrees/fix' });
+    expect(moveToWorktree).toHaveBeenCalledWith('ses_me', {
+      directory: '/repo',
+      worktree: { name: 'fix', branchName: 'iuliia/fix' },
+    });
+  });
+
+  it('passes a branch that already exists through to the move', async () => {
+    const moveToWorktree = vi.fn(async () => ({}));
+    const { service } = createService({ sessionService: { moveToWorktree } });
+
+    await service.execute('session.moveToWorktree', { worktree: 'review', existingBranch: ' origin/review ' }, '/repo', { contextSessionId: 'ses_me' });
+
+    expect(moveToWorktree).toHaveBeenCalledWith('ses_me', {
+      directory: '/repo',
+      worktree: { name: 'review', existingBranch: 'origin/review' },
+    });
+  });
+
+  it('moves a named session from where that session lives', async () => {
+    const moveToWorktree = vi.fn(async () => ({}));
+    const { service, client } = createService({ sessionService: { moveToWorktree } });
+    client.session.list.mockResolvedValue({ data: [{ id: 'ses_other', location: { directory: '/repo/worktrees/other' } }] });
+
+    // A directory of the caller's choosing is ignored: the changes come from where the session lives.
+    await service.execute('session.moveToWorktree', { sessionId: 'ses_other', worktree: 'fix', startRef: 'develop', directory: '/elsewhere' }, '/repo', { contextSessionId: 'ses_me' });
+    await expect(service.execute('session.moveToWorktree', { worktree: 'fix' }, '/repo')).rejects.toThrow('sessionId is required');
+
+    expect(moveToWorktree).toHaveBeenCalledWith('ses_other', {
+      directory: '/repo/worktrees/other',
+      worktree: { name: 'fix', startRef: 'develop' },
+    });
+    expect(moveToWorktree).toHaveBeenCalledTimes(1);
+  });
+
+  it('finds the target session directory on a later session.list page', async () => {
+    const { service, client } = createService();
+    client.session.list
+      .mockResolvedValueOnce({ data: [{ id: 'ses_early', location: { directory: '/repo' } }], cursor: { next: 'page-2' } })
+      .mockResolvedValueOnce({ data: [{ id: 'ses_target', location: { directory: '/repo/worktrees/target' } }], cursor: { next: null } });
+
+    await expect(service.resolveSessionDirectory('ses_target')).resolves.toBe('/repo/worktrees/target');
+    expect(client.session.list).toHaveBeenNthCalledWith(2, { cursor: 'page-2' });
+    expect(client.session.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps paging session.list until the requested limit is satisfied', async () => {
+    const { service, client } = createService();
+    client.session.list
+      .mockResolvedValueOnce({ data: [{ id: 'ses_1', location: { directory: '/repo' }, time: {} }], cursor: { next: 'page-2' } })
+      .mockResolvedValueOnce({ data: [{ id: 'ses_2', location: { directory: '/other' }, time: {} }], cursor: { next: null } });
+
+    await expect(service.execute('session.list', { limit: 2 })).resolves.toEqual({
+      sessions: [
+        { id: 'ses_1', location: { directory: '/repo' }, time: {} },
+        { id: 'ses_2', location: { directory: '/other' }, time: {} },
+      ],
+      limit: 2,
+      directory: null,
+      archived: 'excluded',
+    });
+    expect(client.session.list).toHaveBeenNthCalledWith(2, { cursor: 'page-2' });
+  });
+
+  it('stops paging the session list when a cursor repeats', async () => {
+    const { service, client } = createService();
+    client.session.list.mockResolvedValue({
+      data: [{ id: 'ses_1', location: { directory: '/repo' }, time: {} }],
+      cursor: { next: 'loop' },
+    });
+
+    const { sessions } = await service.execute('session.list', { limit: 10 });
+
+    expect(sessions).toEqual([{ id: 'ses_1', location: { directory: '/repo' }, time: {} }]);
+    expect(client.session.list).toHaveBeenCalledTimes(2);
   });
 
   it('falls back to the context directory when the session is not in the global list', async () => {
@@ -313,6 +472,96 @@ describe('OpenChamber control service', () => {
     });
   });
 
+  it('follows the message cursor so all: true returns the whole history', async () => {
+    const { service, client } = createService();
+    const page = (data, next) => ({ data, cursor: { next } });
+    // Newest page first (the API pages with order: 'desc'), then older pages
+    // reachable only through cursor.next.
+    client.message.list.mockImplementation(async (input) => {
+      if (!input.cursor) {
+        return page([
+          { id: 'msg_new_user', type: 'user', time: { created: 40 }, text: 'Recent question' },
+          { id: 'msg_new_assistant', type: 'assistant', time: { created: 50, completed: 55 }, content: [{ type: 'text', text: 'Recent answer' }] },
+        ], 'cursor-page-2');
+      }
+      if (input.cursor === 'cursor-page-2') {
+        return page([
+          { id: 'msg_old_user', type: 'user', time: { created: 10 }, text: 'Older requirement' },
+        ], undefined);
+      }
+      throw new Error(`unexpected cursor ${input.cursor}`);
+    });
+
+    const result = await service.execute('session.messages', {
+      sessionId: 'ses_1',
+      directory: '/repo',
+      role: 'all',
+      all: true,
+    });
+
+    expect(client.message.list).toHaveBeenCalledTimes(2);
+    expect(client.message.list.mock.calls[1][0]).toMatchObject({ sessionID: 'ses_1', cursor: 'cursor-page-2' });
+    expect(result.messages.map((message) => message.id)).toEqual([
+      'msg_old_user', 'msg_new_user', 'msg_new_assistant',
+    ]);
+  });
+
+  it('pages a bounded read with the cursor alone until it has enough text messages', async () => {
+    const { service, client } = createService();
+    const page = (data, next) => ({ data, cursor: { next } });
+    client.message.list.mockImplementation(async (input) => {
+      if (!input.cursor) {
+        return page([
+          { id: 'msg_new_assistant', type: 'assistant', time: { created: 50, completed: 55 }, content: [{ type: 'text', text: 'Recent answer' }] },
+          { id: 'msg_new_user', type: 'user', time: { created: 40 }, text: 'Recent question' },
+        ], 'cursor-page-2');
+      }
+      if (input.cursor === 'cursor-page-2') {
+        return page([
+          { id: 'msg_mid_user', type: 'user', time: { created: 20 }, text: 'Earlier question' },
+          { id: 'msg_old_user', type: 'user', time: { created: 10 }, text: 'First question' },
+        ], 'cursor-page-3');
+      }
+      throw new Error(`unexpected cursor ${input.cursor}`);
+    });
+
+    const result = await service.execute('session.messages', {
+      sessionId: 'ses_1',
+      directory: '/repo',
+      role: 'user',
+      limit: 2,
+    });
+
+    expect(client.message.list).toHaveBeenCalledTimes(2);
+    expect(client.message.list.mock.calls[0][0]).toMatchObject({ sessionID: 'ses_1', order: 'desc' });
+    expect(client.message.list.mock.calls[1][0]).toMatchObject({ sessionID: 'ses_1', cursor: 'cursor-page-2' });
+    expect(client.message.list.mock.calls[1][0]).not.toHaveProperty('order');
+    expect(result.messages.map((message) => message.id)).toEqual(['msg_mid_user', 'msg_new_user']);
+  });
+
+  it('stops paging when the message cursor repeats or a page comes back empty', async () => {
+    const { service, client } = createService();
+    client.message.list.mockImplementation(async (input) => {
+      if (!input.cursor) {
+        return { data: [{ id: 'msg_new_user', type: 'user', time: { created: 20 }, text: 'Question' }], cursor: { next: 'cursor-loop' } };
+      }
+      return { data: [{ id: 'msg_old_user', type: 'user', time: { created: 10 }, text: 'Older question' }], cursor: { next: 'cursor-loop' } };
+    });
+
+    const looped = await service.execute('session.messages', { sessionId: 'ses_1', directory: '/repo', all: true });
+    expect(client.message.list).toHaveBeenCalledTimes(2);
+    expect(looped.messages.map((message) => message.id)).toEqual(['msg_old_user', 'msg_new_user']);
+
+    client.message.list.mockReset();
+    client.message.list.mockImplementation(async (input) => (input.cursor
+      ? { data: [], cursor: { next: `${input.cursor}-next` } }
+      : { data: [{ id: 'msg_user', type: 'user', time: { created: 10 }, text: 'Question' }], cursor: { next: 'cursor-empty' } }));
+
+    const drained = await service.execute('session.messages', { sessionId: 'ses_1', directory: '/repo', all: true });
+    expect(client.message.list).toHaveBeenCalledTimes(2);
+    expect(drained.messages.map((message) => message.id)).toEqual(['msg_user']);
+  });
+
   it('rejects actions outside the fixed contract', async () => {
     const { service } = createService();
     await expect(service.execute('session.delete')).rejects.toThrow('Unsupported OpenChamber action');
@@ -367,6 +616,119 @@ describe('notify.send', () => {
   it('answers 503 when this server has no notifier wired', async () => {
     const { service } = createService({});
     await expect(service.execute('notify.send', { title: 'Done' }, '/repo')).rejects.toMatchObject({ statusCode: 503 });
+  });
+});
+
+describe('render.page', () => {
+  const page = '<!doctype html><p>Hi</p>';
+
+  it('accepts a page with a title and tells the agent not to restate it', async () => {
+    const { service } = createService();
+
+    const result = await service.execute('render.page', { html: page, title: '  Coverage  ' }, '/repo');
+
+    expect(result).toMatchObject({ shown: true, title: 'Coverage' });
+    expect(result.note).toContain("Don't announce");
+  });
+
+  it.each([
+    [{ title: 'Coverage' }, 'html is required'],
+    [{ html: '   ', title: 'Coverage' }, 'html is required'],
+    [{ html: 'x'.repeat(200_001), title: 'Coverage' }, 'the limit is 200000'],
+    [{ html: page }, 'title is required'],
+    [{ html: page, title: 't'.repeat(121) }, 'the limit is 120'],
+  ])('refuses %o with a reason the agent can act on', async (input, reason) => {
+    const { service } = createService();
+    await expect(service.execute('render.page', input, '/repo'))
+      .rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining(reason) });
+  });
+
+  it('refuses while the tool is switched off, so a stale plugin cannot keep drawing', async () => {
+    const { service } = createService({ isRenderToolEnabled: async () => false });
+    await expect(service.execute('render.page', { html: page, title: 'Coverage' }, '/repo'))
+      .rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  describe('with awaitAnswer', () => {
+    const ask = { html: page, title: 'Pick a layout', awaitAnswer: true };
+    const call = { contextSessionId: 'ses_1', contextCallId: 'call_1' };
+    // The call starts waiting once its checks have run.
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    it('waits until the user answers and returns the answer', async () => {
+      const { service } = createService();
+      const pending = service.execute('render.page', ask, '/repo', call);
+      await settle();
+
+      expect(service.answerPage({ sessionId: 'ses_1', callId: 'call_1', summary: ' Layout B ', data: { layout: 'b' } })).toEqual({ answered: true });
+      const result = await pending;
+
+      expect(result).toMatchObject({ title: 'Pick a layout', answer: { answered: true, summary: 'Layout B', data: { layout: 'b' } } });
+      expect(result.note).toContain('answered on the page');
+    });
+
+    it('announces when the page starts and stops waiting', async () => {
+      const onPageWaitChange = vi.fn();
+      const { service } = createService({ onPageWaitChange });
+      const pending = service.execute('render.page', ask, '/repo', call);
+      await settle();
+
+      expect(onPageWaitChange).toHaveBeenCalledWith({ type: 'waiting', sessionId: 'ses_1', callId: 'call_1', title: 'Pick a layout', directory: '/repo' });
+      service.answerPage({ sessionId: 'ses_1', callId: 'call_1', summary: 'B' });
+      await pending;
+      expect(onPageWaitChange).toHaveBeenLastCalledWith({ type: 'settled', sessionId: 'ses_1', callId: 'call_1' });
+
+      const controller = new AbortController();
+      const aborted = service.execute('render.page', ask, '/repo', { ...call, signal: controller.signal });
+      await settle();
+      controller.abort();
+      await expect(aborted).rejects.toBeTruthy();
+      expect(onPageWaitChange).toHaveBeenLastCalledWith({ type: 'settled', sessionId: 'ses_1', callId: 'call_1' });
+    });
+
+    it('answers once: a second answer, or one for another call, finds nothing waiting', async () => {
+      const { service } = createService();
+      const pending = service.execute('render.page', ask, '/repo', call);
+      await settle();
+
+      expect(() => service.answerPage({ sessionId: 'ses_1', callId: 'call_2', summary: 'B' })).toThrow(expect.objectContaining({ statusCode: 404 }));
+      service.answerPage({ sessionId: 'ses_1', callId: 'call_1', summary: 'B' });
+      await expect(pending).resolves.toMatchObject({ answer: { data: null } });
+      expect(() => service.answerPage({ sessionId: 'ses_1', callId: 'call_1', summary: 'B' })).toThrow(expect.objectContaining({ statusCode: 404 }));
+    });
+
+    it('stops waiting when the call is aborted, and the page no longer takes an answer', async () => {
+      const { service } = createService();
+      const controller = new AbortController();
+      const pending = service.execute('render.page', ask, '/repo', { ...call, signal: controller.signal });
+      await settle();
+
+      controller.abort();
+
+      await expect(pending).rejects.toMatchObject({ message: expect.stringContaining('stopped waiting') });
+      expect(() => service.answerPage({ sessionId: 'ses_1', callId: 'call_1', summary: 'B' })).toThrow(expect.objectContaining({ statusCode: 404 }));
+    });
+
+    it.each([
+      [{ summary: '' }, 400],
+      [{ summary: 's'.repeat(501) }, 400],
+      [{ summary: 'B', data: 'x'.repeat(16_001) }, 413],
+      [{ sessionId: '', summary: 'B' }, 400],
+    ])('refuses the answer %o and keeps waiting', async (answer, statusCode) => {
+      const { service } = createService();
+      const pending = service.execute('render.page', ask, '/repo', call);
+      await settle();
+
+      expect(() => service.answerPage({ sessionId: 'ses_1', callId: 'call_1', ...answer })).toThrow(expect.objectContaining({ statusCode }));
+      service.answerPage({ sessionId: 'ses_1', callId: 'call_1', summary: 'B' });
+      await expect(pending).resolves.toMatchObject({ answer: { summary: 'B' } });
+    });
+
+    it('refuses to wait without a call id, so an older plugin falls back to asking in text', async () => {
+      const { service } = createService();
+      await expect(service.execute('render.page', ask, '/repo', { contextSessionId: 'ses_1' }))
+        .rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('without awaitAnswer') });
+    });
   });
 });
 
@@ -510,5 +872,28 @@ describe('returning a dispatched session result', () => {
     await expect(service.execute('session.create', { prompt: 'x', returnResult: true }, '/repo', { contextSessionId: 'ses_parent' }))
       .rejects.toMatchObject({ statusCode: 503 });
     expect(sessionService.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses a returnResult that is not a boolean instead of silently skipping delivery', async () => {
+    const { service, sessionService, dispatchResults } = createReturningService();
+    await expect(service.execute('session.create', { prompt: 'x', returnResult: 'true' }, '/repo', { contextSessionId: 'ses_parent' }))
+      .rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('returnResult must be a boolean') });
+    expect(sessionService.create).not.toHaveBeenCalled();
+    expect(dispatchResults.register).not.toHaveBeenCalled();
+  });
+
+  it('accepts an explicit false returnResult as the plain dispatch path', async () => {
+    const { service, sessionService, dispatchResults } = createReturningService();
+    const result = await service.execute('session.create', { prompt: 'x', returnResult: false }, '/repo', { contextSessionId: 'ses_parent' });
+    expect(sessionService.create).toHaveBeenCalled();
+    expect(result).not.toHaveProperty('resultDelivery');
+    expect(dispatchResults.register).not.toHaveBeenCalled();
+  });
+
+  it('refuses a wait that is not a boolean', async () => {
+    const { service, sessionService } = createService();
+    await expect(service.execute('session.send', { sessionId: 'ses_1', prompt: 'x', wait: 'true' }, '/repo'))
+      .rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('wait must be a boolean') });
+    expect(sessionService.send).not.toHaveBeenCalled();
   });
 });

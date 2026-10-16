@@ -1,3 +1,4 @@
+import { isPlainObject, isString } from '../shared/guards.js';
 import { normalizeSourceControlProviderInstance } from './provider-instance.js';
 import { resolvePrivateRepositoryIdentity } from './repository-identity.js';
 import { fingerprintRemoteUrl, redactRemoteUrl } from './url-redaction.js';
@@ -11,10 +12,6 @@ const bindingInputError = (message) => {
   return error;
 };
 
-const isPlainObject = (value) => value === Object(value)
-  && !Array.isArray(value)
-  && Object.getPrototypeOf(value) === Object.prototype;
-const isString = (value) => Object.prototype.toString.call(value) === '[object String]';
 const safePresentationText = (value, maximum = 512) => isString(value) && value.length > 0
   && value.length <= maximum && value.trim() === value && !/[\0\r\n]/.test(value);
 const safeProviderUsername = (value) => safePresentationText(value, 255) && /^[A-Za-z0-9_.-]+$/.test(value);
@@ -184,6 +181,60 @@ const inheritedAuxiliaryGrant = (binding, parentRemote, rawEndpoint) => {
     : { mode: parent.mode, readiness: 'ready' };
 };
 
+/**
+ * The remote grant that stands for the repository's identity: the one its
+ * provider association names, else `origin`, else the first ready one.
+ */
+const identityRemoteGrant = (binding) => {
+  const ready = binding.remotes.filter((entry) => entry.readiness === 'ready');
+  const primary = binding.providers[0]?.primaryRemote;
+  return ready.find((entry) => entry.name === primary)
+    ?? ready.find((entry) => entry.name === 'origin')
+    ?? ready[0] ?? null;
+};
+
+const endpointAuthority = (url) => {
+  try {
+    const { protocol, host, port } = normalizeGitRemoteEndpoint(url);
+    return `${protocol}://${host}:${port}`;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * The grant a remote without its own record inherits from the repository's
+ * identity.
+ *
+ * An identity answers for the repository rather than for one address. The
+ * System identity reaches every remote the way the machine's Git does; an
+ * account, a key or an anonymous read reaches every remote on the host and
+ * protocol it was granted for, a fork beside its upstream included. A remote
+ * elsewhere, or one its transport cannot speak, stays without a grant until
+ * it is given its own. A remote's own record always wins, and inherited
+ * grants are never persisted: they follow the identity as it changes.
+ */
+const inheritedRemoteGrant = (binding, remote) => {
+  const parent = identityRemoteGrant(binding);
+  if (!parent || !remote.fetch || !remote.push) return null;
+  if (parent.mode !== 'system') {
+    const origin = endpointAuthority(parent.fetch.displayUrl);
+    const reachable = [remote.fetch, remote.push]
+      .every((endpoint) => origin && endpointAuthority(endpoint.rawUrl ?? endpoint.displayUrl) === origin);
+    if (!reachable) return null;
+  }
+  const grant = {
+    name: remote.name,
+    fetch: { displayUrl: remote.fetch.displayUrl, fingerprint: remote.fetch.fingerprint },
+    push: { displayUrl: remote.push.displayUrl, fingerprint: remote.push.fingerprint },
+    mode: parent.mode,
+    readiness: 'ready',
+    inherited: true,
+  };
+  if (parent.mode === 'managed') grant.credentialId = parent.credentialId;
+  return Object.freeze(grant);
+};
+
 /** The grant an unconfigured repository holds for one of its remotes. */
 const implicitSystemRemote = (remote) => Object.freeze({
   name: remote.name, mode: 'system', readiness: 'ready',
@@ -218,7 +269,7 @@ const normalizeProviderInstance = (provider, instance, makeError = bindingInputE
 };
 
 /** The host a remote address or a provider instance points at, lowercased; null when it names none. */
-const hostOf = (value) => {
+export const hostOf = (value) => {
   const text = String(value ?? '').trim();
   if (!text) return null;
   try { return new URL(text.includes('://') ? text : `https://${text}`).hostname.toLowerCase() || null; }
@@ -340,8 +391,18 @@ export function createBindingService({
       return unavailablePresentation();
     }
   };
-  const presentRead = async (read) => {
-    if (!read.binding) return read;
+  const presentRead = async (stored) => {
+    if (!stored.binding) return stored;
+    // Inherited grants are part of what a reader sees, never of what a
+    // mutation writes back, so they are added only to the presented read.
+    const granted = new Set(stored.binding.remotes.map((remote) => remote.name));
+    const inherited = (stored.repository?.remotes ?? [])
+      .filter((remote) => !granted.has(remote.name))
+      .map((remote) => inheritedRemoteGrant(stored.binding, remote))
+      .filter(Boolean);
+    const read = inherited.length
+      ? { ...stored, binding: { ...stored.binding, remotes: [...stored.binding.remotes, ...inherited] } }
+      : stored;
     const managed = [...new Set(read.binding.remotes
       .filter((remote) => remote.mode === 'managed')
       .map((remote) => remote.credentialId))];
@@ -390,11 +451,13 @@ export function createBindingService({
       && candidate.accountId === accountId
       && candidate.primaryRemote === primaryRemote);
     if (!boundProvider) {
-      // A repository nobody bound to this host, or bound to an identity that
-      // names no account, is read with the account the client is signed in
-      // to, as it was before bindings existed. The remote must really be on
-      // that host; whether the account exists, the provider route decides.
+      // A repository nobody bound to this host, bound to an identity that
+      // names no account, or bound to an account that is gone, is read with
+      // the account the client is signed in to, as it was before bindings
+      // existed. The remote must really be on that host; whether the account
+      // exists, the provider route decides.
       const boundToHost = providers.some((candidate) => candidate.provider === provider
+        && candidate.readiness !== 'account-unavailable'
         && normalizeProviderInstance(candidate.provider, candidate.instance) === instance);
       const remote = context.remotes.find((candidate) => candidate.name === primaryRemote);
       const remoteHost = remote ? hostOf(remote.fetch.displayUrl) : null;
@@ -462,9 +525,14 @@ export function createBindingService({
     // made against the unbound state.
     const boundRemote = current.binding
       ? current.binding.remotes.find((candidate) => candidate.name === remote)
+        ?? (repositoryRemote ? inheritedRemoteGrant(current.binding, repositoryRemote) : null)
       : (repositoryRemote ? implicitSystemRemote(repositoryRemote) : null);
     if (!repositoryRemote || !boundRemote) throw conflict('Git transport remote binding changed');
-    if (boundRemote.readiness !== 'ready') throw conflict('Git transport remote binding needs attention');
+    // Not a binding that moved under the caller: the grant's account is gone
+    // or needs confirming, so the user has to act, and retrying cannot help.
+    if (boundRemote.readiness !== 'ready') {
+      throw Object.assign(conflict('Git transport remote binding needs attention'), { reason: 'needs-attention' });
+    }
     const endpoint = repositoryRemote[endpointKind];
     const boundEndpoint = boundRemote[endpointKind];
     if (!endpoint?.rawUrl || !endpoint.fingerprint || boundEndpoint?.fingerprint !== endpoint.fingerprint) {
@@ -542,12 +610,15 @@ export function createBindingService({
     validateReadContext: (input) => validateAuthority(input, invalidReadInput, bindingInputError),
     validateMutationContext: async (input) => {
       const context = await validateAuthority(input, mutationContextError);
-      // A write goes to the provider on the repository's behalf, so the
-      // binding it was made against must still describe the repository's
-      // remotes; a read tolerates that drift, a mutation does not.
+      // A write goes to the provider on the repository's behalf, so what the
+      // binding granted must still describe the repository: the provider's
+      // remote (checked above) and every remote with a transport grant, none
+      // moved or gone. A remote added beside them (an upstream, a fork a
+      // change request was checked out from) grants nothing and changes
+      // nothing the write relies on, so it does not block it.
       const repository = await resolve(context.directory);
       const current = await readCurrent(repository);
-      if (current.binding && current.binding.configRevision !== repository.configRevision) {
+      if (current.binding?.remotes.some((grant) => grant.readiness === 'config-changed')) {
         throw staleBindingError('Source control repository remotes changed', current);
       }
       return {
@@ -997,6 +1068,20 @@ export function createBindingService({
       if (latest.repositoryId !== context.repositoryId || latest.configRevision !== context.configRevision) throw conflict();
       const record = await store.compareAndSwap(context.repositoryId, expectedRevision, null);
       return { repository: publicContext(context), ...record };
+    },
+    /** A newly connected account takes over what its user's gone account held (`adoptAccount`). */
+    accountConnected: async (identity) => {
+      if (!isPlainObject(identity)) throw bindingInputError('account identity is required');
+      const provider = requiredString(identity.provider, 'provider');
+      if (provider !== 'github' && provider !== 'gitlab') throw bindingInputError('provider is unsupported');
+      if (!(store.adoptAccount instanceof Function)) return [];
+      return store.adoptAccount({
+        provider,
+        instance: normalizeProviderInstance(provider, identity.instance),
+        accountId: requiredString(identity.accountId, 'accountId'),
+        credentialRevision: identity.credentialRevision,
+        providerUserId: requiredString(identity.providerUserId, 'providerUserId'),
+      });
     },
     accountUnavailable: async (identity) => {
       if (!isPlainObject(identity)) throw bindingInputError('account identity is required');

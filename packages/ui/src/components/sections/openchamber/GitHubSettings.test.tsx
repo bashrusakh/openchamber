@@ -37,10 +37,10 @@ describe("GitHubSettings", () => {
   beforeEach(resetAuthState);
   afterEach(resetAuthState);
 
-  test("stays hidden during the initial auth status load", () => {
+  test("says it is checking during the initial auth status load", () => {
     setAuthEntry({ status: null, isLoading: true, hasChecked: false });
 
-    expect(renderSettings()).toBe("");
+    expect(renderSettings()).toContain("Checking connection");
   });
 
   test("stays mounted while a checked status is refreshing, then shows reconnect state", () => {
@@ -76,7 +76,7 @@ describe("GitHubSettings", () => {
     });
 
     const disconnectedMarkup = renderSettings();
-    expect(disconnectedMarkup).toContain("Not Connected");
+    expect(disconnectedMarkup).toContain("Not connected");
     expect(disconnectedMarkup).toContain("Connect GitHub");
   });
 });

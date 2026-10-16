@@ -7,6 +7,8 @@ import { promisify } from 'util';
 import yaml from 'yaml';
 
 import { discoverSkills } from './opencodeConfig';
+import { readEnterprisePolicy } from '../../web/server/lib/enterprise-mode.js';
+import { isInstalledFromSource, readInstalledSources } from '../../web/server/lib/skills-catalog/installed-sources.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -62,7 +64,7 @@ type SkillsRepoScanResult =
   | { ok: false; error: SkillsRepoError };
 
 type SkillsInstallResult =
-  | { ok: true; installed: Array<{ skillName: string; scope: SkillScope; source?: SkillInstallSource }>; skipped: Array<{ skillName: string; reason: string }> }
+  | { ok: true; installed: Array<{ skillName: string; skillDir: string; scope: SkillScope; source?: SkillInstallSource }>; skipped: Array<{ skillName: string; reason: string }> }
   | { ok: false; error: SkillsRepoError };
 
 const CURATED_SOURCES: CuratedSource[] = [
@@ -140,8 +142,18 @@ async function assertGitAvailable() {
   return { ok: true as const };
 }
 
+// Same rules as the server (web/server/lib/skills-catalog/source.js): a branch
+// or tag after `#`, never starting with `-` and never holding `..`.
+const GIT_REF_PATTERN = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
+
 function parseSkillRepoSource(input: string, subpath?: string) {
-  const raw = (input || '').trim();
+  const trimmed = (input || '').trim();
+  const hashIndex = trimmed.lastIndexOf('#');
+  const raw = hashIndex >= 0 ? trimmed.slice(0, hashIndex).trim() : trimmed;
+  const ref = hashIndex >= 0 ? trimmed.slice(hashIndex + 1).trim() || null : null;
+  if (ref !== null && !GIT_REF_PATTERN.test(ref)) {
+    return { ok: false as const, error: { kind: 'invalidSource' as const, message: `Invalid branch or tag "${ref}"` } };
+  }
   if (!raw) {
     return { ok: false as const, error: { kind: 'invalidSource' as const, message: 'Repository source is required' } };
   }
@@ -182,6 +194,7 @@ function parseSkillRepoSource(input: string, subpath?: string) {
       cloneUrlHttps: `https://${gitHost}/${owner}/${repo}.git`,
       cloneUrlSsh: `git@${gitHost}:${owner}/${repo}.git`,
       effectiveSubpath: explicitSubpath,
+      ref,
     }
   }
 
@@ -196,6 +209,7 @@ function parseSkillRepoSource(input: string, subpath?: string) {
       cloneUrlHttps: `https://github.com/${owner}/${repo}.git`,
       cloneUrlSsh: `git@github.com:${owner}/${repo}.git`,
       effectiveSubpath: explicitSubpath || shorthandSubpath,
+      ref,
     };
   }
 
@@ -231,9 +245,10 @@ async function safeRm(dir: string) {
   }
 }
 
-async function cloneRepo(cloneUrl: string, targetDir: string) {
-  const preferred = ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', cloneUrl, targetDir];
-  const fallback = ['clone', '--depth', '1', '--no-checkout', cloneUrl, targetDir];
+async function cloneRepo(cloneUrl: string, targetDir: string, ref: string | null = null) {
+  const branch = ref ? ['--branch', ref] : [];
+  const preferred = ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', ...branch, cloneUrl, targetDir];
+  const fallback = ['clone', '--depth', '1', '--no-checkout', ...branch, cloneUrl, targetDir];
 
   const result = await runGit(preferred, { timeoutMs: 60_000 });
   if (result.ok) return { ok: true as const };
@@ -271,7 +286,7 @@ export async function scanSkillsRepository(options: { source: string; subpath?: 
   const tempBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openchamber-vscode-skills-scan-'));
 
   try {
-    const cloned = await cloneRepo(parsed.cloneUrlHttps, tempBase);
+    const cloned = await cloneRepo(parsed.cloneUrlHttps, tempBase, parsed.ref);
     if (!cloned.ok) {
       return { ok: false as const, error: cloned.error };
     }
@@ -497,7 +512,7 @@ export async function installSkillsFromRepository(options: {
   const tempBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openchamber-vscode-skills-install-'));
 
   try {
-    const cloned = await cloneRepo(parsed.cloneUrlHttps, tempBase);
+    const cloned = await cloneRepo(parsed.cloneUrlHttps, tempBase, parsed.ref);
     if (!cloned.ok) {
       return { ok: false as const, error: cloned.error };
     }
@@ -513,7 +528,7 @@ export async function installSkillsFromRepository(options: {
       return { ok: false as const, error: { kind: 'unknown' as const, message: checkoutResult.stderr || checkoutResult.message || 'Failed to checkout repository' } };
     }
 
-    const installed: Array<{ skillName: string; scope: SkillScope; source?: SkillInstallSource }> = [];
+    const installed: Array<{ skillName: string; skillDir: string; scope: SkillScope; source?: SkillInstallSource }> = [];
     const skipped: Array<{ skillName: string; reason: string }> = [];
 
     for (const plan of skillPlans) {
@@ -558,7 +573,7 @@ export async function installSkillsFromRepository(options: {
 
       try {
         await copyDirectoryNoSymlinks(srcDir, targetDir);
-        installed.push({ skillName: plan.skillName, scope: options.scope, source: targetSource });
+        installed.push({ skillName: plan.skillName, skillDir: plan.skillDirPosix, scope: options.scope, source: targetSource });
       } catch (error) {
         await safeRm(targetDir);
         skipped.push({
@@ -583,9 +598,13 @@ export async function getSkillsCatalog(
   additionalSources?: SkillsCatalogSourceConfig[],
   installedSkills?: Array<{ name: string; scope: SkillScope; source?: 'opencode' | 'agents' | 'claude' }>
 ) {
-  const sources = [...CURATED_SOURCES, ...(Array.isArray(additionalSources) ? additionalSources : [])];
+  // The machine policy can hide the built-in catalogs (see enterprise-mode.js).
+  const curated = readEnterprisePolicy().hideBuiltinSkillCatalogs ? [] : CURATED_SOURCES;
+  const sources = [...curated, ...(Array.isArray(additionalSources) ? additionalSources : [])];
   const discovered = Array.isArray(installedSkills) ? installedSkills : discoverSkills(workingDirectory);
   const installedByName = new Map(discovered.map((s) => [s.name, s]));
+  // Same source-aware rule as the web catalog route (#4756).
+  const provenanceByName = readInstalledSources();
 
   const itemsBySource: Record<string, SkillsCatalogItemWithBadge[]> = {};
 
@@ -597,7 +616,7 @@ export async function getSkillsCatalog(
     }
 
     const effectiveSubpath = src.defaultSubpath || parsed.effectiveSubpath || '';
-    const cacheKey = `${parsed.normalizedRepo}::${effectiveSubpath}`;
+    const cacheKey = `${parsed.normalizedRepo}${parsed.ref ? `#${parsed.ref}` : ''}::${effectiveSubpath}`;
 
     let cached = !refresh ? catalogCache.get(cacheKey) : null;
     if (cached && Date.now() >= cached.expiresAt) {
@@ -623,7 +642,7 @@ export async function getSkillsCatalog(
       return {
         sourceId: src.id,
         ...item,
-        installed: installed ? { isInstalled: true, scope: installed.scope, source: installed.source === 'agents' ? 'agents' : 'opencode' } : { isInstalled: false },
+        installed: installed && isInstalledFromSource(provenanceByName, item.skillName, src.id, item.skillDir) ? { isInstalled: true, scope: installed.scope, source: installed.source === 'agents' ? 'agents' : 'opencode' } : { isInstalled: false },
       };
     });
   }

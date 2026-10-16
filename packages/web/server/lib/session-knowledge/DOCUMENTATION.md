@@ -37,14 +37,23 @@ must re-send it, not merely renaming one.
 
 | Moment | Delivery |
 |---|---|
-| A message from the UI | synthetic part on that message |
-| A scheduled task, a session the agent dispatched | synthetic part on that prompt |
-| After compaction | its own `prompt_async`, alongside the pinned messages |
+| A message from the UI | synthetic message admitted right before that message |
+| A scheduled task, a session the agent dispatched | synthetic message admitted right before that prompt |
+| After compaction | its own synthetic message, alongside the pinned messages |
 
-The first two attach to an outgoing message because there is one. Compaction has
-none, which is why it re-sends on its own — and it travels with
-`context-obligatory`'s pinned messages in a single turn, since two synthetic
-messages back to back read as the agent being interrupted twice.
+OpenCode 2 has no synthetic parts inside a prompt, so the block is always a
+message of its own, admitted with `resume: false`. The first two go in just
+ahead of an outgoing message because there is one. Compaction has none, which is
+why it re-sends on its own — and it travels with `context-obligatory`'s pinned
+messages in a single message, since two synthetic messages back to back read as
+the agent being interrupted twice.
+
+The model reads that message as one from the user, and its rules read as orders.
+After an automatic compaction the agent keeps working with the block as the
+newest user message and no prompt after it, and weaker models answered it ("No
+task yet, so nothing to link") instead of doing the work (#4877). Every block
+therefore opens with `KNOWLEDGE_HEADER`, which says it is background and that
+the agent acts on the user's messages and carries on with work in progress.
 
 ## Failure behaviour
 
@@ -57,6 +66,10 @@ store. The tool description alone is read only when the agent already means to
 call it, so agents told nothing here saved only when the user said "remember".
 The session hears "nothing is stored yet" only when both scopes loaded.
 
+The save rule also says to save before the final reply. The chat shows only the
+last step's text as the answer, so an agent that answered, then saved, then
+wrote one closing line had its whole answer folded into Activity.
+
 A source that will not load never blanks the rest: an unreadable memory store
 still delivers the pinned notes. A memory scope that failed to load is left out
 rather than indexed as empty, which would teach the agent to store again what it
@@ -65,6 +78,17 @@ already has.
 Delivery is recorded only after the send is accepted. Recording it when the text
 is handed over would leave a failed send believing the agent had context it never
 received.
+
+A revert cuts the transcript at the synthetic messages before the reverted
+prompt, so it can take the block along while the stored signature still says it
+was delivered. The client's `revertToMessage` checks the cut for a synthetic
+message starting with the header (`SESSION_KNOWLEDGE_HEADER` in
+`ui/src/lib/sessionKnowledgeApi.ts`, pinned to `KNOWLEDGE_HEADER` by this
+module's test) and calls `POST /api/session-knowledge/forget`, which clears the
+signature and keeps the pins. The resend then carries the block again. Clearing
+the revert afterwards leaves the block in the transcript twice, which costs some
+context and nothing else. Blocks sent before the header existed are not
+recognised.
 
 ## When to link
 
@@ -75,6 +99,33 @@ own description. Stated only in the action's description it went unread: an
 agent handed an issue to investigate saw no reason to open a session-control
 tool, so it never linked anything. It rides the same signature (`l:on`), so it
 is sent once and again after compaction.
+
+## When to move into a worktree
+
+The same session is told when to leave a busy branch: a new task on a checkout
+whose branch already carries an open pull request or changes that are not the
+agent's. The form follows the `agentWorktreeMoveWithoutAsking` setting
+(`WORKTREE_MOVE_GUIDANCE.ask` offers the move and waits, `.auto` moves first and
+says so), read through `isWorktreeMoveWithoutAsking` and only while the tool is
+there. It is part of the signature (`w:ask`, `w:auto`), so flipping the setting
+re-sends the rule. The tool description carries the same text
+(`../agent-tool/runtime.js`, `WORKTREE_MOVE_RULES`); change both together.
+
+## When to draw a page
+
+A session whose agent has the managed `openchamber_render` tool (the setting is
+on and OpenChamber launched OpenCode, read through `isPageRenderingAvailable`)
+is told when a chart, table, diagram or interface mockup beats prose
+(`RENDER_PAGE_GUIDANCE`).
+Stated only in the tool description, it went unread: asked for a breakdown of
+lines of code per package, an agent answered with a list and drew the chart
+only when asked again. The cases and the limits (no page for a few numbers, at
+most one per answer) are `RENDER_PAGE_WHEN` in
+`../openchamber-control/render-page.js`, which the tool description shares. The
+guidance also names asking with a page (`awaitAnswer`) when the user has to
+choose between visual options. It rides the signature as `r:on:3`; the
+version moves whenever the guidance text changes, so sessions carrying the
+older text hear the new one.
 
 ## Entries that read as instructions
 

@@ -8,7 +8,7 @@
  */
 import type {
   GitHubPullRequestRef,
-  GitHubPullRequestSummariesResult,
+  GitHubPullStatusesResult,
   GitHubReferenceDetailResult,
   GitHubReferencesOptions,
   GitHubReferencesResult,
@@ -30,32 +30,6 @@ const checksSummarySchema = z.object({
   startedAt: z.string().optional(),
 });
 
-const prSummariesResultSchema = z.discriminatedUnion('connected', [
-  z.object({ connected: z.literal(false) }),
-  z.object({
-    connected: z.literal(true),
-    fetchedAt: z.number(),
-    summaries: z.array(z.object({
-      owner: z.string(),
-      repo: z.string(),
-      number: z.number(),
-      state: z.enum(['open', 'closed', 'merged']),
-      draft: z.boolean(),
-      title: z.string(),
-      headSha: z.string().optional(),
-      mergeable: z.boolean().nullable(),
-      mergeableState: z.string().nullable(),
-      checks: checksSummarySchema.nullable(),
-    })),
-    issueSummaries: z.array(z.object({
-      owner: z.string(),
-      repo: z.string(),
-      number: z.number(),
-      title: z.string(),
-      state: z.enum(['open', 'completed', 'not_planned']),
-    })),
-  }),
-]);
 
 const referenceFields = {
   number: z.number(),
@@ -105,41 +79,71 @@ const referencesResultSchema = z.discriminatedUnion('connected', [
   }),
 ]);
 
+const referenceCommentFields = {
+  author: z.object({ login: z.string(), avatarUrl: z.string().optional() }).nullable(),
+  body: z.string(),
+  createdAt: z.string().nullable(),
+  url: z.string(),
+  path: z.string().nullable(),
+  line: z.number().nullable(),
+  review: z.enum(['approved', 'changes_requested', 'commented', 'dismissed']).nullable(),
+};
+
 const referenceDetailResultSchema = z.discriminatedUnion('connected', [
   z.object({ connected: z.literal(false) }),
   z.object({
     connected: z.literal(true),
     detail: z.object({
       number: z.number(),
+      // A thread's replies are comments without threads of their own.
       comments: z.array(z.object({
-        author: z.object({ login: z.string(), avatarUrl: z.string().optional() }).nullable(),
-        body: z.string(),
-        createdAt: z.string().nullable(),
-        url: z.string(),
-        path: z.string().nullable(),
-        line: z.number().nullable(),
-        review: z.enum(['approved', 'changes_requested', 'commented', 'dismissed']).nullable(),
+        ...referenceCommentFields,
+        thread: z.object({
+          id: z.string().min(1),
+          resolved: z.boolean(),
+          canResolve: z.boolean(),
+          canReply: z.boolean(),
+          replies: z.array(z.object(referenceCommentFields)),
+        }).optional(),
       })),
       commentTotal: z.number(),
       pull: z.object({
         reviewDecision: z.enum(['approved', 'changes_requested', 'review_required']).nullable(),
+        reviewers: z.array(z.object({ id: z.string(), login: z.string(), avatarUrl: z.string().optional() })).default([]),
+        checks: checksSummarySchema.nullable().optional(),
         additions: z.number(),
         deletions: z.number(),
         changedFiles: z.number(),
-        checks: checksSummarySchema.nullable(),
+        commits: z.array(z.object({
+          sha: z.string(),
+          headline: z.string(),
+          author: z.object({ login: z.string(), avatarUrl: z.string().optional() }).nullable(),
+          authorName: z.string().nullable(),
+          committedAt: z.string().nullable(),
+          url: z.string().nullable(),
+        })).default([]),
+        commitTotal: z.number().nullable().default(null),
       }).nullable(),
     }).nullable(),
   }),
 ]);
 
-const errorSchema = z.object({ error: z.string() });
+const pullStatusesResultSchema = z.discriminatedUnion('connected', [
+  z.object({ connected: z.literal(false) }),
+  z.object({
+    connected: z.literal(true),
+    statuses: z.array(z.object({
+      owner: z.string(),
+      repo: z.string(),
+      number: z.number(),
+      checks: checksSummarySchema.nullable(),
+      mergeable: z.boolean().nullable(),
+      mergeableState: z.string().nullable(),
+    })),
+  }),
+]);
 
-/** Without `accountId` the server answers with the current github.com account. */
-type SummariesRequest = {
-  accountId?: string;
-  refs: GitHubPullRequestRef[];
-  issueRefs: GitHubPullRequestRef[];
-};
+const errorSchema = z.object({ error: z.string() });
 
 const readContextQuery = (context: SourceControlReadContext): URLSearchParams => new URLSearchParams({
   directory: context.directory,
@@ -171,7 +175,8 @@ export const fetchGitHubReferences = async (
 ): Promise<GitHubReferencesResult> => {
   const query = readContextQuery(context);
   query.set('kind', options.kind);
-  if (options.filter) query.set('filter', options.filter);
+  if (options.state) query.set('state', options.state);
+  if (options.people) query.set('people', options.people);
   if (options.query?.trim()) query.set('query', options.query.trim());
   if (options.cursor) query.set('cursor', options.cursor);
   const response = await fetch('/api/source-control/github/references', { query, headers: { Accept: 'application/json' } });
@@ -191,18 +196,13 @@ export const fetchGitHubReferenceDetail = async (
   return readPayload(response, referenceDetailResultSchema, 'Failed to load issue or pull request detail');
 };
 
-export const fetchGitHubSummaries = async (
+export const fetchGitHubPullStatuses = async (
   fetch: GitHubFetch,
-  accountId: string | null,
-  refs: GitHubPullRequestRef[],
-  issueRefs: GitHubPullRequestRef[] = [],
-): Promise<GitHubPullRequestSummariesResult> => {
-  const body: SummariesRequest = { refs, issueRefs };
-  if (accountId) body.accountId = accountId;
-  const response = await fetch('/api/source-control/github/pr/summaries', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return readPayload(response, prSummariesResultSchema, 'Failed to load PR summaries');
+  context: SourceControlReadContext,
+  pulls: GitHubPullRequestRef[],
+): Promise<GitHubPullStatusesResult> => {
+  const query = readContextQuery(context);
+  query.set('pulls', pulls.map((pull) => `${pull.owner}/${pull.repo}#${pull.number}`).join(','));
+  const response = await fetch('/api/source-control/github/references/status', { query, headers: { Accept: 'application/json' } });
+  return readPayload(response, pullStatusesResultSchema, 'Failed to load pull request statuses');
 };

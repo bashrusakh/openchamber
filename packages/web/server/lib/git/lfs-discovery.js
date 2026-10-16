@@ -1,9 +1,14 @@
+import { isString } from '../shared/guards.js';
 import { normalizeDiscoveryEndpoint, resolveGitRelativeEndpoint } from './discovery-endpoint.js';
 
 export const LFS_DISCOVERY_LIMITS = Object.freeze({
   maxFilesBytes: 16 * 1024 * 1024,
   maxBatchBytes: 256 * 1024,
-  fileBatchSize: 128,
+  // As many files per Git call as one call's attribute output may report
+  // (`maxAttributeRecords`): each batch costs three Git processes, and a
+  // repository of thousands of files paid that cost hundreds of times on
+  // every pull and push. Byte limits still bound every call.
+  fileBatchSize: 1_024,
   maxAttributesBytes: 256 * 1024,
   maxConfigBytes: 256 * 1024,
   maxAttributeRecords: 1_024,
@@ -21,7 +26,6 @@ const SAFE_FILTERS = Object.freeze({
   'filter.lfs.smudge': 'git-lfs smudge -- %f',
   'filter.lfs.process': 'git-lfs filter-process',
 });
-const isString = (value) => Object.prototype.toString.call(value) === '[object String]';
 
 const lfsError = (message, code = 'INVALID_LFS_DISCOVERY_INPUT') => Object.assign(new Error(message), { code });
 
@@ -34,7 +38,7 @@ const boundedText = (value, maxBytes, label) => {
   return text;
 };
 
-const parseConfig = (value, limits, label) => {
+const parseConfig = (value, limits, label, { allowRepeatedCanonicalFilters = false } = {}) => {
   const text = boundedText(value, limits.maxConfigBytes, label);
   if (!text) return new Map();
   if (!text.endsWith('\0')) throw lfsError(`${label} is incomplete`);
@@ -44,7 +48,10 @@ const parseConfig = (value, limits, label) => {
     if (separator <= 0 || separator === record.length - 1) throw lfsError(`${label} record is malformed`);
     const key = record.slice(0, separator).toLowerCase();
     const configValue = record.slice(separator + 1);
-    if (result.has(key)) throw lfsError(`${label} contains duplicate ${key}`);
+    // Effective Git config reports every layer, including identical LFS installs.
+    const repeatedCanonicalFilter = allowRepeatedCanonicalFilters && result.get(key) === configValue
+      && (SAFE_FILTERS[key] === configValue || (key === 'filter.lfs.required' && configValue === 'true'));
+    if (result.has(key) && !repeatedCanonicalFilter) throw lfsError(`${label} contains duplicate ${key}`);
     result.set(key, configValue);
   }
   return result;
@@ -76,15 +83,76 @@ const parseAttributes = (value, limits) => {
     if (fields[index + 2] === 'lfs' && !seen.has(filePath)) {
       seen.add(filePath);
       paths.push(filePath);
-      if (paths.length > limits.maxPublicRecords) {
-        throw lfsError('LFS attribute records exceed their public record limit', 'LFS_DISCOVERY_LIMIT_EXCEEDED');
-      }
     }
   }
   return paths;
 };
 
-export async function scanLfsFiles(filesOutput, query, gitlinkPaths = []) {
+// Pointer-sized blobs read with `cat-file --batch`, in as few calls as fit
+// `maxBatchBytes` each: a whole file batch of them may not fit in one.
+const readSmallBlobs = async (query, candidates, limits, label) => {
+  const read = [];
+  for (let start = 0; start < candidates.length;) {
+    const chunk = [];
+    let bytes = 0;
+    while (start < candidates.length) {
+      const candidate = candidates[start];
+      const entryBytes = Buffer.byteLength(`${candidate.oid} blob ${candidate.size}\n`) + candidate.size + 1;
+      if (chunk.length && bytes + entryBytes > limits.maxBatchBytes) break;
+      chunk.push(candidate);
+      bytes += entryBytes;
+      start += 1;
+    }
+    const contents = await query(['cat-file', '--batch'], Buffer.from(`${chunk.map((file) => file.oid).join('\n')}\n`));
+    if (!Buffer.isBuffer(contents) || contents.length > limits.maxBatchBytes) throw lfsError(`${label} batch is invalid`);
+    let position = 0;
+    for (const candidate of chunk) {
+      const header = Buffer.from(`${candidate.oid} blob ${candidate.size}\n`);
+      if (!contents.subarray(position, position + header.length).equals(header)) throw lfsError(`${label} batch header is invalid`);
+      position += header.length;
+      const content = contents.subarray(position, position + candidate.size);
+      position += candidate.size;
+      if (content.length !== candidate.size || contents[position++] !== 10) throw lfsError(`${label} batch is incomplete`);
+      read.push({ candidate, content });
+    }
+    if (position !== contents.length) throw lfsError(`${label} batch contains unexpected output`);
+  }
+  return read;
+};
+
+/**
+ * `git ls-tree -rlz --full-tree HEAD` as path -> object, type and size. With
+ * it, `scanLfsFiles` reads sizes from one tree listing instead of resolving
+ * every `HEAD:<path>` through `cat-file --batch-check`, which walks the tree
+ * once per file and took most of a pull's time on a repository of thousands.
+ */
+export function parseTreeObjects(treeOutput) {
+  const text = boundedText(treeOutput, LFS_DISCOVERY_LIMITS.maxFilesBytes, 'Tree listing');
+  if (text && !text.endsWith('\0')) throw lfsError('Tree listing is incomplete');
+  const entries = new Map();
+  for (const record of text.split('\0')) {
+    if (!record) continue;
+    // A record without a size column says nothing about the object's size:
+    // that path is left to `cat-file --batch-check`.
+    const match = record.match(/^[0-7]{6} (blob|commit|tree) ([0-9a-f]{40}(?:[0-9a-f]{24})?) +(-|0|[1-9][0-9]*)\t([^]+)$/);
+    if (!match) {
+      if (!/^[0-7]{6} (blob|commit|tree) [0-9a-f]{40}(?:[0-9a-f]{24})?\t/.test(record)) throw lfsError('Tree listing is invalid');
+      continue;
+    }
+    entries.set(match[4], { type: match[1], oid: match[2], size: match[3] === '-' ? 0 : Number(match[3]) });
+  }
+  return entries;
+}
+
+/**
+ * Every tracked file is checked, and every pointer-sized blob that claims to be
+ * an LFS pointer is validated. The result keeps only bounded evidence: up to
+ * `maxPublicRecords` attribute records and `maxPointerSamples` pointer samples.
+ * Hydration needs to know whether LFS is in use, not an inventory, so a
+ * repository with thousands of LFS files is scanned in the same memory as one
+ * with a handful.
+ */
+export async function scanLfsFiles(filesOutput, query, gitlinkPaths = [], treeObjects = null) {
   const limits = LFS_DISCOVERY_LIMITS;
   const text = boundedText(filesOutput, limits.maxFilesBytes, 'Tracked files output');
   if (text && !text.endsWith('\0')) throw lfsError('Tracked files output is incomplete');
@@ -116,20 +184,28 @@ export async function scanLfsFiles(filesOutput, query, gitlinkPaths = []) {
     }
     for (const file of selected) {
       const record = `${file}\0filter\0lfs\0`;
-      attributesBytes += Buffer.byteLength(record);
-      if (attributesBytes > limits.maxAttributesBytes) {
-        throw lfsError('LFS attribute records exceed their byte limit', 'LFS_DISCOVERY_LIMIT_EXCEEDED');
-      }
+      const recordBytes = Buffer.byteLength(record);
+      if (attributes.length >= limits.maxPublicRecords || attributesBytes + recordBytes > limits.maxAttributesBytes) break;
+      attributesBytes += recordBytes;
       attributes.push(record);
-    }
-    if (attributes.length > limits.maxPublicRecords) {
-      throw lfsError('LFS attribute records exceed their public record limit', 'LFS_DISCOVERY_LIMIT_EXCEEDED');
     }
 
     // Query sizes without reading blobs. Only pointer-sized blobs enter the
     // bounded content query; Git LFS pointers fit within 1 KiB.
-    const metadata = boundedText(await query(['cat-file', '--batch-check'],
-      Buffer.from(`${batch.map((file) => `HEAD:${file}`).join('\n')}\n`)), limits.maxBatchBytes, 'Git object metadata');
+    // The records `cat-file --batch-check` gives for `HEAD:<path>`, taken from
+    // the tree listing where it has the path; only the paths it lacks are
+    // asked of Git, so their answer is still the authoritative one.
+    const unlisted = batch.filter((file) => !treeObjects?.has(file));
+    const asked = unlisted.length
+      ? boundedText(await query(['cat-file', '--batch-check'],
+        Buffer.from(`${unlisted.map((file) => `HEAD:${file}`).join('\n')}\n`)), limits.maxBatchBytes, 'Git object metadata').split('\n')
+      : [''];
+    if (asked.pop() !== '' || asked.length !== unlisted.length) throw lfsError('Git object metadata is incomplete');
+    let askedIndex = 0;
+    const metadata = `${batch.map((file) => {
+      const entry = treeObjects?.get(file);
+      return entry ? `${entry.oid} ${entry.type} ${entry.size}` : asked[askedIndex++];
+    }).join('\n')}\n`;
     const records = metadata.split('\n');
     if (records.pop() !== '' || records.length !== batch.length) throw lfsError('Git object metadata is incomplete');
     const candidates = [];
@@ -144,25 +220,14 @@ export async function scanLfsFiles(filesOutput, query, gitlinkPaths = []) {
     const selectedPaths = new Set(selected);
     candidates.sort((left, right) => Number(selectedPaths.has(right.path)) - Number(selectedPaths.has(left.path)));
     if (!candidates.length) continue;
-    const contents = await query(['cat-file', '--batch'], Buffer.from(`${candidates.map((file) => file.oid).join('\n')}\n`));
-    if (!Buffer.isBuffer(contents) || contents.length > limits.maxBatchBytes) throw lfsError('Git object batch is invalid');
-    let position = 0;
-    for (const candidate of candidates) {
-      const header = Buffer.from(`${candidate.oid} blob ${candidate.size}\n`);
-      if (!contents.subarray(position, position + header.length).equals(header)) throw lfsError('Git object batch header is invalid');
-      position += header.length;
-      const content = contents.subarray(position, position + candidate.size);
-      position += candidate.size;
-      if (content.length !== candidate.size || contents[position++] !== 10) throw lfsError('Git object batch is incomplete');
+    for (const { candidate, content } of await readSmallBlobs(query, candidates, limits, 'Git object')) {
       if (content.subarray(0, prefix.length).equals(prefix)) {
         parseLfsPointer(content);
-        pointerSamples.push({ path: candidate.path, content: Buffer.from(content) });
-        if (pointerSamples.length > limits.maxPointerSamples) {
-          throw lfsError('LFS pointers exceed their record limit', 'LFS_DISCOVERY_LIMIT_EXCEEDED');
+        if (pointerSamples.length < limits.maxPointerSamples) {
+          pointerSamples.push({ path: candidate.path, content: Buffer.from(content) });
         }
       }
     }
-    if (position !== contents.length) throw lfsError('Git object batch contains unexpected output');
   }
   return { attributesOutput: attributes.join(''), pointerSamples, pointerScanComplete: true };
 }
@@ -224,23 +289,13 @@ export async function scanLfsPushObjects(objectIdsOutput, query) {
       }
     }
     if (!candidates.length) continue;
-    const contents = await query(['cat-file', '--batch'], Buffer.from(`${candidates.map((file) => file.oid).join('\n')}\n`));
-    if (!Buffer.isBuffer(contents) || contents.length > limits.maxBatchBytes) throw lfsError('Push object batch is invalid');
-    let position = 0;
-    for (const candidate of candidates) {
-      const header = Buffer.from(`${candidate.oid} blob ${candidate.size}\n`);
-      if (!contents.subarray(position, position + header.length).equals(header)) throw lfsError('Push object batch header is invalid');
-      position += header.length;
-      const content = contents.subarray(position, position + candidate.size);
-      position += candidate.size;
-      if (content.length !== candidate.size || contents[position++] !== 10) throw lfsError('Push object batch is incomplete');
+    for (const { content } of await readSmallBlobs(query, candidates, limits, 'Push object')) {
       if (!content.subarray(0, prefix.length).equals(prefix)) continue;
       const pointer = parseLfsPointer(content);
       if (pointers.has(pointer.oid) && pointers.get(pointer.oid).size !== pointer.size) throw lfsError('LFS pointer sizes disagree');
       pointers.set(pointer.oid, pointer);
       if (pointers.size > limits.maxPublicRecords) throw lfsError('Push LFS object limit exceeded', 'LFS_DISCOVERY_LIMIT_EXCEEDED');
     }
-    if (position !== contents.length) throw lfsError('Push object batch contains unexpected output');
   }
   return [...pointers.values()];
 }
@@ -269,7 +324,7 @@ const httpsCandidate = (value, gitRemoteUrl) => {
 
 export function resolveLfsPushConfig({ lfsConfigOutput, effectiveConfigOutput, gitRemoteName, gitRemoteUrl }) {
   const committed = parseConfig(lfsConfigOutput, LFS_DISCOVERY_LIMITS, 'Committed LFS configuration');
-  const effective = parseConfig(effectiveConfigOutput, LFS_DISCOVERY_LIMITS, 'Effective LFS configuration');
+  const effective = parseConfig(effectiveConfigOutput, LFS_DISCOVERY_LIMITS, 'Effective LFS configuration', { allowRepeatedCanonicalFilters: true });
   validateExecutableConfig(effective);
   const remoteUrlKey = `remote.${gitRemoteName.toLowerCase()}.lfsurl`;
   for (const key of committed.keys()) {
@@ -332,7 +387,7 @@ export function discoverLfs({
   }
 
   const lfsConfig = parseConfig(lfsConfigOutput, limits, '.lfsconfig output');
-  const effectiveConfig = parseConfig(effectiveConfigOutput, limits, 'Effective LFS config output');
+  const effectiveConfig = parseConfig(effectiveConfigOutput, limits, 'Effective LFS config output', { allowRepeatedCanonicalFilters: true });
   validateExecutableConfig(effectiveConfig);
   for (const key of lfsConfig.keys()) {
     if (key !== 'lfs.url' && key !== `remote.${gitRemoteName.toLowerCase()}.lfsurl`) {

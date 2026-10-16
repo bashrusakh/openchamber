@@ -1,12 +1,12 @@
 import React from 'react';
 import { useChatSessionSelection } from '@/components/chat/chatColumnSession';
 import type { Message, ModelRef, Part, ReasoningPart, TextPart, ToolPart } from '@/lib/opencode/model';
-import { executeToolCalls, isExecuteTool, isShellTool, isSubagentTool } from '@/lib/opencode/tools';
+import { executeHasBackgroundableWork, executeToolCalls, isExecuteTool, isShellTool, isSubagentTool } from '@/lib/opencode/tools';
 
 import type { MessageStreamPhase } from '@/stores/types/sessionTypes';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { useDirectorySync, useSession, useSessionMessages, useSessionPermissions, useSessionForms, useSessionStatus } from '@/sync/sync-context';
-import { useCurrentSessionActivity } from './useSessionActivity';
+import { useSessionActivity } from './useSessionActivity';
 
 type AssistantActivity = 'idle' | 'streaming' | 'tooling' | 'cooldown' | 'permission';
 
@@ -32,7 +32,8 @@ interface WorkingSummary {
     retryInfo: { attempt?: number; next?: number } | null;
     /**
      * The turn waits on work OpenCode can move to the background: a running
-     * shell command or a subagent it delegated to (`session.background`).
+     * shell command or a subagent it delegated to (`session.background`),
+     * including one running inside a Code Mode `execute` call.
      */
     canBackground: boolean;
 }
@@ -83,26 +84,43 @@ const DEFAULT_WORKING: WorkingSummary = {
 
 const EMPTY_PARTS: Part[] = [];
 const STATUS_SIGNATURE_SEPARATOR = '\u0000';
-const EDITING_TOOLS = new Set(['edit', 'write', 'patch']);
-// v2 tool names. `shell` replaced `bash`, `subagent` replaced `task`, and
+
+type ToolBucket = 'read' | 'search' | 'edit' | 'command' | 'lookup' | 'delegate' | 'question' | 'skill';
+
+// Several tools share one phrase, so parallel calls of the same kind can be
+// counted together ("reading 3 files"). The timeline names the exact tool.
+// v2 tool names: `shell` replaced `bash`, `subagent` replaced `task`, and
 // `todowrite`/`todoread`/`list`/`lsp` are gone.
-const TOOL_STATUS_PHRASES = new Map(Object.entries({
-    read: 'reading file',
-    write: 'writing file',
-    edit: 'editing file',
-    patch: 'applying patch',
-    'file-diff': 'reading changes',
-    shell: 'running command',
-    execute: 'running a script',
-    grep: 'searching content',
-    glob: 'finding files',
-    subagent: 'delegating task',
-    webfetch: 'fetching URL',
-    websearch: 'searching web',
-    codesearch: 'web code search',
-    skill: 'learning skill',
-    question: 'asking question',
-}));
+const TOOL_BUCKETS = new Map<string, ToolBucket>(Object.entries({
+    read: 'read',
+    'file-diff': 'read',
+    grep: 'search',
+    glob: 'search',
+    edit: 'edit',
+    write: 'edit',
+    patch: 'edit',
+    shell: 'command',
+    execute: 'command',
+    webfetch: 'lookup',
+    websearch: 'lookup',
+    codesearch: 'lookup',
+    subagent: 'delegate',
+    question: 'question',
+    skill: 'skill',
+} satisfies Record<string, ToolBucket>));
+
+// [one call, several calls]; `{count}` becomes the number of parallel calls in
+// the bucket. A search spans many files in one call, so it is not counted.
+const BUCKET_PHRASES = {
+    read: ['reading a file', 'reading {count} files'],
+    search: ['searching files', 'searching files'],
+    edit: ['editing a file', 'editing {count} files'],
+    command: ['running a command', 'running {count} commands'],
+    lookup: ['looking things up', 'looking things up'],
+    delegate: ['handing off a task', 'handing off {count} tasks'],
+    question: ['asking a question', 'asking a question'],
+    skill: ['picking up a skill', 'picking up {count} skills'],
+} satisfies Record<ToolBucket, readonly [string, string]>;
 const WORKING_PHRASES = [
     'working',
     'processing',
@@ -128,18 +146,24 @@ type ParsedStatusResult = {
     canBackground: boolean;
 };
 
-const getToolStatusPhrase = (toolName: string): string => {
-    return TOOL_STATUS_PHRASES.get(toolName) ?? `using ${toolName}`;
+const getToolStatusPhrase = (toolName: string, count = 1): string => {
+    const bucket = TOOL_BUCKETS.get(toolName);
+    if (!bucket) {
+        return `using ${toolName}`;
+    }
+    const [one, many] = BUCKET_PHRASES[bucket];
+    return (count > 1 ? many : one).replace('{count}', String(count));
 };
 
 /**
  * A running `execute` (Code Mode) script names the tool it is calling as soon
  * as its metadata lists one, so the pill tracks the script's real work instead
- * of sitting on a generic phrase for its whole run.
+ * of sitting on a generic phrase for its whole run. Parallel commands are the
+ * exception: one call's name cannot speak for several, so they count instead.
  */
-const getRunningToolPhrase = (part: ToolPart, toolName: string): string => {
-    if (!isExecuteTool(toolName)) {
-        return getToolStatusPhrase(toolName);
+const getRunningToolPhrase = (part: ToolPart, toolName: string, count: number): string => {
+    if (!isExecuteTool(toolName) || count > 1) {
+        return getToolStatusPhrase(toolName, count);
     }
     const state = part.state;
     const calls = executeToolCalls(state && 'metadata' in state ? state.metadata : undefined);
@@ -163,15 +187,18 @@ const getStableWorkingPhrase = (key: string): string => {
  * The turn waits on a job OpenCode can move to the background: a shell command
  * or a subagent call that already runs. A pending call has not started yet (or
  * waits for a permission), and a background call settles at once, so neither
- * counts.
+ * counts. A running Code Mode `execute` counts when a shell or subagent runs
+ * inside it.
  */
-export const hasBackgroundableWork = (parts: readonly Part[]): boolean => parts.some((part) => (
-    part.type === 'tool'
-    && part.state?.status === 'running'
-    && (isShellTool(part.tool) || isSubagentTool(part.tool))
-));
+export const hasBackgroundableWork = (parts: readonly Part[]): boolean => parts.some((part) => {
+    if (part.type !== 'tool' || part.state?.status !== 'running') return false;
+    if (isShellTool(part.tool) || isSubagentTool(part.tool)) return true;
+    if (!isExecuteTool(part.tool)) return false;
+    return executeHasBackgroundableWork(part.state.metadata);
+});
 
-const createParsedStatus = (parts: Part[], genericKey: string): ParsedStatusResult => {
+export const createParsedStatus = (parts: Part[], genericKey: string): ParsedStatusResult => {
+    const runningToolCounts = countRunningToolCalls(parts);
     let activePartType: ParsedStatusResult['activePartType'] = undefined;
     let activeToolName: string | undefined = undefined;
     let activeToolPhrase: string | undefined = undefined;
@@ -193,14 +220,10 @@ const createParsedStatus = (parts: Part[], genericKey: string): ParsedStatusResu
                 const toolStatus = part.state?.status;
                 if ((toolStatus === 'running' || toolStatus === 'pending') && !activePartType) {
                     const toolName = getToolDisplayName(part);
-                    if (EDITING_TOOLS.has(toolName)) {
-                        activePartType = 'editing';
-                        activeToolName = toolName;
-                    } else {
-                        activePartType = 'tool';
-                        activeToolName = toolName;
-                        activeToolPhrase = getRunningToolPhrase(part, toolName);
-                    }
+                    const bucket = TOOL_BUCKETS.get(toolName);
+                    activePartType = bucket === 'edit' ? 'editing' : 'tool';
+                    activeToolName = toolName;
+                    activeToolPhrase = getRunningToolPhrase(part, toolName, runningToolCounts.get(bucket ?? toolName) ?? 1);
                 }
                 break;
             }
@@ -222,7 +245,7 @@ const createParsedStatus = (parts: Part[], genericKey: string): ParsedStatusResu
 
     const isGenericStatus = activePartType === undefined;
     const statusText = (() => {
-        if (activePartType === 'editing') return activeToolName === 'multiedit' ? getToolStatusPhrase(activeToolName) : 'editing file';
+        if (activePartType === 'editing') return activeToolPhrase ?? 'editing a file';
         if (activePartType === 'tool' && activeToolName) return activeToolPhrase ?? getToolStatusPhrase(activeToolName);
         if (activePartType === 'reasoning') return 'thinking';
         if (activePartType === 'text') return 'composing';
@@ -290,6 +313,24 @@ const getToolDisplayName = (part: ToolPart): string => {
     }
     const candidate = part as ToolPart & Partial<{ name?: unknown }>;
     return typeof candidate.name === 'string' ? candidate.name : 'tool';
+};
+
+/**
+ * Parallel calls are common (three reads, two shell commands), and the last
+ * part alone hides the rest. Count every call that is still running or pending
+ * by bucket so the phrase can say "reading 3 files" instead.
+ */
+const countRunningToolCalls = (parts: readonly Part[]): Map<string, number> => {
+    const counts = new Map<string, number>();
+    for (const part of parts) {
+        if (part.type !== 'tool') continue;
+        const status = part.state?.status;
+        if (status !== 'running' && status !== 'pending') continue;
+        const toolName = getToolDisplayName(part);
+        const bucket = TOOL_BUCKETS.get(toolName) ?? toolName;
+        counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    }
+    return counts;
 };
 
 /** True when a user prompt follows `index`, i.e. a turn is queued or starting. */
@@ -377,7 +418,7 @@ export function useAssistantStatus(): AssistantStatusSnapshot {
         }, [currentSessionId])
     );
 
-    const { phase: activityPhase, isWorking: isPhaseWorking } = useCurrentSessionActivity();
+    const { phase: activityPhase, isWorking: isPhaseWorking } = useSessionActivity(currentSessionId, currentSessionDirectory ?? undefined);
 
     const currentSessionStatus = useSessionStatus(currentSessionId ?? '', currentSessionDirectory ?? undefined);
 

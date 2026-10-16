@@ -12,8 +12,19 @@ matches. `fileTreeStatus.ts` builds path and ancestor indexes once per Git
 snapshot. Open-file membership has its own set, so changing tabs does not
 rebuild the Git index.
 
+Directory listings follow the "Show gitignored files" setting: `SidebarFilesTree`,
+`FilesView`, and the mobile `MobileFilesSurface` ask the runtime for
+`respectGitignore` unless the user has chosen to show gitignored entries, so the
+server's `git check-ignore` filter decides what appears inside a Git repository.
+Outside a repository no entries are ignored, so the hardcoded `node_modules`
+name filter remains as a fallback. Search already follows the same setting.
+
 Desktop `FilesView` in editor-only mode neither loads nor constructs its unused
-tree. Mobile retains its tree. The context panel passes actual visibility,
+tree. In the context panel the panel's tab strip owns the open files: closing
+a file from the editor (Cmd/Ctrl+W in the desktop app, which the window menu
+turns into `openchamber:close-tab` through `lib/closeTabTarget.ts`, or the
+unsaved-changes prompt that may come first) goes through `onCloseFile` to
+`closeContextFile`, which closes that tab exactly as its close button does. Mobile retains its tree. The context panel passes actual visibility,
 including the panel's open state, its active tab, and the editor toggle, to each file surface.
 Hidden surfaces retain drafts, loaded content and scroll state. They stop
 directory and file metadata polling; reopening checks freshness once before
@@ -29,6 +40,25 @@ loading do not request native file grants. Server-backed text reads and metadata
 requests have a 30-second deadline, including response-body reads, so a stalled
 request reaches the existing error handler instead of leaving loading pending.
 
+A file that cannot be read, a missing one included, stays selected and shows
+the read error; the host's tab still names that path, so the editor never falls
+back to another open file. A pending line jump or focus for that path ends
+there. The metadata poll treats a file deleted while open the same way: without
+unsaved edits it shows the error, with unsaved edits it keeps them. It keeps
+polling a failed file and loads it again once a missing file is back; a file
+that exists but fails to read is never reloaded by the poll
+(`openFilePollStep`). Pruning stale open paths (`removeUnselectedOpenPath`)
+never removes the path on screen.
+
+A pending line jump (`pendingFileNavigationStep`) selects its file only until
+that file has been on screen. If the user then switches tabs while it loads,
+the jump leaves the other tab alone and runs when its file is selected again.
+A read-only text file, one outside the workspace for example, opens in the
+read-only code editor, because the selection effect resets the text mode after
+the effect that switches read-only files to the view mode; the jump runs there.
+If no editor is on screen the jump ends, so the waiting mask never hides a
+loaded file.
+
 Sidebar root/runtime changes remount the scoped tree. Its bounded module cache
 provides continuity between mounts; request cancellation for collapsed paths
 stops queued batches, while already-started reads may populate the same-scope
@@ -40,6 +70,15 @@ the meta line height, the icon minimum and vertical padding, so remembered
 offscreen dimensions cannot retain an old font size. Expanded child lists
 sit outside each row's containment, so expansion, scrolling, focus and menus keep
 their existing DOM structure. Reopening still refreshes directory contents.
+
+## Row look
+
+The sidebar tree, `FilesView`'s own tree and the changes tree in `DiffView`
+draw rows from `FileTreeRowParts.tsx`, so the three look the same: flat rows
+indented 12px per level, one faint guide per ancestor level under its
+chevron, a chevron instead of a folder icon, and the git state as a coloured
+letter on the right. A blue dot before the letter marks a file open in a tab;
+it no longer hides the file's git state. Change the look there, not per tree.
 
 ## Refreshing after file changes
 
@@ -120,6 +159,13 @@ forms and embeds. Chat keeps raw HTML inert. A numeric `img height` becomes
 an inline height, because Tailwind preflight's `height: auto` would beat the
 attribute.
 
+A Markdown file's frontmatter shows above its body (`SimpleMarkdownRenderer
+frontmatter="properties"`, also used by the plan view): a YAML mapping
+becomes a key/value table, lists of scalars become chips, nested values show
+as YAML; TOML (`+++`), invalid YAML and non-mapping YAML show as the block
+was written. The skill editor hides it (`frontmatter="hide"`) because the
+description has its own field there.
+
 `useMarkdownLocalAssets` makes a rendered Markdown file's relative images and
 links work: images and `srcset` candidates are fetched through the runtime
 against the file's own directory (outside the workspace when the file is) and
@@ -164,6 +210,13 @@ one instance is mounted, in the docked chain or in the fullscreen overlay;
 entering or leaving fullscreen moves unsaved edits through the text draft, as
 the source toggle does, and the other slot remounts from it.
 
+`isDirty` (draft differs from file) is not proof of a user edit. The context
+panel keeps one FilesView that follows the selected path, so during a file
+switch the draft and the file briefly belong to different files. React to real
+edits through CodeMirror transactions (`isUserEvent('input' | 'delete' | 'undo'
+| 'redo' | 'move')`). Autosave refuses to write an empty draft over a non-empty
+file (`shouldScheduleFileAutosave`); an explicit save still can.
+
 Canvas edits never enter the text draft. A separate `canvasDirty` flag feeds
 the shared `isDirty`, so autosave, Cmd/Ctrl+S, the unsaved-changes prompt,
 `saveDraft`, and the external-change guard all see canvas edits as text edits.
@@ -205,6 +258,39 @@ a one-line notice whose Install button opens that card. `isExcalidrawFile`
 matches both extensions, and `isMarkdownFile` excludes `.excalidraw.md` so an
 Obsidian drawing never takes the markdown preview path; its source view is the
 markdown document.
+
+## Moving and renaming
+
+Dropping a row of the sidebar tree on a folder moves the entry there
+(`SidebarFilesTree`, drop rules in `components/layout/fileTreeMoveDrag.ts`).
+It is the same native drag that attaches a file to the chat, so the drop
+target decides what happens. A file row stands for the folder it is in and
+the empty space below the tree for the root, as in VS Code. The entry's own
+folder, the entry itself and a folder's own subfolders refuse the drop, and a
+drop within the click slop of where the drag began stays a click (#2368).
+Touch-only devices do not move: the tree scrolls under the finger. A dialog
+asks first unless the user turned it off (`confirmFileTreeMove`, Settings >
+General). The server refuses a name that already exists in the target and the
+tree says so in a toast; nothing is replaced or renamed. VS Code has no file
+tree, so nothing moves there.
+
+A move and both rename dialogs (the sidebar tree and `FilesView`'s own tree)
+go through `moveWorkspacePath`. It renames through the runtime and then
+points the context panel file tabs and `useFilesViewTabsStore` (open, selected
+and expanded paths) at the new path with `moveContextFilePaths`. A file tab's
+id comes from its path, so the tab is rebuilt in place and stays active.
+
+The open editor keeps unsaved edits through a move (`lib/filePathMoves.ts`).
+While the rename request is in flight, `FilesView` refuses saves of paths
+under the source, so autosave cannot recreate the file at its old path. When
+the move commits, the editor notes it before the tabs move; once the selected
+path becomes the new one, it adopts that path instead of re-reading the file,
+which would replace the draft. Editors stay keyed by the path the file was
+opened under, so the text editor, a canvas or a diagram is not remounted and
+keeps its edits and undo history. The draft reset that normally follows a
+change of the selected path is skipped for a moved file, and the open-file
+poll does not report the old path as a deleted file while the move is in
+flight or not yet adopted.
 
 ## Uploads
 

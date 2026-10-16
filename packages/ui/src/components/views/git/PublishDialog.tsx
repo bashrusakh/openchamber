@@ -6,7 +6,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import {
   SETTINGS_FIELDS_STACK_CLASS,
   SETTINGS_HELPER_CLASS,
-  SETTINGS_SELECT_SIZE,
   SettingsControlGroup,
   SettingsStackedField,
 } from '@/components/sections/shared/SettingsSection';
@@ -71,7 +70,7 @@ export function PublishDialog({ context, onSelect }: {
                 controlClassName={CONTROL_CLASS}
               >
                 <Select value={fetchRemote} onValueChange={(value) => { setFetchRemote(value); setFetchBranch(''); }}>
-                  <SelectTrigger size={SETTINGS_SELECT_SIZE} className="w-full" aria-label={t('gitView.publish.fetchSource')}>
+                  <SelectTrigger className="w-full" aria-label={t('gitView.publish.fetchSource')}>
                     <SelectValue placeholder={t('gitView.publish.selectRemote')} />
                   </SelectTrigger>
                   <SelectContent>{remotes.map((remote) => <SelectItem key={remote.name} value={remote.name}>{remote.name}</SelectItem>)}</SelectContent>
@@ -84,7 +83,7 @@ export function PublishDialog({ context, onSelect }: {
                 controlClassName={CONTROL_CLASS}
               >
                 <Select value={fetchBranch} onValueChange={setFetchBranch} disabled={!fetchBranches.length}>
-                  <SelectTrigger size={SETTINGS_SELECT_SIZE} className="w-full" aria-label={t('gitView.publish.sourceBranch')}>
+                  <SelectTrigger className="w-full" aria-label={t('gitView.publish.sourceBranch')}>
                     <SelectValue placeholder={t('gitView.publish.sourceBranch')} />
                   </SelectTrigger>
                   <SelectContent>{fetchBranches.map((branch) => <SelectItem key={branch} value={branch}>{branch}</SelectItem>)}</SelectContent>
@@ -104,7 +103,7 @@ export function PublishDialog({ context, onSelect }: {
               controlClassName={CONTROL_CLASS}
             >
               <Select value={pushRemote} onValueChange={setPushRemote}>
-                <SelectTrigger size={SETTINGS_SELECT_SIZE} className="w-full" aria-label={t('gitView.publish.pushDestination')}>
+                <SelectTrigger className="w-full" aria-label={t('gitView.publish.pushDestination')}>
                   <SelectValue placeholder={t('gitView.publish.selectRemote')} />
                 </SelectTrigger>
                 <SelectContent>{remotes.map((remote) => <SelectItem key={remote.name} value={remote.name} disabled={remote.mode === 'anonymous'}>
@@ -114,8 +113,6 @@ export function PublishDialog({ context, onSelect }: {
             </SettingsStackedField>
             <SettingsStackedField
               label={<label htmlFor={`${id}-branch`}>{t('gitView.publish.destinationBranch')}</label>}
-              description={<code className="break-all">{`refs/heads/${context.status.current} → ${pushRemote || '?'}:refs/heads/${pushBranch.trim()}`}</code>}
-              descriptionPlacement="after"
               controlClassName={CONTROL_CLASS}
             >
               <Input id={`${id}-branch`} list={`${id}-branches`} className="h-8 rounded-md" value={pushBranch} onChange={(event) => setPushBranch(event.target.value)} />

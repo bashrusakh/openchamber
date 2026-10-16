@@ -3,6 +3,7 @@ import { parseSource } from './sources.js';
 
 // The composer's provider, which the model stays on; anything else is no provider.
 const providerIdSchema = z.string().trim().min(1).max(200).optional().catch(undefined);
+const modelIdSchema = z.string().trim().min(1).max(200).optional().catch(undefined);
 
 // `req.destroyed` is true for every healthy request once the body parser has
 // consumed the stream, so using it as a disconnect check silently swallows every
@@ -57,8 +58,8 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService, validate
       bindingRevision: Number(input?.bindingRevision),
       primaryRemote: input?.primaryRemote,
     });
-    if (readContext.provider !== 'github') {
-      throw Object.assign(new Error('Pull request walkthroughs currently support GitHub only'), {
+    if (readContext.provider !== 'github' && readContext.provider !== 'gitlab') {
+      throw Object.assign(new Error('Pull request walkthroughs support GitHub and GitLab only'), {
         statusCode: 422,
         code: 'UNSUPPORTED_WALKTHROUGH_PROVIDER',
       });
@@ -82,6 +83,7 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService, validate
           source,
           model: typeof req.query.model === 'string' ? req.query.model : undefined,
           providerID: providerIdSchema.parse(req.query.providerID),
+          modelID: modelIdSchema.parse(req.query.modelID),
           language: typeof req.query.language === 'string' ? req.query.language : undefined,
           readContext,
         },
@@ -149,7 +151,7 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService, validate
   // request below.
   app.post('/api/walkthrough/generate', async (req, res) => {
     try {
-      const { directory, source, force, model, providerID, language } = req.body || {};
+      const { directory, source, force, model, providerID, modelID, language } = req.body || {};
       if (!directory || typeof directory !== 'string') {
         return res.status(400).json({ error: 'directory is required' });
       }
@@ -163,6 +165,7 @@ export function registerWalkthroughRoutes(app, { getWalkthroughService, validate
           force: force === true,
           model: typeof model === 'string' ? model : undefined,
           providerID: providerIdSchema.parse(providerID),
+          modelID: modelIdSchema.parse(modelID),
           language: typeof language === 'string' ? language : undefined,
           readContext,
         },

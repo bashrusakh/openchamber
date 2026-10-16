@@ -32,28 +32,32 @@ import type { Message, ToolPart as ToolPartType } from '@/lib/opencode/model';
 import { cn } from '@/lib/utils';
 
 /** The shared frame every notice row sits in, so they line up with messages. */
-const NoticeRow: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <div className="w-full pb-2">
+const NoticeRow: React.FC<{ children: React.ReactNode; spacingClassName?: string }> = ({ children, spacingClassName = 'pb-2' }) => (
+    <div className={cn('w-full', spacingClassName)}>
         <div className="chat-message-column">{children}</div>
     </div>
 );
 
 const CompactionNotice: React.FC<{ message: Extract<Message, { role: 'compaction' }> }> = ({ message }) => {
     const { t } = useI18n();
+    const expandWhileStreaming = useUIStore((state) => state.expandReasoningWhileStreaming);
     const running = message.status === 'running';
     const failed = message.status === 'failed';
     const summary = message.summary.trim();
 
     // A compaction reads like a thinking row: one collapsible tool-style line
     // whose body is the summary as Markdown. The summary streams in while the
-    // compaction runs, so the body is open and follows its end until it settles.
+    // compaction runs; the reasoning setting decides whether the body opens and
+    // follows its end until it settles, or stays folded.
+    // The compaction opens a turn, and the activity row under it brings its own
+    // top margin, so the row spaces itself above to keep both gaps even.
     return (
-        <NoticeRow>
+        <NoticeRow spacingClassName="pt-1">
             <ReasoningTimelineBlock
                 text={summary}
-                variant="thinking"
                 blockId={message.id}
                 isStreaming={running}
+                expandWhileStreaming={expandWhileStreaming}
                 presentation={{
                     icon: failed ? 'error-warning' : 'scissors',
                     iconClassName: failed ? 'text-[var(--status-error)]' : undefined,
@@ -69,7 +73,7 @@ const CompactionNotice: React.FC<{ message: Extract<Message, { role: 'compaction
                 }}
             />
             {!running && !summary ? (
-                <div className="flex items-center gap-1.5 py-1.5 pl-px typography-meta" style={{ color: 'var(--tools-title)' }}>
+                <div className="flex items-center gap-1.5 py-1.5 ps-px typography-meta" style={{ color: 'var(--tools-title)' }}>
                     <Icon
                         name={failed ? 'error-warning' : 'scissors'}
                         className={cn('h-3.5 w-3.5 shrink-0', failed && 'text-[var(--status-error)]')}
@@ -79,7 +83,7 @@ const CompactionNotice: React.FC<{ message: Extract<Message, { role: 'compaction
                 </div>
             ) : null}
             {message.error ? (
-                <div className="pl-5 typography-meta text-[var(--status-error)] break-words">{message.error.message}</div>
+                <div className="ps-5 typography-meta text-[var(--status-error)] break-words">{message.error.message}</div>
             ) : null}
         </NoticeRow>
     );
@@ -278,7 +282,6 @@ const DispatchedSessionNotice: React.FC<{ message: SyntheticMessage; result: Dis
         <NoticeRow>
             <ReasoningTimelineBlock
                 text={result.output}
-                variant="thinking"
                 blockId={message.id}
                 presentation={{
                     icon: DISPATCHED_SESSION_ICONS[result.state],

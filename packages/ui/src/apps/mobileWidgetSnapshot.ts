@@ -11,7 +11,7 @@ import { getRuntimeKey } from '@/lib/runtime-switch';
 
 /**
  * Builds the lightweight session overview the native iOS widgets render (home medium,
- * lock-screen, Control Center). The widget process can't see the WebView, so the native
+ * lock-screen, Control Center), plus the project list the Shortcuts project picker reads. The widget process can't see the WebView, so the native
  * shell pulls this snapshot via `window.__OPENCHAMBER_WIDGET_SNAPSHOT__()` on
  * background/activate, writes it to the shared App Group, and reloads the widget timelines
  * (see SceneDelegate.writeWidgetSnapshot). Mirrors the sidebar's attention logic so the
@@ -19,7 +19,7 @@ import { getRuntimeKey } from '@/lib/runtime-switch';
  *   needsAttention = unseenCount > 0 && (!isSubtask || notifyOnSubtasks)
  */
 
-export interface MobileWidgetSession {
+interface MobileWidgetSession {
   id: string;
   title: string;
   /** True when the session needs attention (unread + honouring the subtask setting). */
@@ -28,13 +28,21 @@ export interface MobileWidgetSession {
   project: string;
 }
 
-export interface MobileWidgetSnapshot {
+/** A project the iOS Shortcuts picker offers (ShortcutProjectEntity in ShortcutRequests.swift). */
+interface MobileWidgetProject {
+  id: string;
+  label: string;
+}
+
+interface MobileWidgetSnapshot {
   /** Runtime instance that owns all session IDs and paths in this snapshot. */
   runtimeKey: string;
   /** Count of sessions needing attention — same signal that drives the app-icon badge. */
   attentionCount: number;
   /** Top-level sessions in the app's shared lifecycle order (capped for the medium widget). */
   recentSessions: MobileWidgetSession[];
+  /** The runtime's projects, for the Shortcuts project picker. */
+  projects: MobileWidgetProject[];
 }
 
 const RECENT_LIMIT = 6;
@@ -102,7 +110,12 @@ const buildMobileWidgetSnapshot = (): MobileWidgetSnapshot => {
     .slice(0, RECENT_LIMIT)
     .map(({ session, unread, project }) => ({ id: session.id, title: session.title ?? '', unread, project }));
 
-  return { runtimeKey: getRuntimeKey(), attentionCount, recentSessions };
+  return {
+    runtimeKey: getRuntimeKey(),
+    attentionCount,
+    recentSessions,
+    projects: projects.map((project) => ({ id: project.id, label: project.label?.trim() || basename(project.path) })),
+  };
 };
 
 const SNAPSHOT_GLOBAL_KEY = '__OPENCHAMBER_WIDGET_SNAPSHOT__';

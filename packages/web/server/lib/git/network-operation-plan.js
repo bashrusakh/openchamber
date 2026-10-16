@@ -1,3 +1,4 @@
+import { isPlainObject, isString } from '../shared/guards.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -8,10 +9,6 @@ import { createHttpsCredentialReference, normalizeGitRemoteEndpoint } from './cr
 const OPERATIONS = ['push', 'fetch', 'pull', 'delete-remote-branch', 'sync', 'clone', 'checkout-hydration'];
 const SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
 const REF_COMPONENT_PATTERN = /^(?!\.)(?!.*(?:\.\.|\/\.|\.lock(?:\/|$)))(?!.*[~^:?*[\\\s])(?!.*\/$)(?!.*\/\/)[^\0-\x20\x7f]+$/;
-const isPlainObject = (value) => value === Object(value)
-  && !Array.isArray(value)
-  && Object.getPrototypeOf(value) === Object.prototype;
-const isString = (value) => Object.prototype.toString.call(value) === '[object String]';
 const isBoolean = (value) => Object.prototype.toString.call(value) === '[object Boolean]'
   && (value === true || value === false);
 const hasExactKeys = (value, required, optional = []) => {
@@ -39,13 +36,24 @@ const requiredString = (value, name) => {
   if (result.startsWith('-') || /[\0\r\n]/.test(result)) throw planError(`${name} is invalid`);
   return result;
 };
+// A server-generated digest the client echoes back (configRevision, endpoint
+// fingerprint, transportRevision): an opaque sha256/base64url value, never a CLI
+// argument. Base64url may legitimately start with '-', so the leading-dash
+// injection guard in `requiredString` must not apply; only real control
+// characters are rejected.
+const parseDigest = (value, name) => {
+  if (!isString(value) || !value.trim()) throw planError(`${name} is required`);
+  const result = value.trim();
+  if (/[\0\r\n]/.test(result)) throw planError(`${name} is invalid`);
+  return result;
+};
 const parseSha = (value, name) => {
   const sha = requiredString(value, name);
   if (!SHA_PATTERN.test(sha)) throw planError(`${name} is invalid`);
   return sha.toLowerCase();
 };
 const parseFingerprint = (value, name) => {
-  const fingerprint = requiredString(value, name);
+  const fingerprint = parseDigest(value, name);
   if (!/^[A-Za-z0-9_-]{43}$/.test(fingerprint)) throw planError(`${name} is invalid`);
   return fingerprint;
 };
@@ -60,7 +68,7 @@ const parseRemote = (value) => {
     name: requiredString(value.name, 'remote name'),
     endpoint: {
       displayUrl: requiredString(value.endpoint.displayUrl, 'remote displayUrl'),
-      fingerprint: requiredString(value.endpoint.fingerprint, 'remote fingerprint'),
+      fingerprint: parseDigest(value.endpoint.fingerprint, 'remote fingerprint'),
     },
   };
 };
@@ -79,7 +87,7 @@ const parseHydrationRequirements = (value) => {
       || !hasExactKeys(entry.endpoint, ['displayUrl', 'fingerprint'])) {
       throw planError('checkout hydration requirement is invalid');
     }
-    assertSafeExistingEndpoint(entry.endpoint.displayUrl);
+    assertSafeDisplayEndpoint(entry.endpoint.displayUrl);
     return {
       kind: entry.kind,
       path: parseCheckoutPath(entry.path),
@@ -158,7 +166,7 @@ const parseAuxiliaryGrants = (value) => {
       throw planError('auxiliary grant is invalid');
     }
     const transportMode = parseTransportMode(grant.transportMode);
-    assertSafeExistingEndpoint(grant.endpoint.displayUrl);
+    assertSafeDisplayEndpoint(grant.endpoint.displayUrl);
     const parsed = {
       kind: grant.kind,
       endpoint: {
@@ -184,33 +192,41 @@ const parseAuxiliaryGrants = (value) => {
   if (new Set(keys).size !== keys.length) throw planError('auxiliary grants must be unique');
   return grants;
 };
-const assertSafeExistingEndpoint = (endpoint) => {
-  const value = requiredString(endpoint, 'Git endpoint');
-  if (value.length > 4096) throw planError('Git endpoint is invalid');
+/**
+ * Whether Git may receive this endpoint: HTTPS, `ssh://`, or strict SCP.
+ * An SSH URL may name its login user, as SCP does; HTTPS userinfo and any
+ * password are credentials and never pass. Clone and every existing-remote
+ * transfer share this rule.
+ */
+const isSafeTransferEndpoint = (value) => {
+  if (value.length > 4096) return false;
   if (!value.includes('://')) {
     const match = value.match(/^(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?:([^\s:\\]+)$/);
-    if (!match || /[?#]/.test(value) || match[1].startsWith('-')
-      || match[1].split('/').some((part) => !part || part === '.' || part === '..')) {
-      throw planError('Git endpoint is invalid');
-    }
-    return;
+    return Boolean(match) && !/[?#]/.test(value) && !match[1].startsWith('-')
+      && match[1].split('/').every((part) => part && part !== '.' && part !== '..');
   }
   let parsed;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw planError('Git endpoint is invalid');
-  }
   let pathname;
   try {
+    parsed = new URL(value);
     pathname = decodeURIComponent(parsed.pathname);
   } catch {
-    throw planError('Git endpoint is invalid');
+    return false;
   }
-  if (!['https:', 'ssh:'].includes(parsed.protocol) || parsed.username || parsed.password
-    || parsed.search || parsed.hash || !parsed.hostname || !parsed.pathname || parsed.pathname === '/'
-    || /[\0-\x20\x7f\\]/.test(pathname)
-    || pathname.split('/').slice(1).some((part) => !part || part === '.' || part === '..')) {
+  return ['https:', 'ssh:'].includes(parsed.protocol)
+    && (!parsed.username || (parsed.protocol === 'ssh:' && /^[A-Za-z0-9._][A-Za-z0-9._-]*$/.test(parsed.username)))
+    && !parsed.password && !parsed.search && !parsed.hash
+    && Boolean(parsed.hostname) && Boolean(parsed.pathname) && parsed.pathname !== '/'
+    && !/[\0-\x20\x7f\\]/.test(pathname)
+    && pathname.split('/').slice(1).every((part) => part && part !== '.' && part !== '..');
+};
+const assertSafeExistingEndpoint = (endpoint) => {
+  if (!isSafeTransferEndpoint(requiredString(endpoint, 'Git endpoint'))) throw planError('Git endpoint is invalid');
+};
+// Display URLs are redacted, so a URL-form display never carries userinfo.
+const assertSafeDisplayEndpoint = (endpoint) => {
+  const value = requiredString(endpoint, 'Git endpoint');
+  if (!isSafeTransferEndpoint(value) || (value.includes('://') && new URL(value).username)) {
     throw planError('Git endpoint is invalid');
   }
 };
@@ -235,36 +251,21 @@ const parseRemoteFetchMapping = (remoteName, output) => {
 };
 const parseCloneEndpoint = (value) => {
   const endpoint = requiredString(value, 'remoteUrl');
-  if (!endpoint.includes('://')
-    && /^(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?:[^\s:\\]+$/.test(endpoint)) {
-    const separator = endpoint.indexOf(':');
-    const repositoryPath = endpoint.slice(separator + 1);
-    if (/[?#]/.test(endpoint) || repositoryPath.startsWith('-')
-      || repositoryPath.split('/').some((part) => !part || part === '.' || part === '..')) {
-      throw planError('remoteUrl is invalid');
-    }
-    return endpoint;
-  }
-  let parsed;
-  try {
-    parsed = new URL(endpoint);
-  } catch {
-    throw planError('remoteUrl is invalid');
-  }
-  let pathname;
-  try {
-    pathname = decodeURIComponent(parsed.pathname);
-  } catch {
-    throw planError('remoteUrl is invalid');
-  }
-  if (!['https:', 'ssh:'].includes(parsed.protocol) || parsed.password || parsed.search || parsed.hash
-    || !parsed.hostname || !parsed.pathname || parsed.pathname === '/'
-    || (parsed.protocol === 'https:' && parsed.username)
-    || /[\0-\x20\x7f\\]/.test(pathname)
-    || pathname.split('/').slice(1).some((part) => !part || part === '.' || part === '..')) {
-    throw planError('remoteUrl is invalid');
-  }
+  if (!isSafeTransferEndpoint(endpoint)) throw planError('remoteUrl is invalid');
   return endpoint;
+};
+/**
+ * GitLab answers an HTTPS repository address without `.git` with a redirect,
+ * and managed and anonymous transfers never follow one, so a clone from a
+ * GitLab instance uses the `.git` address GitLab itself offers. Other hosts
+ * keep the address as given: some serve a repository only under its own name.
+ */
+const gitLabCloneEndpoint = (endpoint, gitLabInstances) => {
+  if (!endpoint.startsWith('https://')) return endpoint;
+  const parsed = new URL(endpoint);
+  const onGitLab = gitLabInstances.some((instance) => new URL(instance).host === parsed.host);
+  if (!onGitLab || /\.git$/i.test(parsed.pathname)) return endpoint;
+  return `${endpoint}.git`;
 };
 const pathExists = async (target, fsImpl) => {
   try {
@@ -363,7 +364,7 @@ export function createNetworkOperationPlanner({
       throw contributorError('DESTINATION_SELECTION_REQUIRED', 'Contributor push destination selection is required');
     }
     const repositoryId = requiredString(input.repositoryId, 'repositoryId');
-    const configRevision = requiredString(input.configRevision, 'configRevision');
+    const configRevision = parseDigest(input.configRevision, 'configRevision');
     if (!Number.isSafeInteger(input.bindingRevision) || input.bindingRevision < 0) {
       throw planError('bindingRevision is required');
     }
@@ -412,7 +413,7 @@ export function createNetworkOperationPlanner({
     const fetchAuthority = await validateGitTransportContext(authorityInput(fetchRemote, 'fetch'));
     const pushAuthority = await validateGitTransportContext(authorityInput(pushRemote, 'push'));
     const validateAuthority = (authority, remote, transportMode) => {
-      const transportRevision = requiredString(authority.transportRevision, 'transportRevision');
+      const transportRevision = parseDigest(authority.transportRevision, 'transportRevision');
       assertSafeExistingEndpoint(authority.endpoint);
       if (transportMode === 'anonymous' && (authority.credentialId !== undefined
         || normalizeGitRemoteEndpoint(authority.endpoint).protocol !== 'https')) {
@@ -518,7 +519,7 @@ export function createNetworkOperationPlanner({
     const directory = requiredString(input.directory, 'directory');
     const contributor = await readContributor(directory);
     const repositoryId = requiredString(input.repositoryId, 'repositoryId');
-    const configRevision = requiredString(input.configRevision, 'configRevision');
+    const configRevision = parseDigest(input.configRevision, 'configRevision');
     const remote = parseRemote(input.remote);
     const sourceNamespaces = ['refs/heads/', 'refs/tags/'];
     const destinationNamespaces = operation === 'fetch'
@@ -567,7 +568,7 @@ export function createNetworkOperationPlanner({
       remote: remote.name,
       endpointKind,
     });
-    const transportRevision = requiredString(authority.transportRevision, 'transportRevision');
+    const transportRevision = parseDigest(authority.transportRevision, 'transportRevision');
     assertSafeExistingEndpoint(authority.endpoint);
     if (transportMode === 'anonymous' && (authority.credentialId !== undefined
       || normalizeGitRemoteEndpoint(authority.endpoint).protocol !== 'https')) {
@@ -674,6 +675,7 @@ export function createNetworkOperationPlanner({
     )) throw planError('Git clone input is invalid');
     const endpoint = parseCloneEndpoint(input.remoteUrl);
     const transportMode = parseTransportMode(input.transportMode);
+    const gitLabInstances = ['https://gitlab.com'];
     let credentialId;
     if (transportMode === 'system') {
       if (input.unverifiedConfirmed !== true || input.credentialAccount !== undefined || Object.hasOwn(input, 'sshCredentialId')) {
@@ -702,6 +704,7 @@ export function createNetworkOperationPlanner({
         const origin = new URL(account.provider === 'github' ? 'https://github.com' : instance);
         if (origin.protocol !== 'https:' || origin.hostname !== parsedEndpoint.host
           || Number(origin.port || 443) !== parsedEndpoint.port) throw planError('Credential account does not match the HTTPS endpoint');
+        if (account.provider === 'gitlab') gitLabInstances.push(instance);
         const accountId = requiredString(account.accountId, 'credential accountId');
         if (accountId !== account.accountId || /[\0\r\n]/.test(accountId)) throw planError('Credential account is invalid');
         if (!(resolveSourceControlAccount instanceof Function)) {
@@ -733,6 +736,8 @@ export function createNetworkOperationPlanner({
     if (await pathExists(destination, fsImpl)) throw planError('Clone destination already exists');
     if (await pathExists(temporaryDirectory, fsImpl)) throw planError('Clone temporary directory already exists');
     const providerAccount = parseCloneProviderAccount(input.providerAccount, normalizeGitRemoteEndpoint(endpoint));
+    if (providerAccount?.provider === 'gitlab') gitLabInstances.push(providerAccount.instance);
+    const transferEndpoint = gitLabCloneEndpoint(endpoint, gitLabInstances);
     const internal = { destination, temporaryDirectory, transportMode, auxiliaryGrants: parseAuxiliaryGrants(input.auxiliaryGrants) };
     if (providerAccount) internal.providerAccount = providerAccount;
     if (transportMode === 'system') internal.unverifiedConfirmed = true;
@@ -740,13 +745,13 @@ export function createNetworkOperationPlanner({
     if (input.gitIdentityId !== undefined) internal.gitIdentityId = requiredString(input.gitIdentityId, 'gitIdentityId');
     return bundlePlans({
       operationId,
-      endpoint,
+      endpoint: transferEndpoint,
       transportMode,
       target: {
         operation: 'clone',
         remote: {
-          displayUrl: redactRemoteUrl(endpoint),
-          fingerprint: fingerprintRemoteUrl(endpoint),
+          displayUrl: redactRemoteUrl(transferEndpoint),
+          fingerprint: fingerprintRemoteUrl(transferEndpoint),
         },
         destination: {
           displayName: pathImpl.basename(destination),
@@ -766,7 +771,7 @@ export function createNetworkOperationPlanner({
     }
     const directory = requiredString(input.directory, 'directory');
     const repositoryId = requiredString(input.repositoryId, 'repositoryId');
-    const configRevision = requiredString(input.configRevision, 'configRevision');
+    const configRevision = parseDigest(input.configRevision, 'configRevision');
     if (!Number.isSafeInteger(input.bindingRevision) || input.bindingRevision < 0) {
       throw planError('bindingRevision is required');
     }
@@ -814,7 +819,7 @@ export function createNetworkOperationPlanner({
       directory,
       endpointKind: 'fetch',
       transportMode: authority.transportMode,
-      transportRevision: requiredString(authority.transportRevision, 'transportRevision'),
+      transportRevision: parseDigest(authority.transportRevision, 'transportRevision'),
       expectedHeadSha,
       plannedRequirements: requirements,
       plannedTransfers,
@@ -872,7 +877,7 @@ export function createNetworkOperationPlanner({
       directory,
       repositoryId: requiredString(input.repositoryId, 'repositoryId'),
       bindingRevision: input.bindingRevision,
-      configRevision: requiredString(input.configRevision, 'configRevision'),
+      configRevision: parseDigest(input.configRevision, 'configRevision'),
       remote: remote.name,
       endpointKind: 'push',
     });

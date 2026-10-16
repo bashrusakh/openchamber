@@ -1,3 +1,156 @@
+## [2.3.3] - 2026-10-14
+
+### New
+
+- Chat: a video link in a reply plays in place.
+
+### Fixes
+
+- Settings: the Small model list and the model picker in the Changes walkthrough show your models again, so commit messages use the model you picked.
+- Chat: letters like g and p keep their tails in the working status label.
+
+## [2.3.2] - 2026-10-14
+
+### New
+
+- Chat: images in an assistant reply show where the text puts them; a paragraph of screenshots becomes one row.
+
+### Improvements
+
+- Chat: diff previews open in the diff layout set in Appearance, and hunks in side-by-side diffs are set apart.
+
+### Fixes
+
+- Chat: short messages get a bubble that fits them, without empty space on the left (thanks to @timothywang21).
+- Chat: the working status line no longer covers the last line of the chat or grows its own scrollbar.
+- Chat: a step that failed and then recovered in the same turn no longer shows "failed to send message".
+- Settings: the OpenCode config file and agent and command files are replaced in one step, so OpenCode never reads a half-written file. A symlinked config keeps pointing into your dotfiles, and a read-only config stays untouched (thanks to @Ghilteras).
+- Settings/Agents: the permissions editor shows outside folders as allowed by default, as OpenCode treats them.
+
+## [2.3.1] - 2026-10-13
+
+### New
+
+- **Usage: Antigravity card.** Antigravity accounts get their own card with 5-hour and weekly limits. (thanks to @brushax)
+
+### Improvements
+
+- Commit messages and pull request text use the model of OpenCode's title agent when one is configured. (thanks to @DeryFerd)
+- Chat: "Move to background" also works when a shell command or subagent runs inside a Code Mode script. (thanks to @batteryshark)
+
+### Fixes
+
+- Chat: when the agent answers twice in one turn, the first answer stays visible with Activity collapsed.
+- Chat: choosing the Default thinking level no longer makes /btw and follow-up messages fail. (thanks to @rebelliard)
+- Chat: long math formulas scroll sideways, so the whole formula can be read. (thanks to @kuriishi)
+- Skills: the Installed badge shows only on the source you installed the skill from. (thanks to @DeryFerd)
+- Usage: Console sign-ins with newer workspace ids show their limits again. (thanks to @DeryFerd)
+- Usage: with the ChatGPT sign-in, Codex says usage is unavailable for that sign-in method and chat keeps working. (thanks to @DeryFerd)
+
+## [2.3.0] - 2026-10-12
+
+### New
+
+- Languages: Arabic and Hebrew, with the whole layout mirrored right to left.
+- Chat: Stop all on the background commands strip stops every command at once, and the agent answers once.
+- Usage: OpenCode Go shows your credit balance next to the meters (thanks to @pstonesudol).
+
+### Improvements
+
+- **Live replies:** a streaming reply appears a paragraph or list item at a time, and the chat stops scrolling at the start of a long reply so you can read it from the top. With Activity collapsed, a working turn shows its latest 7 steps and a "+N more" count.
+- Composer: the queue, the session goal, a staged revert and the auto review sit as rows at the top of the composer. A staged revert offers Restore only.
+- Composer: the choice to attach a large paste as a file shows right above the input.
+- Chat: the row under an answer keeps copy, fork and pin; the other actions moved into a "more" menu.
+- Settings/Projects: the project page has General, Actions, Worktrees and Environment tabs, with the name, icon and colour edited in its header. Each action and setup command says whether it is shared with the team or only yours.
+- Sessions: sending a message to an archived session brings it back to the sidebar (thanks to @rasyidrafi).
+- Usage: Claude usage without a Claude Code login offers the sign-in right on that page.
+
+### Fixes
+
+- **Notifications:** finished turns, errors and questions show as VS Code notifications with an Open Session button. They used to notify nobody.
+- Settings/MCP: servers from both global OpenCode config files show up (thanks to @IbrahimKhan12).
+- Chat: a turn that failed shows its error. It used to read "The running turn was stopped".
+- Chat: Copy and Save as image under an answer take the whole turn, including what the agent wrote before its tool calls.
+- Chat: a permission that has nothing to remember offers Deny and Allow once only, so Always allow no longer behaves like Allow once.
+- Chat: when a send fails to cancel a pending question or permission, its card comes back so you can answer it.
+- Chat: an Escape that closes a dialog or menu no longer counts toward the double Escape that stops a run.
+- Chat: a cancelled MCP form disappears from the composer.
+- Composer: Enter in an empty composer no longer sends the whole queue into the running turn.
+- Composer: when a send takes the queued messages, each of them shows in the chat in order. They used to reach the model hidden and out of order.
+- Composer: Shift+Enter adds a new line when Ctrl/Cmd+Enter sends.
+- Composer: a click above or below the text puts the caret on the nearest line under the pointer.
+- Settings/Providers: Vertex signed in with `gcloud auth application-default login` shows as connected.
+- Settings/MCP: an imported server name with capitals saves, and a failed save says why.
+- Usage: Kimi accounts on the monthly plan show their quota again (thanks to @CMBill).
+- Usage: Ollama Cloud usage stays signed in. It now uses the API key OpenCode already has (thanks to @kydorn).
+- Usage: OpenCode Go usage loads with a key stored on OpenCode Console.
+- Sidebar: session times such as "4m" and "15h" and relative dates are translated in every language.
+
+### Misc
+
+- The Sorted chat mode is gone. Parts show in the order they ran, and Activity Default decides whether a finished turn folds; a saved Sorted choice reads as Collapsed.
+- The settings that opened shell and edit tool rows by default are gone. Every tool row opens on a click.
+- The sticky user header setting is gone. Your message scrolls with the chat, with its actions under the bubble.
+
+## [2.2.0] - 2026-10-08
+
+### New
+
+- **Models:** a new session starts on the model you last picked in a chat, also after a restart. A project or Settings default still comes first.
+- Agents: star agents in the composer's agent menu, and Tab cycles through the starred ones only.
+- Settings/Agents: pick an agent's colour, or disable an agent without deleting it.
+- Settings/Providers: connect Azure with your Azure CLI login and Amazon Bedrock with an AWS profile. When the list of profiles or resources misses yours, pick "Other…" and type it.
+- Settings: MCP servers and skills that a company policy blocks show "Blocked by policy", with a note on how to allow them.
+
+### Improvements
+
+- **Skills:** type `$` anywhere in a message to pick a skill. `/` at the start of a message lists commands only.
+- Chat: wide tables wrap their cell text by default.
+- Chat: the status line counts parallel tool calls, such as "reading 3 files" (thanks to @DhivakarK-git).
+- Chat: a subagent shows as one tool row with its running time and a Stop button.
+- Composer: comments, quotes and other attached context sit in the attachment row next to files. File names, mentions, skills and snippets show as chips in the composer and in sent messages.
+- Settings/Providers: the connect page opens on a search with popular providers as cards, and every provider is sorted by name.
+- Chat: a long message folds behind a "Show full message" link, and its attachments sit above the text.
+- Chat: typing `@` lists six subagents before you search.
+- Review sessions and the review loop get the full review rules, and the loop stops once nothing important is left.
+
+### Fixes
+
+- Settings/Providers: Azure, Cloudflare AI Gateway, Cloudflare Workers AI and Snowflake Cortex connect with an API key. The key form asks for the resource name or account id they need.
+- OpenChamber no longer turns grey in every VS Code window at once when several windows are open (thanks to chaostheory on Discord).
+- Chat: a session whose last turn was very long opens with its messages. It used to show only the "load older" button.
+- Chat: the compaction summary fills in while it streams, and a compaction in the middle of a run shows where it happened.
+- Chat: the chat no longer jumps up and back when a suggestion or a second line appears in the composer.
+- Chat: #snippets in a queued message reach the model expanded.
+- Chat: tables refit their columns when you resize the panel.
+- Chat: the image viewer fits the image, so a click right next to it closes the viewer.
+- Model picker: the model details card stays clear of the list in the sidebar.
+- The interface language stays when VS Code restores the panel without its storage.
+- A model you hid in the picker is never chosen for a new session.
+- Agents: the colour set in an agent's config shows everywhere.
+- Chat: numbered lists with ten or more items show both digits, and checklist boxes in numbered lists line up (thanks to @gaojunran).
+- Chat: bold and italic text in a quote keeps the quote's colour (thanks to @gaojunran).
+
+## [2.1.1] - 2026-10-04
+
+### New
+
+- **Git:** generate a commit message from the Source Control title bar, and the Generate button in the Git panel fills the message (thanks to @hd-o).
+- Sessions: search the sessions list (thanks to @franzudev).
+- Composer: paste large text a second time within a second to attach it as a file (thanks to @MltStephane).
+
+### Improvements
+
+- New session in an editor tab asks which workspace folder to use when you have several (thanks to @mmospanenko).
+- Settings in a global `opencode.jsonc` apply in VS Code too.
+- Git: upstream tracking matches the web app (thanks to @bashrusakh).
+- Chat: reasoning stays folded while it streams, so the transcript stops jumping. Settings > Chat > Reasoning brings back the old behaviour.
+- Chat: sessions whose last turn ran many tools open faster, and that turn's activity opens at once when you expand it.
+
+### Fixes
+
+- Chat: the chat no longer jumps line by line while a reply streams, and a message you send slides smoothly into view.
+
 ## [2.1.0] - 2026-10-01
 
 ### New

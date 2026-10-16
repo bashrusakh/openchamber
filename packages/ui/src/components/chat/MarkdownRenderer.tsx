@@ -3,6 +3,7 @@ import { lazyWithChunkRecovery } from '@/lib/chunkLoadRecovery';
 import { isMobileSurfaceRuntime } from '@/lib/runtimeSurface';
 import { cn } from '@/lib/utils';
 import { getLoadedMarkdownRendererModule, loadMarkdownRendererModule } from './markdownRendererLoader';
+import type { MarkdownRendererProps } from './MarkdownRendererImpl';
 
 // Thin lazy wrapper around the MarkdownRenderer implementation.
 // The full implementation (marked + Shiki highlighting + KaTeX + morphdom
@@ -15,10 +16,6 @@ const MarkdownRendererLazy = lazyWithChunkRecovery(() =>
 
 const SimpleMarkdownRendererLazy = lazyWithChunkRecovery(() =>
   loadMarkdownRendererModule().then((m) => ({ default: m.SimpleMarkdownRenderer }))
-);
-
-const MarkdownImageGalleryLazy = lazyWithChunkRecovery(() =>
-  import('./MarkdownImageGallery').then((m) => ({ default: m.MarkdownImageGallery }))
 );
 
 const fallback = <div className="break-words w-full min-w-0" />;
@@ -41,7 +38,7 @@ const MobileMarkdownFallback = (props: { content?: unknown; className?: unknown;
   );
 };
 
-export const MarkdownRenderer: React.FC<React.ComponentPropsWithoutRef<typeof MarkdownRendererLazy>> = (props) => {
+export const MarkdownRenderer: React.FC<MarkdownRendererProps> = (props) => {
   const loaded = getLoadedMarkdownRendererModule();
   if (loaded) return <loaded.MarkdownRenderer {...props} />;
   return (
@@ -64,9 +61,3 @@ export const SimpleMarkdownRenderer: React.FC<SimpleMarkdownRendererProps> = ({ 
     </React.Suspense>
   );
 };
-
-export const MarkdownImageGallery: React.FC<React.ComponentPropsWithoutRef<typeof MarkdownImageGalleryLazy>> = (props) => (
-  <React.Suspense fallback={null}>
-    <MarkdownImageGalleryLazy {...props} />
-  </React.Suspense>
-);

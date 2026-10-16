@@ -315,6 +315,131 @@ describe('skill-routes directory soft fallback', () => {
     expect(catalogPayload.sources[0]).not.toHaveProperty('excludedSkills');
   });
 
+  it('marks installed only for the source the skill was installed from', async () => {
+    projectRoot = createTempProject();
+    const skillDir = path.join(projectRoot, '.agents', 'skills', 'skill-creator');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: skill-creator\ndescription: Creates skills\n---\nBody\n');
+
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-skills-data-'));
+    const previousDataDir = process.env.OPENCHAMBER_DATA_DIR;
+    process.env.OPENCHAMBER_DATA_DIR = dataDir;
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, 'skills-installed-sources.json'), JSON.stringify({
+        version: 1,
+        entries: [{ skillName: 'skill-creator', skillDir: 'skills/skill-creator', scope: 'user', source: 'opencode', sourceId: 'acme', sourceRef: 'acme/skills' }],
+      }));
+
+      const scanItem = (repoSource) => ({ repoSource, skillDir: 'skills/skill-creator', skillName: 'skill-creator', installable: true });
+      appHandle = startSkillsApp({
+        projectRoot,
+        overrides: {
+          getCuratedSkillsSources: () => [
+            { id: 'acme', label: 'Acme', source: 'acme/skills', defaultSubpath: 'skills' },
+            { id: 'other', label: 'Other', source: 'other/skills', defaultSubpath: 'skills' },
+          ],
+          parseSkillRepoSource: () => ({ ok: true, host: 'github.com', normalizedRepo: 'owner/repo' }),
+          scanSkillsRepository: async (input) => ({ ok: true, items: [scanItem(input?.source === 'other/skills' ? 'other/skills' : 'acme/skills')] }),
+        },
+      });
+
+      const fromAcme = await (await fetch(
+        `${appHandle.baseUrl}/api/config/skills/catalog/source?sourceId=acme&directory=${encodeURIComponent(projectRoot)}`,
+      )).json();
+      expect(fromAcme.items).toHaveLength(1);
+      expect(fromAcme.items[0].installed).toMatchObject({ isInstalled: true });
+
+      const fromOther = await (await fetch(
+        `${appHandle.baseUrl}/api/config/skills/catalog/source?sourceId=other&directory=${encodeURIComponent(projectRoot)}`,
+      )).json();
+      expect(fromOther.items).toHaveLength(1);
+      expect(fromOther.items[0].installed).toMatchObject({ isInstalled: false });
+
+      // A name the registry has never heard of keeps the old name match.
+      fs.rmSync(path.join(dataDir, 'skills-installed-sources.json'));
+      const legacy = await (await fetch(
+        `${appHandle.baseUrl}/api/config/skills/catalog/source?sourceId=other&directory=${encodeURIComponent(projectRoot)}`,
+      )).json();
+      expect(legacy.items[0].installed).toMatchObject({ isInstalled: true });
+    } finally {
+      if (previousDataDir === undefined) delete process.env.OPENCHAMBER_DATA_DIR;
+      else process.env.OPENCHAMBER_DATA_DIR = previousDataDir;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('records install provenance for what an install returned', async () => {
+    projectRoot = createTempProject();
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-skills-data-'));
+    const previousDataDir = process.env.OPENCHAMBER_DATA_DIR;
+    process.env.OPENCHAMBER_DATA_DIR = dataDir;
+    try {
+      appHandle = startSkillsApp({
+        projectRoot,
+        overrides: {
+          resolveCatalogGitIdentity: async () => ({ ok: true, identity: { transport: 'https', credentialId: 'ref', endpoint: 'https://github.com/owner/repo.git' } }),
+          installSkillsFromRepository: async () => ({
+            ok: true,
+            installed: [{ skillName: 'skill-creator', skillDir: 'skills/skill-creator', scope: 'user', source: 'opencode' }],
+            skipped: [],
+          }),
+        },
+      });
+
+      const install = await fetch(`${appHandle.baseUrl}/api/config/skills/install`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          source: 'owner/repo',
+          sourceId: 'acme',
+          scope: 'user',
+          selections: [{ skillDir: 'skills/skill-creator' }],
+        }),
+      });
+      expect(install.status).toBe(200);
+
+      const payload = JSON.parse(fs.readFileSync(path.join(dataDir, 'skills-installed-sources.json'), 'utf8'));
+      expect(payload.version).toBe(1);
+      expect(payload.entries).toContainEqual(expect.objectContaining({
+        skillName: 'skill-creator',
+        skillDir: 'skills/skill-creator',
+        sourceId: 'acme',
+        sourceRef: 'owner/repo',
+      }));
+    } finally {
+      if (previousDataDir === undefined) delete process.env.OPENCHAMBER_DATA_DIR;
+      else process.env.OPENCHAMBER_DATA_DIR = previousDataDir;
+      fs.rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves supporting files out of the list and keeps them in the skill detail', async () => {
+    projectRoot = createTempProject();
+    const skillDir = path.join(projectRoot, '.agents', 'skills', 'files-skill');
+    fs.mkdirSync(path.join(skillDir, 'references'), { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: files-skill\ndescription: Has files\n---\nBody\n',
+    );
+    fs.writeFileSync(path.join(skillDir, 'references', 'guide.md'), '# Guide\n');
+
+    appHandle = startSkillsApp({ projectRoot });
+    const query = `?directory=${encodeURIComponent(projectRoot)}`;
+
+    const list = await (await fetch(`${appHandle.baseUrl}/api/config/skills${query}`)).json();
+    const listed = list.skills.find((skill) => skill.name === 'files-skill');
+    expect(listed.sources.md.description).toBe('Has files');
+    expect(listed.sources.md).not.toHaveProperty('supportingFiles');
+
+    const detail = await (await fetch(`${appHandle.baseUrl}/api/config/skills/files-skill${query}`)).json();
+    expect(detail.sources.md.supportingFiles).toEqual([{
+      name: 'guide.md',
+      path: path.join('references', 'guide.md'),
+      fullPath: path.join(skillDir, 'references', 'guide.md'),
+    }]);
+  });
+
   it('flags the list as partial when OpenCode skill list fails, and not when it succeeds', async () => {
     projectRoot = createTempProject();
     fs.mkdirSync(path.join(projectRoot, '.agents', 'skills', 'disk-skill'), { recursive: true });
@@ -358,5 +483,240 @@ describe('skill-routes directory soft fallback', () => {
     } finally {
       stubServer.close();
     }
+  });
+
+  it('resolves account-token identities for scan and install', async () => {
+    projectRoot = createTempProject();
+    const account = { provider: 'github', instance: 'github.com', accountId: 'account-one' };
+    const profile = { id: 'work', transport: 'account', account };
+    const credentialResolver = { resolve: async () => ({}) };
+    const resolved = [];
+    const scanResponse = { ok: true, items: [] };
+    const installResponse = { ok: true, installed: [], skipped: [] };
+    appHandle = startSkillsApp({
+      projectRoot,
+      overrides: {
+        getProfile: () => profile,
+        resolveSourceControlAccount: async (input) => {
+          expect(input).toEqual(account);
+          return {
+            credentialId: 'account-one',
+            credentialRevision: 3,
+            providerUserId: 'github.com#42',
+            status: 'valid',
+          };
+        },
+        createHttpsCredentialReference: (input) => {
+          expect(input).toEqual({
+            provider: 'github',
+            instance: 'github.com',
+            credentialId: 'account-one',
+            credentialRevision: 3,
+            providerUserId: 'github.com#42',
+          });
+          return 'managed-account-reference';
+        },
+        credentialResolver,
+        parseSkillRepoSource: () => ({
+          ok: true,
+          host: 'github.com',
+          cloneUrlSsh: 'git@github.com:owner/private.git',
+          cloneUrlHttps: 'https://github.com/owner/private.git',
+        }),
+        scanSkillsRepository: async (input) => {
+          resolved.push(input);
+          return scanResponse;
+        },
+        installSkillsFromRepository: async (input) => {
+          resolved.push(input);
+          return installResponse;
+        },
+      },
+    });
+
+    const scan = await fetch(`${appHandle.baseUrl}/api/config/skills/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'owner/private', gitIdentityId: 'work' }),
+    });
+    expect(scan.status).toBe(200);
+
+    const install = await fetch(`${appHandle.baseUrl}/api/config/skills/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: 'owner/private',
+        gitIdentityId: 'work',
+        scope: 'user',
+        selections: [{ skillDir: 'skills/private-skill' }],
+      }),
+    });
+    expect(install.status).toBe(200);
+    expect(resolved).toHaveLength(2);
+    for (const input of resolved) {
+      expect(input.identity).toEqual({
+        transport: 'https',
+        credentialId: 'managed-account-reference',
+        endpoint: 'https://github.com/owner/private.git',
+      });
+      expect(input.credentialResolver).toBe(credentialResolver);
+    }
+  });
+
+  it('uses the managed SSH identity and endpoint for catalog scans', async () => {
+    projectRoot = createTempProject();
+    let scanInput;
+    appHandle = startSkillsApp({
+      projectRoot,
+      overrides: {
+        getProfile: () => ({
+          id: 'deploy',
+          transport: 'ssh',
+          sshCredentialId: 'ocgit:v1:ssh:key-one',
+        }),
+        parseSkillRepoSource: () => ({
+          ok: true,
+          host: 'git.example.com',
+          cloneUrlSsh: 'git@git.example.com:owner/private.git',
+          cloneUrlHttps: 'https://git.example.com/owner/private.git',
+        }),
+        scanSkillsRepository: async (input) => {
+          scanInput = input;
+          return { ok: true, items: [] };
+        },
+      },
+    });
+
+    const response = await fetch(`${appHandle.baseUrl}/api/config/skills/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'git@git.example.com:owner/private.git', gitIdentityId: 'deploy' }),
+    });
+    expect(response.status).toBe(200);
+    expect(scanInput.identity).toEqual({
+      transport: 'ssh',
+      credentialId: 'ocgit:v1:ssh:key-one',
+      endpoint: 'git@git.example.com:owner/private.git',
+    });
+  });
+
+  it('keeps the System identity on the server Git configuration', async () => {
+    projectRoot = createTempProject();
+    let scanInput;
+    appHandle = startSkillsApp({
+      projectRoot,
+      overrides: {
+        parseSkillRepoSource: () => ({
+          ok: true,
+          cloneUrlSsh: 'git@github.com:owner/repo.git',
+          cloneUrlHttps: 'https://github.com/owner/repo.git',
+        }),
+        scanSkillsRepository: async (input) => {
+          scanInput = input;
+          return { ok: true, items: [] };
+        },
+      },
+    });
+
+    const response = await fetch(`${appHandle.baseUrl}/api/config/skills/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'owner/repo', gitIdentityId: 'global' }),
+    });
+    expect(response.status).toBe(200);
+    expect(scanInput.identity).toBeNull();
+  });
+
+  it('refuses to fall back when the selected account identity is unavailable', async () => {
+    projectRoot = createTempProject();
+    let scanned = false;
+    appHandle = startSkillsApp({
+      projectRoot,
+      overrides: {
+        getProfile: () => ({
+          id: 'work',
+          transport: 'account',
+          account: { provider: 'github', instance: 'github.com', accountId: 'account-one' },
+        }),
+        resolveSourceControlAccount: async () => null,
+        parseSkillRepoSource: () => ({
+          ok: true,
+          cloneUrlSsh: 'git@github.com:owner/private.git',
+          cloneUrlHttps: 'https://github.com/owner/private.git',
+        }),
+        scanSkillsRepository: async () => {
+          scanned = true;
+          return { ok: true, items: [] };
+        },
+      },
+    });
+
+    const response = await fetch(`${appHandle.baseUrl}/api/config/skills/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'owner/private', gitIdentityId: 'work' }),
+    });
+    expect(response.status).toBe(401);
+    expect(scanned).toBe(false);
+  });
+});
+
+describe('skill-routes delete location', () => {
+  /** @type {string | null} */
+  let projectRoot = null;
+  /** @type {{ close: () => Promise<void> } | null} */
+  let appHandle = null;
+
+  afterEach(async () => {
+    if (appHandle) {
+      await appHandle.close();
+      appHandle = null;
+    }
+    if (projectRoot) {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+      projectRoot = null;
+    }
+  });
+
+  const writeProjectSkill = (root, folder, name) => {
+    const dir = path.join(root, folder, 'skills', name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: test\n---\nBody\n`);
+    return dir;
+  };
+
+  it('deletes only the copy at the given scope and source', async () => {
+    projectRoot = createTempProject();
+    appHandle = startSkillsApp({ projectRoot });
+    const agentsCopy = writeProjectSkill(projectRoot, '.agents', 'located-skill');
+    const claudeCopy = writeProjectSkill(projectRoot, '.claude', 'located-skill');
+    const query = `directory=${encodeURIComponent(projectRoot)}`;
+
+    const response = await fetch(`${appHandle.baseUrl}/api/config/skills/located-skill?${query}&scope=project&source=agents`, { method: 'DELETE' });
+
+    expect(response.ok).toBe(true);
+    expect(fs.existsSync(agentsCopy)).toBe(false);
+    expect(fs.existsSync(claudeCopy)).toBe(true);
+  });
+
+  it('fails without touching other copies when the given location has none', async () => {
+    projectRoot = createTempProject();
+    appHandle = startSkillsApp({ projectRoot });
+    const claudeCopy = writeProjectSkill(projectRoot, '.claude', 'elsewhere-skill');
+    const query = `directory=${encodeURIComponent(projectRoot)}`;
+
+    const response = await fetch(`${appHandle.baseUrl}/api/config/skills/elsewhere-skill?${query}&scope=project&source=opencode`, { method: 'DELETE' });
+
+    expect(response.ok).toBe(false);
+    expect(fs.existsSync(claudeCopy)).toBe(true);
+  });
+
+  it('rejects an unknown location', async () => {
+    projectRoot = createTempProject();
+    appHandle = startSkillsApp({ projectRoot });
+
+    const response = await fetch(`${appHandle.baseUrl}/api/config/skills/any-skill?scope=user&source=elsewhere`, { method: 'DELETE' });
+
+    expect(response.status).toBe(400);
   });
 });

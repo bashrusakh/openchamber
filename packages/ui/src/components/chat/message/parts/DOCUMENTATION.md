@@ -8,25 +8,27 @@ Use this doc when you ask an agent to change tool/header/description behavior.
 
 - Message parts are rendered from `MessageBody.tsx`.
 - There are two tool rendering paths:
-  - **Static grouped tools** -> `StaticToolRow` in `ProgressiveGroup.tsx`
+  - **Static tools** -> `StaticToolRow` in `ProgressiveGroup.tsx`
   - **Expandable tools** -> `ToolPart.tsx`
 - Shared tool icon mapping is centralized in `toolPresentation.tsx` (`getToolIcon`).
 
 ## Which file controls what
 
 - `ProgressiveGroup.tsx`
-  - Renders grouped Activity rows and grouped static tools.
-  - Contains `StaticToolRow`.
+  - Contains `StaticToolRow`, the compact one-line row of a navigation tool.
+    The file keeps the name of the grouped Activity block it used to hold.
   - Contains static tool short description logic (`getToolShortDescription`).
-  - If you want to change how `read/grep/perplexity/webfetch/...` look in compact/grouped mode, edit here.
+  - If you want to change how `read/grep/perplexity/webfetch/...` look in compact mode, edit here.
 
 - `ToolPart.tsx`
   - Renders expandable tool rows (shell/edit/write/question/subagent + fallback).
   - Controls expandable header title/description/diff stats/timer and expanded output body.
   - If you want to change expandable tool layout, edit here.
+  - A subagent call is an ordinary tool row, rendered through `SubagentToolPartContent`: shine and a live duration while it runs, the final duration (red on failure) once settled, and an open action that shows the child session. Expanded, it shows the prompt and the result. The row never reads the child session's messages; the child's own chat is where its work is shown.
+  - While the child runs, foreground or background, the row has a stop action. OpenCode 2.0.23 has no route that cancels a subagent job; interrupting the child ends the job as cancelled, which the agent reads as a failed subagent and tends to restart. `opencodeClient.stopSubagent` therefore first admits a non-resuming synthetic note (`subagentCancellationNote` in `@/lib/opencode/subagent-run`) that explains the cancellation as the user's stop without forbidding the work, and interrupts the child only once the note is in. A foreground call the note names reads `stopped` instead of failed (`toStoppedSubagentPart`). Drop the note once OpenCode reports a user cancel itself.
 
 - `taskToolModel.ts`
-  - Owns subagent metadata parsing and child-session summary projection. `ToolPart.tsx` resolves the call's child identity.
+  - Owns subagent output preparation and child identity parsing. `ToolPart.tsx` resolves the call's child identity.
   - A subagent's `state.metadata.sessionID` is the preferred child identity from progress/result updates. Legacy part metadata and output IDs remain readable, then a non-empty `state.input.sessionID` identifies a resumed child when those IDs are absent.
   - If none of those sources names a child, a running call may infer one from child sessions created at or after the call start. Candidates must belong to the parent, match the requested agent when the session has one, and remain unclaimed by sibling calls. A unique candidate is accepted; when several remain, the call description must uniquely match the child title. Ambiguous calls stay unlinked. Inference never pairs children by sibling order or status.
 
@@ -56,16 +58,24 @@ Use this doc when you ask an agent to change tool/header/description behavior.
   - Thinking block UI (`ReasoningTimelineBlock`), summary + optional duration.
 
 - `components/LiveTurnActivity.tsx` (relative to the chat folder)
-  - Owns the optional live-only turn disclosure. `MessageList` enables it when
-    Activity Default is Collapsed and the turn has visible Activity content.
+  - Owns the optional turn disclosure. `MessageList` enables it when Activity
+    Default is Collapsed and the turn has visible Activity content.
   - `components/LiveActivityCollapse.tsx` owns the finite height transition;
     `components/liveActivityContext.ts` scopes the final message's non-text
-    disclosure without changing sorted message context or tool rendering.
+    disclosure without changing message context or tool rendering.
   - `lib/turns/liveActivity.ts` owns final-answer and interruption boundaries.
   - `lib/turns/liveActivitySummary.ts` derives the report from tool results.
 
-- `JustificationBlock.tsx`
-  - Justification block wrapper over `ReasoningTimelineBlock`.
+- `HtmlRenderFrame.tsx` and `htmlRender.ts`
+  - A completed `openchamber_render` call that OpenChamber accepted (`renderedPage` in `@/lib/opencode/tools`: `metadata.openchamber.ok` and an `html` input) is drawn as the page itself in place of its tool row. A refused call keeps its ordinary row, and so does a running one, except a page that waits for the user's answer (`awaitAnswer`): its call runs until the user answers, so it is drawn while it runs, and it stays with a "Not answered" line when the call ends in an error (the user stopped the turn).
+  - The page loads through `srcdoc` in a frame sandboxed with `allow-scripts allow-forms` and never `allow-same-origin`, so its script runs in an opaque origin with no reach into the app. `buildHtmlRenderDocument` puts a bootstrap first in the page's head: the theme as CSS variables (`htmlRenderTheme`; the agent tool's description in `packages/web/server/lib/agent-tool/runtime.js` lists the same names; `--chart-1` is the theme's accent and `--chart-2` to `--chart-6` a fixed set per light and dark, `CHART_SERIES`, because the theme's syntax colors made near-identical series), a size report, and http(s) link clicks handed to the host, which opens them with `openExternalUrl`. A theme switch is posted to the page instead of rebuilding it, so the page keeps its script state. Messages are accepted only from the frame's own window. A focused frame keeps every key from the app, so the bootstrap passes on a Cmd/Ctrl chord the page left alone (not typed into its own fields, not handled by its script, not the clipboard, select-all or undo chords), and the host replays it as a keydown and keyup on the frame element. The app's shortcut handling then runs as for any key pressed outside a text field, with no list of shortcuts to keep in sync. A chord without Cmd or Ctrl is never replayed. Pages are interactive within themselves (tooltips, tabs, sorting).
+  - A page that waits for an answer sends it with `openchamber.submit(data, summary)`, which the bootstrap posts as an MCP Apps `ui/message` request (the summary as text content, the data in `_meta["openchamber/data"]`); the host replies with a JSON-RPC result or error that settles the page's promise. The host accepts it only while the page waits and only during a user gesture: a click inside the frame activates the chat window too (`navigator.userActivation`, checked in Chromium and WebKit), and a page that sends on its own does not, even if it skips the bootstrap. The answer goes to the server through `answerRenderedPage` (`@/lib/renderPageAnswer`); a refusal (answered on another device, turn ended) shows a toast and rejects the page's promise. The page learns where it stands from `openchamber.answer`, set when it loads (a JSON script element, so no data can close it) and updated by a posted state message, so a page loaded again after the answer can show the choice. A line under the page says it waits, what was answered, or that the user answered in the chat. The base stylesheet carries ready classes for such a page in the app's look (`.oc-options`, `.oc-option` with `aria-pressed="true"` on the chosen one, `.oc-button`), which the tool description names, so agents do not style their own on every page. `.oc-option` is the app's flat tile (`.oc-tile`: no border, a tone step on the page, a further step on hover or focus) and takes the selection fill once chosen (`--oc-selection`, like a pressed chip), since the accent colour means act, never chosen. Focus draws no ring on either class; a focused one takes its hover fill. `.oc-button` is drawn like the app's main `Button` (pale accent fill and border, readable accent text from `getReadableThemeColors`, the `.oc-raised-button` light), through `--oc-button-*` variables `htmlRenderTheme` computes per light and dark. It is sized in the app's rem (`--oc-rem`, read from the root font size, which the interface size setting scales), so it matches the app's buttons at any interface size; `--radius` follows the same scale.
+  - The frame takes the page's full reported height (at least 48 px; the 20,000 px ceiling only stops a page that grows with its frame), so a page never scrolls inside the chat: a scrolling frame keeps the wheel or a swipe that starts on it, so the chat stopped under the pointer until the page reached its end, and on a phone a frame as tall as the screen left no place to swipe the chat from. A long page reads in the full-screen view too. The full-screen view builds the page `contained`, which stops its scrolling at the edges without the elastic bounce. A page that fits its frame gets `overflow-y: hidden` from the bootstrap, so a touch that starts on it scrolls the chat instead of bouncing inside the frame (iOS keeps a touch in any document that can scroll). Media is capped at the column width; content still wider scrolls sideways (`overflow-x: auto`, `overscroll-behavior-x: none`), and the tool description asks agents to give a wide table its own scroll box. Only the horizontal bounce is off: `overscroll-behavior-y` stays default, because turning it off would also keep a vertical swipe from reaching the chat. The last height is kept per call, so a row the timeline unmounted comes back at its size.
+  - The bootstrap moves a tooltip or popup the page positions itself back inside the frame when it sticks out past an edge (`translate`, so the page's own `transform` still applies). Only absolutely or fixed positioned elements that are partly inside are moved; one wholly outside, wider than the frame, or inside a box that scrolls or clips is left alone. Hover counts as a trigger, because a CSS `:hover` tooltip changes nothing in the DOM. The tool description also asks agents to keep tooltips inside the page.
+  - In the mobile layout (`useUIStore.isMobile`) the page has no full screen or download: it is already as wide as the screen.
+  - Full screen opens the page in a dialog, inset from its edges and as tall as the page up to the window, past which the page scrolls. Download saves the page with the theme it was viewed in; on Capacitor it goes through the native share sheet, and VS Code shows no download because its bridge has no save route for HTML.
+  - VS Code's webview CSP allows inline scripts but no remote ones, and a `srcdoc` page inherits that policy, so the tool description tells agents to draw charts with inline SVG or their own script.
+  - With Activity collapsed, a page is never folded away. `LiveTurnActivity` collects the turn's pages (`getShownPages`) and `LiveTurnHoistedPagesContext` keeps their rows out of the fold, so an opened fold does not draw them twice. While the turn works, and in a turn that ended without a final answer (stopped, failed), the pages sit right below the fold, and what the agent did after the last page (more steps, the reply it is still writing) is drawn below them, so the page stays put while new work appears under it; once the final answer arrives, the final message draws them above its first answer text. With Activity expanded there is no fold, and a page sits where its call ran.
 
 - `BlockLine.tsx`
   - The vertical connector line left of a collapsible block's body. It is also a click target: clicking it folds/expands the block via its header toggle handler (`onToggle`), or toggles the nearest native `<details>` when no handler is passed (JSON summary sections). Geometry is inline-styled (12px hit strip centered on the 1px line) so it does not depend on compiled Tailwind classes.
@@ -87,22 +97,47 @@ its logical gutter, allowing adjacent Arabic and English items. Inline code
 and code widgets have explicit LTR attributes so they do not choose the
 containing item's direction. Direction changes preserve source and copy text.
 
-### Optional live history disclosure
+### Turn footer copy and image
 
-Activity Default is shared by the settings UI in both render modes. In live
-mode, Expanded preserves the original timeline without a turn disclosure.
-Collapsed adds one Activity header after completion or interruption while preserving the original live rows,
-their order, and their individual controls. It adds no tool subgroups, side
-line, height cap, or inner scroller. Sorted rendering keeps its existing path
-and its own per-turn expansion state.
+The footer under a turn's last assistant message copies and saves the whole
+reply: the text parts of every assistant message in the turn, in order, with
+tool output and reasoning left out. `MessageList` hands the earlier text to the
+last message as `earlierAssistantText`; per-message copy buttons keep copying
+only their own text. Earlier messages may be folded or not mounted, so a
+reply of more than one text part is drawn by `buildTurnImageExportSource` from
+Markdown with the chat's classes and `decorateMarkdown`. A reply of one text
+part keeps the copy of what the chat rendered.
 
-The active turn stays open without an Activity header. A final assistant message with `finish: stop`
+### Optional history disclosure
+
+The chat has one render mode: parts stream in and stay in the order they ran.
+The Sorted mode, which folded a turn's work into one block above its answers,
+was removed; a stored `chatRenderMode: 'sorted'` reads as Collapsed Activity
+(`lib/settings/parsers.ts`, `parseActivityRenderMode`). Expanded preserves the
+timeline without a turn disclosure. Collapsed adds one Activity header after
+completion or interruption while preserving the original rows, their order, and
+their individual controls. It adds no tool subgroups, side line, height cap, or
+inner scroller. Subagent calls alone do not make a turn collapsible.
+
+The active turn has its Activity header from the first step. Folded, it shows
+only the latest 7 rows (a text, a reasoning block or a tool call each;
+`lib/turns/activityRows.ts`); the header counts the earlier ones ("+N more")
+and opens them all. `LiveTurnActivity` leaves out the messages entirely above
+the cut and tells the message it cuts into, through
+`ActivityRowSkipContext`, how many of its first rows `MessageBody` skips; both
+count with the same rule. When the cut moves down, `useActivityRowGlide`
+replays the jump as a 220 ms glide of the rows (FLIP, `transform` only, skipped
+with reduced motion). The trim stays while the settled fold closes and lifts
+when the reader opens it. A final assistant message with `finish: stop`
 collapses the earlier messages and the final message's non-text parts, keeping
 the answer and its existing footer outside. Intermediate-text summary fallback
 and compaction summaries never become final answers. An older turn without a
 final answer collapses once a later visible turn has an assistant response;
 a queued user message alone is not enough. Hidden user continuations retain
-the visible-turn mapping established by `projectTurnRecords`.
+the visible-turn mapping established by `projectTurnRecords`. A notice the
+timeline skips that separates a `stop` answer from the next assistant message
+opens a turn there (`createNoticeTurnSplitter`), so each answer keeps its own
+Activity and stays outside it; a notice between steps of one run does not.
 
 Manual expansion survives later metadata updates and timeline virtualization
 within the session. The disclosure uses a finite 180ms height transition,
@@ -136,8 +171,23 @@ in ESM and CJS. Drop it once upstream ships #536 or an equivalent, and verify
 with `bun packages/ui/tests/chat-history-scroll.browser.mjs`, which runs the
 prepend scenarios over several row-height profiles for this reason.
 
+The same patch hands out containers in item order while the list's initial
+scroll is active, end-aligned included. Upstream reverses them for an
+end-aligned start (`renderPriority` in `findAvailableContainers`), so a
+freshly opened timeline was in reverse DOM order and the DOM-order pass
+(`useDOMOrder`) moved nearly every row about 300 ms after the reveal: each row
+restyled, and with an accessibility client on, the transcript re-serialized
+(about 40 ms on every session open and switch). Containers render in index
+order, so rows are now in DOM order (what screen readers and tab order follow)
+from the first paint, and the pass finds nothing to move. Scrolling up still
+recycles containers out of order; the pass corrects that as before. The patch
+also keeps the pass's own delay: it treats the list's mount as activity, so a
+pass that does have work waits for 500 ms of quiet instead of landing in the
+opening reveal. `scripts/legend-list-dom-order.test.mjs` runs the installed
+bundles' allocation and timer code for both.
+
 The header retains its report when expanded and has no hover background. Its
-left inset matches sorted Activity. Diff deletions use the ASCII hyphen.
+left inset matches the tool rows. Diff deletions use the ASCII hyphen.
 The header reports five categories: changed files, codebase
 exploration, commands, web research, and subagents. Narrow chat columns only
 show file changes. Exploration and research are flags, not synthetic counts.
@@ -176,32 +226,45 @@ finished with `stop`, so no tool patch is parsed while the turn streams.
   Markdown preview opts into rendering raw HTML (`allowRawHtml`, see
   `components/views/files/DOCUMENTATION.md`). Safe custom application links go through the
   app-link confirmation flow in every supported renderer, including VS Code.
-- Final assistant Markdown rendering is independent from image gallery
-  extraction: gallery presence never changes the chat body. Assistant image
-  syntax consistently renders as a shared image icon followed by its filename,
-  without loading the image in the body; tool and simple Markdown retain normal
-  inline image rendering. The gallery separately collects HTTP(S), embedded, and workspace-local
-  PNG/JPEG/GIF/WebP image candidates into one 100px thumbnail gallery in the
-  message-completion area after all message text and above the turn's changed
-  files. Each muted filename caption includes the shared image-file icon.
-  HTTP(S) images keep their browser URL. Embedded and workspace-local images
-  are limited to 10 MiB and validated as PNG/JPEG/GIF/WebP. Chat Markdown uses
-  the assistant image-label policy without gallery-specific link rewriting,
-  completion-state switching, or hidden placeholders. A
-  completed assistant message hydrates at most 12 unique image candidates,
-  including persisted text parts that omit their optional part-level end time.
-  In server-backed runtimes, a gallery approaching the viewport prepares all
-  local candidates in one message-level request, then reuses the authenticated
-  `/api/fs/raw` asset route. Each URL loads only when its thumbnail approaches
-  the viewport. VS Code instead loads workspace-contained images through its
-  local filesystem bridge and never calls the server grant route; OpenCode
-  temporary-directory images remain unsupported there. Mounted historical
-  messages therefore do not eagerly read every image.
-  Gallery clicks do not introduce or alter preview chrome: desktop and mobile
-  both reuse the pre-existing attachment image preview overlay.
-  Workspace-external images receive the existing path-bound `outsideFileGrant`
-  only when the server verifies the exact source in the owning assistant
-  message and the real file is inside OpenCode's dedicated temporary directory.
+- File references become links only once the file is confirmed
+  (`MarkdownRendererImpl` `useFileReferenceInteractions`): inline code, links
+  and path-like tokens inside code blocks are probed through the bounded,
+  cached stat queue after the message settles (never while it streams, never
+  on mobile), and each pass writes all its links at once. Inside a code block
+  nothing is written for a token that leads nowhere, so code full of
+  `console.log` and `this.state` stays plain text with no DOM change; a real
+  file's token gets its span and link a moment after the message shows.
+- Assistant images appear where the text puts them. The Markdown renderer
+  draws assistant image syntax as a label, the shared image icon and the file
+  name, and never loads an image itself (`label` mode in `markdownCore.ts`);
+  tool and simple Markdown keep their own image rendering. A label for a
+  workspace-local or embedded PNG/JPEG/GIF/WebP image outside a link carries
+  its source (`data-openchamber-markdown-image-source`). Once the text part
+  settles (`time.end`), `markdown/inlineMarkdownImages.ts` replaces each such
+  label with the picture, at most 30rem wide and tall, in a bordered frame.
+  A paragraph made only of two or more images becomes one row of equal height
+  that spans the text width (`arrangeImageRow`): each image grows with its
+  width-to-height ratio, the shared height stops at 30rem or the smallest
+  image's natural height, and below 8rem the row wraps. A label loads only when
+  it nears the viewport, so mounted history reads no image files, and the
+  picture replaces the label only after it decoded, so the row grows once.
+  An image that is missing, too large or fails validation keeps its label.
+  Remote images never load: they stay links to themselves (see
+  `MarkdownImageMode`), so a model or a fetched page cannot learn when the
+  user read the message. A click opens the shared attachment preview overlay
+  with every drawn image of the message as its gallery. Copying a selection
+  writes `![name](source)`, never the authenticated asset URL.
+  In server-backed runtimes, the first label of a part to near the viewport
+  prepares all of that part's local images (at most 12) in one request to the
+  grant route, then loads them through the authenticated `/api/fs/raw` asset
+  route; the preview prepares again, so an expired grant is renewed. Embedded
+  images are validated in the browser and limited to 10 MiB. VS Code loads
+  workspace-contained images through its local filesystem bridge and never
+  calls the grant route; OpenCode temporary-directory images remain
+  unsupported there. Workspace-external images receive the existing
+  path-bound `outsideFileGrant` only when the server verifies the exact source
+  in the owning assistant message and the real file is inside OpenCode's
+  dedicated temporary directory.
 - `read` and `skill` are **static navigation tools** and render via `StaticToolRow`.
 - Every other tool, including search/fetch, OpenCode built-ins, custom tools, plugins, and MCP tools, is **expandable** and renders through `ToolPart`.
 - The managed `openchamber` plugin tool uses the expandable path and hides its broad protocol input. The plugin supplies the selected action's human description as the native tool title; the UI renders that metadata without owning an action map. The full versioned result envelope renders through the same neutral JSON summary/tree/raw views as other tools, without a tool-specific output card.
@@ -225,12 +288,11 @@ finished with `stop`, so no tool patch is parsed while the turn streams.
   The status pill says `running a script`, or `calling <tool>` once
   `metadata.toolCalls` names one (`hooks/useAssistantStatus.ts`).
 - Running `shell` output falls back to `state.metadata.output` until canonical `state.output` arrives. Its output viewport grows with the content up to `46vh`, then scrolls and follows new output until the user scrolls up; following resumes when the user returns to the bottom. Live output appends or replaces rewritten snapshots as plain text without worker highlighting; finalized output normalizes ANSI terminal controls with a bounded synthetic-cell budget, bypasses the throttle, and receives the normal one-time highlighted rendering.
-- A background `shell` call (`background: true`, or moved to the background mid-run) settles at once with `metadata.status: "running"` and a `shellID`; its text is a notice plus an instruction for the model. `ToolPart` renders it through `BackgroundShellToolPartContent`, which rebuilds the part from the command's real state (`backgroundShellPart.ts`) so the row keeps the ordinary shell look collapsed and expanded: while `sync/background-shells.ts` lists the command it is a running shell with a live timer from the call start and an `in background` label, and its expanded output is read from `/api/shell/:id/output` once a second, only while expanded (`useBackgroundShellOutput.ts`, starting from the last 64 KiB). Once OpenCode appends the command's completion (a `synthetic` message with `source: "shell"`, see `@/lib/opencode/background-shell`) the row is a finished or failed shell ending at that message, with its real output; the completion message itself stays hidden from the timeline. While it runs the row has a stop action. OpenCode 2.0.19 has no route that cancels a background job, and `shell.remove` reports the command to the agent as an error (`Shell.NotFoundError`, "nothing ran"), after which agents relaunch it; `opencodeClient.stopBackgroundShell` therefore first admits a non-resuming synthetic note (`shellCancellationNote`) that explains the coming error as the user's stop without forbidding the command, and removes the shell only once the note is in. The note stays out of the timeline (no context metadata); its `openchamberShellCancellation` metadata makes the row read "stopped" instead of failed. Drop the note once OpenCode reports a cancel itself. The composer's `BackgroundShellsStrip` offers the same stop for every running command of the session and its subagents (see `composer/DOCUMENTATION.md`). Between the two, or before the list was read, the row shows the notice without the model instruction and no duration. The user moves a foreground command (or a subagent the turn waits on) there with `session.background`, which backgrounds all of the session's blocking work at once: the action sits in the status chip above the composer and in the scroll-to-bottom pill (`components/BackgroundWorkButton.tsx`, a sibling of the pill's scroll button), shown only while `useAssistantStatus` reports `working.canBackground`, and on the customizable `background_session_work` shortcut (default `mod+shift+b`; not the TUI's `ctrl+b`, which the composer's macOS emacs keymap uses to move the caret and which is `mod+b` elsewhere). The row then turns into the background row above.
-- A `subagent` call that went to the background (`background: true`, or moved there with `session.background`) settles at once with `metadata.status: "running"` and the child in `metadata.sessionID`. `ToolPart` renders it through `BackgroundSubagentToolPartContent` (`backgroundSubagentPart.ts`): running while the child session is active in `global-session-status`, then finished, failed or stopped from the report OpenCode appends (`findSubagentRun`), with the `in background` / `stopped` header label. `ChatContainer` drops that report from the timeline (`keepCommandSubagentReports`), so the subagent stays where it was started instead of reappearing as a new turn at the end. Only reports of `subagent: true` commands, which have no call row, still render as their own `TimelineNotice` turn, and only when the child started inside the loaded history; any other report (a call not loaded yet, an unknown child) stays out of the chat and is reachable from the session's subagent list, so loading older history never makes the chat shift.
+- A background `shell` call (`background: true`, or moved to the background mid-run) settles at once with `metadata.status: "running"` and a `shellID`; its text is a notice plus an instruction for the model. `ToolPart` renders it through `BackgroundShellToolPartContent`, which rebuilds the part from the command's real state (`backgroundShellPart.ts`) so the row keeps the ordinary shell look collapsed and expanded: while `sync/background-shells.ts` lists the command it is a running shell with a live timer from the call start and an `in background` label, and its expanded output is read from `/api/shell/:id/output` once a second, only while expanded (`useBackgroundShellOutput.ts`, starting from the last 64 KiB). Once OpenCode appends the command's completion (a `synthetic` message with `source: "shell"`, see `@/lib/opencode/background-shell`) the row is a finished or failed shell ending at that message, with its real output; the completion message itself stays hidden from the timeline. While it runs the row has a stop action. OpenCode 2.0.19 has no route that cancels a background job, and `shell.remove` reports the command to the agent as an error (`Shell.NotFoundError`, "nothing ran"), after which agents relaunch it; `opencodeClient.stopBackgroundShells` therefore first admits one non-resuming synthetic note (`shellCancellationNote`) for the commands of one session it stops, which explains the coming errors as the user's stop without forbidding the commands, and removes the shells together only once the note is in. The note stays out of the timeline (no context metadata); its `openchamberShellCancellation` metadata (`shellIDs`, or a single `shellID` in notes written before stops were grouped) makes each named row read "stopped" instead of failed. Drop the note once OpenCode reports a cancel itself. The composer's `BackgroundShellsStrip` offers the same stop for every running command of the session and its subagents (see `composer/DOCUMENTATION.md`). Between the two, or before the list was read, the row shows the notice without the model instruction and no duration. The user moves a foreground command (or a subagent the turn waits on) there with `session.background`, which backgrounds all of the session's blocking work at once: the action sits in the status chip above the composer and in the scroll-to-bottom pill (`components/BackgroundWorkButton.tsx`, a sibling of the pill's scroll button), shown only while `useAssistantStatus` reports `working.canBackground` (including a running shell or subagent inside Code Mode `execute`: its live `metadata.toolCalls` list or child progress, a `shellID` or a `sessionID` with `status: "running"`, identifies the blocking job), and on the customizable `background_session_work` shortcut (default `mod+shift+b`; not the TUI's `ctrl+b`, which the composer's macOS emacs keymap uses to move the caret and which is `mod+b` elsewhere). The row then turns into the background row above.
+- A `subagent` call that went to the background (`background: true`, or moved there with `session.background`) settles at once with `metadata.status: "running"` and the child in `metadata.sessionID`. `SubagentToolPartContent` rebuilds it from the child (`backgroundSubagentPart.ts`): running while the child session is active in `global-session-status`, then finished, failed or stopped from the report OpenCode appends (`findSubagentRun`), with the `in background` header label while it runs, `stopped` after a cancel, and the stop action described for subagent rows above. `ChatContainer` drops that report from the timeline (`keepCommandSubagentReports`), so the subagent stays where it was started instead of reappearing as a new turn at the end. Only reports of `subagent: true` commands, which have no call row, still render as their own `TimelineNotice` turn, and only when the child started inside the loaded history; any other report (a call not loaded yet, an unknown child) stays out of the chat and is reachable from the session's subagent list, so loading older history never makes the chat shift.
 - The result of a session the agent dispatched with `returnResult` arrives as a `synthetic` message with `source: "openchamber-session"` (`@/lib/opencode/dispatched-session`, delivered by the server's `lib/dispatch-results`). It is a background report like a subagent run (`isBackgroundReportEntry`): it opens a turn, so the woken agent's reply renders below it, and a fork after an answer cuts before it. `TimelineNotice` renders it as one collapsed row, `Session finished: <title>` (failed / stopped variants carry the status icon), that opens to the answer as Markdown with an `Open session` action going through `openSessionLink`.
-- Thinking/Justification duration is hidden in `sorted` mode (handled in `ReasoningPart.tsx` + `JustificationBlock.tsx`).
 - Reasoning streaming presentation derives from the live stream phase (`streaming`/`cooldown`), never from missing persisted timing: a cached part without `time.end` is not live, and a part whose `time.end` is set never streams (issue #2020).
-- Assistant text parts carry the same part-finalization gate (`assistantTextVisibility.ts`): live mode's block-commit reveal holds a still-growing part's trailing line, while a part sealed with `time.end` renders in full immediately — including while the turn stays blocked on a pending question or permission ask (#3277).
+- Assistant text parts carry the same part-finalization gate (`assistantTextVisibility.ts`): the block-level reveal (`lib/streamTextCommit.ts`) holds a still-growing part's unfinished block, and the reply takes new text at most every 400 ms, while a part sealed with `time.end` renders in full immediately — including while the turn stays blocked on a pending question or permission ask (#3277).
 
 ## "I want to change description for Perplexity" (example recipe)
 
@@ -248,7 +310,7 @@ Why: only navigation tools use the compact static path; all other tools need obs
 1. Update `toolRenderUtils.ts`:
    - add/remove a tool name from `STATIC_TOOL_NAMES` only when it has a reliable direct in-app navigation action
 2. Ensure `ToolPart.tsx` supports desired header + expanded output format for that tool.
-3. Validate both modes (`sorted` and `live`).
+3. Validate with Activity Default set to Expanded and to Collapsed.
 
 ## Safe editing checklist
 
@@ -263,6 +325,17 @@ Why: only navigation tools use the compact static path; all other tools need obs
 ## Quick map of files in this folder
 
 - Text: `AssistantTextPart.tsx`, `UserTextPart.tsx`
+- Attachment citations: the composer writes `[name.png]` into the text for each
+  pasted or picked file. `UserTextPart` gets the message's file names and draws
+  each citation of one of them as an inline chip with its file-type icon. The
+  Markdown path rewrites it to a `#openchamber-attachment:` link
+  (`lib/messages/inlineMessageLinks.ts`) that `markdownCore` renders as a span
+  and `decorate.ts` gives its icon; the plain-text path builds the same chip
+  directly. Brackets around anything that is not an attachment stay text.
+  A known skill (`$name`, or `/name` in messages sent before skills moved to
+  `$`) renders as the same chip with the book icon and still opens the skill
+  file on click. The composer draws both chips too
+  (`composer/editor/composerLanguage.ts`).
 - User-attached context (inline code comments, terminal selections, browser
   annotations, PR comments/checks): `UserContextPart.tsx`. `UserTextPart`
   routes to it when the part's metadata carries an `openchamberContext`
@@ -273,6 +346,6 @@ Why: only navigation tools use the compact static path; all other tools need obs
   via text sniffing (`<terminal_context>` blocks, `GitHub issue context (JSON)`
   and `Linear issue context (JSON)` prefixes).
 - Tools: `ToolPart.tsx`, `ToolPartDiffPreview.tsx`, `PlainDiffFallback.tsx`, `ProgressiveGroup.tsx`, `toolPresentation.tsx`, `toolRenderUtils.ts`, `ToolRevealOnMount.tsx`, `GuestToolTable.tsx`
-- Reasoning/justification: `ReasoningPart.tsx`, `JustificationBlock.tsx`
+- Reasoning: `ReasoningPart.tsx`
 - Status/placeholders: `WorkingPlaceholder.tsx`, `SessionActiveSpinner.tsx`, `MigratingPart.tsx`, `BusyDots.tsx`
 - Utility renderers: `VirtualizedCodeBlock.tsx`, `MinDurationShineText.tsx`

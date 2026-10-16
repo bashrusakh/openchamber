@@ -33,7 +33,7 @@ import {
   type TokenUsageInfo,
 } from "./model"
 import { projectUserParts, structuredErrorText, toolAttachments, toolOutputText } from "./projection"
-import { runningShellFromWire, type RunningShell } from "./background-shell"
+import { runningShellFromWire, type RunningShell, type ShellEnd } from "./background-shell"
 
 // ---------------------------------------------------------------------------
 // Event vocabulary
@@ -139,7 +139,7 @@ export type SyncEvent =
   /** A session's shell command started; commands that belong to no session are not reported. */
   | { type: "shell.started"; properties: { shell: RunningShell } }
   /** A shell command exited or was removed. */
-  | { type: "shell.ended"; properties: { shellID: string } }
+  | { type: "shell.ended"; properties: { shellID: string; end: ShellEnd; endedAt: number } }
   | { type: "vcs.branch.updated"; properties: { branch?: string } }
   | { type: "mcp.status.changed"; properties: { server: string } }
   | { type: "catalog.updated"; properties: { kind: CatalogKind } }
@@ -154,6 +154,10 @@ export type SyncEvent =
   | { type: "openchamber.permission-auto-accept"; properties: { sessions: Record<string, boolean>; modes?: Record<string, "ask" | "safety" | "auto">; revision?: number } }
   /** The server did not answer this request on the user's behalf: it waits for the user. */
   | { type: "openchamber.permission-left-for-user"; properties: { permissionId: string; sessionId: string; directory: string | null } }
+  /** A page an agent showed waits for the user's answer (render.page with awaitAnswer). */
+  | { type: "openchamber.page-waiting"; properties: { sessionID: string; directory: string | null; page: { id: string; title: string } } }
+  /** That page stopped waiting: answered, answered in the chat, or its turn ended. */
+  | { type: "openchamber.page-settled"; properties: { sessionID: string; pageID: string } }
 
 /** Agent-completion / restart notices the OpenChamber server publishes for non-web runtimes. */
 export type OpenchamberNotification = {
@@ -168,8 +172,6 @@ export type OpenchamberNotification = {
   desktopNotificationDelivered?: boolean
   desktopStdoutActive?: boolean
 }
-
-export type SyncEventType = SyncEvent["type"]
 
 /** A translated event together with the directory it belongs to. */
 export type RoutedSyncEvent = {
@@ -865,9 +867,16 @@ export function translateWireEvent(event: OpenCodeEvent): SyncEvent[] {
       const shell = runningShellFromWire(event.data.info)
       return shell ? [{ type: "shell.started", properties: { shell } }] : []
     }
-    case "shell.exited":
+    case "shell.exited": {
+      // The wire status type includes `running`, but OpenCode publishes this
+      // event only once a command reached a terminal status.
+      const { status } = event.data
+      if (status === "running") return []
+      const end: ShellEnd = compact({ kind: "exited", status, exit: event.data.exit })
+      return [{ type: "shell.ended", properties: { shellID: event.data.id, end, endedAt: event.created } }]
+    }
     case "shell.deleted":
-      return [{ type: "shell.ended", properties: { shellID: event.data.id } }]
+      return [{ type: "shell.ended", properties: { shellID: event.data.id, end: { kind: "removed" }, endedAt: event.created } }]
 
     // PTYs are the terminal panel's own transport; it does not read them from
     // this stream.

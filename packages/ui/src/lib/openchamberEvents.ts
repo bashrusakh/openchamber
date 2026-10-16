@@ -1,11 +1,13 @@
 import { getRuntimeUrlResolver } from './runtime-url';
 import { runtimeFetch } from './runtime-fetch';
+import { useAuthSessionStore, waitForAuthSession } from './runtime-auth-expiry';
 import { isRelayModeActive } from './relay/runtime-tunnel';
 import { subscribeRuntimeEndpointChanged } from './runtime-switch';
 import { isVSCodeRuntime } from './desktop';
 import { canDriveBrowserPage } from './browser/hostCapability';
 import { messageQueueUpdatedEventSchema, type MessageQueueUpdatedEvent } from '@/stores/messageQueueStore';
 import { z } from 'zod';
+import { trackedItemRecordsSchema } from './trackedItems/model';
 
 type ScheduledTaskRanEvent = {
   type: 'scheduled-task-ran';
@@ -47,7 +49,19 @@ type BrowserControlRequestEvent = {
   requestId: string;
   action: string;
   parameters: Record<string, unknown>;
+  context: BrowserControlRequestContext;
 };
+
+/**
+ * The session that called the browser tool and the project it works in, each
+ * null when unknown (an older server, or a caller with no session).
+ */
+const browserControlRequestContextSchema = z.object({
+  directory: z.string().min(1).nullable().catch(null),
+  sessionId: z.string().min(1).nullable().catch(null),
+});
+export type BrowserControlRequestContext = z.infer<typeof browserControlRequestContextSchema>;
+const UNKNOWN_BROWSER_CONTROL_CONTEXT: BrowserControlRequestContext = { directory: null, sessionId: null };
 
 /**
  * The agent asked for a file to be shown in the user's file panel. Every
@@ -61,6 +75,20 @@ const fileOpenRequestSchema = z.object({
 type FileOpenRequestEvent = { type: 'file-open-request' } & z.infer<typeof fileOpenRequestSchema>;
 
 /**
+ * The agent asked for a saved plan to be shown. `projectId` is the storage
+ * owner; `directory` is where the asking session works, so the window that
+ * shows that project opens the plan.
+ */
+const planOpenRequestSchema = z.object({
+  projectId: z.string().min(1),
+  planId: z.string().min(1),
+  title: z.string(),
+  directory: z.string().min(1).nullable(),
+  sessionId: z.string().min(1).nullable(),
+});
+type PlanOpenRequestEvent = { type: 'plan-open-request' } & z.infer<typeof planOpenRequestSchema>;
+
+/**
  * The agent changed what it remembers. Carries only which store moved, not the
  * entries: listeners re-read from the server, so the event cannot go stale
  * between being sent and being handled.
@@ -70,6 +98,9 @@ type AgentMemoryChangedEvent = {
   scope: 'global' | 'project';
   projectId?: string;
 };
+
+const projectContextChangedSchema = z.object({ projectId: z.string().min(1) });
+type ProjectContextChangedEvent = { type: 'project-context-changed' } & z.infer<typeof projectContextChangedSchema>;
 
 /**
  * The extension chosen as browser provider can no longer serve (paused,
@@ -126,6 +157,12 @@ type RoutingDecisionEvent = { type: 'routing-decision'; decision: z.infer<typeof
 type RoutingPermissionHeldEvent = { type: 'routing-permission-held' } & z.infer<typeof routingPermissionHeldSchema>;
 type RoutingSafetySkippedEvent = { type: 'routing-safety-skipped' } & z.infer<typeof routingSafetySkippedSchema>;
 
+/** Followed pull requests, merge requests or issues whose state the server saw move. */
+type TrackedItemsChangedEvent = { type: 'tracked-items-changed'; records: z.infer<typeof trackedItemRecordsSchema> };
+
+const eventStreamReadySchema = z.object({ connectionId: z.string().min(1).optional() });
+const sourceControlActivitySchema = z.object({ directory: z.string().min(1) });
+
 const notificationPropertiesSchema = z.object({
   title: z.string().optional(),
   body: z.string().optional(),
@@ -139,7 +176,11 @@ const notificationPropertiesSchema = z.object({
 
 type OpenChamberEvent =
   | { type: 'notification'; payload: z.infer<typeof notificationPropertiesSchema> }
-  | { type: 'event-stream-ready' }
+  /** `connectionId` names this connection on the server; absent from servers before tracked items. */
+  | { type: 'event-stream-ready'; connectionId: string | null }
+  | TrackedItemsChangedEvent
+  /** An agent turn finished in `directory`; its branches may have a new pull request. */
+  | { type: 'source-control-activity'; directory: string }
   | RoutingUpdatedEvent
   | RoutingDecisionEvent
   | RoutingPermissionHeldEvent
@@ -150,7 +191,9 @@ type OpenChamberEvent =
   | WorktreeChangedEvent
   | BrowserControlRequestEvent
   | FileOpenRequestEvent
+  | PlanOpenRequestEvent
   | BrowserProviderResetEvent
+  | ProjectContextChangedEvent
   | AgentMemoryChangedEvent;
 type Listener = (event: OpenChamberEvent) => void;
 
@@ -162,6 +205,7 @@ const worktreeChangedPropertiesSchema = z.object({
 let eventSource: EventSource | null = null;
 let relayAbortController: AbortController | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let authSessionWait: AbortController | null = null;
 let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let runtimeChangeUnsubscribe: (() => void) | null = null;
@@ -178,8 +222,26 @@ const clearHeartbeatTimer = () => {
   heartbeatTimer = null;
 };
 
+const cancelAuthSessionWait = () => {
+  authSessionWait?.abort();
+  authSessionWait = null;
+};
+
 const scheduleReconnect = () => {
-  if (reconnectTimer || listeners.size === 0) {
+  if (reconnectTimer || authSessionWait || listeners.size === 0) {
+    return;
+  }
+  // An expired session answers every attempt with 401; wait for the login
+  // instead and reconnect right after it.
+  if (useAuthSessionStore.getState().state !== 'ok') {
+    const wait = new AbortController();
+    authSessionWait = wait;
+    void waitForAuthSession(wait.signal).then(() => {
+      if (wait.signal.aborted) return;
+      authSessionWait = null;
+      reconnectAttempt = 0;
+      connect();
+    });
     return;
   }
   const delay = Math.min(1_000 * Math.pow(2, Math.min(reconnectAttempt, 5)), MAX_RECONNECT_DELAY_MS);
@@ -305,7 +367,21 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
 
   if (envelope.type === 'openchamber:event-stream-ready') {
     reconnectAttempt = 0;
-    for (const listener of listeners) listener({ type: 'event-stream-ready' });
+    const ready = eventStreamReadySchema.safeParse(envelope.properties);
+    const connectionId = ready.success ? ready.data.connectionId ?? null : null;
+    for (const listener of listeners) listener({ type: 'event-stream-ready', connectionId });
+    return;
+  }
+
+  if (envelope.type === 'openchamber:source-control.activity') {
+    const parsed = sourceControlActivitySchema.safeParse(envelope.properties);
+    if (parsed.success) for (const listener of listeners) listener({ type: 'source-control-activity', directory: parsed.data.directory });
+    return;
+  }
+
+  if (envelope.type === 'openchamber:tracked-items.changed') {
+    const records = trackedItemRecordsSchema.parse(getEventProperties(envelope.properties)?.states);
+    if (records.length > 0) for (const listener of listeners) listener({ type: 'tracked-items-changed', records });
     return;
   }
 
@@ -345,6 +421,12 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
     return;
   }
 
+  if (envelope.type === 'openchamber:plan-open-request') {
+    const parsed = planOpenRequestSchema.safeParse(envelope.properties);
+    if (parsed.success) for (const listener of listeners) listener({ type: 'plan-open-request', ...parsed.data });
+    return;
+  }
+
   if (envelope.type === 'openchamber:file-open-request') {
     const parsed = fileOpenRequestSchema.safeParse(envelope.properties);
     if (parsed.success) for (const listener of listeners) listener({ type: 'file-open-request', ...parsed.data });
@@ -354,6 +436,12 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
   if (envelope.type === 'openchamber:browser-provider-reset') {
     const parsed = browserProviderResetSchema.safeParse(envelope.properties);
     if (parsed.success) for (const listener of listeners) listener({ type: 'browser-provider-reset', ...parsed.data });
+    return;
+  }
+
+  if (envelope.type === 'openchamber:project-context-changed') {
+    const parsed = projectContextChangedSchema.safeParse(envelope.properties);
+    if (parsed.success) for (const listener of listeners) listener({ type: 'project-context-changed', ...parsed.data });
     return;
   }
 
@@ -426,6 +514,7 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
       parameters: rawParameters && typeof rawParameters === 'object' && !Array.isArray(rawParameters)
         ? rawParameters as Record<string, unknown>
         : {},
+      context: browserControlRequestContextSchema.safeParse(properties?.context).data ?? UNKNOWN_BROWSER_CONTROL_CONTEXT,
     };
     for (const listener of listeners) {
       listener(nextEvent);
@@ -513,6 +602,7 @@ const ensureRuntimeChangeSubscription = () => {
   if (runtimeChangeUnsubscribe || typeof window === 'undefined') return;
   runtimeChangeUnsubscribe = subscribeRuntimeEndpointChanged(() => {
     cleanupSource();
+    cancelAuthSessionWait();
     reconnectAttempt = 0;
     connect();
   });
@@ -539,6 +629,7 @@ export const subscribeOpenchamberEvents = (listener: Listener): (() => void) => 
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      cancelAuthSessionWait();
       reconnectAttempt = 0;
       cleanupSource();
       cleanupRuntimeChangeSubscription();

@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { isAgentMemoryFeatureAvailable } from '../agent-memory/feature-flag.js';
 import { isPermissionMode } from '../permission-auto-accept/modes.js';
 import { idleStopSchema } from '../spaces/idle-stop.js';
+import { sshHostSchema } from '../spaces/places/ssh-host.js';
 
 // Generated from packages/ui/src/lib/settings/registry.ts by
 // `bun run settings-registry:generate`; `registry.test.ts` fails when stale.
@@ -44,6 +45,8 @@ const customProviderIconsSchema = z.record(
   z.enum(['server', 'cloud', 'database', 'terminal', 'code', 'ai']),
 );
 const CUSTOM_PROVIDER_ICONS_MAX = 256;
+// `provider/model` last picked in a chat composer.
+const lastSelectedModelSchema = z.string().trim().min(1).max(512);
 
 /** Provider id -> icon id; unknown icons and malformed entries are dropped one by one. */
 const sanitizeCustomProviderIcons = (value) => {
@@ -87,6 +90,9 @@ export const createSettingsHelpers = (dependencies) => {
   const TERMINAL_SHELL_VALUES = new Set(['auto', 'bash', 'zsh', 'sh', 'fish', 'pwsh', 'powershell', 'cmd', 'dash', 'ksh', 'nu']);
   const SIDEBAR_PROJECT_DISPLAY_MODE_VALUES = new Set(['all', 'single']);
   const SIDEBAR_VIEW_MODE_VALUES = new Set(['projects', 'timeline']);
+  // The interface languages (`LOCALES` in packages/ui/src/lib/i18n/runtime.ts);
+  // settings-helpers.test.js fails when the two lists drift apart.
+  const UI_LOCALE_VALUES = new Set(['en', 'de', 'fr', 'nl', 'zh-CN', 'zh-TW', 'uk', 'es', 'pt-BR', 'ko', 'pl', 'ja', 'tr', 'ar', 'he']);
   const SIDEBAR_PROJECT_SORT_ORDER_VALUES = new Set(['manual', 'a-z', 'z-a', 'date-added', 'recent']);
   const SIDEBAR_WORKTREE_SORT_ORDER_VALUES = new Set(['recent', 'manual', 'a-z']);
   const HIDDEN_MODELS_MAX = 1024;
@@ -203,6 +209,9 @@ export const createSettingsHelpers = (dependencies) => {
     if (isInputHistoryLimit(candidate.inputHistoryLimit)) {
       result.inputHistoryLimit = candidate.inputHistoryLimit;
     }
+    if (UI_LOCALE_VALUES.has(candidate.locale)) {
+      result.locale = candidate.locale;
+    }
     if (typeof candidate.useSystemTheme === 'boolean') {
       result.useSystemTheme = candidate.useSystemTheme;
     }
@@ -224,7 +233,12 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.splashFgDark === 'string' && candidate.splashFgDark.trim().length > 0) {
       result.splashFgDark = candidate.splashFgDark.trim();
     }
-    if (typeof candidate.lastDirectory === 'string' && candidate.lastDirectory.length > 0) {
+    // An empty string forgets the last directory (the last project was
+    // removed). Every reader treats it as unset, so nothing is warmed at start
+    // or turned back into a project.
+    if (candidate.lastDirectory === '') {
+      result.lastDirectory = '';
+    } else if (typeof candidate.lastDirectory === 'string') {
       const normalized = normalizePathForPersistence(candidate.lastDirectory);
       if (typeof normalized === 'string' && normalized.length > 0) {
         result.lastDirectory = normalized;
@@ -273,6 +287,9 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (typeof candidate.desktopMacMenuBarEnabled === 'boolean') {
       result.desktopMacMenuBarEnabled = candidate.desktopMacMenuBarEnabled;
+    }
+    if (typeof candidate.desktopLinuxNativeFrame === 'boolean') {
+      result.desktopLinuxNativeFrame = candidate.desktopLinuxNativeFrame;
     }
     if (typeof candidate.desktopWindowControlsPosition === 'string') {
       const mode = candidate.desktopWindowControlsPosition.trim();
@@ -340,8 +357,17 @@ export const createSettingsHelpers = (dependencies) => {
     if (SIDEBAR_WORKTREE_SORT_ORDER_VALUES.has(candidate.sidebarWorktreeSortOrder)) {
       result.sidebarWorktreeSortOrder = candidate.sidebarWorktreeSortOrder;
     }
-    if (typeof candidate.sidebarShowRecentSection === 'boolean') {
-      result.sidebarShowRecentSection = candidate.sidebarShowRecentSection;
+    if (typeof candidate.sidebarShowChatsSection === 'boolean') {
+      result.sidebarShowChatsSection = candidate.sidebarShowChatsSection;
+    }
+    if (typeof candidate.sidebarShowWorkSection === 'boolean') {
+      result.sidebarShowWorkSection = candidate.sidebarShowWorkSection;
+    }
+    if (candidate.sidebarShowPinnedSection === true || candidate.sidebarShowPinnedSection === false) {
+      result.sidebarShowPinnedSection = candidate.sidebarShowPinnedSection;
+    }
+    if (candidate.sidebarDetailedZoneRows === true || candidate.sidebarDetailedZoneRows === false) {
+      result.sidebarDetailedZoneRows = candidate.sidebarDetailedZoneRows;
     }
 
     if (Array.isArray(candidate.securityScopedBookmarks)) {
@@ -386,6 +412,13 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.monoFont === 'string' && candidate.monoFont.length > 0) {
       result.monoFont = candidate.monoFont;
     }
+    // Family names for the "custom" font choice; empty clears them.
+    if (typeof candidate.customUiFont === 'string') {
+      result.customUiFont = candidate.customUiFont.slice(0, 100);
+    }
+    if (typeof candidate.customMonoFont === 'string') {
+      result.customMonoFont = candidate.customMonoFont.slice(0, 100);
+    }
     if (typeof candidate.githubClientId === 'string') {
       const trimmed = candidate.githubClientId.trim();
       if (trimmed.length > 0) {
@@ -410,14 +443,41 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.streamingAutoFollowEnabled === 'boolean') {
       result.streamingAutoFollowEnabled = candidate.streamingAutoFollowEnabled;
     }
+    if (typeof candidate.expandReasoningWhileStreaming === 'boolean') {
+      result.expandReasoningWhileStreaming = candidate.expandReasoningWhileStreaming;
+    }
     if (typeof candidate.codeBlockLineWrap === 'boolean') {
       result.codeBlockLineWrap = candidate.codeBlockLineWrap;
+    }
+    if (typeof candidate.tableCellWrap === 'boolean') {
+      result.tableCellWrap = candidate.tableCellWrap;
+    }
+    if (typeof candidate.copyMessagesAsPlainText === 'boolean') {
+      result.copyMessagesAsPlainText = candidate.copyMessagesAsPlainText;
     }
     if (typeof candidate.autoSaveEnabled === 'boolean') {
       result.autoSaveEnabled = candidate.autoSaveEnabled;
     }
+    if (candidate.confirmFileTreeMove === true || candidate.confirmFileTreeMove === false) {
+      result.confirmFileTreeMove = candidate.confirmFileTreeMove;
+    }
+    if (candidate.layoutAnimations === true || candidate.layoutAnimations === false) {
+      result.layoutAnimations = candidate.layoutAnimations;
+    }
+    if (candidate.openLinksInBrowserPanel === true || candidate.openLinksInBrowserPanel === false) {
+      result.openLinksInBrowserPanel = candidate.openLinksInBrowserPanel;
+    }
+    if (candidate.openTrackerLinksOnBoard === true || candidate.openTrackerLinksOnBoard === false) {
+      result.openTrackerLinksOnBoard = candidate.openTrackerLinksOnBoard;
+    }
+    if (candidate.fileTreeSide === 'left' || candidate.fileTreeSide === 'right') {
+      result.fileTreeSide = candidate.fileTreeSide;
+    }
     if (typeof candidate.diffWrapLines === 'boolean') {
       result.diffWrapLines = candidate.diffWrapLines;
+    }
+    if (typeof candidate.diffHideWhitespace === 'boolean') {
+      result.diffHideWhitespace = candidate.diffHideWhitespace;
     }
     if (typeof candidate.persistChatDraft === 'boolean') {
       result.persistChatDraft = candidate.persistChatDraft;
@@ -443,6 +503,9 @@ export const createSettingsHelpers = (dependencies) => {
         result.fileEditorKeymap = mode;
       }
     }
+    if (typeof candidate.fileEditorVimMappings === 'string') {
+      result.fileEditorVimMappings = candidate.fileEditorVimMappings.slice(0, 10_000);
+    }
     if (Array.isArray(candidate.providerOrder)) {
       result.providerOrder = normalizeStringArray(candidate.providerOrder);
     }
@@ -455,8 +518,8 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.sessionWorkEnabled === 'boolean') {
       result.sessionWorkEnabled = candidate.sessionWorkEnabled;
     }
-    if (typeof candidate.sessionWorkAutoOpen === 'boolean') {
-      result.sessionWorkAutoOpen = candidate.sessionWorkAutoOpen;
+    if (typeof candidate.sessionReviewOfferEnabled === 'boolean') {
+      result.sessionReviewOfferEnabled = candidate.sessionReviewOfferEnabled;
     }
     if (typeof candidate.sessionGoalEnabled === 'boolean') {
       result.sessionGoalEnabled = candidate.sessionGoalEnabled;
@@ -589,6 +652,10 @@ export const createSettingsHelpers = (dependencies) => {
       const trimmed = candidate.defaultModel.trim();
       result.defaultModel = trimmed.length > 0 ? trimmed : undefined;
     }
+    const lastSelectedModel = lastSelectedModelSchema.safeParse(candidate.lastSelectedModel);
+    if (lastSelectedModel.success) {
+      result.lastSelectedModel = lastSelectedModel.data;
+    }
     if (typeof candidate.defaultVariant === 'string') {
       const trimmed = candidate.defaultVariant.trim();
       result.defaultVariant = trimmed.length > 0 ? trimmed : undefined;
@@ -666,11 +733,20 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.agentMemoryToolEnabled === 'boolean') {
       result.agentMemoryToolEnabled = candidate.agentMemoryToolEnabled;
     }
+    if (candidate.agentKnowledgeToolEnabled === true || candidate.agentKnowledgeToolEnabled === false) {
+      result.agentKnowledgeToolEnabled = candidate.agentKnowledgeToolEnabled;
+    }
     if (typeof candidate.agentNotifyToolEnabled === 'boolean') {
       result.agentNotifyToolEnabled = candidate.agentNotifyToolEnabled;
     }
+    if (candidate.agentRenderToolEnabled === true || candidate.agentRenderToolEnabled === false) {
+      result.agentRenderToolEnabled = candidate.agentRenderToolEnabled;
+    }
     if (typeof candidate.agentToolsCodeMode === 'boolean') {
       result.agentToolsCodeMode = candidate.agentToolsCodeMode;
+    }
+    if (candidate.agentWorktreeMoveWithoutAsking === true || candidate.agentWorktreeMoveWithoutAsking === false) {
+      result.agentWorktreeMoveWithoutAsking = candidate.agentWorktreeMoveWithoutAsking;
     }
     if (typeof candidate.isolatedSpacesEnabled === 'boolean') {
       result.isolatedSpacesEnabled = candidate.isolatedSpacesEnabled;
@@ -678,6 +754,9 @@ export const createSettingsHelpers = (dependencies) => {
     if (idleStopSchema.safeParse(candidate.isolatedSpacesIdleStop).success) {
       result.isolatedSpacesIdleStop = { ...candidate.isolatedSpacesIdleStop };
     }
+    // The machine of the Docker over SSH place; the empty string takes that place away.
+    const sshHost = sshHostSchema.safeParse(candidate.isolatedSpacesSshHost);
+    if (sshHost.success) result.isolatedSpacesSshHost = sshHost.data;
     if (typeof candidate.openCodeUpdateToastDismissedVersion === 'string') {
       const version = candidate.openCodeUpdateToastDismissedVersion.trim();
       result.openCodeUpdateToastDismissedVersion = version.slice(0, VERSION_STRING_MAX_LENGTH);
@@ -687,12 +766,6 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (typeof candidate.showTurnChangedFiles === 'boolean') {
       result.showTurnChangedFiles = candidate.showTurnChangedFiles;
-    }
-    if (typeof candidate.showExpandedBashTools === 'boolean') {
-      result.showExpandedBashTools = candidate.showExpandedBashTools;
-    }
-    if (typeof candidate.showExpandedEditTools === 'boolean') {
-      result.showExpandedEditTools = candidate.showExpandedEditTools;
     }
     if (typeof candidate.timeFormatPreference === 'string') {
       const mode = candidate.timeFormatPreference.trim();
@@ -738,9 +811,6 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (typeof candidate.collapsibleUserMessages === 'boolean') {
       result.collapsibleUserMessages = candidate.collapsibleUserMessages;
-    }
-    if (typeof candidate.stickyUserHeader === 'boolean') {
-      result.stickyUserHeader = candidate.stickyUserHeader;
     }
     if (typeof candidate.promptNavigatorEnabled === 'boolean') {
       result.promptNavigatorEnabled = candidate.promptNavigatorEnabled;
@@ -815,6 +885,9 @@ export const createSettingsHelpers = (dependencies) => {
 
     if (Array.isArray(candidate.recentAgents)) {
       result.recentAgents = normalizeStringArray(candidate.recentAgents);
+    }
+    if (Array.isArray(candidate.favoriteAgents)) {
+      result.favoriteAgents = normalizeStringArray(candidate.favoriteAgents);
     }
 
     const recentEfforts = sanitizeRecentEfforts(candidate.recentEfforts);

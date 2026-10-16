@@ -24,10 +24,17 @@ const obviousPublishTargets = (context: GitPublishContext): GitPublishTargets | 
       ? { push: { remoteName: tracked.name, ref }, fetch: { remoteName: tracked.name, ref } }
       : { push: { remoteName: tracked.name, ref } };
   }
-  if (context.action === 'push' && remotes.length === 1) {
-    return { push: { remoteName: remotes[0].name, ref: `refs/heads/${branch}` } };
-  }
-  return null;
+  if (context.action !== 'push') return null;
+  // A new branch goes where the repository's identity points: the remote its
+  // account answers for, or the one remote it holds a grant of its own for.
+  // Remotes reached through that identity are fetchable forks, not where a
+  // branch is published unless someone picks them.
+  const binding = effectiveRepositoryBinding(context.bindingRead);
+  const own = remotes.filter((remote) => !remote.inherited);
+  const home = remotes.find((remote) => remote.name === binding.providers[0]?.primaryRemote)
+    ?? (own.length === 1 ? own[0] : null)
+    ?? (remotes.length === 1 ? remotes[0] : null);
+  return home ? { push: { remoteName: home.name, ref: `refs/heads/${branch}` } } : null;
 };
 
 export function useGitPublishChooser({ directory, branch, chooseContributor }: {
@@ -93,7 +100,7 @@ export function useGitPublishChooser({ directory, branch, chooseContributor }: {
           const binding = await sourceControl.repositoryBinding(directory);
           assertCurrent();
           const remote = effectiveRepositoryBinding(binding).remotes.find((entry) => current.tracking?.startsWith(`${entry.name}/`));
-          await runContributorAwareSync({
+          return runContributorAwareSync({
             directory, remoteName: remote?.name ?? '', status: current, git, sourceControl,
             choose: chooseContributor, onOperation: options.onOperation,
           });
@@ -102,6 +109,7 @@ export function useGitPublishChooser({ directory, branch, chooseContributor }: {
             directory, branch: current.current, remoteName: '', git, sourceControl,
             choose: chooseContributor, onOperation: options.onOperation,
           });
+          return null;
         }
       };
     }
@@ -135,7 +143,7 @@ export function useGitPublishChooser({ directory, branch, chooseContributor }: {
     return async () => {
       assertCurrent();
       confirmed.current = null;
-      await runPreparedGitPublish({ selection, git, sourceControl, allowNewCommit: options.beforeCommit, assertCurrent, onOperation: options.onOperation });
+      const operation = await runPreparedGitPublish({ selection, git, sourceControl, allowNewCommit: options.beforeCommit, assertCurrent, onOperation: options.onOperation });
       assertCurrent();
       // A failed post-push read cannot undo a completed publication or retain reusable authority.
       const current = await readGitPublishContext({ action, directory, git, sourceControl }).catch(() => null);
@@ -151,6 +159,7 @@ export function useGitPublishChooser({ directory, branch, chooseContributor }: {
           || (!selection.status.tracking && current.status.tracking === `${selection.targets.push.remoteName}/${selection.targets.push.ref.slice(11)}`))) {
         confirmed.current = { ...current, targets: selection.targets };
       }
+      return operation;
     };
   };
 

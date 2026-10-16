@@ -21,8 +21,7 @@
  *   assistant `message.updated`; only the last one carries `finish: "stop"`,
  *   which is the same signal v1 gave once per turn.
  */
-
-const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+import { isRecord } from '../shared/guards.js';
 
 const trimmed = (value) => (typeof value === 'string' ? value.trim() : '');
 
@@ -223,6 +222,12 @@ export function translateWireEvent(payload) {
       }
       return [];
     }
+
+    // A shell command the user ran from the composer. It is no user message,
+    // so it passes under its own name.
+    case 'session.shell.started':
+      if (!sessionID) return [];
+      return [event('session.shell.started', { sessionID })];
 
     case 'session.step.started': {
       const messageID = trimmed(data.assistantMessageID);

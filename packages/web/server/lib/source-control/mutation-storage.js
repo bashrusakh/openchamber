@@ -1,3 +1,4 @@
+import { isPlainObject, isString } from '../shared/guards.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -11,17 +12,24 @@ const KINDS = [
   'change-request-update',
   'change-request-merge',
   'change-request-ready',
+  'change-request-comment',
+  'change-request-review',
+  'issue-comment',
+  'change-request-state',
+  'issue-state',
+  'change-request-labels',
+  'issue-labels',
+  'change-request-reviewers',
+  'change-request-thread-reply',
+  'change-request-thread-resolve',
+  'change-request-thread-start',
 ];
 const STATES = ['running', 'succeeded', 'failed', 'outcome-unknown'];
 const TERMINAL_STATES = ['succeeded', 'failed'];
 const TARGET_OPTIONAL_KEYS = ['number', 'head', 'base', 'headSha'];
-const RESULT_KEYS = [...TARGET_OPTIONAL_KEYS, 'state', 'merged', 'ready', 'failureStatus', 'failureCode'];
+const RESULT_KEYS = [...TARGET_OPTIONAL_KEYS, 'state', 'merged', 'ready', 'commented', 'failureStatus', 'failureCode'];
 
 const emptyState = () => ({ version: VERSION, records: {} });
-const isPlainObject = (value) => value === Object(value)
-  && !Array.isArray(value)
-  && Object.getPrototypeOf(value) === Object.prototype;
-const isString = (value) => Object.prototype.toString.call(value) === '[object String]';
 const isBoolean = (value) => Object.prototype.toString.call(value) === '[object Boolean]';
 const isFunction = (value) => Object.prototype.toString.call(value) === '[object Function]';
 const isNonEmptyString = (value) => isString(value) && value.length > 0;
@@ -32,6 +40,9 @@ const hasExactKeys = (value, required, optional = []) => {
 };
 const isTimestamp = (value) => Number.isSafeInteger(value) && value >= 0;
 const isPositiveInteger = (value) => Number.isSafeInteger(value) && value > 0;
+// Revision 0 is the designed no-binding state the binding service accepts
+// (DOCUMENTATION.md, binding-service section), so the storage gate matches it.
+const isNonNegativeInteger = (value) => Number.isSafeInteger(value) && value >= 0;
 const isFailureStatus = (value) => Number.isSafeInteger(value) && value >= 400 && value <= 599;
 
 const invalidState = () => {
@@ -66,7 +77,7 @@ const isTarget = (value) => isPlainObject(value)
     TARGET_OPTIONAL_KEYS,
   )
   && isNonEmptyString(value.repositoryId)
-  && isPositiveInteger(value.bindingRevision)
+  && isNonNegativeInteger(value.bindingRevision)
   && isNonEmptyString(value.primaryRemote)
   && isProject(value.project)
   && (value.number === undefined || isPositiveInteger(value.number))
@@ -83,6 +94,7 @@ const isTerminalResult = (value) => isPlainObject(value)
   && (value.headSha === undefined || isNonEmptyString(value.headSha))
   && (value.state === undefined || isNonEmptyString(value.state))
   && (value.merged === undefined || isBoolean(value.merged))
+  && (value.commented === undefined || isBoolean(value.commented))
   && (value.ready === undefined || isBoolean(value.ready))
   && (value.failureStatus === undefined || isFailureStatus(value.failureStatus))
   && (value.failureCode === undefined || isNonEmptyString(value.failureCode));

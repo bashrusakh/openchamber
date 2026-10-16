@@ -9,7 +9,7 @@
  * (`settings-registry.json`, see `registry-snapshot.ts`) — the server's and the
  * VS Code bridge's key lists. A key that is not here does not persist.
  *
- * Scopes (see `.opencode/plans/settings-scopes.md`):
+ * Scopes (see `DOCUMENTATION.md` in this folder):
  * - `instance`: a fact about the machine the server runs on. Never synced.
  * - `profile`: the person's preference. Synced to every client of the
  *   instance; a few are stored per surface kind (`perSurface`).
@@ -24,6 +24,8 @@ import type { DraftStarterRef } from '@/lib/draftStarters';
 import { sanitizeStarterRefs } from '@/lib/draftStarters';
 import { getFilesViewShowGitignored, setFilesViewShowGitignored } from '@/lib/filesViewShowGitignored';
 import { isMonoFontOption, isUiFontOption, type MonoFontOption, type UiFontOption } from '@/lib/fontOptions';
+import { LOCALES } from '@/lib/i18n/runtime';
+import { useI18nStore } from '@/lib/i18n/store';
 import { isInputHistoryLimit, isInputHistoryScope, type InputHistoryScope } from '@/lib/inputHistoryScope';
 import { normalizeMobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 import { isTerminalShell } from '@/lib/terminalShell';
@@ -37,6 +39,7 @@ import { z } from 'zod';
 import {
   fromSchema,
   mapParser,
+  parseActivityRenderMode,
   parseBoolean,
   parseCustomProviderIcons,
   parseDesktopWindowControlsPosition,
@@ -79,7 +82,7 @@ import {
   type UsageModelGroups,
 } from './parsers';
 
-export type SettingsScope = 'instance' | 'profile' | 'device';
+type SettingsScope = 'instance' | 'profile' | 'device';
 export type SettingsSurface = 'web' | 'desktop' | 'vscode' | 'mobile';
 
 /**
@@ -87,7 +90,7 @@ export type SettingsSurface = 'web' | 'desktop' | 'vscode' | 'mobile';
  * explicitly (not `DesktopSettings`) so the registry's type does not refer to
  * itself through the bindings; extend it when another field needs a sibling.
  */
-export type SettingsSiblingView = {
+type SettingsSiblingView = {
   readonly draftStartersCraftGoalAdded?: boolean;
   readonly draftStartersScheduleTaskAdded?: boolean;
   readonly workStatusHiddenSectionsExplicit?: boolean;
@@ -98,14 +101,14 @@ export type SettingsSiblingView = {
  * syntax on purpose: it keeps `SettingsFieldSpec<T>` assignable to
  * `SettingsFieldSpec<unknown>`, which is what the generic loops below iterate.
  */
-export type SettingsUiBinding<T> = {
+type SettingsUiBinding<T> = {
   read(): T | undefined;
   write(value: T, snapshot: SettingsSiblingView): void;
   /** Send changes of the backing store to the server (store-subscribing auto-save). */
   autoSave: boolean;
 };
 
-export type SettingsFieldSpec<T> = {
+type SettingsFieldSpec<T> = {
   scope: SettingsScope;
   parse(value: unknown, raw: SettingsRawDocument): T | undefined;
   ui?: SettingsUiBinding<T>;
@@ -216,6 +219,18 @@ export const SETTINGS_REGISTRY = {
   lightThemeId: field({ scope: 'profile', perSurface: true, parse: parseNonEmptyString }),
   darkThemeId: field({ scope: 'profile', perSurface: true, parse: parseNonEmptyString }),
 
+  // ── Interface language (profile; the i18n store owns the live copy and keeps
+  // browser storage as the first-paint copy; the language picker writes it) ──
+  locale: field({
+    scope: 'profile',
+    parse: parseOneOf(LOCALES),
+    ui: {
+      read: () => useI18nStore.getState().locale,
+      write: (value) => useI18nStore.getState().setLocale(value),
+      autoSave: false,
+    },
+  }),
+
   // ── Workspace pointers and instance facts ──
   lastDirectory: field({ scope: 'instance', adopt: 'bootstrap-only', parse: parseNonEmptyString }),
   homeDirectory: field({ scope: 'instance', parse: parseNonEmptyString }),
@@ -228,6 +243,7 @@ export const SETTINGS_REGISTRY = {
   desktopKeepAwakeEnabled: field({ scope: 'instance', surfaces: ['desktop'], parse: parseBoolean }),
   desktopMinimizeToTrayEnabled: field({ scope: 'instance', surfaces: ['desktop'], parse: parseBoolean }),
   desktopMacMenuBarEnabled: field({ scope: 'instance', surfaces: ['desktop'], parse: parseBoolean }),
+  desktopLinuxNativeFrame: field({ scope: 'instance', surfaces: ['desktop'], parse: parseBoolean }),
   // Write-only: the desktop network page learns whether one is set from
   // `hasDesktopUiPassword` and sends a value only when the user types a new
   // one (or removes it with an empty string).
@@ -277,8 +293,11 @@ export const SETTINGS_REGISTRY = {
   // `builtin` or an installed extension id; the server falls back to `builtin` when that extension cannot serve.
   browserProvider: field({ scope: 'instance', parse: parseNonEmptyString, ui: uiStore('browserProvider', (v) => useUIStore.getState().setBrowserProvider(v)) }),
   agentNotifyToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentNotifyToolEnabled', (v) => useUIStore.getState().setAgentNotifyToolEnabled(v)) }),
+  agentRenderToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentRenderToolEnabled', (v) => useUIStore.getState().setAgentRenderToolEnabled(v)) }),
   agentToolsCodeMode: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentToolsCodeMode', (v) => useUIStore.getState().setAgentToolsCodeMode(v)) }),
+  agentWorktreeMoveWithoutAsking: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentWorktreeMoveWithoutAsking', (v) => useUIStore.getState().setAgentWorktreeMoveWithoutAsking(v)) }),
   agentMemoryToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentMemoryToolEnabled', (v) => useUIStore.getState().setAgentMemoryToolEnabled(v)) }),
+  agentKnowledgeToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentKnowledgeToolEnabled', (v) => useUIStore.getState().setAgentKnowledgeToolEnabled(v)) }),
   // The isolated-spaces switch. The server reads it once at start; a change takes effect at the
   // next start, which the settings row says. Never shown in VS Code (decision 16 of the design).
   isolatedSpacesEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('isolatedSpacesEnabled', (v) => useUIStore.getState().setIsolatedSpacesEnabled(v)) }),
@@ -288,6 +307,11 @@ export const SETTINGS_REGISTRY = {
     scope: 'instance',
     parse: fromSchema(z.object({ enabled: z.boolean(), hours: z.number().int().min(1).max(168) }).strict()),
   }),
+  // The machine of the Docker over SSH place of isolated spaces, `[user@]host[:port]` as the
+  // user's own `ssh` takes it; the empty string means no such place. The server reads it when
+  // the feature comes up; the "Isolated spaces" page writes it through the host's `PUT /machine`
+  // route, never directly, since the host rebuilds its places on the change.
+  isolatedSpacesSshHost: field({ scope: 'instance', parse: parseTrimmedStringUpTo(320) }),
   // Server-owned: it says whether this build has the feature at all.
   agentMemoryFeatureAvailable: field({
     scope: 'instance',
@@ -340,9 +364,10 @@ export const SETTINGS_REGISTRY = {
   sidebarViewMode: field({ scope: 'profile', perSurface: true, parse: parseOneOf(['projects', 'timeline']), ui: sessionDisplayField('sidebarViewMode') }),
   sidebarProjectSortOrder: field({ scope: 'profile', parse: parseOneOf(['manual', 'a-z', 'z-a', 'date-added', 'recent']), ui: sessionDisplayField('projectSortOrder') }),
   sidebarWorktreeSortOrder: field({ scope: 'profile', parse: parseOneOf(['recent', 'manual', 'a-z']), ui: sessionDisplayField('worktreeSortOrder') }),
-  // Per surface: Recent turned on in the desktop sidebar must not fill the
-  // phone's drawer, and the phone's choice must not change the desktop.
-  sidebarShowRecentSection: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: sessionDisplayField('showRecentSection') }),
+  sidebarShowChatsSection: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: sessionDisplayField('showChatsSection') }),
+  sidebarShowWorkSection: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: sessionDisplayField('showWorkSection') }),
+  sidebarShowPinnedSection: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: sessionDisplayField('showPinnedSection') }),
+  sidebarDetailedZoneRows: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: sessionDisplayField('detailedZoneRows') }),
 
   // ── Work status ──
   workStatusSectionOrder: field({
@@ -380,27 +405,29 @@ export const SETTINGS_REGISTRY = {
   showReasoningTraces: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('showReasoningTraces', (v) => useUIStore.getState().setShowReasoningTraces(v)) }),
   streamingAutoFollowEnabled: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: uiStore('streamingAutoFollowEnabled', (v) => useUIStore.getState().setStreamingAutoFollowEnabled(v)) }),
   collapsibleThinkingBlocks: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('collapsibleThinkingBlocks', (v) => useUIStore.getState().setCollapsibleThinkingBlocks(v)) }),
+  expandReasoningWhileStreaming: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('expandReasoningWhileStreaming', (v) => useUIStore.getState().setExpandReasoningWhileStreaming(v)) }),
   showTextJustificationActivity: field({ scope: 'profile', parse: parseBoolean }),
-  chatRenderMode: field({ scope: 'profile', parse: parseOneOf(['sorted', 'live']), ui: uiStore('chatRenderMode', (v) => useUIStore.getState().setChatRenderMode(v)) }),
-  activityRenderMode: field({ scope: 'profile', parse: parseOneOf(['collapsed', 'summary']), ui: uiStore('activityRenderMode', (v) => useUIStore.getState().setActivityRenderMode(v)) }),
+  /** Legacy chat mode that `activityRenderMode` absorbs at parse time. */
+  chatRenderMode: field({ scope: 'profile', parse: parseOneOf(['sorted', 'live']) }),
+  activityRenderMode: field({ scope: 'profile', parse: parseActivityRenderMode, ui: uiStore('activityRenderMode', (v) => useUIStore.getState().setActivityRenderMode(v)) }),
   mermaidRenderingMode: field({ scope: 'profile', parse: parseOneOf(['svg', 'ascii']), ui: uiStore('mermaidRenderingMode', (v) => useUIStore.getState().setMermaidRenderingMode(v)) }),
   userMessageRenderingMode: field({ scope: 'profile', parse: parseOneOf(['markdown', 'plain']), ui: uiStore('userMessageRenderingMode', (v) => useUIStore.getState().setUserMessageRenderingMode(v)) }),
   collapsibleUserMessages: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('collapsibleUserMessages', (v) => useUIStore.getState().setCollapsibleUserMessages(v)) }),
-  stickyUserHeader: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: uiStore('stickyUserHeader', (v) => useUIStore.getState().setStickyUserHeader(v)) }),
   promptNavigatorEnabled: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: uiStore('promptNavigatorEnabled', (v) => useUIStore.getState().setPromptNavigatorEnabled(v)) }),
   wideChatLayoutEnabled: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: uiStore('wideChatLayoutEnabled', (v) => useUIStore.getState().setWideChatLayoutEnabled(v)) }),
   showSplitAssistantMessageActions: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('showSplitAssistantMessageActions', (v) => useUIStore.getState().setShowSplitAssistantMessageActions(v)) }),
   showToolFileIcons: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('showToolFileIcons', (v) => useUIStore.getState().setShowToolFileIcons(v)) }),
   codeBlockLineWrap: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('codeBlockLineWrap', (v) => useUIStore.getState().setCodeBlockLineWrap(v)) }),
+  tableCellWrap: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('tableCellWrap', (v) => useUIStore.getState().setTableCellWrap(v)) }),
+  copyMessagesAsPlainText: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('copyMessagesAsPlainText', (v) => useUIStore.getState().setCopyMessagesAsPlainText(v)) }),
   showTurnChangedFiles: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('showTurnChangedFiles', (v) => useUIStore.getState().setShowTurnChangedFiles(v)) }),
-  showExpandedBashTools: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('showExpandedBashTools', (v) => useUIStore.getState().setShowExpandedBashTools(v)) }),
-  showExpandedEditTools: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('showExpandedEditTools', (v) => useUIStore.getState().setShowExpandedEditTools(v)) }),
   toolJsonViewMode: field({ scope: 'profile', parse: parseOneOf(['summary', 'formatted', 'raw']), ui: uiStore('toolJsonViewMode', (v) => useUIStore.getState().setToolJsonViewMode(v)) }),
   timeFormatPreference: field({ scope: 'profile', parse: parseOneOf(['auto', '12h', '24h']), ui: uiStore('timeFormatPreference', (v) => useUIStore.getState().setTimeFormatPreference(v)) }),
   weekStartPreference: field({ scope: 'profile', parse: parseOneOf(['auto', 'sunday', 'monday']), ui: uiStore('weekStartPreference', (v) => useUIStore.getState().setWeekStartPreference(v)) }),
   messageStreamTransport: field({ scope: 'profile', parse: parseOneOf(['auto', 'ws', 'sse']), ui: configField('settingsMessageStreamTransport') }),
   diffLayoutPreference: field({ scope: 'profile', parse: parseOneOf(['dynamic', 'inline', 'side-by-side']), ui: uiStore('diffLayoutPreference', (v) => useUIStore.getState().setDiffLayoutPreference(v)) }),
   diffWrapLines: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('diffWrapLines', (v) => useUIStore.getState().setDiffWrapLines(v)) }),
+  diffHideWhitespace: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('diffHideWhitespace', (v) => useUIStore.getState().setDiffHideWhitespace(v)) }),
   gitChangesViewMode: field({ scope: 'profile', parse: parseOneOf(['flat', 'tree']), ui: uiStore('gitChangesViewMode', (v) => useUIStore.getState().setGitChangesViewMode(v)) }),
   gitmojiEnabled: field({ scope: 'profile', parse: parseBoolean }),
   defaultFileViewerPreview: field({ scope: 'profile', parse: parseBoolean }),
@@ -415,7 +442,13 @@ export const SETTINGS_REGISTRY = {
     ui: { read: getFilesViewShowGitignored, write: (v) => setFilesViewShowGitignored(v, { persist: false }), autoSave: false },
   }),
   fileEditorKeymap: field({ scope: 'profile', parse: parseFileEditorKeymap, ui: uiStore('fileEditorKeymap', (v) => useUIStore.getState().setFileEditorKeymap(v)) }),
+  fileEditorVimMappings: field({ scope: 'profile', parse: parseTextUpTo(10_000), ui: uiStore('fileEditorVimMappings', (v) => useUIStore.getState().setFileEditorVimMappings(v)) }),
   autoSaveEnabled: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('autoSaveEnabled', (v) => useUIStore.getState().setAutoSaveEnabled(v)) }),
+  confirmFileTreeMove: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('confirmFileTreeMove', (v) => useUIStore.getState().setConfirmFileTreeMove(v)) }),
+  fileTreeSide: field({ scope: 'profile', surfaces: ['web', 'desktop'], parse: parseOneOf(['left', 'right']), ui: uiStore('fileTreeSide', (v) => useUIStore.getState().setFileTreeSide(v)) }),
+  layoutAnimations: field({ scope: 'profile', surfaces: ['web', 'desktop'], parse: parseBoolean, ui: uiStore('layoutAnimations', (v) => useUIStore.getState().setLayoutAnimations(v)) }),
+  openLinksInBrowserPanel: field({ scope: 'profile', surfaces: ['desktop'], parse: parseBoolean, ui: uiStore('openLinksInBrowserPanel', (v) => useUIStore.getState().setOpenLinksInBrowserPanel(v)) }),
+  openTrackerLinksOnBoard: field({ scope: 'profile', surfaces: ['web', 'desktop', 'mobile'], parse: parseBoolean, ui: uiStore('openTrackerLinksOnBoard', (v) => useUIStore.getState().setOpenTrackerLinksOnBoard(v)) }),
   autoCreateWorktree: field({ scope: 'profile', parse: parseBoolean }),
   sessionTabsEnabled: field({ scope: 'profile', surfaces: ['web', 'desktop', 'vscode'], parse: parseBoolean, ui: uiStore('sessionTabsEnabled', (v) => useUIStore.getState().setSessionTabsEnabled(v)) }),
   allowPromptingSubagentSessions: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('allowPromptingSubagentSessions', (v) => useUIStore.getState().setAllowPromptingSubagentSessions(v)) }),
@@ -467,6 +500,8 @@ export const SETTINGS_REGISTRY = {
   editorFontSize: field({ scope: 'profile', perSurface: true, parse: parseFiniteNumber, ui: uiStore('editorFontSize', (v) => useUIStore.getState().setEditorFontSize(v)) }),
   uiFont: field({ scope: 'profile', parse: parseUiFont, ui: uiStore('uiFont', (v) => useUIStore.getState().setUiFont(v)) }),
   monoFont: field({ scope: 'profile', parse: parseMonoFont, ui: uiStore('monoFont', (v) => useUIStore.getState().setMonoFont(v)) }),
+  customUiFont: field({ scope: 'profile', parse: parseTextUpTo(100), ui: uiStore('customUiFont', (v) => useUIStore.getState().setCustomUiFont(v)) }),
+  customMonoFont: field({ scope: 'profile', parse: parseTextUpTo(100), ui: uiStore('customMonoFont', (v) => useUIStore.getState().setCustomMonoFont(v)) }),
   padding: field({ scope: 'profile', perSurface: true, parse: parseFiniteNumber, ui: uiStore('padding', (v) => useUIStore.getState().setPadding(v)) }),
   cornerRadius: field({ scope: 'profile', perSurface: true, parse: parseFiniteNumber, ui: uiStore('cornerRadius', (v) => useUIStore.getState().setCornerRadius(v)) }),
   shortcutOverrides: field({
@@ -489,7 +524,9 @@ export const SETTINGS_REGISTRY = {
   collapsedModelProviders: field({ scope: 'profile', parse: parseStringSet, ui: uiStore('collapsedModelProviders', setUi('collapsedModelProviders'), { autoSave: false }) }),
   customProviderIcons: field({ scope: 'profile', parse: parseCustomProviderIcons, ui: uiStore('customProviderIcons', setUi('customProviderIcons'), { autoSave: false }) }),
   recentModels: field<ModelRef[]>({ scope: 'profile', parse: parseModelRefs(16), ui: uiStore('recentModels', setUi('recentModels'), { autoSave: false }) }),
+  lastSelectedModel: field({ scope: 'profile', parse: parseNonEmptyString, ui: uiStore('lastSelectedModel', setUi('lastSelectedModel')) }),
   recentAgents: field({ scope: 'profile', parse: parseStringSet, ui: uiStore('recentAgents', setUi('recentAgents'), { autoSave: false }) }),
+  favoriteAgents: field({ scope: 'profile', parse: parseStringSet, ui: uiStore('favoriteAgents', setUi('favoriteAgents'), { autoSave: false }) }),
   recentEfforts: field({ scope: 'profile', parse: parseRecentEfforts, ui: uiStore('recentEfforts', setUi('recentEfforts'), { autoSave: false }) }),
   providerOrder: field({ scope: 'profile', parse: parseStringSet, ui: uiStore('providerOrder', (v) => useUIStore.getState().setProviderOrder(v)) }),
 
@@ -497,8 +534,7 @@ export const SETTINGS_REGISTRY = {
   sessionRecapEnabled: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('sessionRecapEnabled', (v) => useUIStore.getState().setSessionRecapEnabled(v)) }),
   sessionSuggestionEnabled: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('sessionSuggestionEnabled', (v) => useUIStore.getState().setSessionSuggestionEnabled(v)) }),
   sessionWorkEnabled: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('sessionWorkEnabled', (v) => useUIStore.getState().setSessionWorkEnabled(v)) }),
-  // Jev runs on the OpenChamber server, which VS Code does not have.
-  sessionWorkAutoOpen: field({ scope: 'profile', surfaces: ['web', 'desktop', 'mobile'], parse: parseBoolean, ui: uiStore('sessionWorkAutoOpen', (v) => useUIStore.getState().setSessionWorkAutoOpen(v)) }),
+  sessionReviewOfferEnabled: field({ scope: 'profile', surfaces: ['web', 'desktop', 'mobile'], parse: parseBoolean, ui: uiStore('sessionReviewOfferEnabled', (v) => useUIStore.getState().setSessionReviewOfferEnabled(v)) }),
   sessionGoalEnabled: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('sessionGoalEnabled', (v) => useUIStore.getState().setSessionGoalEnabled(v)) }),
   // Who checks goal progress. The goal loop runs on the OpenChamber server,
   // which VS Code does not have.
@@ -579,7 +615,7 @@ export const SETTINGS_REGISTRY = {
   inputBarOffset: field({ scope: 'device', surfaces: ['mobile', 'web'], parse: parseFiniteNumber, ui: uiStore('inputBarOffset', (v) => useUIStore.getState().setInputBarOffset(v)) }),
 } as const;
 
-export type SettingsKey = keyof typeof SETTINGS_REGISTRY;
+type SettingsKey = keyof typeof SETTINGS_REGISTRY;
 
 type FieldValue<S> = S extends SettingsFieldSpec<infer T> ? T : never;
 
@@ -599,10 +635,10 @@ export const LOCAL_DEVICE_KEYS = [
   'contextPanelByDirectory',
   'contextRailOrder',
   'contextRailHiddenSurfaces',
+  'contextSurfaceZones',
   'contextEditorTreeVisible',
   'contextEditorVisible',
   'contextEditorTreeWidth',
-  'notesPanelHeight',
   'workStatusExpandedSections',
   'messageQueueExpanded',
   'workStatusScrollTop',
@@ -618,15 +654,10 @@ export const LOCAL_DEVICE_KEYS = [
   'walkthroughTocWidth',
   'diffFileListMode',
   'diffFileTreeWidth',
-  'linearIssueListStatus',
-  'linearIssueListAssignee',
-  'linearIssueListTeamIdByRuntime',
-  'linearIssueListPriority',
   'showTerminalQuickKeysOnDesktop',
   'dockBadgeEnabled',
   'alwaysShowScrollbars',
   'agentMemoryViewedAt',
-  'projectContextSidebarWidth',
 ] as const;
 
 /**
@@ -731,7 +762,7 @@ export const MIRRORED_KEYS = SETTINGS_KEYS.filter((key) => {
 });
 
 /** Shape of one field in the generated JSON snapshot the server and the VS Code bridge consume. */
-export type SettingsRegistrySnapshotField = {
+type SettingsRegistrySnapshotField = {
   scope: SettingsScope;
   perSurface?: true;
   surfaces?: readonly SettingsSurface[];
@@ -745,7 +776,7 @@ export type SettingsRegistrySnapshotField = {
   owner?: 'desktop-shell';
 };
 
-export type SettingsRegistrySnapshot = {
+type SettingsRegistrySnapshot = {
   version: 1;
   fields: Record<string, SettingsRegistrySnapshotField>;
 };

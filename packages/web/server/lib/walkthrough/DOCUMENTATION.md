@@ -20,8 +20,9 @@ has to ask for it.
   `PROMPT_VERSION`.
 - `schema.js` — response schema, response normalization, tolerant JSON parsing.
 - `store.js` — content-addressed cache entries plus mutable pointers.
-- `pull-request.js` — PR diffs and per-file contents via the shared GitHub
-  octokit helper.
+- `pull-request.js` — PR diffs and per-file contents: GitHub through the
+  shared octokit helper, GitLab merge requests through the readers the runtime
+  injects from the GitLab module (`readGitLabChangeRequestPatch`/`File`).
 - `model-settings.js` — the feature's own model override.
 - `languages.js` — the languages the prose may be written in.
 - `index.js` — orchestration.
@@ -57,14 +58,22 @@ written against staged code never silently re-anchors onto an unstaged edit.
 | `commit` | `commit` | `getCommitDiff` compares the full selected commit hash with its first parent; root commits compare with an empty tree |
 | `pr` | `pr:<number>` | The provider's committed pull-request diff, without local working-tree changes. Every read carries a validated repository binding context |
 
-Changes and walkthrough resolve the current branch's base through
-`packages/ui/src/hooks/useBranchComparisonBase.ts`. An explicit choice in Changes
-outranks reflog detection. The resolved base is then qualified by
-`qualifyBaseRef` in `packages/ui/src/components/views/git/baseBranch.ts`: the
-range API names refs literally, and a base outside the remote the repository is
-bound to is not a comparison this repository can make. Both toolbars use
+Changes, mobile Changes and walkthrough resolve the current branch's base
+through `packages/ui/src/hooks/useBranchComparisonBase.ts`, which takes the
+first candidate that names a ref (`resolveBranchComparisonBase` in
+`packages/ui/src/components/views/git/baseBranch.ts`): an explicit choice, then
+the base of the branch's open pull request as the status store already holds it,
+then reflog detection, then the repository's default branch. The pull request's
+base outranks the reflog because it is what the branch merges into and survives
+a rebase or restack. Each candidate is qualified by `qualifyBaseRef`: the range
+API names refs literally, a bare name resolves to the bound remote's copy
+(`origin/main`, what the pull request compares against) and to the local branch
+only when the remote has none, an explicit `refs/heads/` choice stays local, and
+a base outside the bound remote is not a comparison this repository can make. A
+chosen base that no longer resolves, or a candidate naming the branch or its own
+remote copy, gives way to the next. The toolbars use
 `packages/ui/src/components/views/git/BranchComparisonSelector.tsx` to select or
-change the base directly. Walkthrough allows selecting Branch before a base is
+change the base directly; its Automatic item drops the choice. Walkthrough allows selecting Branch before a base is
 known and waits for a valid choice before loading or generating. Opening
 walkthrough from Changes carries the selected base and head; later selections
 in either toolbar update both comparisons.
@@ -94,7 +103,9 @@ PR mode uses the same searchable, paginated selector as Changes. Its list loads
 only while PR mode is visible. Selection ownership and handoff rules are in
 `packages/ui/src/stores/DOCUMENTATION.md`.
 
-PR sources may include `sourceRepo: { owner, repo }`. It qualifies the cache/job
+PR sources may include `sourceRepo: { owner, repo }`. `owner` is a single
+segment on GitHub and a namespace path on GitLab (`group/subgroup`), matching
+what each provider's project mapper produces. It qualifies the cache/job
 key as `pr:<owner>/<repo>:<number>`, so equal numbers in different repositories
 stay apart. Number-only sources keep `pr:<number>` and read the repository behind
 the bound primary remote. A named repository is honoured only inside the bound
@@ -107,14 +118,17 @@ request. The PR panel forwards the project of the pull request it shows.
 to PRs, and the same bound read-context fields as the other walkthrough routes.
 It validates that context against the binding and reads with its exact account;
 without one it reads nothing. It returns GitHub's complete published diff as
-text, with no model readiness checks or generation. Successful empty patches return 200; auth,
+text, with no model readiness checks or generation. A GitLab context returns
+the merge request's diff, rebuilt by `gitlab/resources.js` into the same git
+patch shape from GitLab's per-file hunks (GitLab diffs against the merge base,
+like GitHub). Successful empty patches return 200; auth,
 GitHub and malformed-response failures remain errors. Walkthrough generation
 keeps its existing empty-diff refusal. UI comparison behavior is documented in
 `packages/ui/src/components/views/DOCUMENTATION.md`.
 
 `GET /api/walkthrough/pr-file` takes the same `directory` and PR `source` plus
 `path`, optional `previousPath`, and `status`, and returns `{ original, modified }`
-for that one file as GitHub has it: the base side at the PR's merge base, the
+for that one file as the provider has it: the base side at the PR's merge base, the
 head side at the PR head. This is how the comparison view expands collapsed
 context for a PR: its patch arrives at fixed context and its commits may not be
 on disk, so the working tree is never read. Files above 5 MB answer `413`
@@ -441,7 +455,8 @@ For a PR source, all four routes also require flat `provider`, `instance`,
 query or JSON body. They do not accept a nested context object. The source-control
 binding service validates these immutable fields before walkthrough service,
 cache, job, credential, repository-coordinate, or provider work. The server
-currently accepts only a validated GitHub context. It resolves the exact bound
+accepts a validated GitHub or GitLab context and refuses any other provider with
+`422 UNSUPPORTED_WALKTHROUGH_PROVIDER`. It resolves the exact bound
 account and trusted primary remote, with no active-account or default-remote
 fallback, and every successful PR response echoes the trusted `readContext`.
 An exact-account `401` reconciles the account through the source-control binding

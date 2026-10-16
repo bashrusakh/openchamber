@@ -1,12 +1,14 @@
 import path from 'node:path';
 import os from 'node:os';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 import { createSourceControlAuthStore } from './auth-storage.js';
-import { defaultGitLabClientId, exchangeGitLabDeviceCode, probeGitLabAuth, startGitLabDeviceFlow } from './device-flow.js';
+import { exchangeGitLabDeviceCode, resolveGitLabClientId, probeGitLabAuth, startGitLabDeviceFlow } from './device-flow.js';
 import { getGlabToken } from './glab-credential.js';
 import { normalizeGitLabInstance } from './instance.js';
 import { classifyGitLabFailure } from './network.js';
-import { createGitLabClient } from './client.js';
+import { createGitLabClient, createGitLabDownloader } from './client.js';
 import { createGitLabResourceService } from './resources.js';
 import { verifyGitLabToken } from './verify.js';
 import { isString } from './validation.js';
@@ -84,8 +86,33 @@ function sendAuthStorageError(res, error) {
   return null;
 }
 
+/** A list's state and whose items, from the query; unknown values read as open and anyone. */
+function readListFilter(query) {
+  const state = requestText(query?.state);
+  const people = requestText(query?.people);
+  return {
+    state: ['open', 'closed', 'merged', 'all'].includes(state) ? state : 'open',
+    people: ['any', 'assigned', 'created', 'reviewRequested'].includes(people) ? people : 'any',
+  };
+}
+
 function requestText(value) {
   return isString(value) ? value.trim() : '';
+}
+
+// GitLab writes a file attached in Markdown as `/uploads/<32-hex secret>/<name>`.
+const UPLOAD_SECRET_RE = /^[0-9a-f]{32}$/;
+// Only what an `img` or a `video` draws is served; an uploaded page or SVG
+// opened from this server's origin could run script in it.
+const UPLOAD_MEDIA_TYPE_RE = /^(?:image\/(?:png|jpeg|gif|webp|avif)|video\/(?:mp4|webm|quicktime))$/;
+const UPLOAD_PASSED_HEADERS = ['content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified'];
+
+/** Express has decoded the name already; a `/`, `.` or `..` would leave the upload's folder. */
+function readUploadParams(params) {
+  const secret = requestText(params?.secret);
+  const filename = isString(params?.filename) ? params.filename : '';
+  const plainName = filename && filename !== '.' && filename !== '..' && !/[/\\]/.test(filename);
+  return UPLOAD_SECRET_RE.test(secret) && plainName ? { secret, filename } : null;
 }
 
 function requestNumber(value) {
@@ -107,16 +134,11 @@ export function registerGitLabRoutes(app, options = {}) {
   const store = options.store ?? createSourceControlAuthStore({ filePath: authFile });
   const oauthFlowRegistry = options.oauthFlowRegistry ?? createOAuthFlowRegistry();
   const readSettings = options.readSettings ?? (async () => ({}));
-  const getClientId = async (origin) => {
-    const envValue = isString(process.env.OPENCHAMBER_GITLAB_CLIENT_ID) ? process.env.OPENCHAMBER_GITLAB_CLIENT_ID.trim() : '';
-    if (envValue) return envValue;
-    const settings = await readSettings();
-    const stored = isString(settings?.gitlabClientId) ? settings.gitlabClientId.trim() : '';
-    return stored || defaultGitLabClientId(origin);
-  };
+  const getClientId = (origin) => resolveGitLabClientId(origin, readSettings);
   const glabToken = (origin) => getGlabToken(origin, { execFile: options.execFile, timeoutMs: options.cliTimeoutMs });
   const verify = (origin, token) => verifyGitLabToken({ origin, token, fetch: fetchImpl, timeoutMs });
   const createClient = options.createClient ?? createGitLabClient;
+  const createDownloader = options.createDownloader ?? createGitLabDownloader;
   const identityFor = (origin, accountId) => ({ provider: 'gitlab', instance: origin, accountId });
   /**
    * A connected account is a complete identity waiting to be written: who it
@@ -134,14 +156,18 @@ export function registerGitLabRoutes(app, options = {}) {
     options.onAccountConnected?.({
       account,
       user,
+      credential: { credentialRevision: credential.credentialRevision, providerUserId: credential.providerUserId },
       renews: superseded.map((candidate) => ({ ...account, accountId: candidate.id })),
     });
   };
   const statusCache = createChangeRequestStatusCache({ ttlMs: STATUS_CACHE_TTL_MS });
-  const invalidateAccount = async (origin, accountId) => {
+  /** Writes an account off after GitLab refused its token, unless renewing it works. Returns whether it was renewed. */
+  const invalidateAccount = async (origin, accountId, { renew = true } = {}) => {
     statusCache.invalidate({ instance: origin, accountId });
+    if (renew && await store.renewAccount?.(origin, accountId)) return true;
     await options.onAccountInvalidated?.(identityFor(origin, accountId));
     await store.markAccountInvalid(origin, accountId, 'unauthorized');
+    return false;
   };
 
   const getUsableGlab = async (origin) => {
@@ -156,7 +182,7 @@ export function registerGitLabRoutes(app, options = {}) {
     }
   };
 
-  const buildStatus = async (origin) => {
+  const buildStatus = async (origin, renewed = false) => {
     const instance = await store.readInstance(origin);
     const activeRecord = instance.cliActive ? null : instance.accounts.find((account) => account.id === instance.activeAccountId) ?? null;
     const active = activeRecord?.status === 'invalid' ? null : activeRecord;
@@ -214,8 +240,9 @@ export function registerGitLabRoutes(app, options = {}) {
     } catch (error) {
       const kind = classifyGitLabFailure(error);
       if (error?.kind === 'invalid-token') {
-        await invalidateAccount(origin, active.id);
-        return buildStatus(origin);
+        // A renewed token gets one more try; refused again, the account is written off.
+        const renewedNow = await invalidateAccount(origin, active.id, { renew: !renewed });
+        return buildStatus(origin, renewedNow);
       }
       return { provider: 'gitlab', instance: origin, status: kind, connected: false, message: error?.message, accounts };
     }
@@ -270,7 +297,11 @@ export function registerGitLabRoutes(app, options = {}) {
     const identity = identityFor(origin, accountId);
     const resourceOptions = {
       origin,
-      client: createClient({ origin, token, tokenType: active?.source === 'oauth' ? 'oauth' : 'token' }),
+      // Only a stored personal access token goes as PRIVATE-TOKEN. OAuth
+      // sign-ins, and the glab login (an OAuth token on gitlab.com, a personal
+      // token elsewhere), go as a bearer token, which GitLab accepts for both.
+      client: createClient({ origin, token, tokenType: active?.source === 'pat' ? 'token' : 'oauth' }),
+      download: createDownloader({ origin, token, tokenType: active?.source === 'pat' ? 'token' : 'oauth' }),
       canonicalReads,
     };
     if (options.resolveProjects) resourceOptions.resolveProjects = options.resolveProjects;
@@ -418,20 +449,21 @@ export function registerGitLabRoutes(app, options = {}) {
         record: mutationRecord(context, kind, actor, credential, existing.target, normalized.digest),
         providerAccountId: resource.providerUserId,
         perform: () => { throw mutationConflict(); },
-        reconcile: async () => reconcile(service, await resolveReplay()),
+        reconcile: async () => reconcile(service, await resolveReplay(), normalized),
         classifyError: classifyMutationError,
       });
       statusCache.invalidate({ instance: context.instance, accountId: context.accountId, repositoryId: context.repositoryId });
       return mutationReceipt(execution.record, execution.replayed, resource.providerUserId);
     }
-    const resolved = kind === 'change-request-create'
-      ? await service.resolveCreateMutation(context, context.target, normalized)
-      : await service.resolveChangeRequestMutation(context, context.target);
+    let resolved;
+    if (kind === 'change-request-create') resolved = await service.resolveCreateMutation(context, context.target, normalized);
+    else if (kind.startsWith('issue-')) resolved = await service.resolveIssueMutation(context, context.target);
+    else resolved = await service.resolveChangeRequestMutation(context, context.target);
     const execution = await options.mutationExecutor.execute({
       record: mutationRecord(context, kind, actor, credential, resolved.target, normalized.digest),
       providerAccountId: resource.providerUserId,
       perform: () => perform(service, normalized, resolved),
-      reconcile: () => reconcile(service, resolved),
+      reconcile: () => reconcile(service, resolved, normalized),
       classifyError: classifyMutationError,
     });
     statusCache.invalidate({ instance: context.instance, accountId: context.accountId, repositoryId: context.repositoryId });
@@ -544,7 +576,10 @@ export function registerGitLabRoutes(app, options = {}) {
       acquired = false;
       if (result.status !== 'connected') return res.json({ connected: false, status: result.error, error: result.message });
       const user = await verify(origin, result.accessToken);
-      const credential = await store.setAccount(origin, { token: result.accessToken, user, source: 'oauth', scope: result.scope });
+      const credential = await store.setAccount(origin, {
+        token: result.accessToken, user, source: 'oauth', scope: result.scope,
+        refreshToken: result.refreshToken, expiresIn: result.expiresIn,
+      });
       await announceConnectedAccount(origin, credential, user);
       return res.json({ connected: true, user, scope: result.scope });
     } catch (error) {
@@ -780,6 +815,256 @@ export function registerGitLabRoutes(app, options = {}) {
     }
   });
 
+  // A comment or a review leaves nothing that tells a lost write from one
+  // never sent short of guessing from its text, so the outcome stays unknown.
+  const unknownOutcome = () => ({ state: 'outcome-unknown' });
+  // GitLab's own limit for a note.
+  const NOTE_MAX_LENGTH = 1_000_000;
+  const noteText = (value, required) => {
+    if (value === undefined && !required) return undefined;
+    if (!isString(value) || !value.trim() || value.length > NOTE_MAX_LENGTH) {
+      throw invalidMutationContext('body is required and must fit a GitLab note');
+    }
+    return value;
+  };
+
+  app.post('/api/source-control/gitlab/pr/comment', async (req, res) => {
+    try {
+      const body = req.body ?? {};
+      return res.json(await executeMutation(body, 'change-request-comment', (input, context) => {
+        if (!context.target.number) throw invalidMutationContext('target number is required');
+        const text = noteText(input.body, true);
+        return { body: text, digest: { body: text } };
+      }, async (service, normalized, resolved) => {
+        await service.commentChangeRequest({ providerTarget: resolved.providerTarget, body: normalized.body });
+        return {};
+      }, unknownOutcome));
+    } catch (error) {
+      return sendMutationError(res, error);
+    }
+  });
+
+  // A discussion id (a SHA on GitLab); the request path keeps it on the target merge request.
+  const threadIdOf = (value) => {
+    if (!isString(value) || !/^[A-Za-z0-9_-]{1,100}$/.test(value)) throw invalidMutationContext('threadId is invalid');
+    return value;
+  };
+
+  app.post('/api/source-control/gitlab/pr/thread/start', async (req, res) => {
+    try {
+      const body = req.body ?? {};
+      return res.json(await executeMutation(body, 'change-request-thread-start', (input, context) => {
+        if (!context.target.number) throw invalidMutationContext('target number is required');
+        const text = noteText(input.body, true);
+        return { body: text, digest: { body: text } };
+      }, (service, normalized, resolved) => service.startThread({ providerTarget: resolved.providerTarget, body: normalized.body }),
+      unknownOutcome));
+    } catch (error) {
+      return sendMutationError(res, error);
+    }
+  });
+
+  app.post('/api/source-control/gitlab/pr/thread/reply', async (req, res) => {
+    try {
+      const body = req.body ?? {};
+      return res.json(await executeMutation(body, 'change-request-thread-reply', (input, context) => {
+        if (!context.target.number) throw invalidMutationContext('target number is required');
+        const threadId = threadIdOf(input.threadId);
+        const text = noteText(input.body, true);
+        return { threadId, body: text, digest: { threadId, body: text } };
+      }, (service, normalized, resolved) => service.replyToThread({
+        providerTarget: resolved.providerTarget, threadId: normalized.threadId, body: normalized.body,
+      }), unknownOutcome));
+    } catch (error) {
+      return sendMutationError(res, error);
+    }
+  });
+
+  app.post('/api/source-control/gitlab/pr/thread/resolve', async (req, res) => {
+    try {
+      const body = req.body ?? {};
+      return res.json(await executeMutation(body, 'change-request-thread-resolve', (input, context) => {
+        if (!context.target.number || ![true, false].includes(input.resolved)) {
+          throw invalidMutationContext('target number and resolved are required');
+        }
+        const threadId = threadIdOf(input.threadId);
+        return { threadId, resolved: input.resolved, digest: { threadId, resolved: input.resolved } };
+      }, (service, normalized, resolved) => service.resolveThread({
+        providerTarget: resolved.providerTarget, threadId: normalized.threadId, resolved: normalized.resolved,
+      }), (service, resolved, normalized) => service.reconcileThreadResolve(resolved.providerTarget, normalized.threadId, normalized.resolved)));
+    } catch (error) {
+      return sendMutationError(res, error);
+    }
+  });
+
+  app.post('/api/source-control/gitlab/issues/comment', async (req, res) => {
+    try {
+      const body = req.body ?? {};
+      return res.json(await executeMutation(body, 'issue-comment', (input, context) => {
+        if (!context.target.number) throw invalidMutationContext('target number is required');
+        const text = noteText(input.body, true);
+        return { body: text, digest: { body: text } };
+      }, async (service, normalized, resolved) => {
+        await service.commentIssue({ providerTarget: resolved.providerTarget, body: normalized.body });
+        return {};
+      }, unknownOutcome));
+    } catch (error) {
+      return sendMutationError(res, error);
+    }
+  });
+
+  // Close or reopen: `state` is what the item should become.
+  for (const [path, kind, method] of [
+    ['/api/source-control/gitlab/pr/state', 'change-request-state', 'setChangeRequestState'],
+    ['/api/source-control/gitlab/issues/state', 'issue-state', 'setIssueState'],
+  ]) {
+    app.post(path, async (req, res) => {
+      try {
+        const body = req.body ?? {};
+        return res.json(await executeMutation(body, kind, (input, context) => {
+          if (!context.target.number || !['open', 'closed'].includes(input.state)) {
+            throw invalidMutationContext('target number and state are required');
+          }
+          return { state: input.state, digest: { state: input.state } };
+        }, (service, normalized, resolved) => service[method]({
+          state: normalized.state,
+          providerTarget: resolved.providerTarget,
+          targetProject: resolved.target.project,
+          expectedTarget: resolved.target,
+        }), (service, resolved, normalized) => service.reconcileStateMutation(resolved.providerTarget, kind, normalized.state)));
+      } catch (error) {
+        return sendMutationError(res, error);
+      }
+    });
+  }
+
+  // Labels and reviewers as one whole set, so a repeat asks for the same result.
+  const nameList = (value, limit) => {
+    if (!Array.isArray(value) || value.length > limit
+      || value.some((entry) => !isString(entry) || !entry.trim() || entry.length > 256)) {
+      throw invalidMutationContext('labels or reviewers are invalid');
+    }
+    return [...new Set(value)].sort();
+  };
+  for (const [path, kind, field, method] of [
+    ['/api/source-control/gitlab/pr/labels', 'change-request-labels', 'labels', 'setLabels'],
+    ['/api/source-control/gitlab/issues/labels', 'issue-labels', 'labels', 'setLabels'],
+    ['/api/source-control/gitlab/pr/reviewers', 'change-request-reviewers', 'reviewers', 'setReviewers'],
+  ]) {
+    app.post(path, async (req, res) => {
+      try {
+        const body = req.body ?? {};
+        return res.json(await executeMutation(body, kind, (input, context) => {
+          if (!context.target.number) throw invalidMutationContext('target number is required');
+          const names = nameList(input[field], field === 'labels' ? 100 : 50);
+          // GitLab names a reviewer by user id.
+          if (field === 'reviewers' && names.some((id) => !/^\d+$/.test(id))) throw invalidMutationContext('reviewers are invalid');
+          return { names, digest: { [field]: names } };
+        }, (service, normalized, resolved) => service[method]({
+          kind,
+          [field]: normalized.names,
+          providerTarget: resolved.providerTarget,
+          targetProject: resolved.target.project,
+          expectedTarget: resolved.target,
+        }), (service, resolved, normalized) => service.reconcileSetMutation(resolved.providerTarget, kind, normalized.names)));
+      } catch (error) {
+        return sendMutationError(res, error);
+      }
+    });
+  }
+
+  // The project's labels and who can review in it, for the board's pickers.
+  for (const [path, method] of [
+    ['/api/source-control/gitlab/references/labels', 'listLabels'],
+    ['/api/source-control/gitlab/references/reviewers', 'listReviewerCandidates'],
+  ]) {
+    app.get(path, async (req, res) => {
+      try {
+        const owner = requestText(req.query?.owner);
+        const repo = requestText(req.query?.repo);
+        if (!owner || !repo) return res.status(400).json({ error: 'a complete project selector is required' });
+        const origin = requestOrigin(req);
+        const directory = requestText(req.query?.directory);
+        const trustedContext = await validateReadContext(req, origin, directory);
+        if (!trustedContext) return res.status(501).json({ error: 'Bound source control status is unavailable' });
+        const service = await getResourceService(origin, trustedContext.accountId, true);
+        return res.json({ connected: true, items: await service[method](directory, { owner, name: repo }, trustedContext.primaryRemote) });
+      } catch (error) {
+        if (isReadContextError(error)) return res.status(error.status ?? 400).json(sourceControlErrorBody(error));
+        return sendResourceError(res, error);
+      }
+    });
+  }
+
+  // A picture or a clip attached to an issue, a merge request or a note, for
+  // the board. GitLab serves uploads to signed-in project members only, and
+  // writes them as paths the browser would resolve against this server. The
+  // path keeps GitLab's own shape, so the file name ends it.
+  app.get('/api/source-control/gitlab/uploads/:secret/:filename', async (req, res) => {
+    const abort = new AbortController();
+    res.on('close', () => abort.abort());
+    try {
+      const owner = requestText(req.query?.owner);
+      const repo = requestText(req.query?.repo);
+      const upload = readUploadParams(req.params);
+      if (!owner || !repo || !upload) return res.status(400).json({ error: 'a project selector and an upload path are required' });
+      const origin = requestOrigin(req);
+      const directory = requestText(req.query?.directory);
+      const trustedContext = await validateReadContext(req, origin, directory);
+      if (!trustedContext) return res.status(501).json({ error: 'Bound source control status is unavailable' });
+      const service = await getResourceService(origin, trustedContext.accountId, true);
+      const upstream = await service.readUpload(directory, { owner, name: repo }, trustedContext.primaryRemote, {
+        ...upload,
+        range: requestText(req.get('range')) || undefined,
+        signal: abort.signal,
+      });
+      const type = (upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+      if (!upstream.ok || !upstream.body || !UPLOAD_MEDIA_TYPE_RE.test(type)) {
+        await upstream.body?.cancel().catch(() => {});
+        // A refused read is the file's answer, never the account's: it does not invalidate it.
+        return res.status(upstream.ok ? 415 : upstream.status === 416 ? 416 : 404).end();
+      }
+      res.status(upstream.status);
+      res.setHeader('Content-Type', type);
+      for (const header of UPLOAD_PASSED_HEADERS) {
+        const value = upstream.headers.get(header);
+        if (value) res.setHeader(header, value);
+      }
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+      await pipeline(Readable.fromWeb(upstream.body), res);
+    } catch (error) {
+      if (abort.signal.aborted) return undefined;
+      if (res.headersSent) return res.destroy();
+      if (isReadContextError(error)) return res.status(error.status ?? 400).json(sourceControlErrorBody(error));
+      return sendResourceError(res, error);
+    }
+    return undefined;
+  });
+
+  app.post('/api/source-control/gitlab/pr/review', async (req, res) => {
+    try {
+      const body = req.body ?? {};
+      return res.json(await executeMutation(body, 'change-request-review', (input, context) => {
+        // A verdict names the commit it is for; without one it would land on whatever was pushed last.
+        if (!context.target.number || !context.target.headSha || !['approve', 'request-changes'].includes(input.verdict)) {
+          throw invalidMutationContext('target number, head SHA and review verdict are required');
+        }
+        const text = noteText(input.body, false);
+        return { verdict: input.verdict, body: text, digest: { verdict: input.verdict, body: text ?? null } };
+      }, (service, normalized, resolved) => service.reviewChangeRequest({
+        verdict: normalized.verdict,
+        body: normalized.body,
+        providerTarget: resolved.providerTarget,
+        targetProject: resolved.target.project,
+        expectedTarget: resolved.target,
+      }), unknownOutcome));
+    } catch (error) {
+      return sendMutationError(res, error);
+    }
+  });
+
   app.get('/api/source-control/gitlab/pulls/list', async (req, res) => {
     try {
       const origin = requestOrigin(req);
@@ -790,6 +1075,7 @@ export function registerGitLabRoutes(app, options = {}) {
       return res.json(await service.listChangeRequests(directory, {
         page: requestNumber(req.query?.page) ?? 1,
         query: requestText(req.query?.query) || undefined,
+        ...readListFilter(req.query),
         remote: trustedContext.primaryRemote,
       }));
     } catch (error) {
@@ -813,7 +1099,7 @@ export function registerGitLabRoutes(app, options = {}) {
       if (!number) return res.status(400).json({ error: 'number is required' });
       const service = await getResourceService(origin, trustedContext.accountId, true);
       return res.json(await service.changeRequestContext(directory, number, {
-        includeDiff: req.query?.diff === '1', includeCIDetails: req.query?.checkDetails === '1',
+        includeDiff: req.query?.diff === '1', includeCIDetails: req.query?.checkDetails === '1', includeTimeline: req.query?.timeline === '1',
         project: owner ? { owner, name: repo } : undefined,
         remote: trustedContext.primaryRemote,
         constrainToPrimary: true,
@@ -835,6 +1121,7 @@ export function registerGitLabRoutes(app, options = {}) {
       const service = await getResourceService(origin, trustedContext.accountId, true);
       return res.json(await service.listIssues(directory, {
         page: requestNumber(req.query?.page) ?? 1, query: requestText(req.query?.query) || undefined,
+        ...readListFilter(req.query),
         remote: trustedContext.primaryRemote,
       }));
     } catch (error) {
@@ -920,8 +1207,79 @@ export function registerGitLabRoutes(app, options = {}) {
     }
   });
 
+  /**
+   * A read for another module (the comparison view, walkthroughs) with the
+   * account of a context its caller has already validated. GitLab refusing
+   * the token writes the account off the same way a route read does, and the
+   * upstream status travels with the error.
+   */
+  const readWithBoundAccount = async (context, read) => {
+    const service = await getResourceService(context.instance, context.accountId, true);
+    try {
+      return await read(service);
+    } catch (error) {
+      const upstreamStatus = error?.cause?.response?.status ?? error?.response?.status ?? error?.status;
+      if (upstreamStatus === 401 && !error?.sourceControlAccountUnavailable && error?.sourceControlIdentity?.accountId) {
+        const identity = error.sourceControlIdentity;
+        if (error.sourceControlPersistedAccount) await invalidateAccount(identity.instance, identity.accountId);
+        else await options.onAccountInvalidated?.(identity);
+      }
+      if (Number.isInteger(upstreamStatus) && upstreamStatus >= 400 && upstreamStatus < 600) error.statusCode = upstreamStatus;
+      throw error;
+    }
+  };
+  const projectSelector = (sourceRepo) => (sourceRepo ? { owner: sourceRepo.owner, name: sourceRepo.repo } : undefined);
+
   return {
     listInstances: async () => store.listInstances?.() ?? [],
+    /** Live state of known merge requests and issues, read with the instance's current account. */
+    readLiveSummaries: async ({ instance, accountId = null, refs, issueRefs }) => {
+      let service;
+      try {
+        service = await getResourceService(normalizeGitLabInstance(instance), accountId ?? '');
+      } catch (error) {
+        if (error?.sourceControlAccountUnavailable) return { connected: false };
+        throw error;
+      }
+      return { connected: true, ...(await service.liveSummaries({ refs, issueRefs })) };
+    },
+    readChangeRequestPatch: ({ context, number, sourceRepo }) => readWithBoundAccount(context, (service) => service
+      .changeRequestPatch(context.directory, number, { project: projectSelector(sourceRepo), remote: context.primaryRemote })),
+    readChangeRequestFile: ({ context, number, sourceRepo, path: filePath, previousPath, status }) => readWithBoundAccount(context, (service) => service
+      .changeRequestFileContents(context.directory, number, {
+        project: projectSelector(sourceRepo), remote: context.primaryRemote, path: filePath, previousPath, status,
+      })),
+    /**
+     * The account GitLab reads on this instance use when none is named: the
+     * glab login while the user has switched to it, else the active account.
+     * Null when neither is there.
+     */
+    readCurrentAccountId: async (origin) => {
+      const instance = await store.readInstance(origin);
+      // A glab login that stopped working leaves the active account, as the status read does.
+      const cli = instance.cliActive ? await getUsableGlab(origin) : null;
+      if (cli) return `${origin}#cli:${cli.user.id}`;
+      return instance.accounts.find((account) => account.id === instance.activeAccountId && account.status !== 'invalid')?.id ?? null;
+    },
+    /** A merge request's head on the context's primary project network, by number, for a worktree made from it. */
+    readChangeRequestHead: async ({ context, number }) => {
+      const trusted = await options.validateReadContext(context);
+      const service = await getResourceService(trusted.instance, trusted.accountId, true);
+      const { changeRequest: request } = await service.changeRequestContext(trusted.directory, number, {
+        remote: trusted.primaryRemote,
+        constrainToPrimary: true,
+      });
+      const headSha = String(request?.headSha || '').toLowerCase();
+      if (!request?.project || !request.head || !/^[0-9a-f]{40}$/.test(headSha)) {
+        throw Object.assign(new Error('GitLab returned an invalid merge request head'), { code: 'MALFORMED_PROVIDER_RESPONSE' });
+      }
+      return {
+        project: { id: request.project.id, owner: request.project.owner, name: request.project.name },
+        headSha,
+        headBranch: request.head,
+        headOwner: (request.headProject ?? request.project).owner,
+      };
+    },
     resolveChangeRequestSource: async ({ context, project, number, expectedHeadSha, requestedRemoteName }) => {
       const trusted = await options.validateReadContext(context);
       const service = await getResourceService(trusted.instance, trusted.accountId, true);

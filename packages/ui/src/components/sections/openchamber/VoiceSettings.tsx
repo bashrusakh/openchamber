@@ -20,7 +20,6 @@ import {
     SettingsFieldRow,
     SettingsControlGroup,
     SettingsChipGroup,
-    SETTINGS_SELECT_SIZE,
     SETTINGS_NUMBER_INPUT_CLASS,
     SETTINGS_SELECT_ROW_TRIGGER_CLASS,
     SETTINGS_CONTROL_CLUSTER_CLASS,
@@ -37,7 +36,7 @@ import { disposePreviewAudio } from './voicePreviewAudio';
 import { toast } from '@/components/ui';
 import type { VoiceApiKeyKind } from '@/lib/voiceKeysApi';
 
-const VOICE_TEXT_INPUT_CLASS = 'oc-surface-elevated w-full h-7 rounded-lg border border-input bg-surface-elevated px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring focus:border-interactive-border-focus';
+const VOICE_TEXT_INPUT_CLASS = 'oc-surface-elevated oc-raised oc-field w-full h-7 rounded-lg bg-surface-elevated px-2 typography-ui-label text-foreground placeholder:text-muted-foreground focus:outline-none';
 
 const LOCAL_STT_MODELS = [
     {
@@ -494,7 +493,7 @@ const LocalTtsModelStatus = ({ models, requestingId, request }: ReturnType<typeo
             {available.length > 0 ? (
                 <Collapsible open={availableOpen} onOpenChange={setAvailableOpen}>
                     <CollapsibleTrigger className="group flex w-full items-center justify-between py-1 hover:bg-transparent">
-                        <div className="flex items-center gap-1.5 text-left">
+                        <div className="flex items-center gap-1.5 text-start">
                             <span className="typography-ui-label font-normal text-foreground">
                                 {t('settings.voice.page.localTts.availableToDownload')}
                             </span>
@@ -603,7 +602,7 @@ const VoiceApiKeyField: React.FC<{ kind: VoiceApiKeyKind }> = ({ kind }) => {
                     onClick={() => void save(null)}
                     disabled={isSaving}
                     aria-label={t('settings.voice.page.field.apiKeyRemove')}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    className="absolute inset-e-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 >
                     <Icon name="close" className="w-3.5 h-3.5" />
                 </button>
@@ -1028,7 +1027,7 @@ export const VoiceSettings: React.FC = () => {
                                 value={voiceProvider}
                                 onChange={setVoiceProvider}
                                 aria-label={t('settings.voice.page.field.provider')}
-                                className="w-full gap-1.5 sm:gap-2"
+                                className="w-fit"
                                 options={[
                                     { value: 'browser', label: t('settings.voice.page.provider.browser') },
                                     { value: 'local', label: t('settings.voice.page.provider.local') },
@@ -1039,7 +1038,7 @@ export const VoiceSettings: React.FC = () => {
                                             value: 'say' as const,
                                             label: (
                                                 <>
-                                                    <Icon name="apple" className="mr-0.5 h-3.5 w-3.5" />
+                                                    <Icon name="apple" className="me-0.5 h-3.5 w-3.5" />
                                                     {t('settings.voice.page.provider.say')}
                                                 </>
                                             ),
@@ -1092,7 +1091,7 @@ export const VoiceSettings: React.FC = () => {
                                                 <button
                                                     type="button"
                                                     onClick={() => setOpenaiCompatibleUrl('')}
-                                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                                    className="absolute inset-e-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                                                 >
                                                     <Icon name="close" className="w-3.5 h-3.5" />
                                                 </button>
@@ -1167,7 +1166,7 @@ export const VoiceSettings: React.FC = () => {
                                                     setLocalTtsVoiceId(option.speakerId);
                                                 }}
                                             >
-                                                <SelectTrigger size={SETTINGS_SELECT_SIZE} className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}>
+                                                <SelectTrigger className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}>
                                                     <SelectValue placeholder={t('settings.voice.page.field.selectVoicePlaceholder')}>
                                                         {(value) => localTtsVoiceOptions.find((v) => localTtsVoiceKey(v.modelId, v.speakerId) === value)?.label ?? value}
                                                     </SelectValue>
@@ -1190,7 +1189,7 @@ export const VoiceSettings: React.FC = () => {
                                     {voiceProvider === 'openai' && isOpenAIAvailable && (
                                         <>
                                             <Select value={openaiVoice} onValueChange={setOpenaiVoice}>
-                                                <SelectTrigger size={SETTINGS_SELECT_SIZE} className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}>
+                                                <SelectTrigger className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}>
                                                     <SelectValue placeholder={t('settings.voice.page.field.selectVoicePlaceholder')} />
                                                 </SelectTrigger>
                                                 <SelectContent>
@@ -1212,7 +1211,7 @@ export const VoiceSettings: React.FC = () => {
                                     {voiceProvider === 'say' && isSayAvailable && sayVoices.length > 0 && (
                                         <>
                                             <Select value={sayVoice} onValueChange={setSayVoice}>
-                                                <SelectTrigger size={SETTINGS_SELECT_SIZE} className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}>
+                                                <SelectTrigger className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}>
                                                     <SelectValue placeholder={t('settings.voice.page.field.selectVoicePlaceholder')} />
                                                 </SelectTrigger>
                                                 <SelectContent>
@@ -1230,7 +1229,7 @@ export const VoiceSettings: React.FC = () => {
                                     {voiceProvider === 'browser' && filteredBrowserVoices.length > 0 && (
                                         <>
                                             <Select value={browserVoice || '$auto'} onValueChange={(value) => setBrowserVoice(value === '$auto' ? '' : value)}>
-                                                <SelectTrigger size={SETTINGS_SELECT_SIZE} className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}>
+                                                <SelectTrigger className={SETTINGS_SELECT_ROW_TRIGGER_CLASS}>
                                                     <SelectValue placeholder={t('settings.voice.page.field.auto')} />
                                                 </SelectTrigger>
                                                 <SelectContent>
@@ -1265,7 +1264,7 @@ export const VoiceSettings: React.FC = () => {
                                     {isMobile ? (
                                         <NumberInput value={Math.round(speechVolume * 100)} onValueChange={(v) => setSpeechVolume(v / 100)} min={0} max={100} step={10} className={cn(SETTINGS_NUMBER_INPUT_CLASS, 'tabular-nums')} />
                                     ) : (
-                                        <span className="typography-ui-label text-foreground tabular-nums min-w-[3rem] text-right">
+                                        <span className="typography-ui-label text-foreground tabular-nums min-w-[3rem] text-end">
                                             {Math.round(speechVolume * 100)}%
                                         </span>
                                     )}
@@ -1276,7 +1275,7 @@ export const VoiceSettings: React.FC = () => {
                                     value={ttsInputMode}
                                     onChange={setTtsInputMode}
                                     aria-label={t('settings.voice.page.field.ttsInputMode')}
-                                    className="w-full gap-1.5 sm:gap-2"
+                                    className="w-fit"
                                     options={[
                                         { value: 'sanitized', label: t('settings.voice.page.field.ttsInputModeSanitized') },
                                         { value: 'raw', label: t('settings.voice.page.field.ttsInputModeRaw') },
@@ -1325,7 +1324,7 @@ export const VoiceSettings: React.FC = () => {
                                 value={sttProvider}
                                 onChange={setSttProvider}
                                 aria-label={t('settings.voice.page.field.provider')}
-                                className="w-full gap-1.5 sm:gap-2"
+                                className="w-fit"
                                 options={[
                                     { value: 'local', label: t('settings.voice.page.provider.local') },
                                     { value: 'openai-compatible', label: t('settings.voice.page.provider.server') },
@@ -1361,7 +1360,7 @@ export const VoiceSettings: React.FC = () => {
                                             <button
                                                 type="button"
                                                 onClick={() => setSttServerUrl('')}
-                                                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                                className="absolute inset-e-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                                             >
                                                 <Icon name="close" className="w-3.5 h-3.5" />
                                             </button>

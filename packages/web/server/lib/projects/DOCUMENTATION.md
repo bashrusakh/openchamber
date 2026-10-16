@@ -21,6 +21,7 @@ that writes it:
 | `setup-worktree`, `setup-worktree-wait`, `projectActions`, `projectActionsPrimaryId`, `draftStarters`, `projectPath` | `project-setup.js` via `readProjectSetup` / `updateProjectSetup` on the same runtime | `GET/PUT /api/projects/:projectId/config` (`routes.js`) |
 
 Notes, todos, and plans moved out of this file to `packages/web/server/lib/project-context`.
+A project's environment variables and environment command are not in this file either: values can be secrets, so they live in `environment.json` (mode 0600, `packages/web/server/lib/environment`).
 
 A second, optional source is the team's shared file, `<repo>/.openchamber/project.json`
 (`version: 1`; `setupWorktree`, `setupWorktreeWait`, `projectActions`, `draftStarters`,
@@ -53,8 +54,10 @@ A result with nothing in it removes the file and the `.openchamber` folder
 when that leaves it empty, so unsharing the last item leaves no trace. The
 write refuses a checkout that does not exist and a `plansDir` outside the
 repo. The writer has seen what it shared, so its personal trust record is set
-to the new hash; teammates still get the prompt. The shared UI composes
-"share" and "make personal" as a shared write followed by a personal write.
+to the new hash; teammates still get the prompt. The shared UI moves an
+entry between the files as a write to the destination followed by a removal
+from the source (`packages/ui/src/components/sections/projects/projectSetupModel.ts`),
+so a failed second write leaves the entry in both files, never in neither.
 
 ### Trust
 

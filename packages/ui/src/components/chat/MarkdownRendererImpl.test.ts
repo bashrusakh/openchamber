@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test';
 
-import { localPathFromFileUrl, parseFileReference, type ParsedFileReference } from './fileReferenceParser';
+import { localPathFromFileUrl, normalizeReferencePath, parseFileReference, type ParsedFileReference } from './fileReferenceParser';
 
 const parse = (value: string): ParsedFileReference | null => parseFileReference(value);
 
@@ -184,6 +184,8 @@ const rendererUiState = {
     codeBlockLineWrap: false,
     mermaidRenderingMode: 'svg',
     setCodeBlockLineWrap: () => undefined,
+    tableCellWrap: false,
+    setTableCellWrap: () => undefined,
     openContextPreview: () => undefined,
 };
 
@@ -263,15 +265,19 @@ const fakeUseUIStore = Object.assign(
 mock.module('@/stores/useUIStore', () => ({ useUIStore: fakeUseUIStore }));
 mock.module('@/hooks/useEffectiveDirectory', () => ({ useEffectiveDirectory: () => null }));
 mock.module('@/hooks/useRuntimeAPIs', () => ({ useRuntimeAPIs: () => ({ editor: undefined, runtime: { isVSCode: false } }) }));
-mock.module('@/lib/desktop', () => ({ isDesktopLocalOriginActive: () => false, isDesktopShell: () => false, isVSCodeRuntime: () => false }));
+mock.module('@/lib/desktop', () => ({ isDesktopLocalOriginActive: () => false, isDesktopShell: () => false, isVSCodeRuntime: () => false, openDesktopPath: async () => false }));
+mock.module('./useOpenChatLink', () => ({ useOpenChatLink: () => () => undefined }));
 mock.module('@/lib/runtimeSurface', () => ({ isMobileSurfaceRuntime: () => false }));
 mock.module('@/lib/path-utils', () => ({ getDirectoryForFilePath: () => '', isFilePathWithinDirectory: () => true, toAbsoluteFilePath: () => '' }));
 mock.module('./markdown/markdownCore', () => ({
     getCachedMarkdownBlocks: () => cachedRendererBlocks,
     renderMarkdownBlocks: () => renderMarkdownBlocksForTest(),
-    renderMarkdownSync: () => {
+    // Like the real module: cached blocks are returned as they are, and only
+    // a cache miss parses.
+    renderMarkdownBlocksSync: () => {
+        if (cachedRendererBlocks) return cachedRendererBlocks;
         syncRenderCalls += 1;
-        return '<p>cold</p>';
+        return [{ id: 'full:cold:unhighlighted', html: '<p>cold</p>' }];
     },
 }));
 mock.module('./markdown/markdownTheme', () => ({ ensureMarkdownShikiTheme: () => undefined }));
@@ -292,6 +298,7 @@ type TestDecorateContext = {
 mock.module('./markdown/decorate', () => ({
     attachMarkdownInteractions: () => () => undefined,
     applyMarkdownCodeBlockWrapState: () => undefined,
+    applyMarkdownTableWrapState: () => undefined,
     decorateMarkdown: (root: FakeElement, ctx: TestDecorateContext) => {
         decorateCalls += 1;
         if (root.getAttribute('data-test-decoration-marker') === 'true') return;
@@ -301,7 +308,6 @@ mock.module('./markdown/decorate', () => ({
             `${ctx.labels.copy}|${ctx.codeBlockLineWrap}|${ctx.renderMermaid('test').svg ?? ''}`,
         );
     },
-    getMarkdownCodeText: () => '',
     stabilizeMarkdownTableWidths: () => undefined,
 }));
 mock.module('./markdown/textPosition', () => ({ findTextPosition: () => null }));
@@ -489,6 +495,17 @@ describe('localPathFromFileUrl', () => {
         expect(localPathFromFileUrl('https://example.com/report.html')).toBeNull();
         expect(localPathFromFileUrl('file://remote-host/share/report.html')).toBeNull();
         expect(localPathFromFileUrl('file:///tmp/bad%ZZpath')).toBeNull();
+    });
+});
+
+describe('bare Windows drive reference resolution', () => {
+    test('drops the leading slash a bare /C:/ markdown href carries', () => {
+        // The click resolver feeds a bare href through parseFileReference then
+        // normalizeReferencePath. Windows would otherwise read /C:/... as
+        // C:\C:\..., so the resolved path must lose the leading slash.
+        const parsed = parseFileReference('/C:/example/project/package.json');
+        expect(parsed).not.toBeNull();
+        expect(normalizeReferencePath(parsed!.path)).toBe('C:/example/project/package.json');
     });
 });
 

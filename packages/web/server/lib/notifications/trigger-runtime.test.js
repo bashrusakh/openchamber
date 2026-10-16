@@ -164,11 +164,95 @@ describe('push content in enterprise mode', () => {
       expect(web).toMatchObject({ title: 'Agent response is ready', body: '', data: { sessionId: 'ses_e', type: 'ready' } });
       expect(web.data.sessionName).toBeUndefined();
       expect(sendApnsToAllUiSessions.mock.calls[0][0]).toMatchObject({ title: 'Agent response is ready', body: '' });
+      expect(sendApnsToAllUiSessions.mock.calls[0][0].sealed).toBeUndefined();
       expect(JSON.stringify([web, sendApnsToAllUiSessions.mock.calls[0][0]])).not.toMatch(/billing|customer/);
     } finally {
       delete process.env.OPENCHAMBER_ENTERPRISE_MODE;
       vi.unstubAllGlobals();
     }
+  });
+
+  it('gives a phone with a push key the session name and the reply', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ data: {} })));
+    try {
+      const { runtime, sendPushToAllUiSessions, sendApnsToAllUiSessions } = makePushRuntime();
+      await runtime.maybeSendPushForTrigger(stepStarted('ses_p', 'msg_p'));
+      await runtime.maybeSendPushForTrigger(turnEnded('ses_p'));
+
+      const apns = sendApnsToAllUiSessions.mock.calls[0][0];
+      // The clear text stays generic; the reply rides only in `sealed`.
+      expect(apns).toMatchObject({ title: 'Agent response is ready', body: 'Fix the billing export' });
+      expect(apns.sealed).toEqual({ title: 'Fix the billing export', body: 'The customer table is migrated' });
+      expect(sendPushToAllUiSessions.mock.calls[0][0].phoneBody).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('phone text for permissions and questions', () => {
+  const makeAskRuntime = () => {
+    const sendApnsToAllUiSessions = vi.fn(async () => undefined);
+    const emitDesktopNotification = vi.fn(() => true);
+    const runtime = createNotificationTriggerRuntime({
+      readSettingsFromDisk: async () => ({ nativeNotificationsEnabled: true, notificationMode: 'always', notifyOnQuestion: true }),
+      buildTemplateVariables: async () => ({ session_name: 'Fix login redirect loop' }),
+      resolveNotificationTemplate: (template, variables) => template.replace('{last_message}', variables.last_message ?? ''),
+      shouldApplyResolvedTemplateMessage: () => true,
+      emitDesktopNotification,
+      broadcastUiNotification: vi.fn(),
+      sendPushToAllUiSessions: vi.fn(async () => undefined),
+      sendApnsToAllUiSessions,
+      isAnyInteractiveClientVisible: () => false,
+      getIsSessionAutoAccepting: async () => false,
+    });
+    return { runtime, sendApnsToAllUiSessions, emitDesktopNotification };
+  };
+
+  const permissionAsked = (id, action, resources) => ({
+    type: 'permission.asked',
+    properties: { sessionID: 'ses_1', id, action, resources },
+  });
+
+  it('names the command or file the agent wants, on the phone and on desktop', async () => {
+    vi.useFakeTimers();
+    const { runtime, sendApnsToAllUiSessions, emitDesktopNotification } = makeAskRuntime();
+
+    await runtime.maybeSendPushForTrigger(permissionAsked('per_1', 'bash', ['git push origin bohdan/dev']));
+    await vi.advanceTimersByTimeAsync(600);
+    await runtime.maybeSendPushForTrigger(permissionAsked('per_2', 'edit', ['~/.ssh/config']));
+    await vi.advanceTimersByTimeAsync(600);
+    await runtime.maybeSendPushForTrigger(permissionAsked('per_3', 'webfetch', ['https://example.com']));
+    await vi.advanceTimersByTimeAsync(600);
+    vi.useRealTimers();
+
+    expect(sendApnsToAllUiSessions.mock.calls.map(([payload]) => payload.sealed)).toEqual([
+      { title: 'Fix login redirect loop', body: 'Wants to run: git push origin bohdan/dev' },
+      { title: 'Fix login redirect loop', body: 'Wants to edit: ~/.ssh/config' },
+      { title: 'Fix login redirect loop', body: 'Wants permission: webfetch: https://example.com' },
+    ]);
+    expect(emitDesktopNotification.mock.calls[0][0].body).toBe('bash: git push origin bohdan/dev');
+  });
+
+  it('puts the question on the phone', async () => {
+    vi.useFakeTimers();
+    const { runtime, sendApnsToAllUiSessions } = makeAskRuntime();
+
+    await runtime.maybeSendPushForTrigger({
+      type: 'form.created',
+      properties: {
+        sessionID: 'ses_1',
+        form: { id: 'frm_1', sessionID: 'ses_1', title: 'Logout', fields: [{ key: 'q', type: 'string', title: 'Should logout also forget the remembered device?' }] },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(600);
+    vi.useRealTimers();
+
+    expect(sendApnsToAllUiSessions.mock.calls[0][0].sealed).toEqual({
+      title: 'Fix login redirect loop',
+      body: 'Question: Should logout also forget the remembered device?',
+    });
   });
 });
 
@@ -228,5 +312,100 @@ describe('subagent finish with subagent notifications off', () => {
     await runtime.maybeSendPushForTrigger(turnEnded('ses_child'));
     expect(emitDesktopNotification).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+});
+
+describe('input-needed notification for a page that waits for an answer', () => {
+  it('notifies like a form, with the page title as the ask, and opens its session', async () => {
+    vi.useFakeTimers();
+    const emitDesktopNotification = vi.fn(() => true);
+    const sendApnsToAllUiSessions = vi.fn(async () => undefined);
+    const runtime = createNotificationTriggerRuntime({
+      readSettingsFromDisk: async () => ({ nativeNotificationsEnabled: true, notificationMode: 'always', notifyOnQuestion: true }),
+      buildTemplateVariables: async () => ({ session_name: 'Sidebar cleanup' }),
+      resolveNotificationTemplate: (template, variables) => template.replace('{last_message}', variables.last_message ?? ''),
+      shouldApplyResolvedTemplateMessage: () => true,
+      emitDesktopNotification,
+      broadcastUiNotification: vi.fn(),
+      sendPushToAllUiSessions: vi.fn(async () => undefined),
+      sendApnsToAllUiSessions,
+      isAnyInteractiveClientVisible: () => false,
+    });
+
+    await runtime.maybeSendPushForTrigger({
+      type: 'openchamber:page-waiting',
+      properties: { sessionID: 'ses_1', directory: '/repo', page: { id: 'call_1', title: 'Pick a session row layout' } },
+    });
+    await vi.advanceTimersByTimeAsync(600);
+    vi.useRealTimers();
+
+    expect(emitDesktopNotification.mock.calls[0][0]).toMatchObject({
+      kind: 'question', title: 'Input needed', body: 'Pick a session row layout', sessionId: 'ses_1', directory: '/repo', tag: 'question-ses_1',
+    });
+    expect(sendApnsToAllUiSessions.mock.calls[0][0].sealed).toEqual({ title: 'Sidebar cleanup', body: 'Question: Pick a session row layout' });
+  });
+
+  it('stays quiet when question notifications are off', async () => {
+    vi.useFakeTimers();
+    const emitDesktopNotification = vi.fn(() => true);
+    const runtime = createNotificationTriggerRuntime({
+      readSettingsFromDisk: async () => ({ nativeNotificationsEnabled: true, notificationMode: 'always', notifyOnQuestion: false }),
+      buildTemplateVariables: async () => ({}),
+      resolveNotificationTemplate: () => '',
+      shouldApplyResolvedTemplateMessage: () => false,
+      emitDesktopNotification,
+      broadcastUiNotification: vi.fn(),
+      sendPushToAllUiSessions: vi.fn(async () => undefined),
+      sendApnsToAllUiSessions: vi.fn(async () => undefined),
+      isAnyInteractiveClientVisible: () => false,
+    });
+
+    await runtime.maybeSendPushForTrigger({ type: 'openchamber:page-waiting', properties: { sessionID: 'ses_1', page: { id: 'call_1', title: 'Pick' } } });
+    await vi.advanceTimersByTimeAsync(600);
+    vi.useRealTimers();
+
+    expect(emitDesktopNotification).not.toHaveBeenCalled();
+  });
+});
+
+describe('input-needed notification for an MCP elicitation', () => {
+  it('opens the app, since the form belongs to no session', async () => {
+    vi.useFakeTimers();
+    const emitDesktopNotification = vi.fn(() => true);
+    const sendPushToAllUiSessions = vi.fn(async () => undefined);
+    const buildTemplateVariables = vi.fn(async () => ({}));
+    const runtime = createNotificationTriggerRuntime({
+      readSettingsFromDisk: async () => ({ nativeNotificationsEnabled: true, notificationMode: 'always', notifyOnQuestion: true }),
+      buildTemplateVariables,
+      resolveNotificationTemplate: () => '',
+      shouldApplyResolvedTemplateMessage: () => false,
+      emitDesktopNotification,
+      broadcastUiNotification: vi.fn(),
+      sendPushToAllUiSessions,
+      sendApnsToAllUiSessions: vi.fn(async () => undefined),
+      isAnyInteractiveClientVisible: () => false,
+    });
+
+    await runtime.maybeSendPushForTrigger({
+      type: 'form.created',
+      properties: {
+        sessionID: 'global',
+        form: {
+          id: 'frm_1',
+          sessionID: 'global',
+          title: 'azure-devops is requesting input',
+          fields: [{ key: 'project', type: 'string', title: 'Project', description: 'The Azure DevOps project.' }],
+        },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(600);
+    vi.useRealTimers();
+
+    expect(buildTemplateVariables.mock.calls[0][1]).toBeUndefined();
+    expect(emitDesktopNotification.mock.calls[0][0]).toMatchObject({ kind: 'question', title: 'azure-devops is requesting input' });
+    expect(emitDesktopNotification.mock.calls[0][0].sessionId).toBeUndefined();
+    const push = sendPushToAllUiSessions.mock.calls[0][0];
+    expect(push.data.url).toBe('/');
+    expect(push.data.sessionId).toBeUndefined();
   });
 });

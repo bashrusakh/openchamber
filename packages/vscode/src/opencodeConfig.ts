@@ -16,6 +16,7 @@ import {
   type ParseError,
 } from 'jsonc-parser';
 import { resolveNpmRegistryRequest } from '../../web/server/lib/opencode/npm-registry-config.js';
+import { writeFileAtomic } from '../../web/server/lib/opencode/atomic-write.js';
 import {
   toAgentEntity,
   fromAgentEntity,
@@ -735,10 +736,11 @@ const readConfigLayers = (workingDirectory?: string) => {
 
   return {
     userConfig: userLayer.config,
+    userOverrideConfig: userOverrideLayer.config,
     projectConfig: projectLayer.config,
     customConfig: customLayer.config,
     mergedConfig,
-    paths: { userPath, projectPath, customPath },
+    paths: { userPath, userOverridePath, projectPath, customPath },
     layerErrors,
   };
 };
@@ -1035,7 +1037,7 @@ const writeConfig = (config: Record<string, unknown>, filePath: string = CONFIG_
   // A JSON round-trip normalizes the config at the write boundary: it drops
   // `undefined` values exactly like the serialized write would.
   const desired: JsonValue = JSON.parse(JSON.stringify(config));
-  fs.writeFileSync(filePath, buildConfigFileContent(desired, existingRaw, existingParse), 'utf8');
+  writeFileAtomic(filePath, buildConfigFileContent(desired, existingRaw, existingParse));
 };
 
 const codedError = (message: string, code: string): Error & { code: string } => {
@@ -1581,13 +1583,15 @@ const validateMcpName = (name: string): void => {
   }
 };
 
-/** Same precedence as `getJsonEntrySource`: custom > project > user. */
+/** Same precedence as `getJsonEntrySource`: custom > project > user override > user. */
 const readMcpEntriesAcrossLayers = (layers: ReturnType<typeof readConfigLayers>) =>
-  readLayeredMcpEntries([layers.userConfig, layers.projectConfig, layers.customConfig]);
+  readLayeredMcpEntries([layers.userConfig, layers.userOverrideConfig, layers.projectConfig, layers.customConfig]);
 
 export const listMcpConfigs = (workingDirectory?: string): McpConfigEntry[] => {
   const layers = readConfigLayers(workingDirectory);
-  return Array.from(readMcpEntriesAcrossLayers(layers).entries()).map(([name, entry]) => {
+  const entries = readMcpEntriesAcrossLayers(layers);
+  if (entries.size === 0) throwIfLayerError(layers, layers.paths.userOverridePath);
+  return Array.from(entries.entries()).map(([name, entry]) => {
     const source = getJsonEntrySource(layers, 'mcp', name);
     return {
       name,
@@ -1603,6 +1607,7 @@ export const getMcpConfig = (name: string, workingDirectory?: string): McpConfig
   const layers = readConfigLayers(workingDirectory);
   const entry = readMcpEntriesAcrossLayers(layers).get(name);
   if (!entry) {
+    throwIfLayerError(layers, layers.paths.userOverridePath);
     return null;
   }
   const source = getJsonEntrySource(layers, 'mcp', name);
@@ -1745,6 +1750,12 @@ const getJsonEntrySource = (
     if (project) return project;
   }
 
+  if (paths.userOverridePath) {
+    throwIfLayerError(layers, paths.userOverridePath);
+    const userOverride = found(layers.userOverrideConfig, paths.userOverridePath);
+    if (userOverride) return userOverride;
+  }
+
   throwIfLayerError(layers, paths.userPath);
   const user = found(userConfig, paths.userPath);
   if (user) return user;
@@ -1874,7 +1885,7 @@ const writeMdFile = (filePath: string, frontmatter: Record<string, unknown>, bod
   );
   const yamlStr = yaml.stringify(cleanedFrontmatter);
   const content = `${`---\n${yamlStr}---\n\n${body ?? ''}`.trimEnd()}\n`;
-  fs.writeFileSync(filePath, content, 'utf8');
+  writeFileAtomic(filePath, content);
 };
 
 const readMdAgent = (mdPath: string) => {
@@ -1951,6 +1962,62 @@ export const getAgentConfig = (agentName: string, workingDirectory?: string): {
   }
 
   return { source: 'none', scope: null, path: null, legacy: false, config: {} };
+};
+
+/** Agent ids under one agents directory, nested ones as `group/name`. */
+const collectAgentIds = (dir: string, prefix: string, ids: Set<string>): void => {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      collectAgentIds(path.join(dir, entry.name), `${prefix}${entry.name}/`, ids);
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      ids.add(`${prefix}${entry.name.slice(0, -3)}`);
+    }
+  }
+};
+
+export type DisabledAgent = { name: string; scope: AgentScope | null; path: string | null; description?: string };
+
+/**
+ * Agents switched off with `disabled: true`, which OpenCode drops from its
+ * agent list. Mirrors `listDisabledAgents` in the web server's agents.js.
+ */
+export const listDisabledAgents = (workingDirectory?: string): DisabledAgent[] => {
+  const names = new Set<string>();
+  for (const dir of USER_AGENT_DIRS) collectAgentIds(dir, '', names);
+  if (workingDirectory) {
+    const worktreeRoot = findWorktreeRoot(workingDirectory) || path.resolve(workingDirectory);
+    for (const base of getAncestors(workingDirectory, worktreeRoot)) {
+      for (const dirName of PROJECT_AGENT_DIR_NAMES) {
+        collectAgentIds(path.join(base, '.opencode', dirName), '', names);
+      }
+    }
+  }
+  const { mergedConfig } = readConfigLayers(workingDirectory);
+  for (const sectionKey of ['agents', 'agent', 'mode']) {
+    const section = mergedConfig[sectionKey];
+    if (section && typeof section === 'object' && !Array.isArray(section)) {
+      for (const name of Object.keys(section)) names.add(name);
+    }
+  }
+
+  const disabled: DisabledAgent[] = [];
+  for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
+    const entry = getAgentConfig(name, workingDirectory);
+    if (entry.config.disabled !== true) continue;
+    disabled.push({
+      name,
+      scope: entry.scope,
+      path: entry.path,
+      ...(typeof entry.config.description === 'string' ? { description: entry.config.description } : {}),
+    });
+  }
+  return disabled;
 };
 
 const writeAgentMd = (targetPath: string, entity: AgentEntity): void => {
