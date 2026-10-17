@@ -260,6 +260,19 @@ describe('managed agent tool runtime', () => {
     expect(await loadTools(dataDir, 'knowledge-disabled')).not.toHaveProperty('openchamber_knowledge');
   });
 
+  it('tells an agent how to recover from a knowledge save conflict', async () => {
+    const { runtime, dataDir } = await createRuntime();
+    await prepareManagedEnv(runtime, { includeKnowledge: true });
+    const tools = await loadTools(dataDir, 'knowledge-recovery');
+    const knowledge = tools.openchamber_knowledge;
+
+    // The loaded tool the model reads carries the recovery path.
+    const expected = knowledge.input.properties.parameters.properties.expected;
+    expect(expected.description).toContain('knowledge.list');
+    expect(expected.description).toContain('same id');
+    expect(knowledge.description).toContain('retry the save with the same id');
+  });
+
   it('uses the callback session for knowledge scope and provenance', async () => {
     const { runtime, executeAction } = await createRuntime({ resolveSessionDirectory: async (id) => id === 'ses_real' ? '/real' : null });
     const input = { action: 'knowledge.save', kind: 'note', body: 'Note', origin: { sessionId: 'spoof' }, sessionId: 'spoof' };
@@ -360,6 +373,17 @@ describe('managed agent tool runtime', () => {
     }
   });
 
+  it('declares inputs only inside parameters and lets flattened ones through', async () => {
+    const { runtime, dataDir } = await createRuntime();
+    await prepareManagedEnv(runtime, { includeControl: true, includeWeb: true, includeMemory: true, includeKnowledge: true, includeNotify: true, includeRender: true });
+    const tools = await loadTools(dataDir, 'root-shape');
+
+    for (const tool of Object.values(tools)) {
+      expect(Object.keys(tool.input.properties).sort()).toEqual(['action', 'parameters']);
+      expect(tool.input.additionalProperties).toBe(true);
+    }
+  });
+
   it('accepts inputs passed beside the action, not only inside parameters', async () => {
     const { runtime, dataDir } = await createRuntime();
     const prepared = await prepareManagedEnv(runtime);
@@ -405,6 +429,61 @@ describe('managed agent tool runtime', () => {
     // v2 tools get no directory; the session id is what OpenChamber resolves from.
     expect(sent[2].sessionID).toBe('ses_1');
     expect(sent[2].contextDirectory).toBeUndefined();
+  });
+
+  it('normalizes the two string boolean spellings a model sends, and nothing else', async () => {
+    const { runtime, dataDir } = await createRuntime();
+    const prepared = await prepareManagedEnv(runtime, { includeKnowledge: true });
+    const tools = await loadTools(dataDir, 'boolean-strings');
+
+    const sent = [];
+    const originalFetch = globalThis.fetch;
+    const originalUrl = process.env.OPENCHAMBER_AGENT_TOOL_URL;
+    const originalToken = process.env.OPENCHAMBER_AGENT_TOOL_TOKEN;
+    process.env.OPENCHAMBER_AGENT_TOOL_URL = prepared.OPENCHAMBER_AGENT_TOOL_URL;
+    process.env.OPENCHAMBER_AGENT_TOOL_TOKEN = prepared.OPENCHAMBER_AGENT_TOOL_TOKEN;
+    globalThis.fetch = async (_endpoint, init) => {
+      sent.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ schemaVersion: 1, ok: true, action: 'session.list', data: {} }));
+    };
+    const context = { sessionID: 'ses_1', agent: 'build', messageID: 'msg_1', id: 'call_1', progress: async () => {} };
+
+    try {
+      const call = (tool, input) => tools[tool].execute(input, context);
+      // Real booleans travel unchanged in both shapes.
+      await call('openchamber', { action: 'session.list', parameters: { withStatus: true } });
+      await call('openchamber', { action: 'session.list', parameters: { withStatus: false } });
+      await call('openchamber', { action: 'session.list', withStatus: true });
+      await call('openchamber', { action: 'session.list', withStatus: false });
+      // Exactly the stringified "true"/"false" spellings are normalized.
+      await call('openchamber', { action: 'session.list', parameters: { withStatus: 'true' } });
+      await call('openchamber', { action: 'session.list', parameters: { withStatus: 'false' } });
+      await call('openchamber', { action: 'session.list', withStatus: 'true' });
+      await call('openchamber', { action: 'session.list', withStatus: 'false' });
+      // The field names come from the calling tool's own schema, so other
+      // tools' booleans normalize there too, not only `completed`.
+      await call('openchamber_web', { action: 'browser.type', parameters: { selector: '#q', value: 'x', submit: 'true' } });
+      await call('openchamber_knowledge', { action: 'knowledge.save', parameters: { kind: 'todo', id: 't1', completed: 'false' } });
+      // Every other spelling or value keeps its identity for the strict check.
+      for (const value of ['TRUE', 'False', 'yes', '1', 1, 0, null]) {
+        await call('openchamber', { action: 'session.list', parameters: { withStatus: value } });
+      }
+      // A boolean another tool declares is not a field of this tool, so it is
+      // left alone here.
+      await call('openchamber_web', { action: 'browser.type', parameters: { selector: '#q', value: 'x', withStatus: 'true' } });
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalUrl === undefined) delete process.env.OPENCHAMBER_AGENT_TOOL_URL;
+      else process.env.OPENCHAMBER_AGENT_TOOL_URL = originalUrl;
+      if (originalToken === undefined) delete process.env.OPENCHAMBER_AGENT_TOOL_TOKEN;
+      else process.env.OPENCHAMBER_AGENT_TOOL_TOKEN = originalToken;
+    }
+
+    expect(sent.slice(0, 8).map(({ input }) => input.withStatus)).toEqual([true, false, true, false, true, false, true, false]);
+    expect(sent[8].input.submit).toBe(true);
+    expect(sent[9].input.completed).toBe(false);
+    expect(sent.slice(10, 17).map(({ input }) => input.withStatus)).toEqual(['TRUE', 'False', 'yes', '1', 1, 0, null]);
+    expect(sent[17].input.withStatus).toBe('true');
   });
 
   it('omits a tool the user turned off', async () => {
@@ -593,6 +672,7 @@ describe('managed agent tool runtime', () => {
 
   it.each([
     ['session.create', 'openchamber', { prompt: 'x', goal: 'true' }, 'goal'],
+    ['session.list', 'openchamber', { withStatus: 'true' }, 'withStatus'],
     ['browser.type', 'openchamber_web', { selector: '#q', value: 'x', submit: 'yes' }, 'submit'],
     ['knowledge.save', 'openchamber_knowledge', { kind: 'todo', id: 't1', completed: 'false' }, 'completed'],
     ['notify.send', 'openchamber_notify', { title: 't', showWhenFocused: 1 }, 'showWhenFocused'],
