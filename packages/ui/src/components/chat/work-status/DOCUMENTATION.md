@@ -524,8 +524,10 @@ issues, PRs or guest items attached in the composer, session creation from an
 issue or PR in `NewWorktreeDialog`, and an agent calling the `openchamber`
 tool's `session.link`. There is no manual "link this" control: attaching a
 thread to the work *is* the act of linking it. A message's references are
-written in one metadata patch (`sessionActions.addLinkedIssues`): each write
-replaces the whole list, so one write per item would keep only the last.
+written in one server operation (`sessionActions.addLinkedIssues`): each
+operation sends the items to link, and the OpenChamber server decides the new
+list from a fresh read inside the session's write queue, so a link an agent
+made while the request was in flight survives it.
 
 Detaching is a control on the row, not a side effect of another action. An
 agent's link has no composer chip to dismiss once the message is sent, so
@@ -533,18 +535,19 @@ without a control here it would be permanent unless session metadata were
 edited by hand. Each linked row carries a close control in its trailing value
 slot, the place row actions already occupy, with the pinned rows' hover and
 disabled styling; those pins are the behavioural precedent — the panel that
-shows what is attached can detach it — not the visual one. Pressing it writes
-the removal through the same `setLinkedIssue(…, false)` patch the attach flows
-use — one writer for the list, so a link cannot be dropped by a path that does
-not know the others. The write
+shows what is attached can detach it — not the visual one. Pressing it sends
+the removal through the same server operation (`setLinkedIssue(…, false)`) the
+attach flows use — one writer for the list, so a link cannot be dropped by a
+path that does not know the others. The write
 is deliberately user-initiated: an agent links but never removes, so it cannot
 drop a link the user set (`packages/web/server/lib/openchamber-sessions/session-link.js`).
 A failed removal reports `chat.workStatus.linkedIssues.unlinkFailed` rather than
 leaving the row looking removed.
 
 Stored in session metadata as a **snapshot** (`lib/linkedIssues.ts`, namespace
-`openchamber.linked_issues`), riding the same `patchSessionMetadata` channel as
-pinned messages. Number, title, url, author and avatar only — the body,
+`openchamber.linked_issues`), persisted through the same server-owned metadata
+store as pinned messages. Number, title, url, author and avatar only — the
+body,
 comments and state belong to GitHub, and mirroring them would mean owning their
 staleness. The stored title can drift; that is the price of a store that never
 needs refreshing. A GitHub row opens github.com. A Linear row opens the
