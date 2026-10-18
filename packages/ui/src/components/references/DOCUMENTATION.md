@@ -124,7 +124,10 @@ preview's footer holds actions instead of what the agent gets.
   browser, and a Linear identifier Linear cannot read is searched for. The phone opens the found
   item's preview. Cmd or Ctrl-click, VS Code, a session outside any
   project, Linear while disconnected and links the board does not list open in
-  the browser. A badge's `+N` does nothing; its tooltip lists the others.
+  the browser. Sidebar chips hand over their project's root path, so a
+  worktree session or group outside the root resolves before the live
+  worktree map has loaded (`SessionGroupSection`, `SessionNodeItem`). A
+  badge's `+N` does nothing; its tooltip lists the others.
 - A PR's review threads read as the comment that opened them with the
   replies under it (`ReferenceCommentItem.thread`); a reply is not an entry of
   its own. A resolved thread folds to one line ("Resolved · N replies") and
