@@ -35,10 +35,10 @@ const MARKDOWN_CLASS = '[&_img]:max-w-full [&_img]:h-auto';
 const ZOOMABLE_IMAGE_CLASS = '[&_[data-markdown-content]_img:not(a_img):not([aria-hidden=true])]:cursor-zoom-in';
 
 /**
- * `pinned` (desktop pane): the item header, the meta grid and the send summary
- * stay in view while the description and comments scroll between them, so a
- * long description never hides the diff switch. Inline (mobile): one flow
- * inside the sheet's own scroll.
+ * `pinned` (desktop pane): the item header and the send summary stay in view
+ * while the meta grid, description and comments scroll between them, so a
+ * long preview never hides the diff switch. Inline (mobile): one flow inside
+ * the sheet's own scroll.
  */
 const PreviewFrame: React.FC<{ pinned: boolean; header: React.ReactNode; meta: React.ReactNode; footer: React.ReactNode; children: React.ReactNode }> = ({ pinned, header, meta, footer, children }) => {
     const imagePreview = useReferenceImagePreview();
@@ -56,13 +56,13 @@ const PreviewFrame: React.FC<{ pinned: boolean; header: React.ReactNode; meta: R
     return (
         <div className="flex h-full min-h-0 flex-col">
             <div className="shrink-0 border-b border-border/60 px-6 pb-4 pt-5">
-                <div className="flex flex-col gap-4">
-                    <header className="flex flex-col gap-2">{header}</header>
-                    {meta}
-                </div>
+                <header className="flex flex-col gap-2">{header}</header>
             </div>
             <ScrollableOverlay outerClassName="min-h-0 flex-1" className="px-6 pb-5 pt-4" disableHorizontal>
-                <article className={cn('flex flex-col gap-4', ZOOMABLE_IMAGE_CLASS)} onClick={imagePreview.onClick}>{children}</article>
+                <article className={cn('flex flex-col gap-4', ZOOMABLE_IMAGE_CLASS)} onClick={imagePreview.onClick}>
+                    {meta}
+                    {children}
+                </article>
             </ScrollableOverlay>
             <div className="shrink-0 border-t border-border/60 px-6 py-3">{footer}</div>
             {imagePreview.viewer}
