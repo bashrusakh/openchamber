@@ -166,6 +166,11 @@ function DropdownMenuContent({
   };
 
   return (
+    // `display: contents` on the portal root: Chromium's checkVisibility()
+    // calls such an element hidden, so Base UI's focus manager finds no
+    // tabbable candidate in the popup and leaves the focus on the popup
+    // container. A dropdown with a search field has to ask for the focus
+    // itself.
     <BaseMenu.Portal className="contents" container={portalToBody ? undefined : portalContext?.portalContainer || undefined}>
       <BaseMenu.Positioner
         sideOffset={sideOffset}

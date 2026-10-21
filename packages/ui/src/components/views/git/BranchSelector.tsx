@@ -272,6 +272,10 @@ export const BranchSelector: React.FC<BranchSelectorProps> = ({
             filter would re-filter and reorder the already-ranked rows. */}
         <Command className="h-full min-h-0" shouldFilter={false}>
           <CommandInput
+            // The popup's focus manager cannot reach this field, so the search
+            // field asks for the focus itself; see dropdown-menu for the shared
+            // rule.
+            autoFocus
             placeholder={t('gitView.branch.searchPlaceholder')}
             value={search}
             onValueChange={setSearch}

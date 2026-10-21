@@ -3115,6 +3115,10 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                     <div className="relative">
                                         <Icon name="search" className="absolute inset-s-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
                                         <Input
+                                            // The popup's focus manager cannot reach this
+                                            // field, so the search field asks for the focus
+                                            // itself; see dropdown-menu for the shared rule.
+                                            autoFocus
                                             type="text"
                                             placeholder={t('chat.modelControls.searchAgents')}
                                             value={agentSearchQuery}

@@ -322,6 +322,10 @@ export const BranchIntegrationSection: React.FC<BranchIntegrationSectionProps> =
             {/* rankByQuery owns filtering/ordering; cmdk must not re-filter. */}
             <Command className="h-full min-h-0" shouldFilter={false}>
               <CommandInput
+                // The popup's focus manager cannot reach this field, so the
+                // search field asks for the focus itself; see dropdown-menu for
+                // the shared rule.
+                autoFocus
                 ref={searchInputRef}
                 placeholder={t('gitView.branch.searchPlaceholder')}
                 value={branchSearch}
