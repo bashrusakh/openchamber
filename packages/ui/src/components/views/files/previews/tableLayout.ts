@@ -1,0 +1,609 @@
+/**
+ * The width and window model behind the delimited-text preview.
+ *
+ * The preview stays a real `<table>` with a sticky header, so both axes are
+ * windowed inside that one table: only the rows and the columns in view are
+ * in the document, and the skipped ones are carried by spacer rows and
+ * spacer cells, which keep the table's own layout intact.
+ *
+ * Everything here is a pure function of the parsed table, the measurements
+ * the browser hands over and the scroll offsets, so the mapping from a
+ * scroll position to a range of cells can be checked without a browser.
+ */
+
+/**
+ * What the browser charges for one character and one cell.
+ *
+ * The column widths themselves are written in the font's own character unit
+ * (`ch`), so the browser keeps them right when the font or the interface
+ * size changes. These numbers only tell the preview where the columns sit,
+ * which is what the windowing needs.
+ *
+ * The padding and the border are read from the document, from a probe that
+ * carries the classes a cell of the table carries. The width the browser is
+ * given and the width the model reasons about are both built from them, so
+ * a change to the stylesheet moves the two together.
+ */
+export type TableCellMetrics = {
+  /** The px one character takes in the preview's monospace font. */
+  charWidth: number;
+  /** The px the inline padding of a cell adds around its text. */
+  cellPadding: number;
+  /** The px the end border of a cell adds on its inline end. */
+  cellBorder: number;
+  /** The px one cell may grow to before the cap on the cell applies. */
+  maxCellWidth: number;
+};
+
+/**
+ * The width of the characters outside latin, in character cells.
+ *
+ * A character the browser has no font for falls back to another one, and
+ * that font can lay the character out wider than the monospace font of the
+ * preview. The counted width of a column has to cover the text the browser
+ * lays out, or the cell cuts the value short. These are the widths the
+ * browser measured for the characters the file uses, one for each of them,
+ * keyed by the code point of the character. A character that was not measured
+ * keeps the width the count gives it.
+ */
+export type TableCharacterWidths = ReadonlyMap<number, number>;
+
+/**
+ * The width of the characters outside latin, before the browser measured them.
+ *
+ * A character outside the wide list takes one cell and a character in it takes
+ * two, which is what a monospace font gives a full-width character. The
+ * measured width is only used where it is wider than this one.
+ */
+export const DEFAULT_CHARACTER_WIDTHS: TableCharacterWidths = new Map<number, number>();
+
+/** The width every column asks for, in character cells. */
+export type TableColumnWidths = {
+  /** The width of each column in character cells, the header included. */
+  cells: number[];
+  /** The table's width in character cells, without the cells' own padding. */
+  totalCells: number;
+};
+
+/** The column widths of one table and where each column starts. */
+export type TableColumnPlan = TableColumnWidths & {
+  /** Where each column starts in px, counted from the table's first column. */
+  boundaries: number[];
+  /** The table's width in px. */
+  totalWidth: number;
+};
+
+/** A range of rows or columns. The end is exclusive. */
+export type TableRange = {
+  start: number;
+  end: number;
+};
+
+/** The rows and the columns in view. */
+export type TableWindow = {
+  rows: TableRange;
+  columns: TableRange;
+};
+
+/** The direction the table is laid out in. */
+export type TableDirection = 'ltr' | 'rtl';
+
+/**
+ * The step the browser keeps its layout lengths in, a 1/64 px.
+ *
+ * A text box's width is rounded to the nearest step, and the box the
+ * measuring probe reads is rounded up to the next one, so the advance the
+ * probe measures can be a hair wider than the one the layout uses. A value
+ * that needs a fraction more than the room a cell has still fits, because
+ * the layout rounds it into the room. One step of room is therefore added
+ * before the characters are counted, so that a value which fits is not cut
+ * short, and the column stays within a step of the cap on the cell.
+ */
+const LAYOUT_STEP_PX = 1 / 64;
+
+/** Matches any character outside latin, including the halves of a pair. */
+const NON_ASCII = /[\u0080-\uFFFF]/;
+
+/**
+ * True when the header and the kept rows hold nothing but latin characters.
+ *
+ * The flag is read over exactly the cells the measurement walks, so it is
+ * exact for the cells that decide a width. A row the parser dropped is never
+ * measured, so it cannot change a width. The file itself is not walked for
+ * the flag, which is the part that grows with the file.
+ */
+export const isAsciiOnly = (
+  header: ReadonlyArray<string>,
+  rows: ReadonlyArray<ReadonlyArray<string>>,
+): boolean => {
+  for (const value of header) {
+    if (NON_ASCII.test(value)) return false;
+  }
+  for (const row of rows) {
+    for (const value of row) {
+      if (NON_ASCII.test(value)) return false;
+    }
+  }
+  return true;
+};
+
+/**
+ * The width of a value in character cells.
+ *
+ * A character outside the wide list takes one cell and a character in the
+ * wide list takes two, which is what a monospace font gives a full-width
+ * character, unless the browser measured the character and it takes more
+ * room than that. The measured width is only used where it is wider than
+ * the counted one, so a character the browser lays out narrower does not
+ * make the column wider than it has to be.
+ *
+ * The counted widths were measured in Chromium against the width the browser
+ * lays the text out at: Latin, Thai, Arabic, Hebrew and Devanagari land on
+ * the width the count asks for, and Cyrillic on 0.958 of it. CJK, Hangul and
+ * Kana measured 0.500 of it on a machine without a CJK font, where the count
+ * leaves twice the room; with a CJK font the glyph is 1em against a
+ * monospace advance of about 0.6em, so two cells stays generous there.
+ *
+ * A character the browser lays out wider than the count asks for is measured
+ * in the browser and counted at the width it takes there, so a value in Greek
+ * or in an emoji fits its column. What the model cannot know is the width of
+ * a character the measurement did not reach, and the width a font gives a
+ * character in the middle of a word, such as a letter of an Arabic word,
+ * which the browser shapes.
+ */
+export const displayCells = (
+  value: string,
+  widths?: TableCharacterWidths,
+): number => {
+  // Most values are plain latin, and the browser's own pattern match is
+  // quicker than walking the characters here.
+  if (!NON_ASCII.test(value)) return value.length;
+  let cells = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x80) {
+      cells += 1;
+      continue;
+    }
+    if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const low = value.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        cells += characterWidth((code - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000, widths);
+        index += 1;
+        continue;
+      }
+    }
+    cells += characterWidth(code, widths);
+  }
+  return cells;
+};
+
+/**
+ * The width of one character outside latin, in character cells.
+ *
+ * The width the browser measured for the character is used where there is
+ * one, and a character the measurement did not reach keeps the width the
+ * count gives it.
+ */
+const characterWidth = (code: number, widths: TableCharacterWidths | undefined): number => {
+  const measured = widths?.get(code);
+  if (measured !== undefined) return measured;
+  return isWideCodePoint(code) ? 2 : 1;
+};
+
+/**
+ * The characters of the file that are not latin, by their code point.
+ *
+ * The browser lays a character out with the font it has, and a character it
+ * has no font for falls back to another one, which can be wider than the
+ * monospace font of the preview. Those are the characters the browser has to
+ * measure, and the list holds every one of them once.
+ *
+ * The walk stops at the limit, because the list is only used to measure the
+ * characters in the browser, and a file with more distinct characters than
+ * that costs more to measure than the width it gains. A character the walk
+ * did not reach keeps the width the count gives it.
+ */
+export const collectNonLatinCodePoints = (
+  header: ReadonlyArray<string>,
+  rows: ReadonlyArray<ReadonlyArray<string>>,
+  limit: number,
+): number[] => {
+  // The code points of the basic plane are held in a table, so the walk
+  // over the characters of the file does not hash every one of them. The
+  // planes above it are rare, and they are held in a set.
+  const seen = new Uint8Array(0x10000);
+  const above = new Set<number>();
+  const codePoints: number[] = [];
+  const collect = (value: string): boolean => {
+    for (let index = 0; index < value.length; index += 1) {
+      const code = value.charCodeAt(index);
+      if (code < 0x80) continue;
+      // A character outside the basic plane is a pair of code units, and it
+      // is measured as the one character it is.
+      if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+        const low = value.charCodeAt(index + 1);
+        if (low >= 0xdc00 && low <= 0xdfff) {
+          const point = (code - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000;
+          if (above.has(point)) {
+            index += 1;
+            continue;
+          }
+          above.add(point);
+          codePoints.push(point);
+          if (codePoints.length >= limit) return false;
+          index += 1;
+          continue;
+        }
+      }
+      if (seen[code]) continue;
+      seen[code] = 1;
+      codePoints.push(code);
+      if (codePoints.length >= limit) return false;
+    }
+    return true;
+  };
+  for (const value of header) {
+    if (!collect(value)) return codePoints;
+  }
+  for (const row of rows) {
+    for (const value of row) {
+      if (!collect(value)) return codePoints;
+    }
+  }
+  return codePoints;
+};
+
+/**
+ * The width of the characters of a file, from the advance the browser measured.
+ *
+ * Every character the file uses outside latin is counted at the width the
+ * browser gives it, as long as that is more room than the counted width. A
+ * value in a script the monospace font does not cover is then as wide as the
+ * text the browser lays out for it.
+ */
+export const characterWidthsFrom = (
+  advances: ReadonlyMap<number, number>,
+  charWidth: number,
+): TableCharacterWidths => {
+  if (charWidth <= 0) return DEFAULT_CHARACTER_WIDTHS;
+  const widths = new Map<number, number>();
+  for (const [code, advance] of advances) {
+    const cells = advance / charWidth;
+    // A character that takes less room than the count gives it keeps the
+    // counted width, so the column is not padded with room the text does
+    // not need.
+    const counted = isWideCodePoint(code) ? 2 : 1;
+    widths.set(code, cells > counted ? cells : counted);
+  }
+  return widths;
+};
+
+const isWideCodePoint = (code: number): boolean => (
+  code >= 0x1100 && (
+    code <= 0x115f
+    || code === 0x2329
+    || code === 0x232a
+    || (code >= 0x2e80 && code <= 0x303e)
+    || (code >= 0x3041 && code <= 0x33ff)
+    || (code >= 0x3400 && code <= 0x4dbf)
+    || (code >= 0x4e00 && code <= 0x9fff)
+    || (code >= 0xa000 && code <= 0xa4cf)
+    || (code >= 0xac00 && code <= 0xd7a3)
+    || (code >= 0xf900 && code <= 0xfaff)
+    || (code >= 0xfe10 && code <= 0xfe19)
+    || (code >= 0xfe30 && code <= 0xfe6f)
+    || (code >= 0xff00 && code <= 0xff60)
+    || (code >= 0xffe0 && code <= 0xffe6)
+    || (code >= 0x1f300 && code <= 0x1f64f)
+    || (code >= 0x1f900 && code <= 0x1f9ff)
+    || (code >= 0x20000 && code <= 0x3fffd)
+  )
+);
+
+/**
+ * The width one column takes.
+ *
+ * The width in px is the one the model reasons about, and the width in CSS
+ * is the one the browser is given. Both are built from the same measurement
+ * of the padding and the border of a cell, so they cannot drift apart.
+ *
+ * The last column has no border on its inline end, so it is narrower than
+ * the others by exactly the border.
+ */
+export type TableColumnWidth = {
+  /** The width in px the browser lays the column out at. */
+  px: number;
+  /** The same width, written for the browser. */
+  css: string;
+};
+
+/** The width of a column of the given number of characters. */
+export const columnWidth = (
+  cells: number,
+  metrics: TableCellMetrics,
+  isLastColumn: boolean,
+): TableColumnWidth => {
+  const border = isLastColumn ? 0 : metrics.cellBorder;
+  return {
+    px: cells * metrics.charWidth + metrics.cellPadding + border,
+    css: `calc(${cells}ch + ${metrics.cellPadding}px${border > 0 ? ` + ${border}px` : ''})`,
+  };
+};
+
+/** The width of the table, the sum of its columns. */
+export const tableWidthCss = (totalCells: number, columnCount: number, metrics: TableCellMetrics): string => (
+  `calc(${totalCells}ch + ${columnCount * metrics.cellPadding}px + ${Math.max(0, columnCount - 1) * metrics.cellBorder}px)`
+);
+
+/**
+ * The width every column asks for, taken from the data.
+ *
+ * A column is as wide as its longest value, capped by the cap the cells
+ * carry, and never narrower than its header, which is not capped.
+ *
+ * The widths come from the data and the font, so they are measured once per
+ * file. The room the panel has is shared out over them afterwards, and only
+ * that part is repeated when the panel is resized.
+ */
+export const measureTableColumns = (
+  header: ReadonlyArray<string>,
+  rows: ReadonlyArray<ReadonlyArray<string>>,
+  columnCount: number,
+  metrics: TableCellMetrics,
+  /**
+   * True when the header and the kept rows hold nothing but latin
+   * characters, which makes every value one cell per character. The walk
+   * over the cells is the same order of work the parser already does, so it
+   * is kept as cheap as it can be.
+   */
+  asciiOnly: boolean,
+  /**
+   * The width the browser measured for the characters outside latin, which
+   * is what a value in a script the monospace font does not cover is
+   * counted at.
+   */
+  characterWidths?: TableCharacterWidths,
+): TableColumnWidths => {
+  // The cell count a column may reach before the cap on the cell applies.
+  // The cap is on the cell itself, so the room its text has is the cap
+  // without the padding and the border around it.
+  const maxCells = metrics.charWidth > 0
+    ? Math.max(1, Math.floor((metrics.maxCellWidth - metrics.cellPadding - metrics.cellBorder + LAYOUT_STEP_PX) / metrics.charWidth))
+    : Number.POSITIVE_INFINITY;
+  // A character takes at most the width of the widest one, so a value of n
+  // characters takes at most n times that width.
+  let widestCharacter = 2;
+  if (characterWidths) {
+    for (const width of characterWidths.values()) {
+      if (width > widestCharacter) widestCharacter = width;
+    }
+  }
+
+  const bodyCells = new Array<number>(columnCount).fill(0);
+  for (const row of rows) {
+    for (let column = 0; column < columnCount; column += 1) {
+      if (bodyCells[column] >= maxCells) continue;
+      const value = row[column];
+      if (value === undefined) continue;
+      if (asciiOnly) {
+        if (value.length > bodyCells[column]) bodyCells[column] = value.length;
+        continue;
+      }
+      // A short value cannot beat the widest value found so far.
+      if (value.length * widestCharacter <= bodyCells[column]) continue;
+      const width = displayCells(value, characterWidths);
+      if (width > bodyCells[column]) bodyCells[column] = width;
+    }
+  }
+
+  const cells = new Array<number>(columnCount).fill(0);
+  let totalCells = 0;
+  for (let column = 0; column < columnCount; column += 1) {
+    const headerText = header[column] ?? '';
+    const headerCells = asciiOnly ? headerText.length : displayCells(headerText, characterWidths);
+    const width = Math.max(headerCells, Math.min(bodyCells[column], maxCells));
+    cells[column] = roundUpCells(width);
+    totalCells += cells[column];
+  }
+
+  return { cells, totalCells };
+};
+
+/**
+ * The precision a column width is written with, in cells.
+ *
+ * The counted width of a column is a sum of measured advances, and the sum
+ * carries more digits than the width needs. The count is rounded up to the
+ * precision, so a column is never narrower than the text it holds.
+ */
+const CELL_PRECISION = 1000;
+
+const roundUpCells = (cells: number): number => Math.ceil(cells * CELL_PRECISION) / CELL_PRECISION;
+
+/**
+ * Where the columns sit, from the widths they ask for and the room in the
+ * panel.
+ *
+ * A table narrower than the panel fills it, the way the automatic table
+ * layout filled it: the room left over is shared out over the columns in
+ * proportion to the widths they asked for.
+ */
+export const planTableColumns = (
+  widths: TableColumnWidths,
+  metrics: TableCellMetrics,
+  viewportWidth: number,
+): TableColumnPlan => {
+  const { cells, totalCells } = widths;
+  // The width every column takes is the one the browser is given, so the
+  // boundaries here are the boundaries the browser lays the columns out on.
+  const columnWidths = cells.map((cellCells, column) => (
+    columnWidth(cellCells, metrics, column === cells.length - 1).px
+  ));
+  const naturalWidth = columnWidths.reduce((sum, width) => sum + width, 0);
+  const tableWidth = Math.max(naturalWidth, viewportWidth);
+  const scale = naturalWidth > 0 ? tableWidth / naturalWidth : 1;
+  const boundaries: number[] = [0];
+  for (const width of columnWidths) {
+    boundaries.push(boundaries[boundaries.length - 1] + width * scale);
+  }
+
+  return { cells, totalCells, boundaries, totalWidth: boundaries[boundaries.length - 1] };
+};
+
+/**
+ * The rows in view.
+ *
+ * The sticky header covers the top of the viewport, so the rows in view are
+ * the ones below it, and the row that sits at the scroll offset is the one
+ * the header is about to cover. The height of a row has to match the height
+ * the rows really take, or the mapping from a scroll offset to a row drifts
+ * and the last row cannot be reached.
+ *
+ * The preview gives every row the same height, the one it measured in the
+ * document, so one row height is the height of all of them.
+ */
+export const visibleRowRange = (options: {
+  scrollTop: number;
+  viewportHeight: number;
+  headerHeight: number;
+  rowHeight: number;
+  rowCount: number;
+  overscan: number;
+}): TableRange => {
+  const { scrollTop, viewportHeight, headerHeight, rowHeight, rowCount, overscan } = options;
+  if (rowCount <= 0) return { start: 0, end: 0 };
+  const height = rowHeight > 0 ? rowHeight : 1;
+  const first = Math.floor(Math.max(0, scrollTop) / height);
+  const visible = Math.ceil(Math.max(0, viewportHeight - headerHeight) / height) + 1;
+  const start = Math.max(0, Math.min(rowCount, first - overscan));
+  const end = Math.max(start, Math.min(rowCount, first + visible + overscan));
+  return { start, end };
+};
+
+/**
+ * The columns in view.
+ *
+ * A right-to-left table puts its first column at the right, so the scroll
+ * offset runs the other way and the physical order is the reverse of the
+ * logical one. The range that comes back is in logical columns either way.
+ *
+ * The scroll offset of a right-to-left box is read the way the browser
+ * reports it: 0 at the right edge of the box, and negative from there as the
+ * box is scrolled towards its left edge. The offset is turned into the
+ * distance from the left edge of the content, which is the direction the
+ * boundaries are counted in.
+ */
+export const visibleColumnRange = (options: {
+  scrollLeft: number;
+  viewportWidth: number;
+  boundaries: ReadonlyArray<number>;
+  columnCount: number;
+  overscan: number;
+  direction: TableDirection;
+}): TableRange => {
+  const { scrollLeft, viewportWidth, boundaries, columnCount, overscan, direction } = options;
+  if (columnCount <= 0 || boundaries.length < 2) return { start: 0, end: 0 };
+  const totalWidth = boundaries[boundaries.length - 1];
+  const physical = direction === 'rtl'
+    ? boundaries.map((_, index) => totalWidth - boundaries[columnCount - index])
+    : boundaries;
+  const maxScroll = Math.max(0, totalWidth - viewportWidth);
+  const offset = direction === 'rtl' ? scrollLeft + maxScroll : scrollLeft;
+  const firstVisible = firstBoundaryAbove(physical, offset) - 1;
+  const lastVisible = firstBoundaryAtLeast(physical, offset + viewportWidth) - 1;
+  const start = Math.max(0, Math.min(columnCount, firstVisible - overscan));
+  const end = Math.max(start, Math.min(columnCount, lastVisible + 1 + overscan));
+  if (direction === 'rtl') return { start: columnCount - end, end: columnCount - start };
+  return { start, end };
+};
+
+/** The rows and the columns in view, from one scroll position. */
+export const computeTableWindow = (
+  options: {
+    plan: TableColumnPlan;
+    viewportWidth: number;
+    viewportHeight: number;
+    headerHeight: number;
+    rowHeight: number;
+    rowCount: number;
+    columnCount: number;
+    rowOverscan: number;
+    columnOverscan: number;
+    direction: TableDirection;
+  },
+  scrollTop: number,
+  scrollLeft: number,
+): TableWindow => ({
+  rows: visibleRowRange({
+    scrollTop,
+    viewportHeight: options.viewportHeight,
+    headerHeight: options.headerHeight,
+    rowHeight: options.rowHeight,
+    rowCount: options.rowCount,
+    overscan: options.rowOverscan,
+  }),
+  columns: visibleColumnRange({
+    scrollLeft,
+    viewportWidth: options.viewportWidth,
+    boundaries: options.plan.boundaries,
+    columnCount: options.columnCount,
+    overscan: options.columnOverscan,
+    direction: options.direction,
+  }),
+});
+
+/**
+ * A range that fits inside a number of rows or columns.
+ *
+ * The range starts no further in than the last row and ends no further out
+ * than the file reaches, and it holds one row or column as long as the file
+ * has one.
+ */
+const clampRange = (range: TableRange, count: number): TableRange => {
+  if (count <= 0) return { start: 0, end: 0 };
+  const start = Math.max(0, Math.min(range.start, count - 1));
+  const end = Math.max(start + 1, Math.min(range.end, count));
+  return { start, end };
+};
+
+/**
+ * The window a file of the given size can hold.
+ *
+ * The window of the file that was open before names the rows and the columns
+ * of that file. It is held inside the file that is open now, so the first
+ * commit of a new file mounts the new file's own rows and columns and not
+ * the ones of the file before it.
+ */
+export const clampTableWindow = (
+  tableWindow: TableWindow,
+  columnCount: number,
+  rowCount: number,
+): TableWindow => ({
+  rows: clampRange(tableWindow.rows, rowCount),
+  columns: clampRange(tableWindow.columns, columnCount),
+});
+
+/** The first index whose boundary is past the offset. */
+const firstBoundaryAbove = (boundaries: ReadonlyArray<number>, offset: number): number => {
+  let low = 0;
+  let high = boundaries.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (boundaries[middle] > offset) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+};
+
+/** The first index whose boundary has reached the offset. */
+const firstBoundaryAtLeast = (boundaries: ReadonlyArray<number>, offset: number): number => {
+  let low = 0;
+  let high = boundaries.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (boundaries[middle] >= offset) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+};

@@ -15,7 +15,18 @@ mock.module('@/lib/runtime-fetch', () => ({
     return { ok: true, blob: async () => ({ size: 3 }) };
   },
 }));
-mock.module('@/lib/runtime-switch', () => ({ getRuntimeKey: () => 'runtime-a' }));
+// The runtime key is the one thing this test controls. The other export is
+// here so that the mock covers the whole module: `@/lib/i18n` reaches the
+// runtime through `@/lib/desktop` and asks for it, and a module that does not
+// export it is a broken mock. The runner of the repository gives every test
+// file its own process, so this is not needed for `bun run test`; it keeps a
+// shared-process `bun test <dir>` run from breaking on a file that imports
+// `@/lib/i18n` next. The module itself is not loaded: it reaches the runtime,
+// the relay and the window, none of which this test has.
+mock.module('@/lib/runtime-switch', () => ({
+  getRuntimeKey: () => 'runtime-a',
+  getRuntimeApiBaseUrl: () => '',
+}));
 
 const { useMarkdownLocalAssets } = await import('./useMarkdownLocalAssets');
 
