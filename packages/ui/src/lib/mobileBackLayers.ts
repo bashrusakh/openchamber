@@ -5,7 +5,10 @@
  * Two kinds of layer sit above a shell surface. Base UI popups (dialogs,
  * selects, menus) already close on Escape and move focus into themselves, so
  * back sends Escape to the focused element and only the popup holding focus
- * reacts. MobileOverlayPanel sheets manage no focus, so they register here.
+ * reacts. A MobileOverlayPanel sheet moves no focus into itself, so it
+ * registers here rather than relying on that path. A sheet can still hold the
+ * focus in one of its own fields, but that field is not inside a Base UI
+ * popup, so the Escape path above does not reach it.
  */
 
 const OPEN_POPUP_SELECTOR = [
