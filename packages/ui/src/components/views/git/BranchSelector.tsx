@@ -70,11 +70,12 @@ export const BranchSelector: React.FC<BranchSelectorProps> = ({
   const [unpushedCounts, setUnpushedCounts] = React.useState<Record<string, number>>({});
   const createInputRef = React.useRef<HTMLInputElement>(null);
 
+  // The search field's own key handling, on the cmdk root: typing must reach
+  // the field, not the menu's typeahead, so the key stops there. Escape is
+  // the exception: it has to reach Base UI's own dismiss handling to close
+  // the dropdown. The handler sits on the cmdk root, where cmdk's own key
+  // handling still runs.
   const stopDropdownTypeahead = React.useCallback((event: React.KeyboardEvent<HTMLElement>) => {
-    // Typing must reach the search field, not the menu's typeahead, so the key
-    // stops here. Escape is the exception: it has to reach Base UI's own
-    // dismiss handling to close the dropdown. The handler sits on the cmdk
-    // root, where cmdk's own key handling still runs.
     if (event.key !== 'Escape') event.stopPropagation();
   }, []);
 
@@ -311,7 +312,11 @@ export const BranchSelector: React.FC<BranchSelectorProps> = ({
                     onChange={(e) => setNewBranchName(e.target.value)}
                     onClick={(e) => e.stopPropagation()}
                     onKeyDown={(e) => {
-                      stopDropdownTypeahead(e);
+                      // This row answers Escape itself, and cancelling the row
+                      // leaves the dropdown open so the user can keep browsing.
+                      // Every key stops here, so none of them reaches the
+                      // menu's own handling.
+                      e.stopPropagation();
                       if (e.key === 'Enter') {
                         e.preventDefault();
                         handleCreate();

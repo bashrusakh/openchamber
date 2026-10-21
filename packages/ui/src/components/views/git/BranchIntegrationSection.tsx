@@ -77,7 +77,6 @@ export const BranchIntegrationSection: React.FC<BranchIntegrationSectionProps> =
   const [selectedBranch, setSelectedBranch] = React.useState<BranchIntegrationTarget | null>(null);
   const [branchDropdownOpen, setBranchDropdownOpen] = React.useState(false);
   const [branchSearch, setBranchSearch] = React.useState('');
-  const searchInputRef = React.useRef<HTMLInputElement>(null);
   const logContainerRef = React.useRef<HTMLDivElement>(null);
 
   const isDisabled = disabled || isOperating;
@@ -335,7 +334,6 @@ export const BranchIntegrationSection: React.FC<BranchIntegrationSectionProps> =
                 // search field asks for the focus itself; see dropdown-menu for
                 // the shared rule.
                 autoFocus
-                ref={searchInputRef}
                 placeholder={t('gitView.branch.searchPlaceholder')}
                 value={branchSearch}
                 onValueChange={setBranchSearch}

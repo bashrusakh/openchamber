@@ -130,3 +130,24 @@ test('Escape closes the desktop branch dropdown while the search field holds the
     expect(document.querySelector('input[data-slot="command-input"]') === null).toBe(true);
   });
 });
+
+test('Escape in the create-branch row cancels the row and leaves the dropdown open', async () => {
+  await openDesktopDropdown(async () => {
+    const create = [...document.querySelectorAll<HTMLElement>('[cmdk-item]')]
+      .find((item) => (item.textContent ?? '').includes('Create new branch'));
+    if (!create) throw new Error('Missing create branch item');
+    await act(async () => { create.click(); });
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="New branch name"]');
+    if (!input) throw new Error('Missing create branch input');
+
+    await act(async () => {
+      input.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    });
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 50)); });
+
+    // The row answers Escape itself: it goes away, and the dropdown stays open
+    // so the user can keep browsing.
+    expect(document.querySelector('input[placeholder="New branch name"]') === null).toBe(true);
+    expect(document.querySelector('[data-slot="dropdown-menu-content"]') !== null).toBe(true);
+  });
+});

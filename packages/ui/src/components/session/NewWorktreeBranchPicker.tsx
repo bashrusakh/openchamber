@@ -191,8 +191,9 @@ export function NewWorktreeBranchPicker({
           onKeyDown={(event) => { if (event.key !== 'Escape') event.stopPropagation(); }}
         >
           <CommandInput
-            // Base UI's popup focus manager would focus this field anyway;
-            // asking for it explicitly keeps both surfaces owned here.
+            // The popup's focus manager cannot reach this field, so the search
+            // field asks for the focus itself; see dropdown-menu for the shared
+            // rule.
             autoFocus
             placeholder={t('session.newWorktree.searchBranches')}
             value={query}
