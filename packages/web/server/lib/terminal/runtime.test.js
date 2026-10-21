@@ -9,6 +9,7 @@ import { WebSocket } from 'ws';
 
 import { createTerminalRuntime } from './runtime.js';
 import { createTerminalWsControlFrame, readTerminalWsControlFrame } from './terminal-ws-protocol.js';
+import { MAX_PENDING_CONTROL_SEQUENCE_UNITS } from './history.js';
 
 // Drives the raw upgrade handler by hand. A `ws` client hides the HTTP response
 // once the 101 lands, and a real client cannot be made to upgrade one socket
@@ -743,6 +744,58 @@ describe('terminal runtime', () => {
       const closed = createResponse();
       await harness.routes.delete.get('/api/terminal/:sessionId')({ params: { sessionId: 'term-1' } }, closed);
       expect(closed.body).toEqual({ success: true });
+    } finally { await harness.runtime.shutdown(); }
+  });
+
+  it('drops an unterminated control string from the replay and releases the pending state on exit', async () => {
+    const harness = createHarness();
+    try {
+      await harness.routes.post.get('/api/terminal/create')({ body: { sessionId: 'term-pending', cwd: '/repo' } }, createResponse());
+      const payload = 'p'.repeat(1024);
+      harness.processes[0].emitData('\u001b]0;');
+      for (let index = 0; index < 32; index += 1) harness.processes[0].emitData(payload);
+
+      const running = harness.runtime.__testing.sessionState('term-pending');
+      expect(running.status).toBe('running');
+      // The control string never terminates, so its bytes are carried, and the
+      // carried state stays inside the cap instead of growing with the stream.
+      expect(running.pendingControlSequenceUnits).toBe(4 + 32 * 1024);
+      expect(running.pendingControlSequenceUnits).toBeLessThanOrEqual(MAX_PENDING_CONTROL_SEQUENCE_UNITS);
+      // The control payload never reaches the replay history.
+      expect(running.history).toBe('');
+
+      harness.processes[0].emitExit(0);
+      const exited = harness.runtime.__testing.sessionState('term-pending');
+      expect(exited.status).toBe('exited');
+      // The pending control sequence is released together with the process.
+      expect(exited.pendingControlSequenceUnits).toBe(0);
+      expect(exited.history).toBe('');
+    } finally { await harness.runtime.shutdown(); }
+  });
+
+  it('drops a control sequence that crosses the cap from the replay and replays the text after it', async () => {
+    const harness = createHarness();
+    try {
+      await harness.routes.post.get('/api/terminal/create')({ body: { sessionId: 'term-overflow', cwd: '/repo' } }, createResponse());
+      const payload = 'p'.repeat(4096);
+      harness.processes[0].emitData('\u001b]0;');
+      for (let index = 0; index < 32; index += 1) harness.processes[0].emitData(payload);
+
+      const carried = harness.runtime.__testing.sessionState('term-overflow');
+      // The sequence crossed the cap, so it was dropped from the replay and
+      // the carried state stayed inside the cap.
+      expect(carried.pendingControlSequenceUnits).toBeLessThanOrEqual(MAX_PENDING_CONTROL_SEQUENCE_UNITS);
+      expect(carried.history).not.toContain(payload);
+
+      harness.processes[0].emitData('\u0007');
+      harness.processes[0].emitData('after the sequence');
+
+      const state = harness.runtime.__testing.sessionState('term-overflow');
+      // The parser resynchronised at the end of the dropped sequence, so the
+      // ordinary text after it is replayed again and nothing is carried.
+      expect(state.history).toContain('after the sequence');
+      expect(state.history).not.toContain(payload);
+      expect(state.pendingControlSequenceUnits).toBe(0);
     } finally { await harness.runtime.shutdown(); }
   });
 

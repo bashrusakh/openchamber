@@ -7,7 +7,7 @@ import {
   parseRequestPathname,
   readTerminalWsControlFrame,
 } from './terminal-ws-protocol.js';
-import { sanitizeTerminalHistoryChunk } from './history.js';
+import { consumeTerminalHistoryChunk, createTerminalHistoryParser } from './history.js';
 import { consumeTerminalThemeQueries, terminalThemeModeReport } from './theme-response.js';
 import { buildTerminalShellLaunch, createTerminalShellResolver, normalizeTerminalShell } from './shells.js';
 import { stripAppImageArgv0Leak, stripAppImageLauncherEnv, resolvePosixPtyLaunch } from '../inherited-env.js';
@@ -367,12 +367,20 @@ export function createTerminalRuntime({
           session.pendingThemeControlSequence = theme.pending;
           session.themeModeEnabled = theme.modeEnabled;
           for (const response of theme.responses) session.process?.write(response);
-          const sanitized = sanitizeTerminalHistoryChunk(session.pendingHistoryControlSequence, event.data);
-          session.pendingHistoryControlSequence = sanitized.pending;
-          appendHistory(session.history, sanitized.visible);
+          // A live session always owns a parser: create and restart install
+          // one, and the exit branch releases it, after which the event filter
+          // drops any later output for that process. The branch below is
+          // therefore defensive and not expected to run; it is here so that a
+          // missing parser cannot be dereferenced. It must not start a fresh
+          // parser: that would begin in text mode and replay the rest of a
+          // control string as printable text, which is what the parser exists
+          // to prevent. The raw output of the chunk is published unchanged
+          // either way.
+          const visible = session.historyParser ? consumeTerminalHistoryChunk(session.historyParser, event.data) : '';
+          appendHistory(session.history, visible);
           session.lastActivity = Date.now();
           const output = session.pendingOutput ??= { raw: [], replay: [], chars: 0 };
-          output.raw.push(event.data); output.replay.push(sanitized.visible); output.chars += event.data.length;
+          output.raw.push(event.data); output.replay.push(visible); output.chars += event.data.length;
           if (output.chars >= MAX_OUTPUT_BATCH_CHARS) flushOutput(session);
           else if (!session.outputTimer) { flushOutput(session); openOutputWindow(session); }
         } else {
@@ -381,6 +389,9 @@ export function createTerminalRuntime({
           session.exitCode = Number.isInteger(event.exitCode) ? event.exitCode : null;
           session.signal = Number.isInteger(event.signal) ? event.signal : null;
           session.process = null;
+          // The control sequence that is still in progress is dropped with the
+          // process: an exited session must not keep the carried bytes alive.
+          session.historyParser = null;
           publish(session, { t: 'exit', exitCode: session.exitCode, signal: session.signal });
         }
       }
@@ -419,7 +430,7 @@ export function createTerminalRuntime({
   const startSession = async (session, { cwd, cols, rows, themeMode = 'dark', terminalBackground, terminalForeground, shell, loginShell, mode = INTERACTIVE_TERMINAL_MODE, command = null, purpose = TERMINAL_PURPOSE }, clear = true) => {
     await validateCwd(cwd);
     const spawned = await spawnPty({ cwd, cols, rows, themeMode, shell, loginShell, mode, command });
-    if (clear) { discardOutput(session); session.history = newHistory(); session.pendingHistoryControlSequence = ''; session.pendingThemeControlSequence = ''; session.themeModeEnabled = false; }
+    if (clear) { discardOutput(session); session.history = newHistory(); session.historyParser = createTerminalHistoryParser(); session.pendingThemeControlSequence = ''; session.themeModeEnabled = false; }
     session.retired = false;
     session.cwd = cwd; session.cols = cols; session.rows = rows; session.process = spawned.process;
     session.backend = spawned.backend; session.shell = spawned.shell; session.loginShell = spawned.loginShell; session.status = 'running'; session.exitCode = null; session.signal = null;
@@ -484,7 +495,7 @@ export function createTerminalRuntime({
     if (!existing && sessions.size - superseded.length + pendingSessionCreates.size >= MAX_SESSIONS) throw new Error('Maximum terminal sessions reached');
     const pendingEntry = { cwd: resolvedCwd, shell: normalizedShell, loginShell, mode: launchMode.mode, command: launchMode.command, purpose: normalizedPurpose, cancelled: false, promise: null };
     const creation = (async () => {
-      const session = existing ?? { id, sequence: 0, history: newHistory(), pendingHistoryControlSequence: '', pendingThemeControlSequence: '', eventQueue: [], draining: false, createdAt: Date.now() };
+      const session = existing ?? { id, sequence: 0, history: newHistory(), historyParser: createTerminalHistoryParser(), pendingThemeControlSequence: '', eventQueue: [], draining: false, createdAt: Date.now() };
       const ptyProcess = await startSession(session, { cwd, cols, rows, themeMode, terminalBackground, terminalForeground, shell: normalizedShell, loginShell, mode: launchMode.mode, command: launchMode.command, purpose: normalizedPurpose });
       if (pendingEntry.cancelled) {
         session.retired = true;
@@ -694,7 +705,7 @@ export function createTerminalRuntime({
       session.process = spawned.process; session.backend = spawned.backend; session.shell = spawned.shell; session.loginShell = spawned.loginShell; session.cwd = cwd; session.cols = cols; session.rows = rows;
       session.shellExecutable = spawned.shellExecutable;
       flushOutput(session);
-      session.history = newHistory(); session.pendingHistoryControlSequence = ''; session.pendingThemeControlSequence = ''; session.themeModeEnabled = false; session.status = 'running'; session.exitCode = null; session.signal = null; session.eventQueue.length = 0;
+      session.history = newHistory(); session.historyParser = createTerminalHistoryParser(); session.pendingThemeControlSequence = ''; session.themeModeEnabled = false; session.status = 'running'; session.exitCode = null; session.signal = null; session.eventQueue.length = 0;
       session.themeMode = themeMode === 'light' ? 'light' : 'dark'; session.terminalBackground = terminalBackground; session.terminalForeground = terminalForeground;
       wire(session, spawned.process); void terminateProcess(oldProcess); publish(session, { t: 'restarted', history: '' });
     });
@@ -771,5 +782,21 @@ export function createTerminalRuntime({
     if (!shutdownPromise) shutdownPromise = stop();
     return shutdownPromise;
   };
-  return { shutdown };
+  return {
+    shutdown,
+    // Read-only view of one live session. The carried control-sequence state
+    // and the replay history are internal to the runtime, so the tests read
+    // them from here instead of reaching into the session records.
+    __testing: {
+      sessionState: (sessionId) => {
+        const session = sessions.get(sessionId);
+        if (!session) return null;
+        return {
+          status: session.status,
+          pendingControlSequenceUnits: session.historyParser?.units ?? 0,
+          history: historyText(session.history),
+        };
+      },
+    },
+  };
 }
