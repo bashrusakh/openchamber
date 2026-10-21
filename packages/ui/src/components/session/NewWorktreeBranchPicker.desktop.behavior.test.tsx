@@ -135,4 +135,31 @@ describe('NewWorktreeBranchPicker desktop dropdown', () => {
       expect(document.querySelector('input[data-slot="command-input"]') === null).toBe(true);
     });
   });
+
+  test('Escape during IME composition leaves the dropdown open', async () => {
+    await openDesktopDropdown(async (search) => {
+      // Base UI's dismiss handling sits on the popup and on the document
+      // (useDismiss attaches it to both). The dropdown staying open is what
+      // shows that the popup's handler never saw the key; the document
+      // listener shows it never travelled past the field's own handler either.
+      const seen: string[] = [];
+      const listener = (event: Event) => seen.push((event as KeyboardEvent).key);
+      document.addEventListener('keydown', listener);
+      try {
+        await act(async () => {
+          const event = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+          // The native event reports a composition in progress, the shape the
+          // app's own composition check reads.
+          Object.defineProperty(event, 'isComposing', { value: true });
+          search.dispatchEvent(event);
+        });
+      } finally {
+        document.removeEventListener('keydown', listener);
+      }
+      // The composition owns this Escape: it stops at the field, so the
+      // dropdown stays open and the key never reaches the dismiss handling.
+      expect(seen).toEqual([]);
+      expect(document.querySelector('[data-slot="dropdown-menu-content"]') !== null).toBe(true);
+    });
+  });
 });

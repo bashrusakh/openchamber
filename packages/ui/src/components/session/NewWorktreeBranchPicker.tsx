@@ -17,6 +17,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { dropdownTriggerVariants } from '@/components/ui/dropdown-trigger';
+import { shouldDismissDropdown } from '@/components/ui/dropdown-navigation';
 import { Input } from '@/components/ui/input';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
 import { useI18n } from '@/lib/i18n';
@@ -189,8 +190,10 @@ export function NewWorktreeBranchPicker({
             onValueChange={setQuery}
             // Typing must reach the search field, not the menu's typeahead.
             // Escape is the exception: Base UI closes the menu on Escape from
-            // a document-level listener, so the key has to travel past here.
-            onKeyDown={(event) => { if (event.key !== 'Escape') event.stopPropagation(); }}
+            // a document-level listener, so the key has to travel past here —
+            // but only when it means "dismiss". During IME composition the same
+            // key cancels the composition, so it stops here like any other key.
+            onKeyDown={(event) => { if (!shouldDismissDropdown(event)) event.stopPropagation(); }}
           />
           <CommandList disableHorizontal>
             {status ? (
