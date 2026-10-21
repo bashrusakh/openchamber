@@ -584,10 +584,9 @@ export function ProjectPickerSheet({
         <MobileOverlayPanel open={open} title={title} onClose={onClose}>
             <div className="flex flex-col gap-2 px-3 pb-4 pt-1">
                 <Input
-                    // The sheet has no popup focus manager, so the search field
-                    // asks for the focus. It mounts in the commit the opening
-                    // tap causes, the only window where the focus still raises
-                    // the keyboard in an installed iOS PWA.
+                    // The sheet has no popup focus manager of its own, so the
+                    // search field asks for the focus itself; see
+                    // MobileOverlayPanel for the shared rule.
                     autoFocus
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
@@ -675,10 +674,9 @@ export function MobileDraftTargetSheets(
             >
                 <div className="flex flex-col gap-2 px-3 pb-4 pt-1">
                     <Input
-                        // The sheet has no popup focus manager, so the search
-                        // field asks for the focus. It mounts in the commit the
-                        // opening tap causes, the only window where the focus
-                        // still raises the keyboard in an installed iOS PWA.
+                        // The sheet has no popup focus manager of its own, so the
+                        // search field asks for the focus itself; see
+                        // MobileOverlayPanel for the shared rule.
                         autoFocus
                         value={branchQuery}
                         onChange={(event) => setBranchQuery(event.target.value)}

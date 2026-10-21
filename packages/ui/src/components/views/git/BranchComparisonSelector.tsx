@@ -57,9 +57,8 @@ export function BranchComparisonSelector({ branches, currentBranch, base, onSele
       if (event.key !== 'Escape') event.stopPropagation();
     }}>
       <CommandInput
-        // The sheet has no popup focus manager, so the search field asks for
-        // the focus. The dropdown path already focused it; asking for it
-        // explicitly keeps both surfaces owned here.
+        // The sheet has no popup focus manager of its own, so the search field
+        // asks for the focus itself; see MobileOverlayPanel for the shared rule.
         autoFocus
         className={mobile ? 'h-11' : undefined}
         value={search}

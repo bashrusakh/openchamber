@@ -593,6 +593,9 @@ const SourceBoardBody: React.FC<{
     const search = (
         <ReferenceBrowserSearch
             browser={browser}
+            // The board's field is always on screen, so on the phone it must not
+            // ask for the focus: the keyboard would come up with the board.
+            autoFocus={!isMobile}
             onKeyDown={(event) => {
                 if (narrow) {
                     // Typing or arrows show the results; Enter keeps the one picked.

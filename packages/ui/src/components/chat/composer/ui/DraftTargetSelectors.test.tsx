@@ -11,7 +11,7 @@ import { MobileDraftTargetSheets } from './DraftTargetSelectors';
 
 const project: DraftTargetProject = { id: 'p1', path: '/repo', label: 'repo', kind: 'project' };
 
-const renderBranchSheet = async (onCreateCustomWorktree?: () => void) => {
+const renderSheet = async (openPicker: 'branch' | 'project', onCreateCustomWorktree?: () => void) => {
     const win = new Window({ url: 'http://localhost' });
     const values = {
         window: win,
@@ -27,7 +27,7 @@ const renderBranchSheet = async (onCreateCustomWorktree?: () => void) => {
     document.body.appendChild(container);
     const root = createRoot(container);
     let pickerChanges = 0;
-    let pickerOpen: string | null = 'branch';
+    let pickerOpen: string | null = openPicker;
     await act(async () => root.render(
         <I18nProvider>
             <MobileDraftTargetSheets
@@ -45,7 +45,7 @@ const renderBranchSheet = async (onCreateCustomWorktree?: () => void) => {
                 onDirectoryChange={() => {}}
                 onCreateCustomWorktree={onCreateCustomWorktree}
                 theme={themes[0]}
-                openPicker="branch"
+                openPicker={openPicker}
                 onOpenPickerChange={(next) => { pickerChanges += 1; pickerOpen = next; }}
             />
         </I18nProvider>,
@@ -56,7 +56,7 @@ const renderBranchSheet = async (onCreateCustomWorktree?: () => void) => {
 
 describe('draft worktree actions', () => {
     test('the branch sheet focuses its search field', async () => {
-        const { root } = await renderBranchSheet();
+        const { root } = await renderSheet('branch');
         // The sheet focuses its search field, so typing filters the list right
         // away. Compared as text, not as DOM nodes: matching two DOM nodes with
         // expect(...).toBe(...) never returns when they differ.
@@ -67,9 +67,21 @@ describe('draft worktree actions', () => {
         await act(async () => root.unmount());
     });
 
+    test('the project sheet focuses its search field', async () => {
+        const { root } = await renderSheet('project');
+        // The sheet focuses its search field, so typing filters the list right
+        // away. Compared as text, not as DOM nodes: matching two DOM nodes with
+        // expect(...).toBe(...) never returns when they differ.
+        const search = document.querySelector<HTMLInputElement>('input[placeholder="Search projects..."]');
+        expect(search).not.toBeNull();
+        expect(document.activeElement?.getAttribute('placeholder')).toBe('Search projects...');
+        expect(document.activeElement === search).toBe(true);
+        await act(async () => root.unmount());
+    });
+
     test('offer a quick worktree and the dialog, and the dialog entry closes the sheet', async () => {
         let opened = 0;
-        const { root, picker, button } = await renderBranchSheet(() => { opened += 1; });
+        const { root, picker, button } = await renderSheet('branch', () => { opened += 1; });
         expect(button('Quick worktree')).not.toBeNull();
         const custom = button('New worktree…');
         expect(custom).not.toBeNull();
@@ -80,7 +92,7 @@ describe('draft worktree actions', () => {
     });
 
     test('leave the dialog entry out where the draft cannot open it', async () => {
-        const { root, button } = await renderBranchSheet();
+        const { root, button } = await renderSheet('branch');
         expect(button('Quick worktree')).not.toBeNull();
         expect(button('New worktree…')).toBeNull();
         await act(async () => root.unmount());

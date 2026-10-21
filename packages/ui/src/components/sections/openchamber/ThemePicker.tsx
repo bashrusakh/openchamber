@@ -34,16 +34,6 @@ interface ThemePickerProps {
 }
 
 /**
- * Searchable theme picker for the Appearance page. A plain Select becomes
- * unusable once the list holds dozens of built-in and imported themes, so the
- * popup owns a search field and a ranked list; imported themes keep their
- * inline delete action. Mobile gets the same list in a bottom sheet, whose
- * search field takes the focus when the sheet opens: the sheet has no popup
- * focus manager of its own, and a focus that lands in the commit the opening
- * tap causes is the only one that still raises the keyboard in an installed
- * iOS PWA.
- */
-/**
  * Put the row for `id` in the middle of its cmdk scroller. Rectangles are
  * divided by the popup's entrance scale so this works while the popup is still
  * animating in; scrollTop itself is in unscaled layout pixels.
@@ -67,6 +57,16 @@ const centerRow = (command: Element | null | undefined, id: string, options?: { 
   list.scrollTop = Math.max(0, rowTop - (list.clientHeight - rowHeight) / 2);
 };
 
+/**
+ * Searchable theme picker for the Appearance page. A plain Select becomes
+ * unusable once the list holds dozens of built-in and imported themes, so the
+ * popup owns a search field and a ranked list; imported themes keep their
+ * inline delete action. Mobile gets the same list in a bottom sheet, whose
+ * search field takes the focus when the sheet opens: the sheet has no popup
+ * focus manager of its own, and a focus that lands in the commit the opening
+ * tap causes is the only one that still raises the keyboard in an installed
+ * iOS PWA.
+ */
 export function ThemePicker({ options, value, onValueChange, placeholder, ariaLabel }: ThemePickerProps) {
   const { t } = useI18n();
   const { deleteImportedTheme, customThemeIds } = useThemeSystem();
@@ -179,10 +179,9 @@ export function ThemePicker({ options, value, onValueChange, placeholder, ariaLa
         <MobileOverlayPanel open={open} title={ariaLabel} onClose={() => setOpen(false)}>
           <div className="flex flex-col gap-2 px-3 pb-4 pt-1">
             <Input
-              // The sheet has no popup focus manager, so the search field asks
-              // for the focus. It mounts in the commit the opening tap causes,
-              // the only window where the focus still raises the keyboard in an
-              // installed iOS PWA.
+              // The sheet has no popup focus manager of its own, so the search
+              // field asks for the focus itself; see MobileOverlayPanel for the
+              // shared rule.
               autoFocus
               // The delete action takes the focus with it; the ref the popover
               // uses puts the caret back in the field.

@@ -235,7 +235,7 @@ export const SourceBoardRepositoryPicker: React.FC<{
                 </Button>
                 <MobileOverlayPanel open={open} title={ariaLabel} onClose={() => { setOpen(false); setQuery(''); }}>
                     <div className="flex flex-col gap-2 px-3 pb-4 pt-1">
-                        {/* The popover path focuses the field on open-complete; the sheet has no popup, so the field asks for the focus itself. */}
+                        {/* The sheet has no popup focus manager of its own, so the search field asks for the focus itself; see MobileOverlayPanel for the shared rule. */}
                         <Input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} aria-label={searchLabel} placeholder={searchLabel} className="h-9" />
                         <div className="flex flex-col">
                             {entries.length === 0 ? (

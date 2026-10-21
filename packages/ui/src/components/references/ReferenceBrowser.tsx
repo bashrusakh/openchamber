@@ -131,11 +131,19 @@ const ReferenceFilterMenu: React.FC<{ browser: ReferenceBrowser }> = ({ browser 
     );
 };
 
-/** The search field, taking the room it is given, and the filter beside it. */
+/**
+ * The search field, taking the room it is given, and the filter beside it.
+ *
+ * `autoFocus` says whether the field asks for the focus when it mounts. The
+ * picker sheet wants it: it opens to filter a list. The source board does not
+ * on the phone: its field is always on screen, so the focus would arrive with
+ * the keyboard the moment the board opens.
+ */
 export const ReferenceBrowserSearch: React.FC<{
     browser: ReferenceBrowser;
     onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => void;
-}> = ({ browser, onKeyDown }) => {
+    autoFocus: boolean;
+}> = ({ browser, onKeyDown, autoFocus }) => {
     const { t } = useI18n();
     const { source, isGitLab, isMobile, list, query, searchRef } = browser;
     const placeholder = t(source === 'linear' ? 'references.picker.search.linear' : isGitLab ? 'references.picker.search.gitlab' : 'references.picker.search.github');
@@ -149,7 +157,7 @@ export const ReferenceBrowserSearch: React.FC<{
                 <Icon name="search" className="pointer-events-none absolute inset-s-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                     ref={searchRef}
-                    autoFocus={!isMobile}
+                    autoFocus={autoFocus}
                     value={query}
                     onChange={(event) => browser.setQuery(event.target.value)}
                     onKeyDown={onKeyDown}

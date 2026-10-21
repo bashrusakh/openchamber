@@ -2134,10 +2134,9 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                         <div className="relative">
                             <Icon name="search" className="absolute inset-s-2 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
                             <Input
-                                // The sheet has no popup focus manager, so the search field asks
-                                // for the focus. It mounts in the commit the opening tap causes,
-                                // the only window where the focus still raises the keyboard in an
-                                // installed iOS PWA.
+                                // The sheet has no popup focus manager of its own, so the
+                                // search field asks for the focus itself; see
+                                // MobileOverlayPanel for the shared rule.
                                 autoFocus
                                 value={mobileModelQuery}
                                 onChange={(event) => {

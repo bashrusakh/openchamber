@@ -131,9 +131,8 @@ export function NewWorktreeBranchPicker({
           <div className="space-y-4" ref={mobileListRef}>
             <Input
               // The sheet has no popup focus manager of its own, so the search
-              // field asks for the focus. It mounts in the same commit as the
-              // tap that opened the sheet, which is the only window where a
-              // focus still raises the keyboard in an installed iOS PWA.
+              // field asks for the focus itself; see MobileOverlayPanel for the
+              // shared rule.
               autoFocus
               value={query}
               onChange={(event) => setQuery(event.target.value)}

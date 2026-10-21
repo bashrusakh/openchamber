@@ -149,7 +149,16 @@ function ReferencePickerSurface({
     };
 
     const tabs = <ReferenceBrowserTabs browser={browser} />;
-    const searchAndFilters = <ReferenceBrowserSearch browser={browser} onKeyDown={handleSearchKeyDown} />;
+    const searchAndFilters = (
+        <ReferenceBrowserSearch
+            browser={browser}
+            onKeyDown={handleSearchKeyDown}
+            // The sheet has no popup focus manager of its own, so the search
+            // field asks for the focus itself; see MobileOverlayPanel for the
+            // shared rule.
+            autoFocus
+        />
+    );
     const listBody = (
         <ReferenceBrowserList
             browser={browser}
