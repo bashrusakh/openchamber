@@ -55,6 +55,18 @@ const renderBranchSheet = async (onCreateCustomWorktree?: () => void) => {
 };
 
 describe('draft worktree actions', () => {
+    test('the branch sheet focuses its search field', async () => {
+        const { root } = await renderBranchSheet();
+        // The sheet focuses its search field, so typing filters the list right
+        // away. Compared as text, not as DOM nodes: matching two DOM nodes with
+        // expect(...).toBe(...) never returns when they differ.
+        const search = document.querySelector<HTMLInputElement>('input[placeholder="Search branches..."]');
+        expect(search).not.toBeNull();
+        expect(document.activeElement?.getAttribute('placeholder')).toBe('Search branches...');
+        expect(document.activeElement === search).toBe(true);
+        await act(async () => root.unmount());
+    });
+
     test('offer a quick worktree and the dialog, and the dialog entry closes the sheet', async () => {
         let opened = 0;
         const { root, picker, button } = await renderBranchSheet(() => { opened += 1; });

@@ -37,9 +37,11 @@ interface ThemePickerProps {
  * Searchable theme picker for the Appearance page. A plain Select becomes
  * unusable once the list holds dozens of built-in and imported themes, so the
  * popup owns a search field and a ranked list; imported themes keep their
- * inline delete action. Mobile gets the same list in a bottom sheet with
- * the search field left unfocused, so opening the picker never pops the
- * keyboard.
+ * inline delete action. Mobile gets the same list in a bottom sheet, whose
+ * search field takes the focus when the sheet opens: the sheet has no popup
+ * focus manager of its own, and a focus that lands in the commit the opening
+ * tap causes is the only one that still raises the keyboard in an installed
+ * iOS PWA.
  */
 /**
  * Put the row for `id` in the middle of its cmdk scroller. Rectangles are
@@ -182,6 +184,9 @@ export function ThemePicker({ options, value, onValueChange, placeholder, ariaLa
               // the only window where the focus still raises the keyboard in an
               // installed iOS PWA.
               autoFocus
+              // The delete action takes the focus with it; the ref the popover
+              // uses puts the caret back in the field.
+              ref={searchRef}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder={t('settings.openchamber.visual.field.searchThemes')}

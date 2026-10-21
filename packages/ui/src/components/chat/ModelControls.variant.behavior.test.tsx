@@ -920,6 +920,28 @@ describe('ModelControls effort restore', () => {
     });
   }
 
+  test('the mobile model sheet focuses its search field', async () => {
+    useUIStore.setState({ isMobile: true, isModelSelectorOpen: true });
+    useSessionUIStore.setState({ currentSessionId: null });
+    useConfigStore.setState({
+      providers: [provider], providersLoaded: true, agents: [agent], agentsLoaded: true, settingsDefaultsLoaded: true,
+      currentProviderId: PROVIDER_ID, currentModelId: MODEL_ID, currentAgentName: AGENT, currentVariant: undefined,
+    });
+    const { dom, cleanup } = await renderModelControls();
+    try {
+      await act(async () => dom.container.querySelector<HTMLButtonElement>('.model-controls__model-trigger')?.click());
+      // The sheet focuses its search field, so typing filters the list right
+      // away. Compared as text, not as DOM nodes: matching two DOM nodes with
+      // expect(...).toBe(...) never returns when they differ.
+      const search = dom.container.querySelector<HTMLInputElement>('input[placeholder="Search providers or models"]');
+      expect(search).not.toBeNull();
+      expect(document.activeElement?.getAttribute('placeholder')).toBe('Search providers or models');
+      expect(document.activeElement === search).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
   describe('following the session agent', () => {
     const OTHER_MODEL_ID = 'gpt-other';
     const recordOn = (agentName: string) => ({

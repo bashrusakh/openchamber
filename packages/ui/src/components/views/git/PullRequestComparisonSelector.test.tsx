@@ -101,7 +101,13 @@ const checkPullRequestSelection = async (mobile: boolean, tablet = false) => {
     expect(requestCount).toBe(1);
     expect(container.querySelector('[data-picker="changes"] output')?.textContent).toBe('upstream');
     await act(async () => trigger('changes').click());
-    if (mobile && !tablet) expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    if (mobile && !tablet) {
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      // The sheet focuses its search field, so typing filters the list right
+      // away. Compared as text, not as DOM nodes: matching two DOM nodes with
+      // expect(...).toBe(...) never returns when they differ.
+      expect(document.activeElement?.getAttribute('data-slot')).toBe('command-input');
+    }
     else expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(document.querySelectorAll('[cmdk-item]')).toHaveLength(2);
     const loadMore = [...document.querySelectorAll('button')].find((button) => button.textContent === 'Load more');
