@@ -4,6 +4,7 @@ import { linearIssuePickerI18n } from './linear-issue-picker.i18n';
 import { referencePickerI18n } from './reference-picker.i18n';
 import { repositoryDiscussionsI18n } from './repository-discussions.i18n';
 import { sessionMenuHintsI18n } from './session-menu-hints.i18n';
+import { exportDocumentI18n } from './export-document.i18n';
 import { projectKnowledgeI18n } from './project-knowledge.i18n';
 import { linearPanelI18n } from './linear-panel.i18n';
 import { routingI18n } from './routing.i18n';
@@ -152,6 +153,7 @@ export const dict: Record<I18nKey, string> = {
   ...referencePickerI18n.pl,
   ...repositoryDiscussionsI18n.pl,
   ...sessionMenuHintsI18n.pl,
+  ...exportDocumentI18n.pl,
   ...projectKnowledgeI18n.pl,
   ...linearPanelI18n.pl,
   ...routingI18n.pl,
@@ -554,7 +556,7 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.menu.copied': 'Skopiowano',
   'sessions.sidebar.session.menu.copyLink': 'Kopiuj link',
   'sessions.sidebar.session.menu.unshare': 'Cofnij udostępnienie',
-  'sessions.sidebar.session.menu.exportMarkdown': 'Eksportuj Markdown',
+  'sessions.sidebar.session.menu.exportSession': 'Eksportuj sesję',
   'sessions.sidebar.session.menu.moveToWorktree': 'Przenieś do nowego worktree',
   'sessions.sidebar.session.menu.moveToWorktreeTargets': 'Przenieś do worktree',
   'sessions.sidebar.session.menu.newWorktree': 'Nowy worktree...',
@@ -577,10 +579,9 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.export.failedLoadHistory': 'Nie udało się wczytać pełnej historii sesji',
   'sessions.sidebar.session.export.success': 'Sesja wyeksportowana',
   'sessions.sidebar.session.export.failedRevealPath': 'Nie udało się ujawnić ścieżki',
-  'sessions.sidebar.session.export.untitledSubagent': 'Nienazwane Pod-agent',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'Wyeksportowano sesję, ale pominięto {count} pod-agenta, którego nie można załadować.',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'Wyeksportowano sesję, ale pominięto {count} pod-agentów, których nie można załadować.',
-  'sessions.sidebar.session.export.dialog.title': 'Eksportuj Markdown',
+  'sessions.sidebar.session.export.dialog.title': 'Eksportuj sesję',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'Ta sesja ma {count} pod-agenta. Czy dołączyć go do eksportu?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'Ta sesja ma {count} pod-agentów. Czy dołączyć je do eksportu?',
   'sessions.sidebar.bulkActions.delete': 'Usuń',
@@ -762,6 +763,13 @@ export const dict: Record<I18nKey, string> = {
   'multirun.fusion.toast.failed': 'Nie udało się uruchomić fusion.',
   'sessions.sidebar.session.export.dialog.includeSubtasks': 'Dołącz pod-agentów',
   'sessions.sidebar.session.export.dialog.confirm': 'Eksportuj',
+  'sessions.sidebar.session.export.dialog.descriptionNoSubtasks': 'Eksport to czytelny zapis rozmowy, z pracą pod-agentów na właściwym miejscu.',
+  'sessions.sidebar.session.export.dialog.format': 'Format',
+  'sessions.sidebar.session.export.dialog.detail': 'Szczegółowość',
+  'sessions.sidebar.session.export.dialog.detailReadable': 'Czytelny',
+  'sessions.sidebar.session.export.dialog.detailReadableHint': 'Rozmowa. Długie wyniki narzędzi są skracane i oznaczane.',
+  'sessions.sidebar.session.export.dialog.detailFull': 'Pełne szczegóły',
+  'sessions.sidebar.session.export.dialog.detailFullHint': 'Każde wejście, wyjście i wynik narzędzi w całości.',
   'sessions.sidebar.session.status.active': 'Sesja aktywna',
   'sessions.sidebar.session.status.unread': 'Nieprzeczytane aktualizacje',
   'sessions.sidebar.session.status.backgroundSubagent': 'Subagent działa w tle',
