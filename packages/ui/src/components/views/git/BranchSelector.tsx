@@ -70,8 +70,12 @@ export const BranchSelector: React.FC<BranchSelectorProps> = ({
   const [unpushedCounts, setUnpushedCounts] = React.useState<Record<string, number>>({});
   const createInputRef = React.useRef<HTMLInputElement>(null);
 
-  const stopDropdownTypeahead = React.useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
-    event.stopPropagation();
+  const stopDropdownTypeahead = React.useCallback((event: React.KeyboardEvent<HTMLElement>) => {
+    // Typing must reach the search field, not the menu's typeahead, so the key
+    // stops here. Escape is the exception: it has to reach Base UI's own
+    // dismiss handling to close the dropdown. The handler sits on the cmdk
+    // root, where cmdk's own key handling still runs.
+    if (event.key !== 'Escape') event.stopPropagation();
   }, []);
 
   const sanitizedNewBranch = React.useMemo(
@@ -270,7 +274,7 @@ export const BranchSelector: React.FC<BranchSelectorProps> = ({
       <DropdownMenuContent align="start" className="w-72 p-0 max-h-[60vh] flex flex-col">
         {/* Filtering and ordering are owned by rankByQuery above; cmdk's own
             filter would re-filter and reorder the already-ranked rows. */}
-        <Command className="h-full min-h-0" shouldFilter={false}>
+        <Command className="h-full min-h-0" shouldFilter={false} onKeyDown={stopDropdownTypeahead}>
           <CommandInput
             // The popup's focus manager cannot reach this field, so the search
             // field asks for the focus itself; see dropdown-menu for the shared
@@ -279,7 +283,6 @@ export const BranchSelector: React.FC<BranchSelectorProps> = ({
             placeholder={t('gitView.branch.searchPlaceholder')}
             value={search}
             onValueChange={setSearch}
-            onKeyDown={stopDropdownTypeahead}
           />
           {switchBlockedNotice ? (
             <div className="flex items-start gap-2 border-b border-border/60 px-3 py-2">

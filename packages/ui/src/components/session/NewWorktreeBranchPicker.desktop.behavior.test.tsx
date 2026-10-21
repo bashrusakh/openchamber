@@ -11,7 +11,7 @@ import { Window } from 'happy-dom';
  * The renderer-probe bootstrap the sibling mobile test uses leaves the menu
  * closed under happy-dom, so the desktop surface needs this one.
  */
-test('the desktop dropdown asks for the focus itself, not the popup focus manager', async () => {
+const openDesktopDropdown = async (run: (input: HTMLInputElement) => Promise<void>) => {
   const dom = new Window({ url: 'http://localhost' });
   const originals = new Map<string, PropertyDescriptor | undefined>();
   const globals = {
@@ -86,11 +86,8 @@ test('the desktop dropdown asks for the focus itself, not the popup focus manage
 
     const search = document.querySelector<HTMLInputElement>('input[data-slot="command-input"]');
     if (!search) throw new Error('Missing branch search input');
+    await run(search);
     expect(focusedWhenPopupLanded).toBe('command-input');
-    // Compared as text, not as DOM nodes: matching two DOM nodes with
-    // expect(...).toBe(...) never returns when they differ.
-    expect(document.activeElement?.getAttribute('data-slot')).toBe('command-input');
-    expect(document.activeElement === search).toBe(true);
   } finally {
     await act(async () => root.unmount());
     await dom.happyDOM.abort();
@@ -99,4 +96,43 @@ test('the desktop dropdown asks for the focus itself, not the popup focus manage
       else Reflect.deleteProperty(globalThis, name);
     }
   }
+};
+
+test('the desktop dropdown asks for the focus itself, not the popup focus manager', async () => {
+  await openDesktopDropdown(async (search) => {
+    // Compared as text, not as DOM nodes: matching two DOM nodes with
+    // expect(...).toBe(...) never returns when they differ.
+    expect(document.activeElement?.getAttribute('data-slot')).toBe('command-input');
+    expect(document.activeElement === search).toBe(true);
+  });
 });
+
+test('Escape closes the desktop dropdown while the search field holds the focus', async () => {
+  await openDesktopDropdown(async (search) => {
+    expect(document.activeElement === search).toBe(true);
+    await act(async () => {
+      search.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    });
+    // Base UI closes the menu on Escape from a document-level listener, so the
+    // key has to travel past the field's own handler to reach it.
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 50)); });
+    // Compared as booleans, not as DOM nodes: matching a DOM node with
+    // expect(...).toBeNull() never returns when the node is there.
+    expect(document.querySelector('[data-slot="dropdown-menu-content"]') === null).toBe(true);
+    expect(document.querySelector('input[data-slot="command-input"]') === null).toBe(true);
+  });
+});
+
+test('ArrowDown moves the active item while the search field holds the focus', async () => {
+  await openDesktopDropdown(async (search) => {
+    // The field's own handler stops the key for the menu's typeahead, but it
+    // sits on the cmdk root, so cmdk's own key handling still runs.
+    const activeItem = () => document.querySelector('[cmdk-item][data-selected="true"]')?.getAttribute('data-value') ?? null;
+    const before = activeItem();
+    await act(async () => {
+      search.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    });
+    expect(activeItem()).not.toBe(before);
+  });
+});
+

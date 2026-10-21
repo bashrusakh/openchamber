@@ -34,6 +34,17 @@ const ensureOverlayRoot = () => {
   return root;
 };
 
+/**
+ * The panel that hosts the mobile sheets.
+ *
+ * The focus contract for the sheets it hosts: the panel is a container and
+ * focuses nothing itself, so a sheet that filters a list asks for the focus
+ * in its own search field. The panel cannot make that call: it cannot tell a
+ * search field from the first field of a form or a row of action buttons. The
+ * ask has to land in the commit the opening tap causes, because a focus
+ * deferred to a later task does not raise the software keyboard in an
+ * installed iOS PWA.
+ */
 export const MobileOverlayPanel: React.FC<MobileOverlayPanelProps> = ({
   open,
   title,
@@ -88,14 +99,6 @@ export const MobileOverlayPanel: React.FC<MobileOverlayPanelProps> = ({
       window.dispatchEvent(new Event('oc:mobile-overlay-closed'));
     };
   }, [open]);
-
-  // The focus contract for the sheets this panel hosts: the panel is a
-  // container and focuses nothing itself, so a sheet that filters a list asks
-  // for the focus in its own search field. The panel cannot make that call:
-  // it cannot tell a search field from the first field of a form or a row of
-  // action buttons. The ask has to land in the commit the opening tap causes,
-  // because a focus deferred to a later task does not raise the software
-  // keyboard in an installed iOS PWA.
 
   // One stable closer per panel: it is this panel's identity in the back
   // layer stack, and always calls the latest onClose.

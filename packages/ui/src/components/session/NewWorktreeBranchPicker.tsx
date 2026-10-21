@@ -182,7 +182,14 @@ export function NewWorktreeBranchPicker({
         className="flex max-h-[min(var(--available-height),24rem)] w-[var(--anchor-width)] min-w-[16rem] flex-col overflow-hidden p-0"
         ref={desktopContentRef}
       >
-        <Command shouldFilter={false}>
+        <Command
+          shouldFilter={false}
+          // Typing must reach the search field, not the menu's typeahead, so
+          // the key stops here. Escape is the exception: it has to reach
+          // Base UI's own dismiss handling to close the dropdown. The handler
+          // sits on the cmdk root, where cmdk's own key handling still runs.
+          onKeyDown={(event) => { if (event.key !== 'Escape') event.stopPropagation(); }}
+        >
           <CommandInput
             // Base UI's popup focus manager would focus this field anyway;
             // asking for it explicitly keeps both surfaces owned here.
@@ -190,8 +197,6 @@ export function NewWorktreeBranchPicker({
             placeholder={t('session.newWorktree.searchBranches')}
             value={query}
             onValueChange={setQuery}
-            // Typing must reach the search field, not the menu's typeahead.
-            onKeyDown={(event) => event.stopPropagation()}
           />
           <CommandList disableHorizontal>
             {status ? (

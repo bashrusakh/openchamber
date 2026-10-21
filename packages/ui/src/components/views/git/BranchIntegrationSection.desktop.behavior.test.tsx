@@ -3,18 +3,20 @@ import { expect, test } from 'bun:test';
 import { Window } from 'happy-dom';
 
 /**
- * The desktop integrate-branch dropdown asks for the focus in its search field.
+ * The desktop integrate-branch dropdown asks for the focus in its search
+ * field, and Escape still closes it.
  *
- * The assertion is made at the moment the popup lands, and it discriminates
- * in happy-dom: Base UI's focus manager focuses the field a frame later, so
- * without the explicit request the field is not focused at that moment.
+ * The focus assertion is made at the moment the popup lands, and it
+ * discriminates in happy-dom: Base UI's focus manager focuses the field a
+ * frame later, so without the explicit request the field is not focused at
+ * that moment.
  *
  * It is not a measurement of the browser's tabbable scan — happy-dom has no
  * checkVisibility(), so it cannot model the `display: contents` portal root
  * that stops the manager from reaching the field in a real browser (see
  * dropdown-menu). The assertion covers the request, not the scan.
  */
-test('the desktop integrate-branch dropdown asks for the focus in its search field', async () => {
+const openDesktopDropdown = async (run: (input: HTMLInputElement) => Promise<void>) => {
   const dom = new Window({ url: 'http://localhost' });
   const originals = new Map<string, PropertyDescriptor | undefined>();
   const globals = {
@@ -92,10 +94,7 @@ test('the desktop integrate-branch dropdown asks for the focus in its search fie
     const search = document.querySelector<HTMLInputElement>('input[data-slot="command-input"]');
     if (!search) throw new Error('Missing branch search input');
     expect(focusedWhenPopupLanded).toBe('command-input');
-    // Compared as text, not as DOM nodes: matching two DOM nodes with
-    // expect(...).toBe(...) never returns when they differ.
-    expect(document.activeElement?.getAttribute('data-slot')).toBe('command-input');
-    expect(document.activeElement === search).toBe(true);
+    await run(search);
   } finally {
     globalThis.fetch = originalFetch;
     await act(async () => root.unmount());
@@ -105,4 +104,29 @@ test('the desktop integrate-branch dropdown asks for the focus in its search fie
       else Reflect.deleteProperty(globalThis, name);
     }
   }
+};
+
+test('the desktop integrate-branch dropdown asks for the focus in its search field', async () => {
+  await openDesktopDropdown(async (search) => {
+    // Compared as text, not as DOM nodes: matching two DOM nodes with
+    // expect(...).toBe(...) never returns when they differ.
+    expect(document.activeElement?.getAttribute('data-slot')).toBe('command-input');
+    expect(document.activeElement === search).toBe(true);
+  });
+});
+
+test('Escape closes the desktop integrate-branch dropdown while the search field holds the focus', async () => {
+  await openDesktopDropdown(async (search) => {
+    expect(document.activeElement === search).toBe(true);
+    await act(async () => {
+      search.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    });
+    // Base UI closes the menu on Escape from a document-level listener, so the
+    // key has to travel past the field's own handler to reach it.
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 50)); });
+    // Compared as booleans, not as DOM nodes: matching a DOM node with
+    // expect(...).toBeNull() never returns when the node is there.
+    expect(document.querySelector('[data-slot="dropdown-menu-content"]') === null).toBe(true);
+    expect(document.querySelector('input[data-slot="command-input"]') === null).toBe(true);
+  });
 });

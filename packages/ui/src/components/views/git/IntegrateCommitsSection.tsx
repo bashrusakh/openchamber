@@ -66,7 +66,6 @@ export const IntegrateCommitsSection: React.FC<{
   const currentSessionId = useSessionUIStore((s) => s.currentSessionId);
   const [branchDropdownOpen, setBranchDropdownOpen] = React.useState(false);
   const [branchSearch, setBranchSearch] = React.useState('');
-  const searchInputRef = React.useRef<HTMLInputElement>(null);
 
   const filteredBranches = React.useMemo(
     () => rankByQuery(localBranches, branchSearch, (branch) => [branch]),
@@ -77,16 +76,6 @@ export const IntegrateCommitsSection: React.FC<{
   React.useEffect(() => {
     setTargetBranch(defaultTargetBranch);
   }, [defaultTargetBranch]);
-
-  // Focus search input when branch dropdown opens
-  React.useEffect(() => {
-    if (branchDropdownOpen) {
-      const timer = setTimeout(() => {
-        searchInputRef.current?.focus();
-      }, 0);
-      return () => clearTimeout(timer);
-    }
-  }, [branchDropdownOpen]);
 
   const isEligible = Boolean(
     repoRoot && sourceBranch && targetBranch && targetBranch !== 'HEAD' && sourceBranch !== targetBranch
@@ -383,13 +372,24 @@ export const IntegrateCommitsSection: React.FC<{
                 className="w-72 p-0 max-h-[var(--available-height)] flex flex-col overflow-hidden"
               >
                 {/* rankByQuery owns filtering/ordering; cmdk must not re-filter. */}
-                <Command className="h-full min-h-0" shouldFilter={false}>
+                <Command
+                  className="h-full min-h-0"
+                  shouldFilter={false}
+                  // Typing must reach the search field, not the menu's typeahead, so
+                  // the key stops here. Escape is the exception: it has to reach
+                  // Base UI's own dismiss handling to close the dropdown. The
+                  // handler sits on the cmdk root, where cmdk's own key handling
+                  // still runs.
+                  onKeyDown={(event) => { if (event.key !== 'Escape') event.stopPropagation(); }}
+                >
                   <CommandInput
-                    ref={searchInputRef}
+                    // The popup's focus manager cannot reach this field, so the
+                    // search field asks for the focus itself; see dropdown-menu for
+                    // the shared rule.
+                    autoFocus
                     placeholder={t('gitView.branch.searchPlaceholder')}
                     value={branchSearch}
                     onValueChange={setBranchSearch}
-                    onKeyDown={(event) => event.stopPropagation()}
                   />
                   <CommandList
                     className="h-full min-h-0"

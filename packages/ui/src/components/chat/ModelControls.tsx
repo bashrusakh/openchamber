@@ -3124,6 +3124,14 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
                                             value={agentSearchQuery}
                                             onChange={(e) => setAgentSearchQuery(e.target.value)}
                                             onKeyDown={(e) => {
+                                                // Escape and the arrow keys belong to the
+                                                // menu: Escape has to reach Base UI's
+                                                // dismiss handling to close the dropdown,
+                                                // and the arrows move the active item.
+                                                // Everything else stops here so that
+                                                // typing does not reach the menu's
+                                                // typeahead.
+                                                if (e.key === 'Escape' || e.key === 'ArrowDown' || e.key === 'ArrowUp') return;
                                                 e.stopPropagation();
                                             }}
                                             className="ps-8 h-8 typography-meta"
