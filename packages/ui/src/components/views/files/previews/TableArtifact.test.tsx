@@ -206,13 +206,19 @@ const buildCsvWithEmptyHeaders = (rows: number, columns: number, emptyColumns: n
   return [header.join(','), ...lines].join('\n');
 };
 
-/** A table whose columns are all four characters wide, so the model is exact. */
+/**
+ * A table whose columns are all four characters wide, so the model is exact.
+ *
+ * The file holds ten rows of the same line, so its grid is too large to be
+ * kept whole and the preview windows it.
+ */
 const buildUniformCsv = (columns: number): string => {
   const cells: string[] = [];
   for (let column = 0; column < columns; column += 1) {
     cells.push(`c${String(column).padStart(3, '0')}`);
   }
-  return `${cells.join(',')}\n${cells.join(',')}`;
+  const line = cells.join(',');
+  return [line, ...Array.from({ length: 10 }, () => line)].join('\n');
 };
 
 /**
@@ -482,6 +488,9 @@ describe('TableArtifact', () => {
       : 'odd'
   );
 
+  /** The column of a cell, from the name of its value. */
+  const columnOf = (value: string): number => Number(value.replace(/^r\d+c/, ''));
+
   /** True when the cell keeps the border on its inline end. */
   const keepsEndBorder = (cell: Element | null): boolean => (
     (cell?.getAttribute('class') ?? '').includes('border-e')
@@ -699,7 +708,10 @@ describe('TableArtifact', () => {
 
   test('notices a font change after a file without rows', async () => {
     await render('');
-    await render(buildCsv(20, 50));
+    // The grid of the file is too large to be kept whole, so the file is
+    // windowed and the width of a character decides which columns are in
+    // the document.
+    await render(buildCsv(100, 50));
     const before = mountedColumns().length;
 
     // The font changes, so a character takes more room and fewer columns
@@ -719,7 +731,9 @@ describe('TableArtifact', () => {
     // preview watches the probe's text, so that text has to be a box of its
     // own for a change of the font to reach the measurement.
     globalThis.ResizeObserver = ContentBoxResizeObserver;
-    await render(buildCsv(20, 50));
+    // The grid of the file is too large to be kept whole, so the file is
+    // windowed.
+    await render(buildCsv(100, 50));
     const before = mountedColumns().length;
     expect(before).toBeGreaterThan(0);
 
@@ -741,8 +755,9 @@ describe('TableArtifact', () => {
     await scrollTo(ROW_HEIGHT * 50);
     expect(mountedRowNames()).toContain('r50');
 
-    // A new file, with more rows and fewer columns.
-    await render(buildCsv(500, 4));
+    // A new file, with more rows and fewer columns. Its grid is too large to
+    // be kept whole, so the file is windowed.
+    await render(buildCsv(500, 8));
     await scrollTo(ROW_HEIGHT * 400);
 
     // The scroll lands on a row of the file that is open now, not on a row
@@ -753,8 +768,9 @@ describe('TableArtifact', () => {
   test('measures a file that has a header but no rows', async () => {
     // The measuring probe is in the document as long as the file has
     // columns, so a file with a header and no rows is measured like any
-    // other file.
-    const header = Array.from({ length: 50 }, (_, column) => `h${column}`).join(',');
+    // other file. The header holds more columns than a grid may hold and be
+    // kept whole, so the file is windowed.
+    const header = Array.from({ length: 2_100 }, (_, column) => `h${column}`).join(',');
     await render(header);
     const before = host.querySelectorAll('th[scope="col"]').length;
     expect(before).toBeGreaterThan(0);
@@ -897,7 +913,7 @@ describe('TableArtifact', () => {
   });
 
   test('mounts the columns the viewer can see after the document turns right to left', async () => {
-    await render(buildUniformCsv(50));
+    await render(buildUniformCsv(500));
 
     // The window starts at the first column of a left-to-right document.
     expect(mountedColumns()).toEqual(columnsFrom(0, 20));
@@ -936,7 +952,9 @@ describe('TableArtifact', () => {
   });
 
   test('gives the spacer cells the border of a cell of the table', async () => {
-    await render(buildCsv(20, 50));
+    // The grid of the file is too large to be kept whole, so the file is
+    // windowed.
+    await render(buildCsv(100, 50));
     // The table is wide, so the window has a spacer on both sides of it.
     await scrollTo(0, 1000);
 
@@ -953,7 +971,9 @@ describe('TableArtifact', () => {
   });
 
   test('gives the spacer cells of the header the border of a header cell', async () => {
-    await render(buildCsv(20, 50));
+    // The grid of the file is too large to be kept whole, so the file is
+    // windowed.
+    await render(buildCsv(100, 50));
     await scrollTo(0, 1000);
 
     const spacers = Array.from(host.querySelectorAll('thead th[colspan]'));
@@ -1030,7 +1050,9 @@ describe('TableArtifact', () => {
   });
 
   test('stripes the rows by their index and not by their place in the document', async () => {
-    await render(buildCsv(200, 4));
+    // The grid of the file is too large to be kept whole, so the file is
+    // windowed.
+    await render(buildCsv(600, 4));
 
     // The window is moved over a row with an odd index, so the first row in
     // the document is an odd one.
@@ -1047,7 +1069,9 @@ describe('TableArtifact', () => {
   });
 
   test('keeps the border on the inline end of the columns before the last one of the file', async () => {
-    await render(buildCsv(20, 50));
+    // The grid of the file is too large to be kept whole, so the file is
+    // windowed.
+    await render(buildCsv(100, 50));
 
     // The window is in the middle of the file, so the last column in the
     // document is not the last column of the file.
@@ -1105,5 +1129,117 @@ describe('TableArtifact', () => {
 
     // Ten characters still take ten cells, and not less.
     expect(host.querySelector('col')?.getAttribute('style')).toContain('10ch');
+  });
+
+  test('states how many rows and columns the whole table has', async () => {
+    await render(buildCsv(100, 50));
+
+    // The rows outside the window are not in the document, so the table
+    // states how many of them it has. The header row is counted with the
+    // rows.
+    expect(host.querySelector('table')?.getAttribute('aria-rowcount')).toBe('100');
+    expect(host.querySelector('table')?.getAttribute('aria-colcount')).toBe('50');
+  });
+
+  test('counts the rows the table holds and not the rows the file has', async () => {
+    // The parser keeps the first rows of the file and the meta line says
+    // so. The table holds the rows it keeps.
+    await render(buildCsv(2_100, 50));
+
+    expect(host.querySelector('table')?.getAttribute('aria-rowcount')).toBe('2001');
+    expect(host.querySelector('table')?.getAttribute('aria-colcount')).toBe('50');
+  });
+
+  test('gives every mounted row and cell its place in the file', async () => {
+    await render(buildCsv(2_100, 50));
+
+    const expectPlacesToBeRight = () => {
+      const rows = mountedRows();
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        // The header row is the first row of the table, so the row of the
+        // file is one below it.
+        expect(row.element.getAttribute('aria-rowindex')).toBe(String(row.index + 2));
+        for (const cell of Array.from(row.element.querySelectorAll('td[title]'))) {
+          const column = columnOf(cell.getAttribute('title') ?? '');
+          expect(cell.getAttribute('aria-colindex')).toBe(String(column + 1));
+        }
+      }
+      for (const header of Array.from(host.querySelectorAll('th[scope="col"]'))) {
+        const column = columnOf(header.textContent ?? '');
+        expect(header.getAttribute('aria-colindex')).toBe(String(column + 1));
+      }
+    };
+
+    expectPlacesToBeRight();
+
+    // The window moves over the rows and the columns in the middle of the
+    // file, and the places are the ones the file gives them.
+    await scrollTo(ROW_HEIGHT * 100, 1000);
+    expectPlacesToBeRight();
+
+    // And back to the start of it.
+    await scrollTo(0, 0);
+    expectPlacesToBeRight();
+  });
+
+  test('keeps the spacer rows and the spacer cells out of the accessibility tree', async () => {
+    await render(buildCsv(2_100, 50));
+    await scrollTo(ROW_HEIGHT * 100, 1000);
+
+    // The rows that stand for the rows outside the window.
+    const spacerRows = Array.from(host.querySelectorAll('tbody tr'))
+      .filter((row) => !row.querySelector('td[title]'));
+    expect(spacerRows.length).toBeGreaterThan(0);
+    for (const row of spacerRows) {
+      expect(row.getAttribute('aria-hidden')).toBe('true');
+    }
+
+    // The cells that stand for the columns beside the window.
+    const headerSpacers = Array.from(host.querySelectorAll('thead th[colspan]'));
+    expect(headerSpacers.length).toBe(2);
+    for (const cell of headerSpacers) {
+      expect(cell.getAttribute('aria-hidden')).toBe('true');
+    }
+
+    const bodySpacers = columnSpacers();
+    expect(bodySpacers.length).toBe(2);
+    for (const cell of bodySpacers) {
+      expect(cell.getAttribute('aria-hidden')).toBe('true');
+    }
+  });
+
+  test('keeps a file whose grid is small whole', async () => {
+    await render(buildCsv(20, 8));
+
+    // Every row and every column of the file is in the document, so the
+    // browser's find-in-page, a selection of the whole file and a screen
+    // reader see the file.
+    expect(host.querySelectorAll('th[scope="col"]').length).toBe(8);
+    expect(dataCells().length).toBe(19 * 8);
+
+    // Nothing is outside the window, so there are no spacers.
+    expect(host.querySelectorAll('tbody tr[aria-hidden]').length).toBe(0);
+    expect(host.querySelectorAll('td[colspan], th[colspan]').length).toBe(0);
+  });
+
+  test('windows a file whose grid is large', async () => {
+    await render(buildCsv(2_100, 50));
+
+    // The document holds the cells in view and not the cells of the file.
+    expect(dataCells().length).toBeLessThan(2_000 * 50);
+    expect(host.querySelectorAll('tbody tr[aria-hidden]').length).toBeGreaterThan(0);
+  });
+
+  test('keeps the same file whole in a narrow panel and in a wide panel', async () => {
+    await render(buildCsv(20, 8));
+    const inWidePanel = dataCells().length;
+
+    await resize(320);
+
+    // The decision is a property of the file, so the narrow panel holds the
+    // same cells.
+    expect(dataCells().length).toBe(inWidePanel);
+    expect(host.querySelectorAll('th[scope="col"]').length).toBe(8);
   });
 });

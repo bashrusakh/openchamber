@@ -160,8 +160,9 @@ show the previous and next image of the same folder, see below),
 element, duration and dimensions once metadata loads, a stated failure when
 the runtime cannot decode the codec), `FontArtifact` (a specimen under a
 throwaway `FontFace` family removed when the tab closes), `TableArtifact`
-(CSV/TSV through `delimitedText.ts`, capped rows stated in the meta line,
-only the rows and columns in view mounted), and `BinaryArtifact` (name, type,
+(CSV/TSV through `delimitedText.ts`, capped rows stated in the meta line, the
+rows and columns in view mounted unless the grid of the file is small enough
+to be kept whole), and `BinaryArtifact` (name, type,
 size, download; never a decode attempt).
 `FilesView.renderArtifactPreview` is the single switch both the docked and
 the fullscreen viewer use. SVG, Mermaid (`.mmd`) and delimited files are text
@@ -169,26 +170,32 @@ with an artifact view: each has a per-path preview/source toggle, and opens
 in preview regardless of the text-first setting because an agent-produced
 artifact is opened to be looked at.
 
-The table preview mounts only the rows and the columns in view. A wide export
-holds far more cells than a screen can show, and mounting all of them froze
-the viewer for seconds: 2,000 rows with 50 columns ask for 100,000 cells.
-The rows outside the window are carried by spacer rows that take their
-height, and the columns beside the window by a spacer cell that spans them,
-so the table keeps its own layout, its column widths and its text selection.
-`tableLayout.ts` holds the model: the width of every column, and the range of
-rows and columns a scroll position lands on. What has to stay true:
+The table preview mounts only the rows and the columns in view, unless the
+grid of the file is small enough to be kept whole. A wide export holds far
+more cells than a screen can show, and mounting all of them froze the viewer
+for seconds: 2,000 rows with 50 columns ask for 100,000 cells. The rows
+outside the window are carried by spacer rows that take their height, and
+the columns beside the window by a spacer cell that spans them, so the table
+keeps its own layout, its column widths and its text selection.
+`tableLayout.ts` holds the model: the width of every column, the range of
+rows and columns a scroll position lands on, and the size of the grid of a
+file. What has to stay true:
 
 - the preview is a real `<table>` with a sticky `<thead>`, because the table
   semantics and the native text selection depend on it;
 - the row cap of the parser and the notice about it in the meta line stay as
   they are;
+- a file whose grid is small enough is kept whole and a file whose grid is
+  large enough is windowed. The decision is a property of the file, so the
+  same file is kept whole in a narrow panel and in a wide one;
 - the mounted cells stay bounded by the viewport on both axes, so the cost of
-  drawing a file does not grow with the file. Three things grow with it
-  anyway: the parse of the file, the walks over the kept cells (the check for
-  plain latin, the walk for the characters outside latin and the measurement
-  of the widths, which the first file of a session pays for twice), and the
-  `<col>` the table holds for every column of the file, because the parser
-  does not bound the number of columns;
+  drawing a file does not grow with the file. The files that are kept whole
+  are the exception, and the limit bounds what they cost. Three things grow
+  with the file anyway: the parse of the file, the walks over the kept cells
+  (the check for plain latin, the walk for the characters outside latin and
+  the measurement of the widths, which the first file of a session pays for
+  twice), and the `<col>` the table holds for every column of the file,
+  because the parser does not bound the number of columns;
 - the widths of the columns are measured from the data and from the font, and
   a resize of the panel does not measure them again;
 - the column widths stay the same while scrolling, and a column is as wide as
@@ -197,7 +204,11 @@ rows and columns a scroll position lands on. What has to stay true:
 - only the rows and the columns in view are in the document, so the browser's
   find-in-page, a selection of the whole file and a screen reader see the
   window and not the file. A value outside the window is in the document only
-  while the window is over it;
+  while the window is over it. A file that is kept whole holds every row and
+  every column of it, so those three see the file;
+- the table states how many rows and how many columns it has, and every
+  mounted row and cell states where it sits in the file, so a screen reader
+  is told the size of the table and not the size of the window;
 - a right-to-left table keeps its columns in the order the file has them,
   with the first column on the right. Its scroll offset is read the way the
   browser reports it: 0 at the right edge of the box, and negative from
@@ -246,6 +257,59 @@ border of a cell are written from the measurement of the document. The height
 of a row is measured from the document as well, and every row is given that
 height, the header row included, so the mapping from a scroll offset to a row
 stays exact and the last row can be reached.
+
+### Why a small file is kept whole and a large one is windowed
+
+The preview held every cell of the file before the windowing, and the
+browser's find-in-page, a selection of the whole file and a screen reader saw
+the file. The windowing took that away from every file, and it only had to
+take it away from the files that are large enough for the window to matter.
+So a file whose grid is small enough is held whole, and the size of the grid
+is the number of cells the table holds, the header row included. The limit is
+one number, `TABLE_WHOLE_GRID_CELL_LIMIT`, and the file decides: the same
+file is held whole in a narrow panel and in a wide one, because a decision
+that changed with the size of the panel would hold a file in one panel and
+window it in the next.
+
+The limit was measured in Chromium against the markup of the preview. The
+machine was busy with other work during the measurements and the figures
+moved by about a third between runs, so they are given as ranges: holding
+1,000 cells took 20 to 60 ms of layout, 2,000 cells 30 to 90 ms, 4,000 cells
+75 to 120 ms, 10,000 cells about 300 ms and 100,000 cells 3 to 4 s. The
+rendering of the cells is on top of the layout the browser does for them. A
+pause of a tenth of a second is where the viewer starts to notice one, so
+2,000 cells is the largest grid whose cost stays around it. The window itself
+holds about 800 cells and costs 15 to 25 ms, so holding a file of that size
+whole costs little more than opening any windowed file.
+
+### Why the walk over the cells goes over the fields a row has
+
+The walk over the cells of a file went over every column of every row, and a
+file with few fields per row and many columns paid for the whole width of the
+table on every row: 2,000 rows with one field each took 25 ms to measure with
+5,000 columns, 290 ms with 20,000 and 520 ms with 50,000 on a busy machine.
+The walk goes over the fields a row has now, which took 1 ms, 1 ms and 2 ms
+for the same three files. The widths are the same, because a row that does
+not reach a column cannot narrow it.
+
+### Why the table states its size and the place of its rows and cells
+
+A table whose rows and columns are only partly in the document tells a
+screen reader the size of the window and not the size of the file: it said
+there were seven columns where the file had fifty. The table states how many
+rows and columns it has with `aria-rowcount` and `aria-colcount`, and every
+mounted row and cell states where it sits with `aria-rowindex` and
+`aria-colindex`, counted from one and with the header row counted with the
+rows. The places follow the file and not the document, so the row under the
+top-left corner of the viewport carries the number its place in the file gives
+it. The spacer rows and the spacer cells stand for the rows and the columns
+outside the window and are hidden from the accessibility tree, so they are
+counted nowhere.
+
+The count of the rows is the number of rows the table holds and not the
+number of rows the file has: the parser keeps the first rows of a large file
+and the meta line says so, and a row the file has and the table does not is
+no row of the table.
 
 ### Why the window is written here and not taken from `@tanstack/react-virtual`
 

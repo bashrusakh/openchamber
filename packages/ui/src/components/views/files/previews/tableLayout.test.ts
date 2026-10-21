@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  TABLE_WHOLE_GRID_CELL_LIMIT,
   characterWidthsFrom,
   clampTableWindow,
   collectNonLatinCodePoints,
   columnWidth,
   computeTableWindow,
   displayCells,
+  holdsWholeTable,
   isAsciiOnly,
   measureTableColumns,
   planTableColumns,
@@ -491,5 +493,66 @@ describe('the width the browser is given and the width the model reasons about',
         - widths.cells[column] * changed.charWidth;
       expect(difference(chromeOf(css), modelChrome)).toBeLessThan(0.000001);
     }
+  });
+});
+
+describe('the size of a grid', () => {
+  test('keeps a grid of few cells whole', () => {
+    expect(holdsWholeTable(19, 10)).toBe(true);
+    expect(holdsWholeTable(0, 100)).toBe(true);
+  });
+
+  test('windows a grid of many cells', () => {
+    expect(holdsWholeTable(2_000, 50)).toBe(false);
+    expect(holdsWholeTable(200, 20)).toBe(false);
+  });
+
+  test('counts the header row with the rows', () => {
+    // The header row is a row of the table, so a file with a header of two
+    // thousand columns holds two thousand cells and not one cell less.
+    expect(holdsWholeTable(0, TABLE_WHOLE_GRID_CELL_LIMIT)).toBe(true);
+    expect(holdsWholeTable(0, TABLE_WHOLE_GRID_CELL_LIMIT + 1)).toBe(false);
+  });
+
+  test('the limit is one number', () => {
+    // A grid of exactly the limit is kept whole, and a grid of one cell
+    // more is windowed.
+    expect(holdsWholeTable(TABLE_WHOLE_GRID_CELL_LIMIT - 1, 1)).toBe(true);
+    expect(holdsWholeTable(TABLE_WHOLE_GRID_CELL_LIMIT, 1)).toBe(false);
+  });
+});
+
+describe('the width of a ragged file', () => {
+  test('measures a ragged file the same as the file with the missing values filled in', () => {
+    const ragged = [['alice', 'Lisbon'], ['bo']];
+    const filled = [['alice', 'Lisbon'], ['bo', '']];
+    expect(measureTableColumns(['name', 'city'], ragged, 2, METRICS, true))
+      .toEqual(measureTableColumns(['name', 'city'], filled, 2, METRICS, true));
+  });
+
+  test('keeps the width of the widest value of a column', () => {
+    // The row that does not reach the second column cannot narrow it.
+    const widths = measureTableColumns(['name', 'city'], [['alice', 'Lisbon'], ['bo']], 2, METRICS, true);
+    expect(widths.cells).toEqual([5, 6]);
+  });
+
+  test('walks over the fields a row has and not over every column of the file', () => {
+    // The walk over the cells of a file grew with the number of columns of
+    // the file when it went over every column of every row, and a file with
+    // few fields per row and many columns paid for the whole width of the
+    // table on every row.
+    let reads = 0;
+    const row = new Proxy<string[]>(['a'], {
+      get(target, key) {
+        if (key === 'length') return target.length;
+        reads += 1;
+        return target[Number(key)];
+      },
+    });
+
+    measureTableColumns(['h'], [row], 50_000, METRICS, true);
+
+    // The one field of the row, and nothing else.
+    expect(reads).toBe(1);
   });
 });

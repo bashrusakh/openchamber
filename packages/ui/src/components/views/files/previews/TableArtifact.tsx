@@ -12,6 +12,7 @@ import {
   collectNonLatinCodePoints,
   columnWidth,
   computeTableWindow,
+  holdsWholeTable,
   isAsciiOnly,
   measureTableColumns,
   planTableColumns,
@@ -203,6 +204,10 @@ const measureCharacterWidths = (
  * in view are in the document. The skipped ones are carried by spacer rows
  * and spacer cells, which keeps the table's own layout, its column widths
  * and its text selection intact.
+ *
+ * A file whose grid is small enough is kept whole, so the document holds
+ * every cell of it and the browser's find-in-page, a selection of the whole
+ * file and a screen reader see the file and not the window.
  */
 export const TableArtifact: React.FC<{
   path: string;
@@ -217,6 +222,10 @@ export const TableArtifact: React.FC<{
   // cells that decide a width. A row the parser dropped is never measured,
   // so it cannot change a width.
   const asciiOnly = React.useMemo(() => isAsciiOnly(table.header, table.rows), [table]);
+  // Whether the whole grid of the file is small enough to be kept in the
+  // document. It is a property of the file, so the same file is kept whole
+  // in a narrow panel and in a wide one.
+  const holdsWholeGrid = holdsWholeTable(table.rows.length, table.columnCount);
   // The characters outside latin are the ones the browser has to measure,
   // because the font it falls back to can lay them out wider than the
   // monospace font of the preview. A file of plain latin characters has
@@ -288,10 +297,19 @@ export const TableArtifact: React.FC<{
   // document: a render React throws away leaves the model of the commit
   // before it in place, and the window a scroll event asks for is then the
   // one of what is on screen.
-  const modelRef = React.useRef({ plan, layout, rowCount: table.rows.length, columnCount: table.columnCount });
+  const modelRef = React.useRef({
+    plan,
+    layout,
+    rowCount: table.rows.length,
+    columnCount: table.columnCount,
+    holdsWholeGrid,
+  });
 
   const applyWindow = React.useCallback(() => {
     const model = modelRef.current;
+    // A file whose grid is kept whole has every cell of it in the document,
+    // so there is no window to move.
+    if (model.holdsWholeGrid) return;
     const offsets = offsetsRef.current;
     const next = computeTableWindow({
       plan: model.plan,
@@ -419,15 +437,29 @@ export const TableArtifact: React.FC<{
     // The model is written here and not during the render: a render React
     // throws away must not leave a plan in it that was never in the
     // document, and a scroll event reads this model.
-    modelRef.current = { plan, layout, rowCount: table.rows.length, columnCount: table.columnCount };
+    modelRef.current = {
+      plan,
+      layout,
+      rowCount: table.rows.length,
+      columnCount: table.columnCount,
+      holdsWholeGrid,
+    };
     applyWindow();
-  }, [applyWindow, layout, plan, table]);
+  }, [applyWindow, holdsWholeGrid, layout, plan, table]);
 
   // The window of the file that was open before names the rows and the
   // columns of that file, and it is held inside the file that is open now
   // before anything is mounted. The first commit of a new file then carries
   // the new file's own rows and columns.
-  const mountedWindow = clampTableWindow(visible, table.columnCount, table.rows.length);
+  //
+  // A file whose grid is small enough is kept whole: every row and every
+  // column of it is in the document, so the browser's find-in-page, a
+  // selection of the whole file and a screen reader see the file and not the
+  // window. The decision is a property of the file, so it does not change
+  // with the size of the panel.
+  const mountedWindow: TableWindow = holdsWholeGrid
+    ? { rows: { start: 0, end: table.rows.length }, columns: { start: 0, end: table.columnCount } }
+    : clampTableWindow(visible, table.columnCount, table.rows.length);
 
   const visibleColumns: number[] = [];
   for (let column = mountedWindow.columns.start; column < mountedWindow.columns.end; column += 1) {
@@ -503,6 +535,11 @@ export const TableArtifact: React.FC<{
           {characterProbe}
           <div ref={scrollerRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-auto">
             <table
+              // The rows and the columns outside the window are not in the
+              // document, so the table states how many of them it has, the
+              // header row counted with the rows.
+              aria-colcount={table.columnCount}
+              aria-rowcount={table.rows.length + 1}
               className="min-w-full border-separate border-spacing-0 font-mono typography-meta"
               style={{
                 tableLayout: 'fixed',
@@ -516,7 +553,7 @@ export const TableArtifact: React.FC<{
                     without text has no line in it, and a header row that
                     takes its height from the cells in view collapses to the
                     padding and the border while the window moves over it. */}
-                <tr style={{ height: layout.rowHeight }}>
+                <tr aria-rowindex={1} style={{ height: layout.rowHeight }}>
                   {mountedWindow.columns.start > 0 && (
                     <th
                       colSpan={mountedWindow.columns.start}
@@ -525,7 +562,12 @@ export const TableArtifact: React.FC<{
                     />
                   )}
                   {visibleColumns.map((column) => (
-                    <th key={column} scope="col" className={headerClassName(column)}>
+                    <th
+                      key={column}
+                      scope="col"
+                      aria-colindex={column + 1}
+                      className={headerClassName(column)}
+                    >
                       {table.header[column] ?? ''}
                     </th>
                   ))}
@@ -557,6 +599,9 @@ export const TableArtifact: React.FC<{
                   return (
                     <tr
                       key={row}
+                      // The row of the file, the header row counted with the
+                      // rows before it.
+                      aria-rowindex={row + 2}
                       className={rowClassName(row)}
                       style={{ height: layout.rowHeight }}
                     >
@@ -570,7 +615,12 @@ export const TableArtifact: React.FC<{
                       {visibleColumns.map((column) => {
                         const value = values[column] ?? '';
                         return (
-                          <td key={column} className={cellClassName(column)} title={value}>
+                          <td
+                            key={column}
+                            aria-colindex={column + 1}
+                            className={cellClassName(column)}
+                            title={value}
+                          >
                             {value}
                           </td>
                         );

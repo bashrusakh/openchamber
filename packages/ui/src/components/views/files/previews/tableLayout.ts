@@ -65,6 +65,34 @@ export type TableColumnWidths = {
   totalCells: number;
 };
 
+/**
+ * The largest number of cells a table may hold to be kept whole.
+ *
+ * What it costs to hold a grid is the browser's style recalculation and
+ * layout of its cells, and it grows with the number of cells. The number was
+ * measured in Chromium against the markup of the preview: holding 2,000
+ * cells took 30 to 90 ms of layout, 4,000 cells 75 to 120 ms, 10,000 cells
+ * about 300 ms and 100,000 cells 3 to 4 s. A file that holds more cells
+ * than this is windowed, so the document only ever holds the cells in view.
+ */
+export const TABLE_WHOLE_GRID_CELL_LIMIT = 2_000;
+
+/**
+ * True when the grid of a file is small enough to be kept whole.
+ *
+ * A table that is kept whole holds every cell of the file in the document,
+ * so the browser's find-in-page, a selection of the whole file and a screen
+ * reader see the file and not the window. The decision is a property of the
+ * file and not of the panel, so the same file is kept whole in a narrow
+ * panel and in a wide one.
+ *
+ * The size of the grid is the number of cells the table holds, the header
+ * row included.
+ */
+export const holdsWholeTable = (rowCount: number, columnCount: number): boolean => (
+  (rowCount + 1) * columnCount <= TABLE_WHOLE_GRID_CELL_LIMIT
+);
+
 /** The column widths of one table and where each column starts. */
 export type TableColumnPlan = TableColumnWidths & {
   /** Where each column starts in px, counted from the table's first column. */
@@ -340,7 +368,10 @@ export const tableWidthCss = (totalCells: number, columnCount: number, metrics: 
  * The width every column asks for, taken from the data.
  *
  * A column is as wide as its longest value, capped by the cap the cells
- * carry, and never narrower than its header, which is not capped.
+ * carry, and never narrower than its header, which is not capped. The walk
+ * over the cells goes over the fields a row has, so a row that does not
+ * reach a column does not narrow it and a file with few fields per row does
+ * not pay for the whole width of the table on every row.
  *
  * The widths come from the data and the font, so they are measured once per
  * file. The room the panel has is shared out over them afterwards, and only
@@ -382,7 +413,12 @@ export const measureTableColumns = (
 
   const bodyCells = new Array<number>(columnCount).fill(0);
   for (const row of rows) {
-    for (let column = 0; column < columnCount; column += 1) {
+    // The walk goes over the fields the row has and not over every column
+    // of the file. A row that does not reach a column cannot narrow it, and
+    // a file with few fields per row and many columns paid for the whole
+    // width of the table on every row.
+    const fields = Math.min(row.length, columnCount);
+    for (let column = 0; column < fields; column += 1) {
       if (bodyCells[column] >= maxCells) continue;
       const value = row[column];
       if (value === undefined) continue;
