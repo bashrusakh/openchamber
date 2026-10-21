@@ -130,6 +130,11 @@ export function NewWorktreeBranchPicker({
         <MobileOverlayPanel open={open} title={title} onClose={() => changeOpen(false)}>
           <div className="space-y-4" ref={mobileListRef}>
             <Input
+              // The sheet has no popup focus manager of its own, so the search
+              // field asks for the focus. It mounts in the same commit as the
+              // tap that opened the sheet, which is the only window where a
+              // focus still raises the keyboard in an installed iOS PWA.
+              autoFocus
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder={t('session.newWorktree.searchBranches')}
@@ -180,6 +185,9 @@ export function NewWorktreeBranchPicker({
       >
         <Command shouldFilter={false}>
           <CommandInput
+            // Base UI's popup focus manager would focus this field anyway;
+            // asking for it explicitly keeps both surfaces owned here.
+            autoFocus
             placeholder={t('session.newWorktree.searchBranches')}
             value={query}
             onValueChange={setQuery}

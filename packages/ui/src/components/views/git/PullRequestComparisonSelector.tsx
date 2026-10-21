@@ -40,7 +40,8 @@ export function PullRequestComparisonSelector({ comparison, mobile = false }: {
     <Icon name="arrow-down-s" className="size-3.5" />
   </Button>;
   const picker = <Command className="min-h-0" shouldFilter={false} onKeyDown={(event) => { if (event.key !== 'Escape') event.stopPropagation(); }}>
-    <CommandInput autoFocus={!sheet} value={comparison.query} onValueChange={comparison.setQuery}
+    {/* The sheet has no popup focus manager, so the search field asks for the focus. The dropdown path already focused it; asking for it explicitly keeps both surfaces owned here. */}
+    <CommandInput autoFocus value={comparison.query} onValueChange={comparison.setQuery}
       placeholder={t('session.githubPrPicker.searchPlaceholder')} aria-label={t('session.githubPrPicker.searchPlaceholder')} />
     {comparison.loading ? <div className="flex items-center gap-2 p-4 typography-meta text-muted-foreground">
       <Icon name="loader-4" className="size-4 animate-spin" />{t('session.githubPrPicker.loading.pullRequests')}

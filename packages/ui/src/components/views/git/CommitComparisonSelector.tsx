@@ -49,7 +49,8 @@ export function CommitComparisonSelector({ commits, selectedHash, loading, error
   );
   const picker = (
     <Command shouldFilter={false} className={mobile ? '[&_[data-slot=command-input-wrapper]]:h-11' : undefined} onKeyDown={(event) => { if (event.key !== 'Escape') event.stopPropagation(); }}>
-      <CommandInput autoFocus={!useSheet} className={mobile ? 'h-11' : undefined} value={search} onValueChange={setSearch} placeholder={t('commitComparison.search')} aria-label={t('commitComparison.search')} />
+      {/* The sheet has no popup focus manager, so the search field asks for the focus. The dropdown path already focused it; asking for it explicitly keeps both surfaces owned here. */}
+      <CommandInput autoFocus className={mobile ? 'h-11' : undefined} value={search} onValueChange={setSearch} placeholder={t('commitComparison.search')} aria-label={t('commitComparison.search')} />
       {loading ? (
         <div className="flex items-center justify-center gap-2 p-4 typography-meta text-muted-foreground">
           <Icon name="loader-4" className="size-4 animate-spin" />{t('diffView.state.loadingChanges')}

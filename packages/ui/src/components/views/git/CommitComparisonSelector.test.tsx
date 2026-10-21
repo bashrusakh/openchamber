@@ -59,7 +59,13 @@ const checkCommitSelection = async (mobile: boolean, tablet = false) => {
     if (mobile) {
       if (tablet) expect(document.querySelector('[role="dialog"]')).toBeNull();
       else expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-      if (!tablet) expect(document.activeElement).not.toBe(input());
+      if (!tablet) {
+        // The sheet focuses its search field, so typing filters the list
+        // right away. Compared as text, not as DOM nodes: matching two DOM
+        // nodes with expect(...).toBe(...) never returns when they differ.
+        expect(document.activeElement?.getAttribute('data-slot')).toBe('command-input');
+        expect(document.activeElement === input()).toBe(true);
+      }
     }
     const first = document.querySelector('[cmdk-item]');
     expect(first?.textContent).toContain('fix: first commit');

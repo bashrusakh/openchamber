@@ -75,3 +75,31 @@ test('the repository picker names the chosen repository, or all of them', async 
     }
   }
 });
+
+test('the repository sheet puts the caret in its search field', async () => {
+  const { I18nProvider } = await import('@/lib/i18n');
+  const { SourceBoardRepositoryPicker } = await import('./SourceBoardPickers');
+
+  await act(async () => {
+    root.render(
+      <I18nProvider>
+        <SourceBoardRepositoryPicker repositories={['/work/app', '/work/team/api']} selected={null} root="/work" allAvailable onSelect={() => {}} sheet />
+      </I18nProvider>,
+    );
+  });
+
+  const trigger = host.querySelector<HTMLButtonElement>('button');
+  if (!trigger) throw new Error('Missing repository trigger');
+  await act(async () => trigger.click());
+  // The sheet animates in on timers that update React state; let them land
+  // inside act() so the run stays free of out-of-act update warnings.
+  await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 300)); });
+
+  // The sheet renders into the shared mobile overlay root, not the picker.
+  const search = document.querySelector<HTMLInputElement>('input[aria-label="Search repositories"]');
+  if (!search) throw new Error('Missing repository search input');
+  // Compared as text, not as DOM nodes: matching two DOM nodes with
+  // expect(...).toBe(...) never returns when they differ.
+  expect(document.activeElement?.getAttribute('aria-label')).toBe('Search repositories');
+  expect(document.activeElement === search).toBe(true);
+});

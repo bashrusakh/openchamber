@@ -65,7 +65,13 @@ const checkBranchSelection = async (mobile: boolean, tablet = false) => {
     if (mobile) {
       if (tablet) expect(document.querySelector('[role="dialog"]')).toBeNull();
       else expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-      if (!tablet) expect(document.activeElement).not.toBe(document.querySelector('input'));
+      if (!tablet) {
+        // The sheet focuses its search field, so typing filters the list
+        // right away. Compared as text, not as DOM nodes: matching two DOM
+        // nodes with expect(...).toBe(...) never returns when they differ.
+        expect(document.activeElement?.getAttribute('data-slot')).toBe('command-input');
+        expect(document.activeElement === document.querySelector('input')).toBe(true);
+      }
     }
     expect(document.querySelector('[data-value="refs/heads/feature"]')).toBeNull();
     await press('ArrowDown');
