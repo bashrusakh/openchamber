@@ -1152,7 +1152,8 @@ describe('TableArtifact', () => {
     });
 
     // The widths of the file that is closed are not counted on this thread:
-    // that walk is over the whole text of a file nobody is looking at.
+    // that walk is over the text of every row the preview holds, for a
+    // file nobody is looking at.
     expect(widthCounts).toBe(0);
   });
 
