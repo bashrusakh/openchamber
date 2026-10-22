@@ -112,6 +112,46 @@ const FALLBACK_METRICS: TableCellMetrics = {
   maxCellWidth: 512,
 };
 
+/**
+ * The widths of the cells that stand for a range of columns outside the
+ * window.
+ *
+ * The preview gives the browser the geometry of the columns it draws. The
+ * columns outside the window are not drawn, and their widths reach the
+ * browser through the cells that stand for them: a cell that stands for a
+ * range of columns carries the width of the range, which is the characters
+ * of the columns of the range, the padding of each of them and the border
+ * that ends them.
+ *
+ * A range of columns that is wider than a cell may span is carried by more
+ * than one cell, and each of them carries the width of the columns it
+ * stands for.
+ */
+const spacerWidths = (
+  cells: ReadonlyArray<number>,
+  from: number,
+  to: number,
+  columnCount: number,
+  metrics: TableCellMetrics,
+): string[] => {
+  const widths: string[] = [];
+  let start = from;
+  for (const span of tableSpacerSpans(to - from)) {
+    const end = start + span;
+    let characters = 0;
+    for (let column = start; column < end; column += 1) {
+      characters += cells[column] ?? 0;
+    }
+    // The last column of the file has no border on its inline end.
+    const borders = (end === columnCount ? span - 1 : span) * metrics.cellBorder;
+    widths.push(
+      `calc(${characters}ch + ${span * metrics.cellPadding}px${borders > 0 ? ` + ${borders}px` : ''})`,
+    );
+    start = end;
+  }
+  return widths;
+};
+
 type TableLayout = {
   /** What one character and one cell cost, measured from the document. */
   metrics: TableCellMetrics;
@@ -432,25 +472,6 @@ const TableView: React.FC<{
     () => planTableColumns(widths, layout.metrics, layout.viewportWidth),
     [layout.metrics, layout.viewportWidth, widths],
   );
-  // The columns are written with the widths they asked for, which do not
-  // change when the panel is resized, so the colgroup is not rebuilt either.
-  const colgroup = React.useMemo(
-    () => (
-      <colgroup>
-        {widths.cells.map((cells, column) => {
-          const width: TableColumnWidth = columnWidth(cells, layout.metrics, column === table.columnCount - 1);
-          return (
-            <col
-              key={column}
-              style={{ width: width.css }}
-            />
-          );
-        })}
-      </colgroup>
-    ),
-    [layout.metrics, table.columnCount, widths.cells],
-  );
-
   // The model the window is computed from. It is written after the commit
   // and not during the render, so it always holds a render that reached the
   // document: a render React throws away leaves the model of the commit
@@ -646,6 +667,31 @@ const TableView: React.FC<{
   // model names.
   const leadingSpans = tableSpacerSpans(mountedWindow.columns.start);
   const trailingSpans = tableSpacerSpans(table.columnCount - mountedWindow.columns.end);
+  // The widths those cells carry. A cell that stands for a range of columns
+  // carries the width of the range, so the browser lays the window out where
+  // the model says it is, and the table keeps the width the model gives it.
+  // The widths are kept while the range they belong to is the same, so a
+  // scroll that moves the rows does not count the columns of the file again.
+  const leadingWidths = React.useMemo(
+    () => spacerWidths(
+      widths.cells,
+      0,
+      mountedWindow.columns.start,
+      table.columnCount,
+      layout.metrics,
+    ),
+    [layout.metrics, mountedWindow.columns.start, table.columnCount, widths.cells],
+  );
+  const trailingWidths = React.useMemo(
+    () => spacerWidths(
+      widths.cells,
+      mountedWindow.columns.end,
+      table.columnCount,
+      table.columnCount,
+      layout.metrics,
+    ),
+    [layout.metrics, mountedWindow.columns.end, table.columnCount, widths.cells],
+  );
   // The cells that carry the rows outside the window. They hold no text, no
   // padding and no border, so they add nothing to the height of their row,
   // which is written on the row itself. A range of columns that is wider
@@ -729,7 +775,6 @@ const TableView: React.FC<{
                 width: tableWidthCss(plan.totalCells, table.columnCount, layout.metrics),
               }}
             >
-              {colgroup}
               <thead className="sticky top-0 z-10 bg-[var(--surface-subtle)]">
                 {/* The header row is given the height of a row, so the cells
                     that happen to be in view cannot change it. A header cell
@@ -741,26 +786,38 @@ const TableView: React.FC<{
                     <th
                       key={`leading-${index}`}
                       colSpan={span}
+                      style={{ width: leadingWidths[index] }}
                       aria-hidden="true"
                       className={index === leadingSpans.length - 1
                         ? leadingSpacerClassName('border-border/40')
                         : spacerClassName('border-border/40')}
                     />
                   ))}
-                  {visibleColumns.map((column) => (
-                    <th
-                      key={column}
-                      scope="col"
-                      aria-colindex={column + 1}
-                      className={headerClassName(column)}
-                    >
-                      {table.header[column] ?? ''}
-                    </th>
-                  ))}
+                  {visibleColumns.map((column) => {
+                    // The width of a column reaches the browser through the
+                    // cell of the first row that stands for it.
+                    const width: TableColumnWidth = columnWidth(
+                      widths.cells[column] ?? 0,
+                      layout.metrics,
+                      column === table.columnCount - 1,
+                    );
+                    return (
+                      <th
+                        key={column}
+                        scope="col"
+                        aria-colindex={column + 1}
+                        className={headerClassName(column)}
+                        style={{ width: width.css }}
+                      >
+                        {table.header[column] ?? ''}
+                      </th>
+                    );
+                  })}
                   {trailingSpans.map((span, index) => (
                     <th
                       key={`trailing-${index}`}
                       colSpan={span}
+                      style={{ width: trailingWidths[index] }}
                       aria-hidden="true"
                       className={spacerClassName('border-border/40')}
                     />

@@ -1086,7 +1086,7 @@ describe('TableArtifact', () => {
     expect(afterOpen).toBeGreaterThan(0);
     // The character takes five and a third cells, so the first column is as
     // wide as the text the browser lays out for it.
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(8.334ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(8.334ch + 16px + 1px)');
 
     // A file without rows has no table to measure, so the widths of the file
     // before it stay counted.
@@ -1099,7 +1099,7 @@ describe('TableArtifact', () => {
     await render(content);
 
     expect(widthCounts).toBeGreaterThan(afterOpen);
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(8.334ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(8.334ch + 16px + 1px)');
   });
 
   test('does not publish the widths of a count whose measurements are old', async () => {
@@ -1121,7 +1121,7 @@ describe('TableArtifact', () => {
     // more, so the widths the parser counted are the exact ones.
     characterAdvances.set('Ω', 7.5);
     await resize(VIEWPORT_WIDTH);
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(5ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(5ch + 16px + 1px)');
 
     // The answer of the count arrives now. It was asked for with the
     // measurements of the font before it, so its widths belong to a font that
@@ -1130,7 +1130,7 @@ describe('TableArtifact', () => {
       worker.releaseCounts();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(5ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(5ch + 16px + 1px)');
   });
 
   test('does not count the widths of a file that is closed on this thread', async () => {
@@ -1329,7 +1329,7 @@ describe('TableArtifact', () => {
     // The first column holds seven characters in the longest of the rows
     // that are kept, so it is seven cells wide and not the ten cells the
     // dropped row would ask for.
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(7ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(7ch + 16px + 1px)');
   });
 
   test('does not count the widths of a dropped row again', async () => {
@@ -1349,7 +1349,7 @@ describe('TableArtifact', () => {
     // The first column holds seven characters in the longest of the rows
     // that are kept, so it is seven cells wide and not the ten cells the
     // dropped row would ask for.
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(7ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(7ch + 16px + 1px)');
   });
 
   test('measures a file whose kept rows hold wide characters the wide way', async () => {
@@ -1359,28 +1359,52 @@ describe('TableArtifact', () => {
 
     // Five full-width characters take ten cells, and the column is as wide
     // as the text the browser lays out for them.
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('10ch');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('10ch');
   });
 
   test('sizes a column to the value it holds', async () => {
     await render(`h\n${'x'.repeat(65)}`);
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('65ch');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('65ch');
 
     await render(`h\n${'x'.repeat(66)}`);
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('66ch');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('66ch');
   });
 
   test('writes the width of a column from the measurement of the cell', async () => {
     await render(buildCsv(4, 3));
 
     // The padding and the border the preview measured are the ones the width
-    // of the column is written with.
-    const columns = Array.from(host.querySelectorAll('col'));
+    // of the column is written with. The width of a column rides on the cell
+    // of the first row that stands for it.
+    const columns = Array.from(host.querySelectorAll('th[scope="col"]'));
     expect(columns).toHaveLength(3);
     expect(columns[0]?.getAttribute('style')).toContain('calc(4ch + 16px + 1px)');
     // The last column keeps its missing border.
     expect(columns[2]?.getAttribute('style')).toContain('calc(4ch + 16px)');
     expect(columns[2]?.getAttribute('style')).not.toContain('+ 1px');
+  });
+
+  test('gives the browser the width of the range a spacer cell stands for', async () => {
+    // The file is windowed, so the columns beside the window are carried by
+    // the cells that stand for them. Each of those cells carries the width
+    // of the range it stands for, so the browser lays the window out where
+    // the model says it is.
+    await render(buildUniformCsv(500));
+    await scrollTo(0, 2000);
+
+    const spacers = Array.from(host.querySelectorAll('thead th[colspan]'));
+    expect(spacers.length).toBe(2);
+    for (const spacer of spacers) {
+      const columns = Number(spacer.getAttribute('colspan'));
+      // Every column of the file is four characters wide, so the width of a
+      // range is the characters of its columns and the padding of each of
+      // them.
+      expect(spacer.getAttribute('style')).toContain(`calc(${columns * 4}ch + ${columns * 16}px`);
+    }
+
+    // The columns of the window carry their own width.
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style'))
+      .toContain('calc(4ch + 16px + 1px)');
   });
 
   test('writes the width of the table from the same measurement', async () => {
@@ -1393,25 +1417,25 @@ describe('TableArtifact', () => {
 
   test('moves the width of the columns when the padding of the cell changes', async () => {
     await render(buildCsv(4, 3));
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(4ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(4ch + 16px + 1px)');
 
     // The padding of the cell changes, and the preview measures it again.
     cellPadding = 12;
     await resize(VIEWPORT_WIDTH);
 
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(4ch + 24px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(4ch + 24px + 1px)');
     expect(host.querySelector('table')?.getAttribute('style')).toContain('calc(12ch + 72px + 2px)');
   });
 
   test('moves the width of the columns when the border of the cell changes', async () => {
     await render(buildCsv(4, 3));
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(4ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(4ch + 16px + 1px)');
 
     // The border of the cell changes, and the preview measures it again.
     cellBorder = 2;
     await resize(VIEWPORT_WIDTH);
 
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(4ch + 16px + 2px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(4ch + 16px + 2px)');
     expect(host.querySelector('table')?.getAttribute('style')).toContain('calc(12ch + 48px + 4px)');
   });
 
@@ -1431,7 +1455,7 @@ describe('TableArtifact', () => {
 
     // The column holds the 66 characters that fit, and the cell cuts the
     // value short.
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('66ch');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('66ch');
   });
 
   test('mounts the columns the viewer can see after the document turns right to left', async () => {
@@ -1635,7 +1659,7 @@ describe('TableArtifact', () => {
     await render(buildCsv(4, 3));
 
     // The border is read on the side the direction of the document puts it.
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(4ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(4ch + 16px + 1px)');
     expect(host.querySelector('table')?.getAttribute('style')).toContain('calc(12ch + 48px + 2px)');
   });
 
@@ -1650,7 +1674,7 @@ describe('TableArtifact', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(4ch + 16px + 1px)');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('calc(4ch + 16px + 1px)');
   });
 
   test('stripes the rows by their index and not by their place in the document', async () => {
@@ -1721,7 +1745,7 @@ describe('TableArtifact', () => {
     await render(`h\n${'Ω'.repeat(10)}`);
 
     // Ten characters of 9 px take 90 px, which is twelve cells of 7.5 px.
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('12ch');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('12ch');
   });
 
   test('keeps the counted width of a character the browser lays out narrower', async () => {
@@ -1732,7 +1756,7 @@ describe('TableArtifact', () => {
     await render(`h\n${'Я'.repeat(10)}`);
 
     // Ten characters still take ten cells, and not less.
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('10ch');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('10ch');
   });
 
   test('counts the header with the characters the browser measured', async () => {
@@ -1743,7 +1767,7 @@ describe('TableArtifact', () => {
     await render(`ΩΩΩΩΩ\na\n`);
 
     // Five characters of 9 px take 45 px, which is six cells of 7.5 px.
-    expect(host.querySelector('col')?.getAttribute('style')).toContain('6ch');
+    expect(host.querySelector('th[scope="col"]')?.getAttribute('style')).toContain('6ch');
   });
 
   test('states how many rows and columns the whole table has', async () => {

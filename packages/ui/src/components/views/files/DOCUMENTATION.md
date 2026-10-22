@@ -179,6 +179,16 @@ for seconds: 2,000 rows with 50 columns ask for 100,000 cells. The rows
 outside the window are carried by spacer rows that take their height, and
 the columns beside the window by spacer cells that span them, so the table
 keeps its own layout, its column widths and its text selection.
+The widths of the columns reach the browser through the cells of the first
+row, and not through a `<col>` for every column of the file: the cell of a
+column in view carries the width of that column, and the cell that stands for
+a range of columns beside the window carries the width of the range, which is
+the characters of its columns, the padding of each of them and the border
+that ends them. The browser is asked to lay out the window and not the file,
+which is what keeps the cost of the drawing independent of the number of
+columns of the file. The columns of a range are laid out over the range
+itself, so their widths inside it are the width of the range shared among
+them, and the width of the table is the width of the file either way.
 `tableLayout.ts` holds the model: the width of every column, the range of
 rows and columns a scroll position lands on, the size of the grid of a file
 and the cells that carry the columns beside the window. What has to stay
@@ -193,11 +203,10 @@ true:
   same file is kept whole in a narrow panel and in a wide one;
 - the mounted cells stay bounded by the viewport on both axes, so the cost of
   drawing a file does not grow with the file. The files that are kept whole
-  are the exception, and the limit bounds what they cost. Two things grow
-  with the file anyway: the `<col>` the table holds for every column of the
-  file, because the parser does not bound the number of columns, and the rows
-  the cache of the cut rows holds, because a row of a file with many columns
-  holds many values. The parse of the file and the count of the widths again
+  are the exception, and the limit bounds what they cost. One thing grows
+  with the file anyway: the rows the cache of the cut rows holds, because a
+  row of a file with many columns holds many values. The parse of the file
+  and the count of the widths again
   with the measured characters, which only a file that holds a character
   wider than the count pays for, run in a worker when the file is large
   enough, so they cost the worker and not the thread the user is looking at;
