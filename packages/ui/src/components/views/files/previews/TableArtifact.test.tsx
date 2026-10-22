@@ -5,6 +5,17 @@ import { createRoot, type Root } from 'react-dom/client';
 
 import { I18nProvider } from '@/lib/i18n';
 
+import type { DelimitedWorkerRequest, DelimitedWorkerResponse } from './delimited-worker-protocol';
+
+// Bun cannot load Vite's `?worker&url` import that the client of the worker
+// makes. The preview itself never starts a worker in this test, because the
+// runtime has none, so the URL is never read.
+mock.module('./delimited-text.worker.ts?worker&url', () => ({
+  default: 'blob:test-delimited-worker',
+}));
+
+const { resetDelimitedWorkerClientForTests } = await import('./delimited-worker');
+
 // The number of times the preview counts the widths of the columns again
 // with the characters the browser measured. That count walks over the text
 // of the file, so it is the part of the preview that grows with the file,
@@ -12,10 +23,19 @@ import { I18nProvider } from '@/lib/i18n';
 const delimitedText = await import('./delimitedText');
 const countDelimitedColumnCells = delimitedText.countDelimitedColumnCells;
 const cutDelimitedRow = delimitedText.cutDelimitedRow;
+// The parse of a file, as the preview makes it on the thread it is on. The
+// worker of the preview parses the file with the parser of the repository,
+// and that parse is not counted here: it happens in the worker.
+const parseDelimitedText = delimitedText.parseDelimitedText;
 let widthCounts = 0;
 let rowCuts = 0;
+let parseCalls = 0;
 mock.module('./delimitedText', () => ({
   ...delimitedText,
+  parseDelimitedText: (...args: Parameters<typeof parseDelimitedText>) => {
+    parseCalls += 1;
+    return parseDelimitedText(...args);
+  },
   countDelimitedColumnCells: (...args: Parameters<typeof countDelimitedColumnCells>) => {
     widthCounts += 1;
     return countDelimitedColumnCells(...args);
@@ -29,6 +49,9 @@ mock.module('./delimitedText', () => ({
 // The preview is loaded after the mock, so it is the count of the preview
 // that is counted.
 const { TableArtifact } = await import('./TableArtifact');
+// The number of characters a file may hold to be parsed on the thread the
+// preview is on. A file that is larger is parsed in a worker.
+const { SMALL_FILE_CHAR_LIMIT } = await import('./useDelimitedTable');
 
 /** What the preview reads from the computed style of its probe. */
 type ComputedStyleDouble = Pick<
@@ -119,6 +142,53 @@ class FakeResizeObserver implements ResizeObserver {
 }
 
 /**
+ * A worker that parses a file the way the worker of the preview does.
+ *
+ * The worker of the preview is a script of its own, and the test gives it
+ * one: the request is handed to it and the answer is read from it. The file
+ * is parsed with the parser of the repository, the one the preview would
+ * have used on the thread it is on.
+ */
+class FakeWorker {
+  /** Every worker the preview has made. */
+  static instances: FakeWorker[] = [];
+  /** The requests the preview sent to this worker. */
+  readonly requests: DelimitedWorkerRequest[] = [];
+  onmessage: ((event: { data: DelimitedWorkerResponse }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onmessageerror: (() => void) | null = null;
+
+  constructor() {
+    FakeWorker.instances.push(this);
+  }
+
+  postMessage(request: DelimitedWorkerRequest): void {
+    this.requests.push(request);
+    if (request.type !== 'parse') return;
+    const table = parseDelimitedText(request.content, request.delimiter, request.rowCap);
+    // The worker answers in a task of its own, the way a worker does.
+    setTimeout(() => {
+      this.onmessage?.({ data: { type: 'parsed', id: request.id, table } });
+    }, 0);
+  }
+
+  terminate(): void {}
+}
+
+/**
+ * A worker that does not take the request it is given.
+ *
+ * A worker that cannot be used is given up on, so the request fails and the
+ * file is parsed on the thread of the preview, the way a runtime without a
+ * worker does.
+ */
+class RefusingWorker extends FakeWorker {
+  postMessage(): void {
+    throw new Error('The worker does not take the request');
+  }
+}
+
+/**
  * A resize observer that reports what the browser reports.
  *
  * The browser reports the content box of the element it observes and it
@@ -182,6 +252,24 @@ const buildCsv = (rows: number, columns: number): string => {
       cells.push(`r${row}c${column}`.padEnd(4, 'x'));
     }
     lines.push(cells.join(','));
+  }
+  return lines.join('\n');
+};
+
+/**
+ * A file whose text is longer than the preview parses on the thread it is
+ * on, so the preview parses it in a worker.
+ *
+ * The file holds the same line over and over, so it is large without
+ * holding more than a few values.
+ */
+const buildLargeCsv = (columns: number): string => {
+  const line = buildCsv(1, columns);
+  const lines: string[] = [];
+  let length = 0;
+  while (length <= SMALL_FILE_CHAR_LIMIT) {
+    lines.push(line);
+    length += line.length + 1;
   }
   return lines.join('\n');
 };
@@ -325,6 +413,8 @@ describe('TableArtifact', () => {
   let root: Root;
   let scrollTop = 0;
   let scrollLeft = 0;
+  /** The worker of the runtime, which this test takes away. */
+  let originalWorker: unknown;
   /** The width of the box the preview is rendered in. */
   let viewportWidth = VIEWPORT_WIDTH;
   /** The padding on each side of a cell, as the preview reads it. */
@@ -345,6 +435,8 @@ describe('TableArtifact', () => {
     characterAdvances.clear();
     widthCounts = 0;
     rowCuts = 0;
+    parseCalls = 0;
+    FakeWorker.instances = [];
     viewportWidth = VIEWPORT_WIDTH;
     cellPadding = 8;
     cellBorder = 1;
@@ -398,6 +490,13 @@ describe('TableArtifact', () => {
       getComputedStyle: computedStyle,
       IS_REACT_ACT_ENVIRONMENT: true,
     });
+    // The runtime of this test has no worker, so the preview parses the file
+    // on the main thread, which is the path a runtime without a worker
+    // takes.
+    originalWorker = globalThis.Worker;
+    Reflect.deleteProperty(globalThis, 'Worker');
+    // A worker of an earlier test must not answer for this one.
+    resetDelimitedWorkerClientForTests();
     // The preview reads the box it is in and where that box is scrolled to.
     Object.defineProperty(windowInstance.HTMLElement.prototype, 'clientWidth', {
       configurable: true,
@@ -427,6 +526,7 @@ describe('TableArtifact', () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     await windowInstance.happyDOM.close();
+    Object.assign(globalThis, { Worker: originalWorker });
   });
 
   const render = async (content: string, sizeBytes: number | null = null) => {
@@ -943,6 +1043,88 @@ describe('TableArtifact', () => {
     await scrollTo(ROW_HEIGHT);
 
     expect(rowCuts - afterOpen).toBeLessThanOrEqual(ROW_OVERSCAN);
+  });
+
+  test('shows a loading state while the file is parsed', async () => {
+    // The file is larger than the preview parses on the thread it is on, so
+    // it is parsed in a worker and the worker answers in a promise. The
+    // table is not there in the first commit.
+    const content = buildLargeCsv(50);
+    act(() => {
+      root.render(
+        <I18nProvider>
+          <TableArtifact path="/repo/data.csv" content={content} sizeBytes={null} />
+        </I18nProvider>,
+      );
+    });
+
+    expect(host.textContent).toContain('Loading...');
+    expect(host.querySelector('table')).toBeNull();
+
+    // And the table is there once the file is parsed.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(host.querySelector('table')).not.toBeNull();
+  });
+
+  test('parses a small file on this thread, without a worker', async () => {
+    // The runtime has a worker, and the file is small enough to be parsed on
+    // the thread the preview is on, so the table is there in the first
+    // commit and no worker is made for it.
+    Object.assign(globalThis, { Worker: FakeWorker });
+    act(() => {
+      root.render(
+        <I18nProvider>
+          <TableArtifact path="/repo/data.csv" content={buildCsv(20, 4)} sizeBytes={null} />
+        </I18nProvider>,
+      );
+    });
+
+    expect(host.textContent).not.toContain('Loading...');
+    expect(host.querySelector('table')).not.toBeNull();
+    // The file was parsed here, and no worker was asked for it.
+    expect(parseCalls).toBe(1);
+    expect(FakeWorker.instances).toHaveLength(0);
+  });
+
+  test('parses the file in the worker when the runtime has one', async () => {
+    // The runtime has a worker, so the file is parsed in it and the thread
+    // the user is looking at does not parse it.
+    Object.assign(globalThis, { Worker: FakeWorker });
+    const content = buildLargeCsv(50);
+    await render(content);
+
+    // The worker was asked to parse the file, and it answered with the
+    // table of the file.
+    const worker = FakeWorker.instances[0];
+    expect(worker).toBeDefined();
+    const request = worker?.requests[0];
+    if (!request || request.type !== 'parse') throw new Error('The worker was not asked to parse the file');
+    expect(request.content).toBe(content);
+    expect(host.querySelector('table')).not.toBeNull();
+    // The file was not parsed on the thread of the preview.
+    expect(parseCalls).toBe(0);
+  });
+
+  test('parses the file on this thread when the runtime has no worker', async () => {
+    // The runtime of this test has no worker, so the file is parsed here.
+    // The parse is slower for the user and it is the last resort.
+    await render(buildLargeCsv(50));
+
+    expect(host.querySelector('table')).not.toBeNull();
+    expect(parseCalls).toBe(1);
+  });
+
+  test('parses the file on this thread when the worker does not take the request', async () => {
+    // The worker does not take the request, so the request fails and the
+    // file is parsed here, the way a runtime without a worker does.
+    Object.assign(globalThis, { Worker: RefusingWorker });
+    await render(buildLargeCsv(50));
+
+    expect(host.querySelector('table')).not.toBeNull();
+    expect(parseCalls).toBe(1);
   });
 
   test('measures a file whose dropped rows hold wide characters the same as a latin file', async () => {

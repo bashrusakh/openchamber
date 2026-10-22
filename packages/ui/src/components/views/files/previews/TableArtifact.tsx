@@ -1,15 +1,13 @@
 import React from 'react';
 
+import { Icon } from '@/components/icon/Icon';
 import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { ArtifactMetaBar } from './ArtifactMetaBar';
 import { formatArtifactSize } from './artifactMeta';
 import {
-  DEFAULT_TABLE_ROW_CAP,
-  countDelimitedColumnCells,
   cutDelimitedRow,
   delimiterForPath,
-  parseDelimitedText,
   type DelimitedRow,
   type DelimitedTable,
 } from './delimitedText';
@@ -20,7 +18,6 @@ import {
   columnWidth,
   computeTableWindow,
   displayCells,
-  hasWiderCharacter,
   holdsWholeTable,
   measureTableColumns,
   planTableColumns,
@@ -36,6 +33,7 @@ import {
   type TableRange,
   type TableWindow,
 } from './tableLayout';
+import { useDelimitedTable } from './useDelimitedTable';
 
 /**
  * A row is one line of the preview's meta type plus the cell's padding and
@@ -218,31 +216,6 @@ type TableCellWidths = {
 };
 
 /**
- * The widths of the columns of a file, and the file they were counted for.
- */
-type CountedWidths = {
-  /** The content of the file. */
-  content: string;
-  /** The delimiter the file was parsed with. */
-  delimiter: ',' | '\t';
-  /** The width of the widest kept value of every column, in character cells. */
-  cells: number[];
-};
-
-/**
- * The characters the widths of a file were counted with, and the file they
- * were counted for.
- */
-type CountedCharacters = {
-  /** The content of the file. */
-  content: string;
-  /** The delimiter the file was parsed with. */
-  delimiter: ',' | '\t';
-  /** The characters the widths were counted with. */
-  widths: TableCharacterWidths;
-};
-
-/**
  * The rows of a file, cut out of its source when they are needed.
  *
  * The preview reads the file in one place: the rows that are cut out of the
@@ -347,18 +320,30 @@ export const TableArtifact: React.FC<{
   content: string;
   sizeBytes: number | null;
 }> = ({ path, content, sizeBytes }) => {
+  const { t } = useI18n();
   const delimiter = delimiterForPath(path);
-  // The parser walks the text of the file once and keeps the place of every
-  // row it holds, so the preview never holds the cells of the file. The
-  // widths of the columns come out of the same walk.
-  const table = React.useMemo(
-    () => parseDelimitedText(content, delimiter, DEFAULT_TABLE_ROW_CAP),
-    [content, delimiter],
-  );
+  // The parse of the file runs in a worker, so the main thread is free while
+  // a wide export is read. The worker answers with the table, and the
+  // preview only renders what it sends back.
+  const delimited = useDelimitedTable(content, delimiter);
+
+  if (delimited.table === null) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <ArtifactMetaBar items={[formatArtifactSize(sizeBytes)]} />
+        <div className="flex items-center gap-2 p-3 typography-ui text-muted-foreground">
+          <Icon name="loader-4" className="size-4 animate-spin" />
+          {t('common.loading')}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <TableView
-      table={table}
+      table={delimited.table}
+      bodyCells={delimited.bodyCells}
+      countBodyCells={delimited.countBodyCells}
       content={content}
       delimiter={delimiter}
       sizeBytes={sizeBytes}
@@ -371,10 +356,12 @@ export const TableArtifact: React.FC<{
  */
 const TableView: React.FC<{
   table: DelimitedTable;
+  bodyCells: number[];
+  countBodyCells: (characterWidths: TableCharacterWidths) => void;
   content: string;
   delimiter: ',' | '\t';
   sizeBytes: number | null;
-}> = ({ table, content, delimiter, sizeBytes }) => {
+}> = ({ table, bodyCells, countBodyCells, content, delimiter, sizeBytes }) => {
   const { t } = useI18n();
   // The rows of the file are cut out of the source when they are needed, and
   // the cache that holds them is bounded by the window.
@@ -382,50 +369,6 @@ const TableView: React.FC<{
     () => createTableSource(content, delimiter, table.rows),
     [content, delimiter, table.rows],
   );
-  /**
-   * The widths of the columns of the body, and the file they were counted
-   * for.
-   *
-   * They are the widths the parser counted, and they are counted again with
-   * the characters the browser measured when a character is wider than the
-   * count gives it.
-   */
-  const [counted, setCounted] = React.useState<CountedWidths | null>(null);
-  /**
-   * The characters the widths were last counted with, and the file they were
-   * counted for. The count is asked for once for a set of characters: the
-   * panel is resized and rendered again all the time, and the widths of the
-   * file do not change with them.
-   */
-  const countedRef = React.useRef<CountedCharacters | null>(null);
-  // A file that is not the one the widths were counted for starts with the
-  // widths the parser counted.
-  const bodyCells = counted !== null
-    && counted.content === content
-    && counted.delimiter === delimiter
-    ? counted.cells
-    : table.columnCells;
-  /**
-   * Count the widths of the columns again with the characters the browser
-   * measured.
-   *
-   * A file whose characters are all counted right keeps the widths the
-   * parser counted, and nothing is counted again.
-   */
-  const countBodyCells = React.useCallback((characterWidths: TableCharacterWidths): void => {
-    const previous = countedRef.current;
-    if (previous !== null
-      && previous.content === content
-      && previous.delimiter === delimiter
-      && sameCharacterWidths(previous.widths, characterWidths)) {
-      return;
-    }
-    countedRef.current = { content, delimiter, widths: characterWidths };
-    const cells = hasWiderCharacter(characterWidths)
-      ? countDelimitedColumnCells(content, delimiter, DEFAULT_TABLE_ROW_CAP, characterWidths)
-      : table.columnCells;
-    setCounted({ content, delimiter, cells });
-  }, [content, delimiter, table.columnCells]);
   // Whether the whole grid of the file is small enough to be kept in the
   // document. It is a property of the file, so the same file is kept whole
   // in a narrow panel and in a wide one.
@@ -615,9 +558,8 @@ const TableView: React.FC<{
         return sameLayout(current, next) ? current : next;
       });
       // The widths of the columns are counted again with the characters the
-      // browser measured, and the count walks over the text of the kept
-      // rows. A file whose characters are all counted right is not counted
-      // again at all.
+      // browser measured, and the count runs in the worker. A file whose
+      // characters are all counted right is not counted again at all.
       countBodyCells(measuredWidths);
     };
 

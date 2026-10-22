@@ -160,8 +160,9 @@ show the previous and next image of the same folder, see below),
 element, duration and dimensions once metadata loads, a stated failure when
 the runtime cannot decode the codec), `FontArtifact` (a specimen under a
 throwaway `FontFace` family removed when the tab closes), `TableArtifact`
-(CSV/TSV through `delimitedText.ts`, parsed on the thread of the preview,
-capped rows stated in the meta line, the
+(CSV/TSV through `delimitedText.ts`, parsed on the thread of the preview when
+the file is small enough and in a worker otherwise, with a loading state until
+the worker answers, capped rows stated in the meta line, the
 rows and columns in view mounted unless the grid of the file is small enough
 to be kept whole), and `BinaryArtifact` (name, type,
 size, download; never a decode attempt).
@@ -192,16 +193,14 @@ true:
   same file is kept whole in a narrow panel and in a wide one;
 - the mounted cells stay bounded by the viewport on both axes, so the cost of
   drawing a file does not grow with the file. The files that are kept whole
-  are the exception, and the limit bounds what they cost. Three things grow
-  with the file anyway: the parse of the file, which counts the widths of the
-  columns and finds the characters outside latin in the same walk over its
-  text, the count of the widths again with the measured characters, which
-  only a file that holds a character wider than the count pays for, and the
-  `<col>` the table holds for every column of the file, because the parser
-  does not bound the number of columns. The parse and that count run on the
-  thread of the preview, so they cost the thread the user is looking at. The
-  rows the cache of the cut rows holds grow with the file as well, because a
-  row of a file with many columns holds many values;
+  are the exception, and the limit bounds what they cost. Two things grow
+  with the file anyway: the `<col>` the table holds for every column of the
+  file, because the parser does not bound the number of columns, and the rows
+  the cache of the cut rows holds, because a row of a file with many columns
+  holds many values. The parse of the file and the count of the widths again
+  with the measured characters, which only a file that holds a character
+  wider than the count pays for, run in a worker when the file is large
+  enough, so they cost the worker and not the thread the user is looking at;
 - the widths of the columns come from the data and from the font, and a resize
   of the panel does not count them again;
 - the column widths stay the same while scrolling, and a column is as wide as
@@ -246,8 +245,8 @@ in the same walk, so the open of a file costs one walk over its text. A
 2,000-row file with 50 columns took 18 ms of parse on the machine the figures
 below were taken on, and a file with 5,000 columns in 2,000 rows, which is
 124 MB of text, took 504 ms. The parse is the largest single item on both,
-and it runs on the thread of the preview, so a wide file costs the thread
-the user is looking at what its parse costs.
+and a file that is large enough is parsed in a worker, so it costs the worker
+and not the thread the user is looking at.
 
 The walk over the cells the preview used to make is gone, and with it the
 measurement of the widths the preview did for every file. A file that holds a
@@ -301,12 +300,51 @@ with millions of cells put millions of strings in the memory of the tab, and
 the walk over them to measure the columns cost more than the parse of the
 file itself.
 
-One place also means that the rest of the preview does not have to know how
-the table was made: the preview asks for the table and gets one, and the
-widths of the columns and the places of the rows come with it. The parse
-runs on the thread of the preview, over the text the preview holds, and the
-count of the widths that a character wider than the count makes necessary
-runs there as well.
+One place also means that the parse can be moved off the main thread without
+the rest of the preview knowing: the preview asks for the table and gets one,
+and where the parse ran is not its business. The parse of a file that is large
+enough runs in a worker for the reason below.
+
+### Why a large file is parsed in a worker
+
+The parse of a file walks its text once, and a wide export is tens of
+megabytes of text: 145 MB of it took about 900 ms of the main thread, and the
+viewer was frozen for all of it. The parse and the count of the widths of
+such a file are therefore done in a worker, and the main thread only renders
+what the worker sends back. The preview shows a loading state until the
+worker answers.
+
+A runtime without a worker, a worker that cannot be created, one that crashes,
+one that does not take the request and one that does not answer within its
+budget all end the same way: the file is parsed on the main thread, which is
+slower for the user and the last resort. The budget grows with the size of
+the file, because the parse walks the text once and a big file takes longer
+than a small one.
+
+The worker keeps the text of the parse it answers, so the count of the widths
+does not have to carry the text of the file again. Only the newest parse is
+kept: the preview has one file open at a time, and the text of a file the
+user has left is of no use to the file that is open now. A count for a parse
+the worker does not hold any more is answered as a failure, and the preview
+counts the widths on the main thread instead.
+
+### Why a small file is parsed on the thread of the preview
+
+A file of at most 200,000 characters is parsed on the thread the preview is
+on, in the first render, and the preview opens without a loading state. The
+parse of a file of n characters costs about 15 ms per megabyte in Chromium, so
+a file of that size is parsed in a few milliseconds, and a round trip through a
+worker costs more than that: the worker is made, the text is copied into it
+and it answers. The file used to open in the first frame, and a spinner and a
+meta line that change are a worse trade than a parse of a few milliseconds.
+
+The limit is the preview's own decision. The editor has a limit of its own for
+a different reason, and the two are not the same number by accident: the
+editor opens a large file in the view instead of the editor, and the preview
+pays for a parse it can afford to make.
+
+A file that is larger is parsed in the worker, and the preview shows its
+loading state until the worker answers.
 
 ### Why the widths are counted as the rows are read
 
