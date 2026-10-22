@@ -93,6 +93,36 @@ export const holdsWholeTable = (rowCount: number, columnCount: number): boolean 
   (rowCount + 1) * columnCount <= TABLE_WHOLE_GRID_CELL_LIMIT
 );
 
+/**
+ * The largest number of columns a cell may span.
+ *
+ * HTML limits the `colspan` of a cell to 1000: the attribute keeps the value
+ * that was written, but the browser lays the cell out over 1000 columns at
+ * most. A cell that stands for more columns than that leaves the columns
+ * after it in the wrong place, so a range of columns that is wider than this
+ * is carried by more than one cell.
+ */
+export const HTML_MAX_COLSPAN = 1000;
+
+/**
+ * The cells that carry a range of columns outside the window.
+ *
+ * The spans add up to the number of columns the range holds, and none of them
+ * is wider than HTML allows, so the browser lays the cells of the window out
+ * over the columns the model names. A range that fits in one cell is carried
+ * by one cell, and the file keeps the markup it had.
+ */
+export const tableSpacerSpans = (columns: number): number[] => {
+  const spans: number[] = [];
+  let left = columns;
+  while (left > 0) {
+    const span = Math.min(left, HTML_MAX_COLSPAN);
+    spans.push(span);
+    left -= span;
+  }
+  return spans;
+};
+
 /** The column widths of one table and where each column starts. */
 export type TableColumnPlan = TableColumnWidths & {
   /** Where each column starts in px, counted from the table's first column. */
@@ -131,29 +161,6 @@ const LAYOUT_STEP_PX = 1 / 64;
 
 /** Matches any character outside latin, including the halves of a pair. */
 const NON_ASCII = /[\u0080-\uFFFF]/;
-
-/**
- * True when the header and the kept rows hold nothing but latin characters.
- *
- * The flag is read over exactly the cells the measurement walks, so it is
- * exact for the cells that decide a width. A row the parser dropped is never
- * measured, so it cannot change a width. The file itself is not walked for
- * the flag, which is the part that grows with the file.
- */
-export const isAsciiOnly = (
-  header: ReadonlyArray<string>,
-  rows: ReadonlyArray<ReadonlyArray<string>>,
-): boolean => {
-  for (const value of header) {
-    if (NON_ASCII.test(value)) return false;
-  }
-  for (const row of rows) {
-    for (const value of row) {
-      if (NON_ASCII.test(value)) return false;
-    }
-  }
-  return true;
-};
 
 /**
  * The width of a value in character cells.
@@ -227,57 +234,55 @@ const characterWidth = (code: number, widths: TableCharacterWidths | undefined):
  * monospace font of the preview. Those are the characters the browser has to
  * measure, and the list holds every one of them once.
  *
+ * The walk is over the text of the file and not over its cells, because a
+ * cell is a string of its own and a file with millions of cells costs more
+ * to walk over than its text does. The text holds the characters of the
+ * cells in the order the cells have them, so the list is the one the cells
+ * would give. A character of a row the parser dropped is in it as well, and
+ * such a character is in no value that is counted, so it changes no width.
+ *
  * The walk stops at the limit, because the list is only used to measure the
  * characters in the browser, and a file with more distinct characters than
  * that costs more to measure than the width it gains. A character the walk
  * did not reach keeps the width the count gives it.
  */
 export const collectNonLatinCodePoints = (
-  header: ReadonlyArray<string>,
-  rows: ReadonlyArray<ReadonlyArray<string>>,
+  content: string,
   limit: number,
 ): number[] => {
+  // A file that starts with a byte order mark is read without it, the way
+  // the parser reads it, so the mark is not one of the characters of the
+  // data. The mark is skipped and the text is not copied, because the text
+  // of a large export is large.
+  const start = content.charCodeAt(0) === 0xfeff ? 1 : 0;
   // The code points of the basic plane are held in a table, so the walk
   // over the characters of the file does not hash every one of them. The
   // planes above it are rare, and they are held in a set.
   const seen = new Uint8Array(0x10000);
   const above = new Set<number>();
   const codePoints: number[] = [];
-  const collect = (value: string): boolean => {
-    for (let index = 0; index < value.length; index += 1) {
-      const code = value.charCodeAt(index);
-      if (code < 0x80) continue;
-      // A character outside the basic plane is a pair of code units, and it
-      // is measured as the one character it is.
-      if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
-        const low = value.charCodeAt(index + 1);
-        if (low >= 0xdc00 && low <= 0xdfff) {
-          const point = (code - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000;
-          if (above.has(point)) {
-            index += 1;
-            continue;
-          }
+  for (let index = start; index < content.length; index += 1) {
+    const code = content.charCodeAt(index);
+    if (code < 0x80) continue;
+    // A character outside the basic plane is a pair of code units, and it
+    // is measured as the one character it is.
+    if (code >= 0xd800 && code <= 0xdbff && index + 1 < content.length) {
+      const low = content.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        const point = (code - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000;
+        if (!above.has(point)) {
           above.add(point);
           codePoints.push(point);
-          if (codePoints.length >= limit) return false;
-          index += 1;
-          continue;
+          if (codePoints.length >= limit) return codePoints;
         }
+        index += 1;
+        continue;
       }
-      if (seen[code]) continue;
-      seen[code] = 1;
-      codePoints.push(code);
-      if (codePoints.length >= limit) return false;
     }
-    return true;
-  };
-  for (const value of header) {
-    if (!collect(value)) return codePoints;
-  }
-  for (const row of rows) {
-    for (const value of row) {
-      if (!collect(value)) return codePoints;
-    }
+    if (seen[code]) continue;
+    seen[code] = 1;
+    codePoints.push(code);
+    if (codePoints.length >= limit) return codePoints;
   }
   return codePoints;
 };
@@ -373,6 +378,12 @@ export const tableWidthCss = (totalCells: number, columnCount: number, metrics: 
  * reach a column does not narrow it and a file with few fields per row does
  * not pay for the whole width of the table on every row.
  *
+ * Every value is counted on its own: a value of plain latin characters takes
+ * one cell per character, and any other value takes the width its characters
+ * are measured at. The count of a value decides the width of its column and
+ * nothing else, so the width of a column does not depend on what the rest of
+ * the file holds.
+ *
  * The widths come from the data and the font, so they are measured once per
  * file. The room the panel has is shared out over them afterwards, and only
  * that part is repeated when the panel is resized.
@@ -382,13 +393,6 @@ export const measureTableColumns = (
   rows: ReadonlyArray<ReadonlyArray<string>>,
   columnCount: number,
   metrics: TableCellMetrics,
-  /**
-   * True when the header and the kept rows hold nothing but latin
-   * characters, which makes every value one cell per character. The walk
-   * over the cells is the same order of work the parser already does, so it
-   * is kept as cheap as it can be.
-   */
-  asciiOnly: boolean,
   /**
    * The width the browser measured for the characters outside latin, which
    * is what a value in a script the monospace font does not cover is
@@ -422,10 +426,6 @@ export const measureTableColumns = (
       if (bodyCells[column] >= maxCells) continue;
       const value = row[column];
       if (value === undefined) continue;
-      if (asciiOnly) {
-        if (value.length > bodyCells[column]) bodyCells[column] = value.length;
-        continue;
-      }
       // A short value cannot beat the widest value found so far.
       if (value.length * widestCharacter <= bodyCells[column]) continue;
       const width = displayCells(value, characterWidths);
@@ -437,7 +437,7 @@ export const measureTableColumns = (
   let totalCells = 0;
   for (let column = 0; column < columnCount; column += 1) {
     const headerText = header[column] ?? '';
-    const headerCells = asciiOnly ? headerText.length : displayCells(headerText, characterWidths);
+    const headerCells = displayCells(headerText, characterWidths);
     const width = Math.max(headerCells, Math.min(bodyCells[column], maxCells));
     cells[column] = roundUpCells(width);
     totalCells += cells[column];

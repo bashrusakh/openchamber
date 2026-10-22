@@ -175,11 +175,12 @@ grid of the file is small enough to be kept whole. A wide export holds far
 more cells than a screen can show, and mounting all of them froze the viewer
 for seconds: 2,000 rows with 50 columns ask for 100,000 cells. The rows
 outside the window are carried by spacer rows that take their height, and
-the columns beside the window by a spacer cell that spans them, so the table
+the columns beside the window by spacer cells that span them, so the table
 keeps its own layout, its column widths and its text selection.
 `tableLayout.ts` holds the model: the width of every column, the range of
-rows and columns a scroll position lands on, and the size of the grid of a
-file. What has to stay true:
+rows and columns a scroll position lands on, the size of the grid of a file
+and the cells that carry the columns beside the window. What has to stay
+true:
 
 - the preview is a real `<table>` with a sticky `<thead>`, because the table
   semantics and the native text selection depend on it;
@@ -190,11 +191,11 @@ file. What has to stay true:
   same file is kept whole in a narrow panel and in a wide one;
 - the mounted cells stay bounded by the viewport on both axes, so the cost of
   drawing a file does not grow with the file. The files that are kept whole
-  are the exception, and the limit bounds what they cost. Three things grow
-  with the file anyway: the parse of the file, the walks over the kept cells
-  (the check for plain latin, the walk for the characters outside latin and
+  are the exception, and the limit bounds what they cost. Four things grow
+  with the file anyway: the parse of the file, the walk over the text of the
+  file for the characters outside latin, the walk over the kept cells for
   the measurement of the widths, which the first file of a session pays for
-  twice), and the `<col>` the table holds for every column of the file,
+  twice, and the `<col>` the table holds for every column of the file,
   because the parser does not bound the number of columns;
 - the widths of the columns are measured from the data and from the font, and
   a resize of the panel does not measure them again;
@@ -209,6 +210,10 @@ file. What has to stay true:
 - the table states how many rows and how many columns it has, and every
   mounted row and cell states where it sits in the file, so a screen reader
   is told the size of the table and not the size of the window;
+- the cells of the window sit in the columns the model names, for a file of
+  any number of columns. HTML limits the `colspan` of a cell to 1000, and a
+  cell that claims more is laid out over fewer columns, so a range of
+  columns that is wider than the limit is carried by more than one cell;
 - a right-to-left table keeps its columns in the order the file has them,
   with the first column on the right. Its scroll offset is read the way the
   browser reports it: 0 at the right edge of the box, and negative from
@@ -229,27 +234,28 @@ file. What has to stay true:
 
 How much each of them costs was measured on one machine, so the figures below
 describe that machine and say nothing about the code itself. A 2,000-row file
-with 50 columns took 66 ms of parse, 15 ms for the latin check and 6 ms for
-the measurement of the widths, about 90 ms of main-thread work when the file
-opens. The first file of a session pays the measurement of the widths a
-second time, because the layout starts on guessed metrics, so it takes about
-96 ms there. A file with 5,000 columns in 2,000 rows took 2.2 s of parse,
-0.66 s for the latin check and 0.24 s for the widths, and about 3.3 s for the
-first file of a session, which pays the measurement of the widths twice. The
-same shape measured about 1.8 s of parse and about 1.7 s for the latin check
-on another machine. The parse is the largest single item on both, but the
-margin over the latin check is wide on the first machine and narrow on the
-second.
+with 50 columns took 37 ms of parse, 9 ms for the walk for the characters
+outside latin and 20 ms for the measurement of the widths, about 69 ms of
+main-thread work when the file opens. The first file of a session pays the
+measurement of the widths a second time, because the layout starts on
+guessed metrics, so it takes about 89 ms there. A file with 5,000 columns in
+2,000 rows took 1.8 s of parse, 0.13 s for the walk for the characters
+outside latin and 0.43 s for the measurement of the widths, and about 2.4 s
+for the open of the file. The first file of a session pays the measurement of
+the widths twice, so it takes about 2.8 s there. The parse is the largest
+single item on both.
 
-A file that holds characters outside latin pays for the walk that finds them
-and for the measured widths they are counted at. The same 2,000-row file with
-50 columns of greek took 20 ms for the walk for the characters and 23 ms for
-the measurement of the widths on another machine, against 4 ms and 4 ms for
-the same file in plain latin characters. A file in plain latin characters
-runs neither: the walk for the characters outside latin is only made for a
-file that has them. Such a file also pays for the measurement of the widths
-twice, because the characters are measured with the font after the first
-commit, and the widths are counted again with them.
+A file of 50 columns pays about what it paid before the width of a value was
+counted on its own: the check for plain latin it gave up is what the counting
+of every value costs. A file with 5,000 columns is the one that gains, because
+the check it gave up grew with the number of cells and the counting does
+not.
+
+A file that holds characters outside latin pays for the measured widths they
+are counted at, and the walk that finds them is the one it pays for in any
+case. Such a file also pays for the measurement of the widths twice, because
+the characters are measured with the font after the first commit, and the
+widths are counted again with them.
 
 The widths are written in the font's own character unit, so the browser
 resolves the characters against the font it has, and the padding and the
@@ -381,19 +387,49 @@ with the wrong widths for a frame.
 
 The characters outside latin are counted at the counted width in that first
 commit as well, and the layout effect measures them with the font and counts
-the widths again. A file in plain latin characters has no such characters,
-and the walk that looks for them is not made for it.
+the widths again. The walk that finds them is over the text of the file, so
+it is made once for the file and not again for the first commit.
 
-### Why the latin flag is read from the kept rows and not from the file
+### Why the width of a value is counted on its own
 
 A value of plain latin characters takes one cell per character, and a value
-with characters outside latin takes the width they are measured at, so the
-preview has to know which it is looking at before it measures a column. The
-flag is read over the header and the rows that are kept. The measurement walks
-exactly those cells, so the flag is exact for the cells that decide a width,
-and a row the parser dropped is never measured, so it cannot change one.
-Reading the whole file for the flag walked every row of the export for rows
-that are never shown.
+with characters outside latin takes the width they are measured at. The count
+decides the width of the column the value sits in and nothing else, so the
+preview counts every value on its own and never asks what the rest of the
+file holds.
+
+It used to ask. The preview read a flag over the kept cells that told it
+whether the file held nothing but latin characters, and the flag decided how
+a value was counted. The flag repeated, over every kept cell, a decision the
+counter makes on its own over the cells it reads, and it cost more than the
+measurement it was meant to make cheaper: the counter stops reading a column
+once that column cannot get any wider, and the flag read every cell of the
+file. A 2,000-row file with 5,000 columns paid 2.1 s for the flag and
+0.17 s for the measurement on the machine the figures above were taken on.
+The open of that file is 1.55 s shorter without the flag, and the widths it
+measures are the same to the pixel.
+
+A file of 50 columns paid 16 ms for the flag and 7 ms for the measurement,
+and pays 9 ms for the walk for the characters and 20 ms for the measurement
+now. The check it gave up grew with the number of cells and the counting
+does not, so a file with 5,000 columns gains what a file with 50 columns
+gives up.
+
+### Why the characters outside latin are found in the text of the file
+
+The preview has to know which characters outside latin the file uses, because
+the browser measures each of them in a hidden probe. The walk is over the
+text of the file and not over the cells the parser built, because a cell is a
+string of its own and a file with millions of cells costs more to walk over
+than its text does: the same 2,000-row file with 5,000 columns spends 1.5 s
+on a walk over its cells and 0.13 s on a walk over its 75 MB of text.
+
+The text holds the characters of the cells in the order the cells have them,
+so the list is the one the cells would give. A character of a row the parser
+dropped is in the list as well, and such a character is in no value that is
+counted, so it changes no width. The preview draws those characters in the
+probe as well, which costs the measurement of a few more characters and
+nothing else.
 
 ### Why the measurements keep the object they have
 
@@ -572,6 +608,35 @@ The spacer rows carry no background of their own, so the region they cover is
 one flat colour where the preview stripes every row. They stand at least
 five rows beyond the edges of the viewport, so the region they cover is never
 on screen and the stripes of the mounted rows carry on unbroken.
+
+### Why a range of columns wider than a cell may span is carried by more than one cell
+
+HTML limits the `colspan` of a cell to 1000. The attribute keeps the value
+that was written, but the browser lays the cell out over 1000 columns at the
+most, and the cells of the window end up in the columns before the ones the
+model names. Measured in Chromium against the markup of the preview: a file
+with 2,000 columns, scrolled to its end, put the cells of the window 53,572
+px to the left of where the model named them, outside the visible part of the
+table, and a file with 5,000 columns put them 81,640 px off in the middle
+of the file. The table was wide enough and the scroll reached the end of it;
+the cells simply were not where the model said they were.
+
+A range of columns that is wider than the limit is therefore carried by more
+than one cell, and the spans add up to the number of columns the range
+holds. The cells of the window then land in the columns the model names, for
+a file of any number of columns, and a range that fits in one cell is still
+carried by one cell. The limit is a property of HTML and not of the preview,
+so it is a named constant of the model (`HTML_MAX_COLSPAN`) and the cells
+that carry a range are computed from it (`tableSpacerSpans`).
+
+The row that stands for the rows above the window keeps its one cell. That
+cell gives the row its height and nothing else: it carries no padding, no
+border and no background of its own, and the height of the row is written on
+the row. The browser lays the cell out over 1000 columns of a file with more
+than that, and the row keeps the height it asks for, which was measured in
+Chromium: a row that stands for 144 rows of a file with 1,200 columns was
+3,888 px tall with a cell that was laid out over 1,000 of the 1,200 columns.
+Splitting the cell would add cells to the document for nothing.
 
 ### Why the striping and the last column's border follow the index
 

@@ -11,13 +11,10 @@ import { I18nProvider } from '@/lib/i18n';
 const tableLayout = await import('./tableLayout');
 const measureTableColumns = tableLayout.measureTableColumns;
 let cellWalks = 0;
-/** The latin flag the preview measured the columns with. */
-let lastAsciiOnly: boolean | null = null;
 mock.module('./tableLayout', () => ({
   ...tableLayout,
   measureTableColumns: (...args: Parameters<typeof measureTableColumns>) => {
     cellWalks += 1;
-    lastAsciiOnly = args[4];
     return measureTableColumns(...args);
   },
 }));
@@ -325,7 +322,6 @@ describe('TableArtifact', () => {
     probeTextWidth = PROBE_CHARACTER_COUNT * MEASURED_ADVANCE;
     characterAdvances.clear();
     cellWalks = 0;
-    lastAsciiOnly = null;
     viewportWidth = VIEWPORT_WIDTH;
     cellPadding = 8;
     cellBorder = 1;
@@ -550,6 +546,40 @@ describe('TableArtifact', () => {
     if (!row) return [];
     return Array.from(row.children).filter((cell) => !cell.hasAttribute('title'));
   };
+
+  /** The first mounted row of the body. */
+  const firstMountedRow = (): Element | null => (
+    Array.from(host.querySelectorAll('tbody tr'))
+      .find((row) => row.querySelector('td[aria-colindex]')) ?? null
+  );
+
+  /**
+   * The cells that stand for the columns beside the window, split into the
+   * ones before the window and the ones after it.
+   *
+   * The cells of the window state the column they sit in and the spacers
+   * state none, so the cells around them are the ones that stand for the
+   * columns beside the window.
+   */
+  const spacerGroups = (row: Element | null) => {
+    if (!row) return { leading: [], trailing: [] };
+    const cells = Array.from(row.children);
+    const isWindow = (cell: Element) => cell.hasAttribute('aria-colindex');
+    const first = cells.findIndex(isWindow);
+    const last = cells.map(isWindow).lastIndexOf(true);
+    return {
+      leading: cells.slice(0, first),
+      trailing: cells.slice(last + 1),
+    };
+  };
+
+  /** The number of columns a spacer cell stands for. */
+  const spanOf = (cell: Element): number => Number(cell.getAttribute('colspan') ?? '1');
+
+  /** The number of columns a group of spacer cells stands for. */
+  const spanOfGroup = (cells: Element[]): number => (
+    cells.reduce((sum, cell) => sum + spanOf(cell), 0)
+  );
 
   test('mounts only the cells in view of a wide export', async () => {
     await render(buildCsv(2_100, 50));
@@ -821,23 +851,27 @@ describe('TableArtifact', () => {
     expect(cellWalks).toBeGreaterThan(afterOpen);
   });
 
-  test('measures a file whose dropped rows hold wide characters as a latin file', async () => {
-    // The flag is read over the cells the measurement walks, and a dropped
-    // row is never measured, so the wide characters of a dropped row cannot
-    // change a width.
+  test('measures a file whose dropped rows hold wide characters the same as a latin file', async () => {
+    // A dropped row is never measured, and the characters of a dropped row
+    // are in no value that is counted, so they cannot change a width.
     const lines = buildCsv(2_001, 4).split('\n');
-    lines.push('名前,wide,wide,wide');
+    lines.push('名前の名前,wide,wide,wide');
     await render(lines.join('\n'));
 
-    expect(lastAsciiOnly).toBe(true);
+    // The first column holds seven characters in the longest of the rows
+    // that are kept, so it is seven cells wide and not the ten cells the
+    // dropped row would ask for.
+    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(7ch + 16px + 1px)');
   });
 
   test('measures a file whose kept rows hold wide characters the wide way', async () => {
     const lines = buildCsv(10, 4).split('\n');
-    lines[3] = '名前,wide,wide,wide';
+    lines[3] = '名前の名前,wide,wide,wide';
     await render(lines.join('\n'));
 
-    expect(lastAsciiOnly).toBe(false);
+    // Five full-width characters take ten cells, and the column is as wide
+    // as the text the browser lays out for them.
+    expect(host.querySelector('col')?.getAttribute('style')).toContain('10ch');
   });
 
   test('sizes a column to the value it holds', async () => {
@@ -981,6 +1015,45 @@ describe('TableArtifact', () => {
     const [leading, trailing] = spacers;
     expect(borderClasses(leading)).toEqual(['border-b', 'border-border/40', 'border-e']);
     expect(borderClasses(trailing)).toEqual(['border-b', 'border-border/40']);
+  });
+
+  test('carries the columns beside the window in cells that HTML allows', async () => {
+    // A file with more columns than a cell may span, so the columns before
+    // the window are more than 1000 of them.
+    await render(buildUniformCsv(2_000));
+    await scrollTo(0, 70_000);
+
+    const cells = dataCells();
+    const start = Number(cells[0].getAttribute('aria-colindex')) - 1;
+    const end = Number(cells[cells.length - 1].getAttribute('aria-colindex'));
+    // The window is far enough into the file that the columns before it are
+    // more than a cell may span.
+    expect(start).toBeGreaterThan(1_000);
+
+    for (const row of [host.querySelector('thead tr'), firstMountedRow()]) {
+      const { leading, trailing } = spacerGroups(row);
+      // The cells before the window stand for the columns before it, and the
+      // cells after it for the columns after it.
+      expect(spanOfGroup(leading)).toBe(start);
+      expect(spanOfGroup(trailing)).toBe(2_000 - end);
+      // No cell stands for more columns than HTML allows. A cell that does
+      // is laid out over fewer columns than it says, and the cells of the
+      // window end up in the wrong columns.
+      for (const cell of [...leading, ...trailing]) {
+        expect(spanOf(cell)).toBeLessThanOrEqual(1_000);
+      }
+    }
+  });
+
+  test('carries a range of columns that fits in one cell with one cell', async () => {
+    // A file with 1,001 columns: the columns before the window are at most
+    // 1,000 of them, which is what a cell may span.
+    await render(buildUniformCsv(1_001));
+    await scrollTo(0, 20_000);
+
+    const { leading, trailing } = spacerGroups(firstMountedRow());
+    expect(leading).toHaveLength(1);
+    expect(trailing).toHaveLength(1);
   });
 
   test('mounts the columns of the new file and not the ones of the file before it', async () => {

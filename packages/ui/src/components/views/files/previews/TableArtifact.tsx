@@ -13,9 +13,9 @@ import {
   columnWidth,
   computeTableWindow,
   holdsWholeTable,
-  isAsciiOnly,
   measureTableColumns,
   planTableColumns,
+  tableSpacerSpans,
   tableWidthCss,
   type TableCellMetrics,
   type TableCharacterWidths,
@@ -78,9 +78,16 @@ const CELL_END_BORDER_CLASS = 'border-e';
  * interior boundary and keeps the border on its inline end, and the spacer
  * at the end of the file is the table's own last column and keeps the
  * missing border.
+ *
+ * A range of columns that is wider than a cell may span is carried by more
+ * than one cell, and only the last of them ends at the boundary of the
+ * window, so only it keeps the border on its inline end. The cells before it
+ * end in the middle of the range and have no boundary to mark.
  */
-const leadingSpacerClassName = (borderClass: string): string => `border-b ${borderClass} ${CELL_END_BORDER_CLASS}`;
-const trailingSpacerClassName = (borderClass: string): string => `border-b ${borderClass}`;
+const spacerClassName = (borderClass: string): string => `border-b ${borderClass}`;
+const leadingSpacerClassName = (borderClass: string): string => (
+  `${spacerClassName(borderClass)} ${CELL_END_BORDER_CLASS}`
+);
 
 /**
  * What the preview assumes before the browser has measured the font. The
@@ -216,23 +223,18 @@ export const TableArtifact: React.FC<{
 }> = ({ path, content, sizeBytes }) => {
   const { t } = useI18n();
   const table = React.useMemo(() => parseDelimitedText(content, delimiterForPath(path)), [content, path]);
-  // A file of plain latin characters measures its columns by their length,
-  // which keeps the walk over the cells cheap. The flag is read over exactly
-  // the header and the rows the measurement walks, so it is exact for the
-  // cells that decide a width. A row the parser dropped is never measured,
-  // so it cannot change a width.
-  const asciiOnly = React.useMemo(() => isAsciiOnly(table.header, table.rows), [table]);
   // Whether the whole grid of the file is small enough to be kept in the
   // document. It is a property of the file, so the same file is kept whole
   // in a narrow panel and in a wide one.
   const holdsWholeGrid = holdsWholeTable(table.rows.length, table.columnCount);
   // The characters outside latin are the ones the browser has to measure,
   // because the font it falls back to can lay them out wider than the
-  // monospace font of the preview. A file of plain latin characters has
-  // none, and the walk that looks for them is not run at all.
+  // monospace font of the preview. The walk is over the text of the file
+  // and not over its cells, because a cell is a string of its own and a
+  // file with millions of cells costs more to walk over than its text does.
   const codePoints = React.useMemo(
-    () => (asciiOnly ? [] : collectNonLatinCodePoints(table.header, table.rows, CHARACTER_MEASUREMENT_LIMIT)),
-    [asciiOnly, table],
+    () => collectNonLatinCodePoints(content, CHARACTER_MEASUREMENT_LIMIT),
+    [content],
   );
   const summary = table.totalRows === 1
     ? t('filesView.artifact.table.rowsSingle', { rows: table.totalRows, columns: table.columnCount })
@@ -264,10 +266,9 @@ export const TableArtifact: React.FC<{
       table.rows,
       table.columnCount,
       layout.metrics,
-      asciiOnly,
       layout.characterWidths,
     ),
-    [asciiOnly, layout.characterWidths, layout.metrics, table],
+    [layout.characterWidths, layout.metrics, table],
   );
   const plan = React.useMemo<TableColumnPlan>(
     () => planTableColumns(widths, layout.metrics, layout.viewportWidth),
@@ -469,6 +470,12 @@ export const TableArtifact: React.FC<{
   for (let row = mountedWindow.rows.start; row < mountedWindow.rows.end; row += 1) {
     visibleRows.push(row);
   }
+  // The cells that carry the columns beside the window. A range of columns
+  // that is wider than a cell may span is carried by more than one cell, so
+  // that the browser lays the cells of the window out over the columns the
+  // model names.
+  const leadingSpans = tableSpacerSpans(mountedWindow.columns.start);
+  const trailingSpans = tableSpacerSpans(table.columnCount - mountedWindow.columns.end);
 
   const headerClassName = (column: number): string => cn(
     `whitespace-nowrap border-b ${CELL_END_BORDER_CLASS} border-border/40 ${CELL_PADDING_CLASS} py-1 text-start font-medium text-foreground`,
@@ -554,13 +561,16 @@ export const TableArtifact: React.FC<{
                     takes its height from the cells in view collapses to the
                     padding and the border while the window moves over it. */}
                 <tr aria-rowindex={1} style={{ height: layout.rowHeight }}>
-                  {mountedWindow.columns.start > 0 && (
+                  {leadingSpans.map((span, index) => (
                     <th
-                      colSpan={mountedWindow.columns.start}
+                      key={`leading-${index}`}
+                      colSpan={span}
                       aria-hidden="true"
-                      className={leadingSpacerClassName('border-border/40')}
+                      className={index === leadingSpans.length - 1
+                        ? leadingSpacerClassName('border-border/40')
+                        : spacerClassName('border-border/40')}
                     />
-                  )}
+                  ))}
                   {visibleColumns.map((column) => (
                     <th
                       key={column}
@@ -571,13 +581,14 @@ export const TableArtifact: React.FC<{
                       {table.header[column] ?? ''}
                     </th>
                   ))}
-                  {mountedWindow.columns.end < table.columnCount && (
+                  {trailingSpans.map((span, index) => (
                     <th
-                      colSpan={table.columnCount - mountedWindow.columns.end}
+                      key={`trailing-${index}`}
+                      colSpan={span}
                       aria-hidden="true"
-                      className={trailingSpacerClassName('border-border/40')}
+                      className={spacerClassName('border-border/40')}
                     />
-                  )}
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -605,13 +616,16 @@ export const TableArtifact: React.FC<{
                       className={rowClassName(row)}
                       style={{ height: layout.rowHeight }}
                     >
-                      {mountedWindow.columns.start > 0 && (
+                      {leadingSpans.map((span, index) => (
                         <td
-                          colSpan={mountedWindow.columns.start}
+                          key={`leading-${index}`}
+                          colSpan={span}
                           aria-hidden="true"
-                          className={leadingSpacerClassName('border-border/30')}
+                          className={index === leadingSpans.length - 1
+                            ? leadingSpacerClassName('border-border/30')
+                            : spacerClassName('border-border/30')}
                         />
-                      )}
+                      ))}
                       {visibleColumns.map((column) => {
                         const value = values[column] ?? '';
                         return (
@@ -625,13 +639,14 @@ export const TableArtifact: React.FC<{
                           </td>
                         );
                       })}
-                      {mountedWindow.columns.end < table.columnCount && (
+                      {trailingSpans.map((span, index) => (
                         <td
-                          colSpan={table.columnCount - mountedWindow.columns.end}
+                          key={`trailing-${index}`}
+                          colSpan={span}
                           aria-hidden="true"
-                          className={trailingSpacerClassName('border-border/30')}
+                          className={spacerClassName('border-border/30')}
                         />
-                      )}
+                      ))}
                     </tr>
                   );
                 })}

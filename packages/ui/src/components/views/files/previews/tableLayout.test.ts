@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  HTML_MAX_COLSPAN,
   TABLE_WHOLE_GRID_CELL_LIMIT,
   characterWidthsFrom,
   clampTableWindow,
@@ -9,9 +10,9 @@ import {
   computeTableWindow,
   displayCells,
   holdsWholeTable,
-  isAsciiOnly,
   measureTableColumns,
   planTableColumns,
+  tableSpacerSpans,
   tableWidthCss,
   visibleColumnRange,
   visibleRowRange,
@@ -36,10 +37,9 @@ const tablePlan = (
   columnCount: number,
   metrics: TableCellMetrics,
   viewportWidth: number,
-  asciiOnly: boolean,
   characterWidths?: TableCharacterWidths,
 ) => planTableColumns(
-  measureTableColumns(header, rows, columnCount, metrics, asciiOnly, characterWidths),
+  measureTableColumns(header, rows, columnCount, metrics, characterWidths),
   metrics,
   viewportWidth,
 );
@@ -63,7 +63,7 @@ describe('displayCells', () => {
 
 describe('planTableColumns', () => {
   test('sizes a column to its longest value', () => {
-    const plan = tablePlan(['name', 'city'], [['alice', 'Lisbon'], ['bo', 'Porto']], 2, METRICS, 0, false);
+    const plan = tablePlan(['name', 'city'], [['alice', 'Lisbon'], ['bo', 'Porto']], 2, METRICS, 0);
     expect(plan.cells).toEqual([5, 6]);
     // The first column carries the border, the last one does not.
     expect(plan.boundaries).toEqual([0, 54.5, 115.5]);
@@ -71,24 +71,24 @@ describe('planTableColumns', () => {
   });
 
   test('keeps a header that is longer than every value', () => {
-    const plan = tablePlan(['a very long header'], [['x']], 1, METRICS, 0, false);
+    const plan = tablePlan(['a very long header'], [['x']], 1, METRICS, 0);
     expect(plan.cells).toEqual([18]);
     expect(plan.boundaries).toEqual([0, 18 * 7.5 + 16]);
   });
 
   test('caps a long value but not a long header', () => {
-    const capped = tablePlan(['h'], [['x'.repeat(200)]], 1, METRICS, 0, false);
+    const capped = tablePlan(['h'], [['x'.repeat(200)]], 1, METRICS, 0);
     // 66 cells fit under the cap: 66 * 7.5 + 16 = 511.
     expect(capped.cells).toEqual([66]);
     expect(capped.totalWidth).toBe(511);
 
-    const header = tablePlan(['h'.repeat(200)], [['x']], 1, METRICS, 0, false);
+    const header = tablePlan(['h'.repeat(200)], [['x']], 1, METRICS, 0);
     expect(header.cells).toEqual([200]);
     expect(header.totalWidth).toBe(200 * 7.5 + 16);
   });
 
   test('shares the room left over in a wider panel over the columns', () => {
-    const plan = tablePlan(['a', 'b'], [['x', 'y']], 2, METRICS, 200, false);
+    const plan = tablePlan(['a', 'b'], [['x', 'y']], 2, METRICS, 200);
     // The columns ask for 24.5 px and 23.5 px, and the room the panel has is
     // shared out over them in proportion to that.
     expect(plan.totalWidth).toBe(200);
@@ -97,25 +97,64 @@ describe('planTableColumns', () => {
 
   test('shares the room left over in proportion to the columns', () => {
     // The first column asks for 54.5px, the second for 23.5px.
-    const plan = tablePlan(['a', 'b'], [['xxxxx', 'y']], 2, METRICS, 156, false);
+    const plan = tablePlan(['a', 'b'], [['xxxxx', 'y']], 2, METRICS, 156);
     expect(plan.boundaries).toEqual([0, 109, 156]);
   });
 
   test('keeps the columns at their own width in a narrower panel', () => {
-    const plan = tablePlan(['a', 'b'], [['x', 'y']], 2, METRICS, 40, false);
+    const plan = tablePlan(['a', 'b'], [['x', 'y']], 2, METRICS, 40);
     expect(plan.boundaries).toEqual([0, 24.5, 48]);
   });
 
   test('counts a wide character as two cells of the column', () => {
-    const plan = tablePlan(['名前'], [['名']], 1, METRICS, 0, false);
+    const plan = tablePlan(['名前'], [['名']], 1, METRICS, 0);
     expect(plan.cells).toEqual([4]);
   });
 
-  test('measures a latin file by the length of its values', () => {
-    const latin = tablePlan(['name'], [['alice'], ['bo']], 1, METRICS, 0, true);
-    const measured = tablePlan(['name'], [['alice'], ['bo']], 1, METRICS, 0, false);
-    expect(latin.cells).toEqual(measured.cells);
-    expect(latin.boundaries).toEqual(measured.boundaries);
+  test('counts a plain latin value by the length of its characters', () => {
+    const plan = tablePlan(['name'], [['alice'], ['bo']], 1, METRICS, 0);
+    expect(plan.cells).toEqual([5]);
+  });
+});
+
+describe('the count of a value', () => {
+  /** The width the browser gives a greek letter, in px. */
+  const ALPHA_ADVANCE = 8.27;
+  const ALPHA = 'α'.codePointAt(0) ?? 0;
+
+  test('is the count of that value, whatever the rest of the file holds', () => {
+    // A plain latin value takes one cell per character, and a file whose
+    // other rows hold characters outside latin does not change it.
+    const alone = tablePlan(['name'], [['alice']], 1, METRICS, 0);
+    const beside = tablePlan(['name'], [['alice'], ['東京']], 1, METRICS, 0);
+
+    expect(alone.cells).toEqual([5]);
+    expect(beside.cells).toEqual([5]);
+  });
+
+  test('does not change the width of another column', () => {
+    // The count of a value is the count of that value, so a row with
+    // characters outside latin does not change the width of a column that
+    // holds the same values without it.
+    const without = tablePlan(['h', 'h'], [['alice', 'bo']], 2, METRICS, 0);
+    const withWide = tablePlan(['h', 'h'], [['alice', 'bo'], ['東京', 'x']], 2, METRICS, 0);
+
+    expect(withWide.cells[0]).toBe(without.cells[0]);
+  });
+
+  test('is the width the browser gives the characters of a value', () => {
+    // A value in a script the monospace font does not cover is counted at
+    // the width the browser gives its characters, and the plain latin value
+    // beside it keeps its length.
+    const widths = characterWidthsFrom(new Map([[ALPHA, ALPHA_ADVANCE]]), METRICS.charWidth);
+    const plan = tablePlan(['h', 'h'], [['alice', 'α'.repeat(10)]], 2, METRICS, 0, widths);
+
+    // The first column is as wide as the five characters of its value.
+    expect(plan.cells[0]).toBe(5);
+    // The second one is as wide as the ten characters the browser measured,
+    // which take more room than the count gives them.
+    expect(plan.cells[1]).toBeGreaterThan(10);
+    expect(plan.cells[1]).toBeLessThan(12);
   });
 });
 
@@ -124,7 +163,7 @@ describe('the widths of the columns and the room of the panel', () => {
   const rows = [['alice', 'Lisbon'], ['bo', 'Porto']];
 
   test('keeps the widths the data asks for when the panel grows', () => {
-    const widths = measureTableColumns(header, rows, 2, METRICS, false);
+    const widths = measureTableColumns(header, rows, 2, METRICS);
     const narrow = planTableColumns(widths, METRICS, 0);
     const wide = planTableColumns(widths, METRICS, 400);
 
@@ -139,18 +178,6 @@ describe('the widths of the columns and the room of the panel', () => {
   });
 });
 
-describe('isAsciiOnly', () => {
-  test('tells a latin table from one with wide characters', () => {
-    expect(isAsciiOnly(['name', 'city'], [['alice', 'Lisbon']])).toBe(true);
-    expect(isAsciiOnly(['名前', 'city'], [])).toBe(false);
-    expect(isAsciiOnly(['name'], [['alice'], ['bo', '東京']])).toBe(false);
-  });
-
-  test('looks at the header as well as the rows', () => {
-    expect(isAsciiOnly(['name', '東京'], [['alice']])).toBe(false);
-  });
-});
-
 describe('the characters outside latin', () => {
   /** The code points the check uses, the way the model keys them. */
   const ALPHA = 'α'.codePointAt(0) ?? 0;
@@ -159,20 +186,43 @@ describe('the characters outside latin', () => {
   const YA = 'я'.codePointAt(0) ?? 0;
 
   test('are collected once each', () => {
-    const codePoints = collectNonLatinCodePoints(['α', 'b'], [['γα', 'δ'], ['α']], 100);
+    const codePoints = collectNonLatinCodePoints('α,b\nγα,δ\nα', 100);
     expect(codePoints.sort((left, right) => left - right)).toEqual([ALPHA, GAMMA, DELTA]);
   });
 
   test('are not collected for a file of plain latin characters', () => {
-    expect(collectNonLatinCodePoints(['name'], [['alice']], 100)).toEqual([]);
+    expect(collectNonLatinCodePoints('name\nalice', 100)).toEqual([]);
   });
 
   test('are collected as the one character a pair of code units is', () => {
-    expect(collectNonLatinCodePoints(['🙂'], [], 100)).toEqual(['🙂'.codePointAt(0)]);
+    expect(collectNonLatinCodePoints('🙂', 100)).toEqual(['🙂'.codePointAt(0)]);
   });
 
   test('stop at the limit of the measurement', () => {
-    expect(collectNonLatinCodePoints(['αβγ'], [], 2)).toHaveLength(2);
+    expect(collectNonLatinCodePoints('αβγ', 2)).toHaveLength(2);
+  });
+
+  test('are collected from the text of the file and not from its cells', () => {
+    // The text holds the characters of the cells in the order the cells have
+    // them, so the walk over the text gives the same list the cells would.
+    const cells = [['α', 'b'], ['γα', 'δ'], ['α']];
+    const text = cells.map((row) => row.join(',')).join('\n');
+
+    expect(collectNonLatinCodePoints(text, 100).sort((left, right) => left - right))
+      .toEqual([ALPHA, GAMMA, DELTA]);
+  });
+
+  test('are collected from a row the parser dropped as well', () => {
+    // The characters of a row the parser dropped are in no value that is
+    // counted, so they change no width, but the browser measures them all
+    // the same.
+    expect(collectNonLatinCodePoints('alice\n東京', 100)).toEqual(['東'.codePointAt(0), '京'.codePointAt(0)]);
+  });
+
+  test('are not the byte order mark a file may start with', () => {
+    // The parser reads a file that starts with a byte order mark without
+    // it, so the mark is not one of the characters of the data.
+    expect(collectNonLatinCodePoints('﻿name\nalice', 100)).toEqual([]);
   });
 
   test('are counted at the width the browser measured for them', () => {
@@ -182,7 +232,7 @@ describe('the characters outside latin', () => {
     // column is as wide as the text the browser lays out.
     const advance = 8.27;
     const widths = characterWidthsFrom(new Map([[ALPHA, advance]]), METRICS.charWidth);
-    const plan = tablePlan(['h'], [['α'.repeat(40)]], 1, METRICS, 0, false, widths);
+    const plan = tablePlan(['h'], [['α'.repeat(40)]], 1, METRICS, 0, widths);
 
     // The text takes 330.8 px, and the column is as wide as that.
     expect(plan.totalWidth).toBeGreaterThanOrEqual(40 * advance + METRICS.cellPadding);
@@ -195,7 +245,7 @@ describe('the characters outside latin', () => {
     // the cell the count gives it, so the column is not padded with room
     // the text does not need.
     const widths = characterWidthsFrom(new Map([[YA, 7.19]]), METRICS.charWidth);
-    const plan = tablePlan(['h'], [['я'.repeat(40)]], 1, METRICS, 0, false, widths);
+    const plan = tablePlan(['h'], [['я'.repeat(40)]], 1, METRICS, 0, widths);
 
     expect(plan.cells).toEqual([40]);
     expect(plan.totalWidth).toBe(40 * METRICS.charWidth + METRICS.cellPadding);
@@ -214,7 +264,7 @@ describe('the characters outside latin', () => {
     // A value that mixes a character the browser lays out wider with one it
     // lays out narrower is as wide as the text the browser lays out.
     const widths = characterWidthsFrom(new Map([[ALPHA, 8.27], [YA, 7.19]]), METRICS.charWidth);
-    const plan = tablePlan(['h'], [['ααααя']], 1, METRICS, 0, false, widths);
+    const plan = tablePlan(['h'], [['ααααя']], 1, METRICS, 0, widths);
 
     const text = 4 * 8.27 + 7.19;
     expect(plan.totalWidth).toBeGreaterThanOrEqual(text + METRICS.cellPadding);
@@ -233,31 +283,31 @@ describe('the cap on a cell', () => {
 
   test('keeps a value that fits the room of the cell', () => {
     // 66 characters take 495 px, which is the room the cell has.
-    const plan = tablePlan(['h'], [['x'.repeat(66)]], 1, MEASURED_METRICS, 0, false);
+    const plan = tablePlan(['h'], [['x'.repeat(66)]], 1, MEASURED_METRICS, 0);
     expect(plan.cells).toEqual([66]);
     expect(plan.totalWidth).toBeLessThanOrEqual(METRICS.maxCellWidth + 1 / 64);
   });
 
   test('cuts a value one character over the room short', () => {
-    const plan = tablePlan(['h'], [['x'.repeat(67)]], 1, MEASURED_METRICS, 0, false);
+    const plan = tablePlan(['h'], [['x'.repeat(67)]], 1, MEASURED_METRICS, 0);
     expect(plan.cells).toEqual([66]);
   });
 
   test('keeps a value that fits at an advance that does not divide the room', () => {
     // 58 characters of 8.4 px take 487.2 px and fit, 59 take 495.6 px and do not.
     const metrics: TableCellMetrics = { ...METRICS, charWidth: 8.4 };
-    expect(tablePlan(['h'], [['x'.repeat(58)]], 1, metrics, 0, false).cells).toEqual([58]);
-    expect(tablePlan(['h'], [['x'.repeat(59)]], 1, metrics, 0, false).cells).toEqual([58]);
+    expect(tablePlan(['h'], [['x'.repeat(58)]], 1, metrics, 0).cells).toEqual([58]);
+    expect(tablePlan(['h'], [['x'.repeat(59)]], 1, metrics, 0).cells).toEqual([58]);
   });
 
   test('counts a full-width character as two cells of the cap', () => {
     // 33 full-width characters take 66 cells and fit, 34 take 68 and do not.
-    expect(tablePlan(['h'], [['名'.repeat(33)]], 1, MEASURED_METRICS, 0, false).cells).toEqual([66]);
-    expect(tablePlan(['h'], [['名'.repeat(34)]], 1, MEASURED_METRICS, 0, false).cells).toEqual([66]);
+    expect(tablePlan(['h'], [['名'.repeat(33)]], 1, MEASURED_METRICS, 0).cells).toEqual([66]);
+    expect(tablePlan(['h'], [['名'.repeat(34)]], 1, MEASURED_METRICS, 0).cells).toEqual([66]);
   });
 
   test('keeps the column within the cap on the cell', () => {
-    const plan = tablePlan(['h'], [['x'.repeat(200)]], 1, MEASURED_METRICS, 0, false);
+    const plan = tablePlan(['h'], [['x'.repeat(200)]], 1, MEASURED_METRICS, 0);
     expect(plan.totalWidth).toBeLessThanOrEqual(METRICS.maxCellWidth + 1 / 64);
   });
 });
@@ -354,7 +404,6 @@ describe('computeTableWindow', () => {
       8,
       METRICS,
       0,
-      false,
     );
     const window = computeTableWindow({
       plan,
@@ -429,6 +478,39 @@ describe('the width the table is written with', () => {
   test('adds up the columns for the table', () => {
     expect(tableWidthCss(30, 4, METRICS)).toBe('calc(30ch + 64px + 3px)');
     expect(tableWidthCss(0, 0, METRICS)).toBe('calc(0ch + 0px + 0px)');
+  });
+});
+
+describe('the cells that carry the columns outside the window', () => {
+  test('holds the limit HTML puts on the colspan of a cell', () => {
+    // HTML limits the colspan of a cell to 1000. The attribute keeps the
+    // value that was written, but the browser lays the cell out over 1000
+    // columns at the most.
+    expect(HTML_MAX_COLSPAN).toBe(1_000);
+  });
+
+  test('carries a range that fits in one cell with one cell', () => {
+    expect(tableSpacerSpans(0)).toEqual([]);
+    expect(tableSpacerSpans(1)).toEqual([1]);
+    expect(tableSpacerSpans(999)).toEqual([999]);
+    expect(tableSpacerSpans(HTML_MAX_COLSPAN)).toEqual([HTML_MAX_COLSPAN]);
+  });
+
+  test('carries a range that is wider than a cell may span with more than one cell', () => {
+    expect(tableSpacerSpans(HTML_MAX_COLSPAN + 1)).toEqual([HTML_MAX_COLSPAN, 1]);
+    expect(tableSpacerSpans(1_500)).toEqual([1_000, 500]);
+    expect(tableSpacerSpans(5_000)).toEqual([1_000, 1_000, 1_000, 1_000, 1_000]);
+  });
+
+  test('covers every column of the range and spans no more than HTML allows', () => {
+    for (const columns of [0, 1, 999, 1_000, 1_001, 2_000, 5_000, 32_767]) {
+      const spans = tableSpacerSpans(columns);
+      expect(spans.reduce((sum, span) => sum + span, 0)).toBe(columns);
+      for (const span of spans) {
+        expect(span).toBeGreaterThan(0);
+        expect(span).toBeLessThanOrEqual(HTML_MAX_COLSPAN);
+      }
+    }
   });
 });
 
@@ -526,13 +608,13 @@ describe('the width of a ragged file', () => {
   test('measures a ragged file the same as the file with the missing values filled in', () => {
     const ragged = [['alice', 'Lisbon'], ['bo']];
     const filled = [['alice', 'Lisbon'], ['bo', '']];
-    expect(measureTableColumns(['name', 'city'], ragged, 2, METRICS, true))
-      .toEqual(measureTableColumns(['name', 'city'], filled, 2, METRICS, true));
+    expect(measureTableColumns(['name', 'city'], ragged, 2, METRICS))
+      .toEqual(measureTableColumns(['name', 'city'], filled, 2, METRICS));
   });
 
   test('keeps the width of the widest value of a column', () => {
     // The row that does not reach the second column cannot narrow it.
-    const widths = measureTableColumns(['name', 'city'], [['alice', 'Lisbon'], ['bo']], 2, METRICS, true);
+    const widths = measureTableColumns(['name', 'city'], [['alice', 'Lisbon'], ['bo']], 2, METRICS);
     expect(widths.cells).toEqual([5, 6]);
   });
 
@@ -550,7 +632,7 @@ describe('the width of a ragged file', () => {
       },
     });
 
-    measureTableColumns(['h'], [row], 50_000, METRICS, true);
+    measureTableColumns(['h'], [row], 50_000, METRICS);
 
     // The one field of the row, and nothing else.
     expect(reads).toBe(1);
