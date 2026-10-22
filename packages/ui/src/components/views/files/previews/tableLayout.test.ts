@@ -5,7 +5,6 @@ import {
   TABLE_WHOLE_GRID_CELL_LIMIT,
   characterWidthsFrom,
   clampTableWindow,
-  collectNonLatinCodePoints,
   columnWidth,
   computeTableWindow,
   displayCells,
@@ -28,8 +27,33 @@ const METRICS: TableCellMetrics = {
 };
 
 /**
+ * The width of the widest value of every column, the way the parser counts
+ * them as it reads a file: the width of a value is the width of its
+ * characters, and the widest value of a column is the width of the column.
+ */
+const bodyCells = (
+  rows: ReadonlyArray<ReadonlyArray<string>>,
+  columnCount: number,
+  characterWidths?: TableCharacterWidths,
+): number[] => {
+  const cells = new Array<number>(columnCount).fill(0);
+  for (const row of rows) {
+    const fields = Math.min(row.length, columnCount);
+    for (let column = 0; column < fields; column += 1) {
+      const width = displayCells(row[column], characterWidths);
+      if (width > cells[column]) cells[column] = width;
+    }
+  }
+  return cells;
+};
+
+/**
  * The plan of one table: the widths the columns ask for, and the room the
  * panel has shared out over them.
+ *
+ * The header's values are counted on their own, and the body comes in as the
+ * width of the widest value of every column, which is what the parser hands
+ * over.
  */
 const tablePlan = (
   header: ReadonlyArray<string>,
@@ -39,7 +63,12 @@ const tablePlan = (
   viewportWidth: number,
   characterWidths?: TableCharacterWidths,
 ) => planTableColumns(
-  measureTableColumns(header, rows, columnCount, metrics, characterWidths),
+  measureTableColumns(
+    header.map((value) => displayCells(value, characterWidths)),
+    bodyCells(rows, columnCount, characterWidths),
+    columnCount,
+    metrics,
+  ),
   metrics,
   viewportWidth,
 );
@@ -163,7 +192,12 @@ describe('the widths of the columns and the room of the panel', () => {
   const rows = [['alice', 'Lisbon'], ['bo', 'Porto']];
 
   test('keeps the widths the data asks for when the panel grows', () => {
-    const widths = measureTableColumns(header, rows, 2, METRICS);
+    const widths = measureTableColumns(
+      header.map((value) => displayCells(value)),
+      bodyCells(rows, 2),
+      2,
+      METRICS,
+    );
     const narrow = planTableColumns(widths, METRICS, 0);
     const wide = planTableColumns(widths, METRICS, 400);
 
@@ -178,52 +212,34 @@ describe('the widths of the columns and the room of the panel', () => {
   });
 });
 
+describe('the width every column asks for', () => {
+  test('takes the header and the body as they are counted', () => {
+    const widths = measureTableColumns([9, 3], [4, 7], 2, METRICS);
+    expect(widths.cells).toEqual([9, 7]);
+    expect(widths.totalCells).toBe(16);
+  });
+
+  test('caps the body and not the header', () => {
+    // 66 cells fit under the cap: 66 * 7.5 + 16 = 511.
+    expect(measureTableColumns([1], [200], 1, METRICS).cells).toEqual([66]);
+    expect(measureTableColumns([200], [200], 1, METRICS).cells).toEqual([200]);
+  });
+
+  test('rounds a width up to the precision of a cell', () => {
+    expect(measureTableColumns([1.0004], [0], 1, METRICS).cells).toEqual([1.001]);
+  });
+
+  test('a column neither the header nor the body reaches has no width', () => {
+    const widths = measureTableColumns([4], [4], 3, METRICS);
+    expect(widths.cells).toEqual([4, 0, 0]);
+    expect(widths.totalCells).toBe(4);
+  });
+});
+
 describe('the characters outside latin', () => {
   /** The code points the check uses, the way the model keys them. */
   const ALPHA = 'α'.codePointAt(0) ?? 0;
-  const GAMMA = 'γ'.codePointAt(0) ?? 0;
-  const DELTA = 'δ'.codePointAt(0) ?? 0;
   const YA = 'я'.codePointAt(0) ?? 0;
-
-  test('are collected once each', () => {
-    const codePoints = collectNonLatinCodePoints('α,b\nγα,δ\nα', 100);
-    expect(codePoints.sort((left, right) => left - right)).toEqual([ALPHA, GAMMA, DELTA]);
-  });
-
-  test('are not collected for a file of plain latin characters', () => {
-    expect(collectNonLatinCodePoints('name\nalice', 100)).toEqual([]);
-  });
-
-  test('are collected as the one character a pair of code units is', () => {
-    expect(collectNonLatinCodePoints('🙂', 100)).toEqual(['🙂'.codePointAt(0)]);
-  });
-
-  test('stop at the limit of the measurement', () => {
-    expect(collectNonLatinCodePoints('αβγ', 2)).toHaveLength(2);
-  });
-
-  test('are collected from the text of the file and not from its cells', () => {
-    // The text holds the characters of the cells in the order the cells have
-    // them, so the walk over the text gives the same list the cells would.
-    const cells = [['α', 'b'], ['γα', 'δ'], ['α']];
-    const text = cells.map((row) => row.join(',')).join('\n');
-
-    expect(collectNonLatinCodePoints(text, 100).sort((left, right) => left - right))
-      .toEqual([ALPHA, GAMMA, DELTA]);
-  });
-
-  test('are collected from a row the parser dropped as well', () => {
-    // The characters of a row the parser dropped are in no value that is
-    // counted, so they change no width, but the browser measures them all
-    // the same.
-    expect(collectNonLatinCodePoints('alice\n東京', 100)).toEqual(['東'.codePointAt(0), '京'.codePointAt(0)]);
-  });
-
-  test('are not the byte order mark a file may start with', () => {
-    // The parser reads a file that starts with a byte order mark without
-    // it, so the mark is not one of the characters of the data.
-    expect(collectNonLatinCodePoints('﻿name\nalice', 100)).toEqual([]);
-  });
 
   test('are counted at the width the browser measured for them', () => {
     // A character the monospace font does not cover falls back to another
@@ -608,23 +624,38 @@ describe('the width of a ragged file', () => {
   test('measures a ragged file the same as the file with the missing values filled in', () => {
     const ragged = [['alice', 'Lisbon'], ['bo']];
     const filled = [['alice', 'Lisbon'], ['bo', '']];
-    expect(measureTableColumns(['name', 'city'], ragged, 2, METRICS))
-      .toEqual(measureTableColumns(['name', 'city'], filled, 2, METRICS));
+    expect(measureTableColumns(
+      ['name', 'city'].map((value) => displayCells(value)),
+      bodyCells(ragged, 2),
+      2,
+      METRICS,
+    )).toEqual(measureTableColumns(
+      ['name', 'city'].map((value) => displayCells(value)),
+      bodyCells(filled, 2),
+      2,
+      METRICS,
+    ));
   });
 
   test('keeps the width of the widest value of a column', () => {
     // The row that does not reach the second column cannot narrow it.
-    const widths = measureTableColumns(['name', 'city'], [['alice', 'Lisbon'], ['bo']], 2, METRICS);
+    const widths = measureTableColumns(
+      ['name', 'city'].map((value) => displayCells(value)),
+      bodyCells([['alice', 'Lisbon'], ['bo']], 2),
+      2,
+      METRICS,
+    );
     expect(widths.cells).toEqual([5, 6]);
   });
 
-  test('walks over the fields a row has and not over every column of the file', () => {
-    // The walk over the cells of a file grew with the number of columns of
-    // the file when it went over every column of every row, and a file with
-    // few fields per row and many columns paid for the whole width of the
-    // table on every row.
+  test('reads the width of every column and not the values of the cells', () => {
+    // The measurement used to walk over the cells of the file, and the walk
+    // went over the fields a row has, so a file with few fields per row and
+    // many columns did not pay for the whole width of the table on every
+    // row. The widths come in counted now, so the measurement reads one
+    // number per column and nothing else.
     let reads = 0;
-    const row = new Proxy<string[]>(['a'], {
+    const body = new Proxy<number[]>([1, 2, 3], {
       get(target, key) {
         if (key === 'length') return target.length;
         reads += 1;
@@ -632,9 +663,9 @@ describe('the width of a ragged file', () => {
       },
     });
 
-    measureTableColumns(['h'], [row], 50_000, METRICS);
+    measureTableColumns([4], body, 50_000, METRICS);
 
-    // The one field of the row, and nothing else.
-    expect(reads).toBe(1);
+    // The width of every column, and nothing else.
+    expect(reads).toBe(50_000);
   });
 });

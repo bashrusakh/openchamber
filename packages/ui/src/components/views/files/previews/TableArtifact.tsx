@@ -4,17 +4,27 @@ import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { ArtifactMetaBar } from './ArtifactMetaBar';
 import { formatArtifactSize } from './artifactMeta';
-import { delimiterForPath, parseDelimitedText } from './delimitedText';
+import {
+  DEFAULT_TABLE_ROW_CAP,
+  countDelimitedColumnCells,
+  cutDelimitedRow,
+  delimiterForPath,
+  parseDelimitedText,
+  type DelimitedRow,
+  type DelimitedTable,
+} from './delimitedText';
 import {
   DEFAULT_CHARACTER_WIDTHS,
   characterWidthsFrom,
   clampTableWindow,
-  collectNonLatinCodePoints,
   columnWidth,
   computeTableWindow,
+  displayCells,
+  hasWiderCharacter,
   holdsWholeTable,
   measureTableColumns,
   planTableColumns,
+  sameCharacterWidths,
   tableSpacerSpans,
   tableWidthCss,
   type TableCellMetrics,
@@ -23,6 +33,7 @@ import {
   type TableColumnWidth,
   type TableColumnWidths,
   type TableDirection,
+  type TableRange,
   type TableWindow,
 } from './tableLayout';
 
@@ -41,16 +52,17 @@ const PROBE_CHARACTER_COUNT = 256;
 const PROBE_TEXT = '0'.repeat(PROBE_CHARACTER_COUNT);
 /** The character the row probe draws, to give it a line of its own. */
 const PROBE_ROW_TEXT = '0';
+
 /**
- * The characters outside latin the browser measures, at most.
+ * The cells the cache of the cut rows holds beside the rows on screen.
  *
- * The list is the characters the file uses, and every one of them is drawn
- * in the browser to learn the width it takes there. A file with more
- * distinct characters than this costs more to measure than the width it
- * gains, and the characters the walk did not reach keep the width the count
- * gives them.
+ * The rows that are on screen are held whatever they cost, because they are
+ * the ones the preview draws. The rows beside them are held as long as the
+ * cache holds fewer cells than this, so a scroll that comes back over a row
+ * does not cut it again, and a file with many columns does not put millions
+ * of strings in the cache.
  */
-const CHARACTER_MEASUREMENT_LIMIT = 1024;
+const TABLE_ROW_CACHE_CELL_LIMIT = 2_000;
 
 /**
  * The inline padding of a cell.
@@ -132,14 +144,6 @@ const sameMetrics = (current: TableCellMetrics, next: TableCellMetrics): boolean
   && current.maxCellWidth === next.maxCellWidth
 );
 
-const sameCharacterWidths = (current: TableCharacterWidths, next: TableCharacterWidths): boolean => {
-  if (current.size !== next.size) return false;
-  for (const [character, width] of current) {
-    if (next.get(character) !== width) return false;
-  }
-  return true;
-};
-
 const sameLayout = (current: TableLayout, next: TableLayout): boolean => (
   sameMetrics(current.metrics, next.metrics)
   && sameCharacterWidths(current.characterWidths, next.characterWidths)
@@ -201,6 +205,128 @@ const measureCharacterWidths = (
 };
 
 /**
+ * The width of the values of a table, in character cells.
+ *
+ * The header's values and the body's values are counted apart, because the
+ * header is never capped and the body is.
+ */
+type TableCellWidths = {
+  /** The width of every header value, in character cells. */
+  headerCells: number[];
+  /** The width of the widest kept value of every column, in character cells. */
+  bodyCells: number[];
+};
+
+/**
+ * The widths of the columns of a file, and the file they were counted for.
+ */
+type CountedWidths = {
+  /** The content of the file. */
+  content: string;
+  /** The delimiter the file was parsed with. */
+  delimiter: ',' | '\t';
+  /** The width of the widest kept value of every column, in character cells. */
+  cells: number[];
+};
+
+/**
+ * The characters the widths of a file were counted with, and the file they
+ * were counted for.
+ */
+type CountedCharacters = {
+  /** The content of the file. */
+  content: string;
+  /** The delimiter the file was parsed with. */
+  delimiter: ',' | '\t';
+  /** The characters the widths were counted with. */
+  widths: TableCharacterWidths;
+};
+
+/**
+ * The rows of a file, cut out of its source when they are needed.
+ *
+ * The preview reads the file in one place: the rows that are cut out of the
+ * source and the cache that holds them come from here, so the rest of the
+ * preview never walks over the cells of the file.
+ *
+ * The cache holds the rows that are on screen, and they are held whatever
+ * they cost: they are the ones the preview draws, and a bound by the cells
+ * the cache holds kept one row of a file with 5,000 columns, so every change
+ * of the window cut all the rows on screen again. The rows beside them are
+ * held as long as the cache holds fewer cells than the budget, so a scroll
+ * that comes back over a row finds it, and the memory the cache holds does
+ * not grow with the number of rows of the file.
+ */
+type TableSource = {
+  /** The values of a row, cut out of the source the first time it is asked for. */
+  values(row: number): string[];
+  /** Keep the rows that are on screen and drop the ones that are not. */
+  keepRows(range: TableRange): void;
+};
+
+/**
+ * The rows of a file, cut out of its source when they are needed.
+ *
+ * A row is cut out of the source when it is mounted, and a row that was cut
+ * is not cut again, so a scroll that comes back over a row does not pay for
+ * it twice.
+ */
+const createTableSource = (
+  content: string,
+  delimiter: ',' | '\t',
+  rows: readonly DelimitedRow[],
+): TableSource => {
+  /** The rows that were cut out of the source, by the row they belong to. */
+  const cutRows = new Map<number, string[]>();
+  /** The number of cells the cut rows hold. */
+  let cutCells = 0;
+  /** The rows that are on screen. */
+  let windowRange: TableRange = { start: 0, end: 0 };
+
+  const values = (row: number): string[] => {
+    const held = cutRows.get(row);
+    if (held) return held;
+    const span = rows[row];
+    if (!span) return [];
+    const cut = cutDelimitedRow(content, span, delimiter);
+    cutRows.set(row, cut);
+    cutCells += cut.length;
+    return cut;
+  };
+
+  /**
+   * Drop the rows that are not on screen when the cache holds more cells
+   * than the budget.
+   */
+  const prune = (): void => {
+    while (cutCells > TABLE_ROW_CACHE_CELL_LIMIT) {
+      let dropped = false;
+      for (const row of cutRows.keys()) {
+        if (row >= windowRange.start && row < windowRange.end) continue;
+        const cut = cutRows.get(row);
+        cutRows.delete(row);
+        cutCells -= cut ? cut.length : 0;
+        dropped = true;
+        break;
+      }
+      // Only the rows that are on screen are left, and they are held.
+      if (!dropped) return;
+    }
+  };
+
+  /**
+   * Keep the rows that are on screen and drop the ones that are not, as far
+   * as the budget allows.
+   */
+  const keepRows = (range: TableRange): void => {
+    windowRange = range;
+    prune();
+  };
+
+  return { values, keepRows };
+};
+
+/**
  * CSV/TSV as a grid: a sticky header row, monospace cells, and a hard cap on
  * rows so a large export renders at all. The cap is stated in the meta line,
  * not hidden, because "2,000 rows" and "the first 2,000 rows" mean different
@@ -221,21 +347,95 @@ export const TableArtifact: React.FC<{
   content: string;
   sizeBytes: number | null;
 }> = ({ path, content, sizeBytes }) => {
+  const delimiter = delimiterForPath(path);
+  // The parser walks the text of the file once and keeps the place of every
+  // row it holds, so the preview never holds the cells of the file. The
+  // widths of the columns come out of the same walk.
+  const table = React.useMemo(
+    () => parseDelimitedText(content, delimiter, DEFAULT_TABLE_ROW_CAP),
+    [content, delimiter],
+  );
+
+  return (
+    <TableView
+      table={table}
+      content={content}
+      delimiter={delimiter}
+      sizeBytes={sizeBytes}
+    />
+  );
+};
+
+/**
+ * The table of a file, and the window of it that is on screen.
+ */
+const TableView: React.FC<{
+  table: DelimitedTable;
+  content: string;
+  delimiter: ',' | '\t';
+  sizeBytes: number | null;
+}> = ({ table, content, delimiter, sizeBytes }) => {
   const { t } = useI18n();
-  const table = React.useMemo(() => parseDelimitedText(content, delimiterForPath(path)), [content, path]);
+  // The rows of the file are cut out of the source when they are needed, and
+  // the cache that holds them is bounded by the window.
+  const source = React.useMemo(
+    () => createTableSource(content, delimiter, table.rows),
+    [content, delimiter, table.rows],
+  );
+  /**
+   * The widths of the columns of the body, and the file they were counted
+   * for.
+   *
+   * They are the widths the parser counted, and they are counted again with
+   * the characters the browser measured when a character is wider than the
+   * count gives it.
+   */
+  const [counted, setCounted] = React.useState<CountedWidths | null>(null);
+  /**
+   * The characters the widths were last counted with, and the file they were
+   * counted for. The count is asked for once for a set of characters: the
+   * panel is resized and rendered again all the time, and the widths of the
+   * file do not change with them.
+   */
+  const countedRef = React.useRef<CountedCharacters | null>(null);
+  // A file that is not the one the widths were counted for starts with the
+  // widths the parser counted.
+  const bodyCells = counted !== null
+    && counted.content === content
+    && counted.delimiter === delimiter
+    ? counted.cells
+    : table.columnCells;
+  /**
+   * Count the widths of the columns again with the characters the browser
+   * measured.
+   *
+   * A file whose characters are all counted right keeps the widths the
+   * parser counted, and nothing is counted again.
+   */
+  const countBodyCells = React.useCallback((characterWidths: TableCharacterWidths): void => {
+    const previous = countedRef.current;
+    if (previous !== null
+      && previous.content === content
+      && previous.delimiter === delimiter
+      && sameCharacterWidths(previous.widths, characterWidths)) {
+      return;
+    }
+    countedRef.current = { content, delimiter, widths: characterWidths };
+    const cells = hasWiderCharacter(characterWidths)
+      ? countDelimitedColumnCells(content, delimiter, DEFAULT_TABLE_ROW_CAP, characterWidths)
+      : table.columnCells;
+    setCounted({ content, delimiter, cells });
+  }, [content, delimiter, table.columnCells]);
   // Whether the whole grid of the file is small enough to be kept in the
   // document. It is a property of the file, so the same file is kept whole
   // in a narrow panel and in a wide one.
   const holdsWholeGrid = holdsWholeTable(table.rows.length, table.columnCount);
   // The characters outside latin are the ones the browser has to measure,
   // because the font it falls back to can lay them out wider than the
-  // monospace font of the preview. The walk is over the text of the file
-  // and not over its cells, because a cell is a string of its own and a
-  // file with millions of cells costs more to walk over than its text does.
-  const codePoints = React.useMemo(
-    () => collectNonLatinCodePoints(content, CHARACTER_MEASUREMENT_LIMIT),
-    [content],
-  );
+  // monospace font of the preview. The parser finds them in the same walk
+  // that counts the widths, so the preview never walks over the text of the
+  // file to find them.
+  const codePoints = table.codePoints;
   const summary = table.totalRows === 1
     ? t('filesView.artifact.table.rowsSingle', { rows: table.totalRows, columns: table.columnCount })
     : t('filesView.artifact.table.rowsPlural', { rows: table.totalRows, columns: table.columnCount });
@@ -258,17 +458,32 @@ export const TableArtifact: React.FC<{
   // The width every column asks for comes from the data and the
   // measurements, so it is measured again when one of them changes and not
   // for a resize of the panel. The room the panel has is shared out over
-  // those widths afterwards, and only that part is repeated when the panel is
-  // resized.
+  // those widths afterwards, and only that part is repeated when the panel
+  // is resized.
+  //
+  // The values of the file are counted with the characters the browser
+  // measured, and the count of the body is repeated only when the measured
+  // table changes. A resize of the panel, a scroll and a render that changes
+  // nothing leave it where it is.
+  const cellWidths = React.useMemo<TableCellWidths>(() => ({
+    // The header's values are counted here, because the parser leaves them
+    // out of the body: they are not part of it and the cap on a cell does
+    // not reach them.
+    headerCells: table.header.map((value) => displayCells(value, layout.characterWidths)),
+    // The widths of the body are the ones the parser counted, and they are
+    // counted again with the measured characters when a character is wider
+    // than the count gives it. A file whose characters are all counted right
+    // is not counted again at all.
+    bodyCells,
+  }), [bodyCells, layout.characterWidths, table.header]);
   const widths = React.useMemo<TableColumnWidths>(
     () => measureTableColumns(
-      table.header,
-      table.rows,
+      cellWidths.headerCells,
+      cellWidths.bodyCells,
       table.columnCount,
       layout.metrics,
-      layout.characterWidths,
     ),
-    [layout.characterWidths, layout.metrics, table],
+    [cellWidths, layout.metrics, table.columnCount],
   );
   const plan = React.useMemo<TableColumnPlan>(
     () => planTableColumns(widths, layout.metrics, layout.viewportWidth),
@@ -399,6 +614,11 @@ export const TableArtifact: React.FC<{
         };
         return sameLayout(current, next) ? current : next;
       });
+      // The widths of the columns are counted again with the characters the
+      // browser measured, and the count walks over the text of the kept
+      // rows. A file whose characters are all counted right is not counted
+      // again at all.
+      countBodyCells(measuredWidths);
     };
 
     measure();
@@ -430,7 +650,7 @@ export const TableArtifact: React.FC<{
     return () => {
       for (const observer of observers) observer.disconnect();
     };
-  }, [codePoints, table]);
+  }, [codePoints, countBodyCells, table]);
 
   // A new file, a new size or a new measurement moves the window. It runs
   // before the paint, so the table never shows a half-filled window.
@@ -462,6 +682,14 @@ export const TableArtifact: React.FC<{
     ? { rows: { start: 0, end: table.rows.length }, columns: { start: 0, end: table.columnCount } }
     : clampTableWindow(visible, table.columnCount, table.rows.length);
 
+  // The cache holds the rows that are on screen and drops the rows that
+  // leave the screen, so a scroll or a render does not cut a row that was
+  // cut already. It runs after the commit, because the rows of the window
+  // are cut during the render.
+  React.useLayoutEffect(() => {
+    source.keepRows(mountedWindow.rows);
+  }, [mountedWindow.rows, source]);
+
   const visibleColumns: number[] = [];
   for (let column = mountedWindow.columns.start; column < mountedWindow.columns.end; column += 1) {
     visibleColumns.push(column);
@@ -476,6 +704,12 @@ export const TableArtifact: React.FC<{
   // model names.
   const leadingSpans = tableSpacerSpans(mountedWindow.columns.start);
   const trailingSpans = tableSpacerSpans(table.columnCount - mountedWindow.columns.end);
+  // The cells that carry the rows outside the window. They hold no text, no
+  // padding and no border, so they add nothing to the height of their row,
+  // which is written on the row itself. A range of columns that is wider
+  // than a cell may span is carried by more than one cell here as well, so
+  // that no cell of the table claims a span the browser cannot lay out.
+  const rowSpans = tableSpacerSpans(table.columnCount);
 
   const headerClassName = (column: number): string => cn(
     `whitespace-nowrap border-b ${CELL_END_BORDER_CLASS} border-border/40 ${CELL_PADDING_CLASS} py-1 text-start font-medium text-foreground`,
@@ -596,14 +830,18 @@ export const TableArtifact: React.FC<{
                   // The height of a spacer row is written on the row: a
                   // cell's own padding would make the cell taller than the
                   // height it asks for, and the rows would sit lower than
-                  // the model says.
+                  // the model says. The cells hold no text, so they add
+                  // nothing to that height.
                   <tr aria-hidden="true" style={{ height: mountedWindow.rows.start * layout.rowHeight }}>
-                    <td colSpan={table.columnCount} />
+                    {rowSpans.map((span, index) => (
+                      <td key={`rows-above-${index}`} colSpan={span} />
+                    ))}
                   </tr>
                 )}
                 {visibleRows.map((row) => {
-                  const values = table.rows[row];
-                  if (!values) return null;
+                  // The values of a row are cut out of the source when the
+                  // row is mounted, and a row that was cut is not cut again.
+                  const values = source.values(row);
                   // Every row is the height the document reports, so a row
                   // without text is as tall as a row with text and the
                   // mapping from a scroll offset to a row stays exact.
@@ -655,7 +893,9 @@ export const TableArtifact: React.FC<{
                     aria-hidden="true"
                     style={{ height: (table.rows.length - mountedWindow.rows.end) * layout.rowHeight }}
                   >
-                    <td colSpan={table.columnCount} />
+                    {rowSpans.map((span, index) => (
+                      <td key={`rows-below-${index}`} colSpan={span} />
+                    ))}
                   </tr>
                 )}
               </tbody>

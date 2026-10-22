@@ -200,18 +200,44 @@ export const displayCells = (
       cells += 1;
       continue;
     }
-    if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
-      const low = value.charCodeAt(index + 1);
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        cells += characterWidth((code - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000, widths);
-        index += 1;
-        continue;
-      }
-    }
-    cells += characterWidth(code, widths);
+    const point = codePointAt(value, index);
+    cells += characterWidth(point, widths);
+    // A character outside the basic plane is a pair of code units, and it is
+    // counted as the one character it is.
+    if (point > 0xffff) index += 1;
   }
   return cells;
 };
+
+/**
+ * The code point of the character at a place in a text.
+ *
+ * A character outside the basic plane is a pair of code units, and it is
+ * measured as the one character it is. A code unit that is half of a pair
+ * without the other half is a character of its own.
+ */
+export const codePointAt = (text: string, index: number): number => {
+  const code = text.charCodeAt(index);
+  if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length) {
+    const low = text.charCodeAt(index + 1);
+    if (low >= 0xdc00 && low <= 0xdfff) {
+      return (code - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000;
+    }
+  }
+  return code;
+};
+
+/**
+ * The width of one character outside latin, counted without a measurement.
+ *
+ * A character outside the wide list takes one cell and a character in the
+ * wide list takes two, which is what a monospace font gives a full-width
+ * character. The measured width of a character is only used where it is
+ * wider than this one.
+ */
+const countedCharacterWidth = (code: number): number => (
+  isWideCodePoint(code) ? 2 : 1
+);
 
 /**
  * The width of one character outside latin, in character cells.
@@ -220,71 +246,45 @@ export const displayCells = (
  * one, and a character the measurement did not reach keeps the width the
  * count gives it.
  */
-const characterWidth = (code: number, widths: TableCharacterWidths | undefined): number => {
+export const characterWidth = (code: number, widths: TableCharacterWidths | undefined): number => {
   const measured = widths?.get(code);
   if (measured !== undefined) return measured;
-  return isWideCodePoint(code) ? 2 : 1;
+  return countedCharacterWidth(code);
 };
 
 /**
- * The characters of the file that are not latin, by their code point.
+ * Whether a character the browser measured takes more room than the count
+ * gives it.
  *
- * The browser lays a character out with the font it has, and a character it
- * has no font for falls back to another one, which can be wider than the
- * monospace font of the preview. Those are the characters the browser has to
- * measure, and the list holds every one of them once.
- *
- * The walk is over the text of the file and not over its cells, because a
- * cell is a string of its own and a file with millions of cells costs more
- * to walk over than its text does. The text holds the characters of the
- * cells in the order the cells have them, so the list is the one the cells
- * would give. A character of a row the parser dropped is in it as well, and
- * such a character is in no value that is counted, so it changes no width.
- *
- * The walk stops at the limit, because the list is only used to measure the
- * characters in the browser, and a file with more distinct characters than
- * that costs more to measure than the width it gains. A character the walk
- * did not reach keeps the width the count gives it.
+ * The measured table keeps the larger of the two widths, so an entry that is
+ * wider than the counted width of its character is a character the browser
+ * lays out wider than the monospace font of the preview. Only such a
+ * character makes the counted widths of the columns too narrow, and only such
+ * a file has to count them again.
  */
-export const collectNonLatinCodePoints = (
-  content: string,
-  limit: number,
-): number[] => {
-  // A file that starts with a byte order mark is read without it, the way
-  // the parser reads it, so the mark is not one of the characters of the
-  // data. The mark is skipped and the text is not copied, because the text
-  // of a large export is large.
-  const start = content.charCodeAt(0) === 0xfeff ? 1 : 0;
-  // The code points of the basic plane are held in a table, so the walk
-  // over the characters of the file does not hash every one of them. The
-  // planes above it are rare, and they are held in a set.
-  const seen = new Uint8Array(0x10000);
-  const above = new Set<number>();
-  const codePoints: number[] = [];
-  for (let index = start; index < content.length; index += 1) {
-    const code = content.charCodeAt(index);
-    if (code < 0x80) continue;
-    // A character outside the basic plane is a pair of code units, and it
-    // is measured as the one character it is.
-    if (code >= 0xd800 && code <= 0xdbff && index + 1 < content.length) {
-      const low = content.charCodeAt(index + 1);
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        const point = (code - 0xd800) * 0x400 + (low - 0xdc00) + 0x10000;
-        if (!above.has(point)) {
-          above.add(point);
-          codePoints.push(point);
-          if (codePoints.length >= limit) return codePoints;
-        }
-        index += 1;
-        continue;
-      }
-    }
-    if (seen[code]) continue;
-    seen[code] = 1;
-    codePoints.push(code);
-    if (codePoints.length >= limit) return codePoints;
+export const hasWiderCharacter = (widths: TableCharacterWidths): boolean => {
+  for (const [code, width] of widths) {
+    if (width > countedCharacterWidth(code)) return true;
   }
-  return codePoints;
+  return false;
+};
+
+/**
+ * Whether two tables of character widths hold the same numbers.
+ *
+ * The measurements keep the object they have while their values stay the
+ * same, and a new table with the same numbers would ask for the count of the
+ * widths again, on every frame of a drag of the panel.
+ */
+export const sameCharacterWidths = (
+  current: TableCharacterWidths,
+  next: TableCharacterWidths,
+): boolean => {
+  if (current.size !== next.size) return false;
+  for (const [character, width] of current) {
+    if (next.get(character) !== width) return false;
+  }
+  return true;
 };
 
 /**
@@ -306,7 +306,7 @@ export const characterWidthsFrom = (
     // A character that takes less room than the count gives it keeps the
     // counted width, so the column is not padded with room the text does
     // not need.
-    const counted = isWideCodePoint(code) ? 2 : 1;
+    const counted = countedCharacterWidth(code);
     widths.set(code, cells > counted ? cells : counted);
   }
   return widths;
@@ -373,32 +373,23 @@ export const tableWidthCss = (totalCells: number, columnCount: number, metrics: 
  * The width every column asks for, taken from the data.
  *
  * A column is as wide as its longest value, capped by the cap the cells
- * carry, and never narrower than its header, which is not capped. The walk
- * over the cells goes over the fields a row has, so a row that does not
- * reach a column does not narrow it and a file with few fields per row does
- * not pay for the whole width of the table on every row.
- *
- * Every value is counted on its own: a value of plain latin characters takes
- * one cell per character, and any other value takes the width its characters
- * are measured at. The count of a value decides the width of its column and
- * nothing else, so the width of a column does not depend on what the rest of
- * the file holds.
+ * carry, and never narrower than its header, which is not capped. The header
+ * and the body come in as the widths they were counted at, in character
+ * cells, so the preview does not walk over the cells of the file to measure
+ * them: the parser counts the values as it reads them and the preview counts
+ * the header's values on their own.
  *
  * The widths come from the data and the font, so they are measured once per
  * file. The room the panel has is shared out over them afterwards, and only
  * that part is repeated when the panel is resized.
  */
 export const measureTableColumns = (
-  header: ReadonlyArray<string>,
-  rows: ReadonlyArray<ReadonlyArray<string>>,
+  /** The width of every header value, in character cells. */
+  headerCells: ReadonlyArray<number>,
+  /** The width of the widest body value of every column, in character cells. */
+  bodyCells: ReadonlyArray<number>,
   columnCount: number,
   metrics: TableCellMetrics,
-  /**
-   * The width the browser measured for the characters outside latin, which
-   * is what a value in a script the monospace font does not cover is
-   * counted at.
-   */
-  characterWidths?: TableCharacterWidths,
 ): TableColumnWidths => {
   // The cell count a column may reach before the cap on the cell applies.
   // The cap is on the cell itself, so the room its text has is the cap
@@ -406,39 +397,16 @@ export const measureTableColumns = (
   const maxCells = metrics.charWidth > 0
     ? Math.max(1, Math.floor((metrics.maxCellWidth - metrics.cellPadding - metrics.cellBorder + LAYOUT_STEP_PX) / metrics.charWidth))
     : Number.POSITIVE_INFINITY;
-  // A character takes at most the width of the widest one, so a value of n
-  // characters takes at most n times that width.
-  let widestCharacter = 2;
-  if (characterWidths) {
-    for (const width of characterWidths.values()) {
-      if (width > widestCharacter) widestCharacter = width;
-    }
-  }
-
-  const bodyCells = new Array<number>(columnCount).fill(0);
-  for (const row of rows) {
-    // The walk goes over the fields the row has and not over every column
-    // of the file. A row that does not reach a column cannot narrow it, and
-    // a file with few fields per row and many columns paid for the whole
-    // width of the table on every row.
-    const fields = Math.min(row.length, columnCount);
-    for (let column = 0; column < fields; column += 1) {
-      if (bodyCells[column] >= maxCells) continue;
-      const value = row[column];
-      if (value === undefined) continue;
-      // A short value cannot beat the widest value found so far.
-      if (value.length * widestCharacter <= bodyCells[column]) continue;
-      const width = displayCells(value, characterWidths);
-      if (width > bodyCells[column]) bodyCells[column] = width;
-    }
-  }
 
   const cells = new Array<number>(columnCount).fill(0);
   let totalCells = 0;
   for (let column = 0; column < columnCount; column += 1) {
-    const headerText = header[column] ?? '';
-    const headerCells = displayCells(headerText, characterWidths);
-    const width = Math.max(headerCells, Math.min(bodyCells[column], maxCells));
+    // A column the header does not reach and a column the body does not
+    // reach have no value, and a value of no width is nothing.
+    const headerWidth = headerCells[column] ?? 0;
+    const bodyWidth = bodyCells[column] ?? 0;
+    // The header is never capped, the body is.
+    const width = Math.max(headerWidth, Math.min(bodyWidth, maxCells));
     cells[column] = roundUpCells(width);
     totalCells += cells[column];
   }

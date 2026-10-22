@@ -5,22 +5,29 @@ import { createRoot, type Root } from 'react-dom/client';
 
 import { I18nProvider } from '@/lib/i18n';
 
-// The number of times the preview walks over the cells of the file to find
-// the width every column asks for. That walk is the part of the preview that
-// grows with the file, so it is counted here.
-const tableLayout = await import('./tableLayout');
-const measureTableColumns = tableLayout.measureTableColumns;
-let cellWalks = 0;
-mock.module('./tableLayout', () => ({
-  ...tableLayout,
-  measureTableColumns: (...args: Parameters<typeof measureTableColumns>) => {
-    cellWalks += 1;
-    return measureTableColumns(...args);
+// The number of times the preview counts the widths of the columns again
+// with the characters the browser measured. That count walks over the text
+// of the file, so it is the part of the preview that grows with the file,
+// and it is counted here.
+const delimitedText = await import('./delimitedText');
+const countDelimitedColumnCells = delimitedText.countDelimitedColumnCells;
+const cutDelimitedRow = delimitedText.cutDelimitedRow;
+let widthCounts = 0;
+let rowCuts = 0;
+mock.module('./delimitedText', () => ({
+  ...delimitedText,
+  countDelimitedColumnCells: (...args: Parameters<typeof countDelimitedColumnCells>) => {
+    widthCounts += 1;
+    return countDelimitedColumnCells(...args);
+  },
+  cutDelimitedRow: (...args: Parameters<typeof cutDelimitedRow>) => {
+    rowCuts += 1;
+    return cutDelimitedRow(...args);
   },
 }));
 
-// The preview is loaded after the mock, so it is the walk of the preview that
-// is counted.
+// The preview is loaded after the mock, so it is the count of the preview
+// that is counted.
 const { TableArtifact } = await import('./TableArtifact');
 
 /** What the preview reads from the computed style of its probe. */
@@ -180,6 +187,21 @@ const buildCsv = (rows: number, columns: number): string => {
 };
 
 /**
+ * A table whose first data row holds a character the browser can lay out
+ * wider than the monospace font of the preview.
+ *
+ * The character is measured in the browser, and the widths of the columns
+ * are counted again with the measurement.
+ */
+const buildCsvWithWideCharacter = (rows: number, columns: number): string => {
+  const lines = buildCsv(rows, columns).split('\n');
+  const first = lines[1];
+  if (first === undefined) return lines.join('\n');
+  lines[1] = `Ω${first.slice(1)}`;
+  return lines.join('\n');
+};
+
+/**
  * A table whose first data row holds nothing but delimiters. Such a row has
  * no text in it, so it is shorter than the rows around it.
  */
@@ -209,13 +231,13 @@ const buildCsvWithEmptyHeaders = (rows: number, columns: number, emptyColumns: n
  * The file holds ten rows of the same line, so its grid is too large to be
  * kept whole and the preview windows it.
  */
-const buildUniformCsv = (columns: number): string => {
+const buildUniformCsv = (columns: number, rows = 10): string => {
   const cells: string[] = [];
   for (let column = 0; column < columns; column += 1) {
     cells.push(`c${String(column).padStart(3, '0')}`);
   }
   const line = cells.join(',');
-  return [line, ...Array.from({ length: 10 }, () => line)].join('\n');
+  return [line, ...Array.from({ length: rows }, () => line)].join('\n');
 };
 
 /**
@@ -321,7 +343,8 @@ describe('TableArtifact', () => {
     ContentBoxResizeObserver.instances = [];
     probeTextWidth = PROBE_CHARACTER_COUNT * MEASURED_ADVANCE;
     characterAdvances.clear();
-    cellWalks = 0;
+    widthCounts = 0;
+    rowCuts = 0;
     viewportWidth = VIEWPORT_WIDTH;
     cellPadding = 8;
     cellBorder = 1;
@@ -815,40 +838,111 @@ describe('TableArtifact', () => {
     expect(host.querySelectorAll('th[scope="col"]').length).toBeLessThan(before);
   });
 
-  test('does not walk over the cells of the file again when the panel is resized', async () => {
-    await render(buildCsv(200, 50));
-    const afterOpen = cellWalks;
-    // The walk has to have happened, or the count below says nothing.
+  test('does not count the widths of the columns again when the panel is resized', async () => {
+    // A file with a character the browser lays out wider than the count
+    // gives it, so the widths of the body are counted again with the
+    // measured table.
+    characterAdvances.set('Ω', 40);
+    await render(buildCsvWithWideCharacter(200, 50));
+    const afterOpen = widthCounts;
+    // The count has to have happened, or the count below says nothing.
     expect(afterOpen).toBeGreaterThan(0);
 
     // The panel grows: the room it has changes, the widths the file asks for
-    // do not, so the cells of the file are not walked over again.
+    // do not, so the widths are not counted again.
     await resize(VIEWPORT_WIDTH + 240);
 
-    expect(cellWalks).toBe(afterOpen);
+    expect(widthCounts).toBe(afterOpen);
+
+    // And a scroll over the file does not count them again either.
+    await scrollTo(ROW_HEIGHT * 100);
+
+    expect(widthCounts).toBe(afterOpen);
   });
 
-  test('walks over the cells of the file again when the font changes', async () => {
-    await render(buildCsv(200, 50));
-    const afterOpen = cellWalks;
+  test('counts the widths of the columns again when the font changes', async () => {
+    characterAdvances.set('Ω', 40);
+    await render(buildCsvWithWideCharacter(200, 50));
+    const afterOpen = widthCounts;
     expect(afterOpen).toBeGreaterThan(0);
 
-    // The font changes, so a character takes more room and the widths the
-    // file asks for are measured again.
+    // The font changes, so the characters are measured again and the widths
+    // of the file are counted with them.
     probeTextWidth = PROBE_CHARACTER_COUNT * MEASURED_ADVANCE * 4;
     await resize(VIEWPORT_WIDTH);
 
-    expect(cellWalks).toBeGreaterThan(afterOpen);
+    expect(widthCounts).toBeGreaterThan(afterOpen);
   });
 
-  test('walks over the cells of the file again when the file changes', async () => {
-    await render(buildCsv(20, 4));
-    const afterOpen = cellWalks;
+  test('counts the widths of the columns again when the file changes', async () => {
+    characterAdvances.set('Ω', 40);
+    await render(buildCsvWithWideCharacter(20, 4));
+    const afterOpen = widthCounts;
     expect(afterOpen).toBeGreaterThan(0);
 
-    await render(buildCsv(20, 8));
+    await render(buildCsvWithWideCharacter(20, 8));
 
-    expect(cellWalks).toBeGreaterThan(afterOpen);
+    expect(widthCounts).toBeGreaterThan(afterOpen);
+  });
+
+  test('does not count the widths of the columns again for a file of plain latin', async () => {
+    // Every character of the file is counted right, so the widths the parser
+    // counted are the exact widths and the body is not counted again.
+    await render(buildCsv(200, 50));
+
+    expect(widthCounts).toBe(0);
+  });
+
+  test('cuts a row out of the source only once', async () => {
+    await render(buildCsv(600, 4));
+    const afterOpen = rowCuts;
+    expect(afterOpen).toBeGreaterThan(0);
+
+    // The window moves over rows that were not mounted before.
+    await scrollTo(ROW_HEIGHT * 300);
+    const afterScroll = rowCuts;
+    expect(afterScroll).toBeGreaterThan(afterOpen);
+
+    // And back over the rows that were mounted before. They were cut out of
+    // the source when they were mounted the first time, so a scroll that
+    // comes back over them does not pay for them twice.
+    await scrollTo(0);
+
+    expect(rowCuts).toBe(afterScroll);
+  });
+
+  test('drops the cut rows that do not fit in the cache', async () => {
+    // A file with 500 columns holds 500 cells in every row, so the cache
+    // holds a few rows of it and not the whole file.
+    await render(buildCsv(100, 500));
+    const afterOpen = rowCuts;
+    expect(afterOpen).toBeGreaterThan(0);
+
+    // The window moves over rows that were not mounted before.
+    await scrollTo(ROW_HEIGHT * 40);
+    const afterScroll = rowCuts;
+    expect(afterScroll).toBeGreaterThan(afterOpen);
+
+    // The cache had no room for the rows that were mounted before, so they
+    // are cut again.
+    await scrollTo(0);
+
+    expect(rowCuts).toBeGreaterThan(afterScroll);
+  });
+
+  test('keeps the rows that are on screen when they do not fit in the cache', async () => {
+    // A file with 500 columns holds more cells in one row than the cache has
+    // room for, so the rows that are on screen are held and the rows beside
+    // them are dropped.
+    await render(buildCsv(100, 500));
+    const afterOpen = rowCuts;
+    expect(afterOpen).toBeGreaterThan(0);
+
+    // The window moves over one row. The rows that stay on screen are not
+    // cut again, so only the row that came into the window is.
+    await scrollTo(ROW_HEIGHT);
+
+    expect(rowCuts - afterOpen).toBeLessThanOrEqual(ROW_OVERSCAN);
   });
 
   test('measures a file whose dropped rows hold wide characters the same as a latin file', async () => {
@@ -857,6 +951,26 @@ describe('TableArtifact', () => {
     const lines = buildCsv(2_001, 4).split('\n');
     lines.push('名前の名前,wide,wide,wide');
     await render(lines.join('\n'));
+
+    // The first column holds seven characters in the longest of the rows
+    // that are kept, so it is seven cells wide and not the ten cells the
+    // dropped row would ask for.
+    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(7ch + 16px + 1px)');
+  });
+
+  test('does not count the widths of a dropped row again', async () => {
+    // The character of the dropped row is measured and laid out wider than
+    // the count gives it, so the widths of the body are counted again with
+    // the measured table. The dropped row is not one of the rows that are
+    // counted, and its characters are in no value that is counted.
+    characterAdvances.set('名', 20);
+    const lines = buildCsv(2_001, 4).split('\n');
+    lines.push('名前の名前,wide,wide,wide');
+    await render(lines.join('\n'));
+
+    // The widths of the body were counted again, because the character of
+    // the dropped row is one the browser lays out wider than the count.
+    expect(widthCounts).toBeGreaterThan(0);
 
     // The first column holds seven characters in the longest of the rows
     // that are kept, so it is seven cells wide and not the ten cells the
@@ -1056,6 +1170,49 @@ describe('TableArtifact', () => {
     expect(trailing).toHaveLength(1);
   });
 
+  test('carries the rows outside the window in cells that HTML allows', async () => {
+    // A file with more columns than a cell may span, so the row that stands
+    // for the rows outside the window is wider than a cell may span.
+    await render(buildUniformCsv(2_000, 100));
+    await scrollTo(ROW_HEIGHT * 10);
+
+    // The rows that stand for the rows above and below the window.
+    const spacerRows = Array.from(host.querySelectorAll('tbody tr'))
+      .filter((row) => !row.querySelector('td[title]'));
+    expect(spacerRows).toHaveLength(2);
+    for (const row of spacerRows) {
+      const cells = Array.from(row.children);
+      // The cells of the row stand for the columns of the file.
+      expect(spanOfGroup(cells)).toBe(2_000);
+      // No cell stands for more columns than HTML allows. A cell that does is
+      // laid out over fewer columns than it says.
+      for (const cell of cells) {
+        expect(spanOf(cell)).toBeLessThanOrEqual(1_000);
+      }
+    }
+  });
+
+  test('keeps the width and the height of a table whose rows are carried by several cells', async () => {
+    // The row that stands for the rows outside the window is carried by more
+    // than one cell, and the table is as wide and as tall as it was.
+    await render(buildUniformCsv(2_000, 100));
+    await scrollTo(ROW_HEIGHT * 10);
+
+    // The table is as wide as its columns ask for. The first thousand
+    // columns are four characters wide and the rest are five.
+    expect(host.querySelector('table')?.getAttribute('style')).toContain('calc(9000ch + 32000px + 1999px)');
+
+    // The rows of the table are as tall as they were: the spacer rows carry
+    // the height of the rows they stand for, and the header row is a row of
+    // its own.
+    const heightOf = (row: Element | null): number => (
+      row instanceof HTMLElement ? Number.parseFloat(row.style.height) : 0
+    );
+    const bodyHeight = Array.from(host.querySelectorAll('tbody tr'))
+      .reduce((sum, row) => sum + heightOf(row), 0);
+    expect(bodyHeight + heightOf(host.querySelector('thead tr'))).toBe(101 * ROW_HEIGHT);
+  });
+
   test('mounts the columns of the new file and not the ones of the file before it', async () => {
     // The window of the file before names more columns than the file that is
     // open now has, so the first commit of the new file has to hold the new
@@ -1202,6 +1359,17 @@ describe('TableArtifact', () => {
 
     // Ten characters still take ten cells, and not less.
     expect(host.querySelector('col')?.getAttribute('style')).toContain('10ch');
+  });
+
+  test('counts the header with the characters the browser measured', async () => {
+    // A character of the header is measured like any other character, and
+    // the header is as wide as the text the browser lays out for it. The
+    // header is not capped, so it is as wide as it asks for.
+    characterAdvances.set('Ω', 9);
+    await render(`ΩΩΩΩΩ\na\n`);
+
+    // Five characters of 9 px take 45 px, which is six cells of 7.5 px.
+    expect(host.querySelector('col')?.getAttribute('style')).toContain('6ch');
   });
 
   test('states how many rows and columns the whole table has', async () => {

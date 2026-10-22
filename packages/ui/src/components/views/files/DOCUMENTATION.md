@@ -160,7 +160,8 @@ show the previous and next image of the same folder, see below),
 element, duration and dimensions once metadata loads, a stated failure when
 the runtime cannot decode the codec), `FontArtifact` (a specimen under a
 throwaway `FontFace` family removed when the tab closes), `TableArtifact`
-(CSV/TSV through `delimitedText.ts`, capped rows stated in the meta line, the
+(CSV/TSV through `delimitedText.ts`, parsed on the thread of the preview,
+capped rows stated in the meta line, the
 rows and columns in view mounted unless the grid of the file is small enough
 to be kept whole), and `BinaryArtifact` (name, type,
 size, download; never a decode attempt).
@@ -191,14 +192,18 @@ true:
   same file is kept whole in a narrow panel and in a wide one;
 - the mounted cells stay bounded by the viewport on both axes, so the cost of
   drawing a file does not grow with the file. The files that are kept whole
-  are the exception, and the limit bounds what they cost. Four things grow
-  with the file anyway: the parse of the file, the walk over the text of the
-  file for the characters outside latin, the walk over the kept cells for
-  the measurement of the widths, which the first file of a session pays for
-  twice, and the `<col>` the table holds for every column of the file,
-  because the parser does not bound the number of columns;
-- the widths of the columns are measured from the data and from the font, and
-  a resize of the panel does not measure them again;
+  are the exception, and the limit bounds what they cost. Three things grow
+  with the file anyway: the parse of the file, which counts the widths of the
+  columns and finds the characters outside latin in the same walk over its
+  text, the count of the widths again with the measured characters, which
+  only a file that holds a character wider than the count pays for, and the
+  `<col>` the table holds for every column of the file, because the parser
+  does not bound the number of columns. The parse and that count run on the
+  thread of the preview, so they cost the thread the user is looking at. The
+  rows the cache of the cut rows holds grow with the file as well, because a
+  row of a file with many columns holds many values;
+- the widths of the columns come from the data and from the font, and a resize
+  of the panel does not count them again;
 - the column widths stay the same while scrolling, and a column is as wide as
   the text the browser lays out for its longest value, so nothing that fits
   today is cut short;
@@ -213,7 +218,9 @@ true:
 - the cells of the window sit in the columns the model names, for a file of
   any number of columns. HTML limits the `colspan` of a cell to 1000, and a
   cell that claims more is laid out over fewer columns, so a range of
-  columns that is wider than the limit is carried by more than one cell;
+  columns that is wider than the limit is carried by more than one cell. No
+  cell of the table claims a span above the limit, the cell of a row that
+  stands for the rows outside the window included;
 - a right-to-left table keeps its columns in the order the file has them,
   with the first column on the right. Its scroll offset is read the way the
   browser reports it: 0 at the right edge of the box, and negative from
@@ -233,29 +240,26 @@ true:
   scratch.
 
 How much each of them costs was measured on one machine, so the figures below
-describe that machine and say nothing about the code itself. A 2,000-row file
-with 50 columns took 37 ms of parse, 9 ms for the walk for the characters
-outside latin and 20 ms for the measurement of the widths, about 69 ms of
-main-thread work when the file opens. The first file of a session pays the
-measurement of the widths a second time, because the layout starts on
-guessed metrics, so it takes about 89 ms there. A file with 5,000 columns in
-2,000 rows took 1.8 s of parse, 0.13 s for the walk for the characters
-outside latin and 0.43 s for the measurement of the widths, and about 2.4 s
-for the open of the file. The first file of a session pays the measurement of
-the widths twice, so it takes about 2.8 s there. The parse is the largest
-single item on both.
+describe that machine and say nothing about the code itself. The parse counts
+the width of every value as it reads it and finds the characters outside latin
+in the same walk, so the open of a file costs one walk over its text. A
+2,000-row file with 50 columns took 18 ms of parse on the machine the figures
+below were taken on, and a file with 5,000 columns in 2,000 rows, which is
+124 MB of text, took 504 ms. The parse is the largest single item on both,
+and it runs on the thread of the preview, so a wide file costs the thread
+the user is looking at what its parse costs.
 
-A file of 50 columns pays about what it paid before the width of a value was
-counted on its own: the check for plain latin it gave up is what the counting
-of every value costs. A file with 5,000 columns is the one that gains, because
-the check it gave up grew with the number of cells and the counting does
-not.
-
-A file that holds characters outside latin pays for the measured widths they
-are counted at, and the walk that finds them is the one it pays for in any
-case. Such a file also pays for the measurement of the widths twice, because
-the characters are measured with the font after the first commit, and the
-widths are counted again with them.
+The walk over the cells the preview used to make is gone, and with it the
+measurement of the widths the preview did for every file. A file that holds a
+character the browser lays out wider than the count pays for the count of the
+widths again with the measured characters, and that count walks over the text
+of the kept rows: it took 15 ms for the 2,000-row file with 50 columns, 105 ms
+for one with 1,000 columns and 611 ms for the one with 5,000 columns. The
+walk over the cells it replaces took 11 ms, 93 ms and 457 ms, and the preview
+made that walk twice for every file, because the layout starts on guessed
+metrics and the measurement replaces them. The count of the widths is a
+little dearer than one of those walks, and it is paid once, by the files that
+hold a character the browser lays out wider than the count.
 
 The widths are written in the font's own character unit, so the browser
 resolves the characters against the font it has, and the padding and the
@@ -288,15 +292,77 @@ pause of a tenth of a second is where the viewer starts to notice one, so
 holds about 800 cells and costs 15 to 25 ms, so holding a file of that size
 whole costs little more than opening any windowed file.
 
-### Why the walk over the cells goes over the fields a row has
+### Why the file is read in one place
 
-The walk over the cells of a file went over every column of every row, and a
-file with few fields per row and many columns paid for the whole width of the
-table on every row: 2,000 rows with one field each took 25 ms to measure with
-5,000 columns, 290 ms with 20,000 and 520 ms with 50,000 on a busy machine.
-The walk goes over the fields a row has now, which took 1 ms, 1 ms and 2 ms
-for the same three files. The widths are the same, because a row that does
-not reach a column cannot narrow it.
+The preview reads the file in one place, and everything else reads the table
+from there: the parse, the rows that are cut out of the source and the widths
+of the columns. The preview held the cells of the file before, and a file
+with millions of cells put millions of strings in the memory of the tab, and
+the walk over them to measure the columns cost more than the parse of the
+file itself.
+
+One place also means that the rest of the preview does not have to know how
+the table was made: the preview asks for the table and gets one, and the
+widths of the columns and the places of the rows come with it. The parse
+runs on the thread of the preview, over the text the preview holds, and the
+count of the widths that a character wider than the count makes necessary
+runs there as well.
+
+### Why the widths are counted as the rows are read
+
+A column is as wide as its longest value, and the count of a value decides
+the width of its column and nothing else. The parser counts the values as it
+reads them, so the preview never holds the cells of the file and never walks
+over them to measure them.
+
+The walk over the cells went over every column of every row, and a file with
+few fields per row and many columns paid for the whole width of the table on
+every row: 2,000 rows with one field each took 25 ms to measure with 5,000
+columns, 290 ms with 20,000 and 520 ms with 50,000 on a busy machine. The
+parser counts the fields a row has and not every column of the file, which
+took 1 ms, 1 ms and 2 ms for the same three files. The widths are the same,
+because a row that does not reach a column cannot narrow it.
+
+### Why a row is cut out of the source when it is mounted
+
+The values of a row are cut out of the text when the row is mounted, and a row
+that was cut is not cut again, so a scroll that comes back over a row does not
+pay for it twice. The rows that were cut are held in a cache.
+
+The rows that are on screen are held whatever they cost, and the rows beside
+them are held as long as the cache holds fewer cells than its budget. A bound
+by the cells alone held one row of a file with 5,000 columns, so every change
+of the window cut all the rows on screen again: about 34 rows, 0.8 ms each,
+roughly 28 ms on every scroll step. A file with 5,000 columns holds the 34
+rows of its window, which is 170,000 values, and a file with 50 columns holds
+the same 34 rows of 50 values, which the bound by the cells held as well. The
+memory the cache holds does not grow with the number of rows of the file: the
+rows on screen are as many as the panel is tall, and the rows beside them are
+bounded by the budget.
+
+A file whose whole grid is kept in the document holds all of its rows at once.
+
+The cache is dropped when the file changes, because the rows of the file
+before it are of no use to the file that is open now.
+
+### Why the widths are counted again only when a character is wider than the count
+
+The parser counts the columns with the counted rule, because it runs before
+the browser has measured a single character. A file whose characters are all
+counted right, which is every file without Greek, an emoji or another
+character the font does not cover, has the exact widths already, and nothing
+is counted again. A file that holds such a character would have its values cut
+short, so its widths are counted again with the measured table.
+
+The count again walks over the text of the rows the preview holds and stops
+at the end of the last of them, because the rows it holds are a prefix of the
+file and the rows after them are not counted. It runs when the measured table
+changes, and not when the panel is resized, scrolled or rendered again.
+
+It costs a little more than the walk over the cells it replaces, because a
+walk over the text cannot use the early-out that walk had: the length of a
+value is only known after its characters have been read, so every value has to
+be counted.
 
 ### Why the table states its size and the place of its rows and cells
 
@@ -363,32 +429,32 @@ so the height of a row is the height to give the header row.
 ### Why the widths of the columns are measured apart from the room of the panel
 
 A column asks for the width of its longest value, and the room the panel has
-left over is shared out over the columns afterwards. The two are measured in
+left over is shared out over the columns afterwards. The two are counted in
 two steps, because only the second one has anything to do with the panel: the
-walk over the cells of the file is the expensive part, and repeating it for
+count of the widths of the file is the expensive part, and repeating it for
 every frame of a sidebar drag made the cost of a wide export grow with the
-file. The widths are measured once per file and once more for every change of
-the font, and a resize only shares the room out again. The first file of a
-session is measured twice, because the layout starts on guessed metrics.
+file. The widths are counted once per file and once more for every change of
+the font, and a resize only shares the room out again.
 
 ### Why the first file of a session is measured against guessed metrics
 
 The layout starts on guessed metrics, because the font is only measured from
 the document after the first commit, and the widths of the columns are needed
-for that first commit. The measurement of the widths therefore runs against
-the guesses, and the layout effect then replaces the guesses with the
-measured ones, which asks for the walk over the cells again. The result of
-the first walk is never painted, so it is waste. Every file after the first
-one is measured once, because the metrics do not change and the memo holds.
+for that first commit. The first commit therefore carries the counted widths,
+and the layout effect then replaces them with the measured ones. The counted
+widths of the first commit are the ones the parser counted, and they are
+exact unless a character is wider than the count, so a file is only counted
+again when it holds such a character. Every file after the first one is
+counted once, because the metrics do not change and the memo holds.
 Measuring the widths without the metrics would take the cap on a cell off the
-walk over the cells and put it in a second pass, which changes the width
-model. Leaving the first commit without column widths would show the table
-with the wrong widths for a frame.
+count and put it in a second pass, which changes the width model. Leaving the
+first commit without column widths would show the table with the wrong widths
+for a frame.
 
 The characters outside latin are counted at the counted width in that first
-commit as well, and the layout effect measures them with the font and counts
-the widths again. The walk that finds them is over the text of the file, so
-it is made once for the file and not again for the first commit.
+commit as well, and the layout effect measures them with the font. The count
+of the widths is repeated only when one of them is wider than the count, and
+that count walks over the text of the kept rows.
 
 ### Why the width of a value is counted on its own
 
@@ -410,19 +476,18 @@ The open of that file is 1.55 s shorter without the flag, and the widths it
 measures are the same to the pixel.
 
 A file of 50 columns paid 16 ms for the flag and 7 ms for the measurement,
-and pays 9 ms for the walk for the characters and 20 ms for the measurement
-now. The check it gave up grew with the number of cells and the counting
+and pays for the walk for the characters and for the count of the widths now. The check it gave up grew with the number of cells and the counting
 does not, so a file with 5,000 columns gains what a file with 50 columns
 gives up.
 
 ### Why the characters outside latin are found in the text of the file
 
 The preview has to know which characters outside latin the file uses, because
-the browser measures each of them in a hidden probe. The walk is over the
-text of the file and not over the cells the parser built, because a cell is a
-string of its own and a file with millions of cells costs more to walk over
-than its text does: the same 2,000-row file with 5,000 columns spends 1.5 s
-on a walk over its cells and 0.13 s on a walk over its 75 MB of text.
+the browser measures each of them in a hidden probe. The parser finds them in
+the walk it makes over the text of the file, because a cell is a string of its
+own and a file with millions of cells costs more to walk over than its text
+does: the same 2,000-row file with 5,000 columns spends 1.5 s on a walk over
+its cells and 0.13 s on a walk over its 75 MB of text.
 
 The text holds the characters of the cells in the order the cells have them,
 so the list is the one the cells would give. A character of a row the parser
@@ -433,17 +498,17 @@ nothing else.
 
 ### Why the measurements keep the object they have
 
-The widths of the columns are measured from the data and from what one
+The widths of the columns are counted from the data and from what one
 character and one cell cost, and the preview keeps them in a memo that runs
 again when one of those inputs changes. A resize of the panel changes none of
 them, but it does build a new layout, and a new object for the same numbers
-would look to the memo like a change of the font and ask for the walk over
-the cells of the file again, on every frame of a drag. The measurements
-therefore keep the object they have while their values stay the same, and
-only a new font, a new interface size or a new file measures the widths
-again. The measured widths of the characters outside latin are kept the same
-way: a resize measures them again in the browser, finds the same numbers and
-leaves the map the preview holds as it is.
+would look to the memo like a change of the font and ask for the count of the
+widths again, on every frame of a drag. The measurements therefore keep the
+object they have while their values stay the same, and only a new font, a new
+interface size or a new file counts the widths again. The measured widths of
+the characters outside latin are kept the same way: a resize measures them
+again in the browser, finds the same numbers and leaves the map the preview
+holds as it is.
 
 ### Why the border of a cell is read on its inline end
 
@@ -629,14 +694,14 @@ carried by one cell. The limit is a property of HTML and not of the preview,
 so it is a named constant of the model (`HTML_MAX_COLSPAN`) and the cells
 that carry a range are computed from it (`tableSpacerSpans`).
 
-The row that stands for the rows above the window keeps its one cell. That
-cell gives the row its height and nothing else: it carries no padding, no
-border and no background of its own, and the height of the row is written on
-the row. The browser lays the cell out over 1000 columns of a file with more
-than that, and the row keeps the height it asks for, which was measured in
-Chromium: a row that stands for 144 rows of a file with 1,200 columns was
-3,888 px tall with a cell that was laid out over 1,000 of the 1,200 columns.
-Splitting the cell would add cells to the document for nothing.
+The row that stands for the rows outside the window is carried by cells in the
+same way. Its cells hold no text, no padding and no border, so they add
+nothing to the height of the row, and the height of the row is written on the
+row itself. Splitting the cell of a row that stands for 144 rows of a file
+with 1,200 columns adds a cell to the document and nothing else: the row was
+3,888 px tall with a cell that was laid out over 1,000 of the 1,200 columns,
+and it is as tall with the two cells that cover the 1,200 columns between
+them.
 
 ### Why the striping and the last column's border follow the index
 
