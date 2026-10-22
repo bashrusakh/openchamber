@@ -312,9 +312,9 @@ export const useDelimitedTable = (
       );
       // A count that a newer one replaced does not publish its widths.
       if (countRef.current !== count) return;
-      // The file is not the one that is open any more, so its widths are
-      // neither published nor counted here: that walk is over the whole text
-      // of a file the user has left.
+      // The file is not the one that is open any more, so its widths are neither
+      // published nor counted here: that walk is over the text of every row the preview
+      // holds, and it would hold the thread of the preview for as long as it takes.
       if (openTableRef.current !== file.table) return;
       // The worker could not answer, so the widths are counted here.
       const countedCells = cells ?? countDelimitedColumnCells(
