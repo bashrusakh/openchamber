@@ -329,9 +329,9 @@ the worker does not hold any more is answered as a failure, and the preview
 counts the widths on the main thread instead.
 
 A count for a file the user has left is dropped instead of counted on the
-main thread: that walk is over the whole text of the file, and it would hold
-the thread of the preview for as long as it takes, for a file nobody is
-looking at.
+main thread: that walk is over the text of every row the preview holds, and
+it would hold the thread of the preview for as long as it takes, for a file
+nobody is looking at.
 
 ### Why a small file is parsed on the thread of the preview
 
@@ -484,8 +484,8 @@ left over is shared out over the columns afterwards. The two are counted in
 two steps, because only the second one has anything to do with the panel: the
 count of the widths of the file is the expensive part, and repeating it for
 every frame of a sidebar drag made the cost of a wide export grow with the
-file. The widths are counted once per file and once more for every change of
-the font, and a resize only shares the room out again.
+file. The widths are counted once for every open of a file and once more for
+every change of the font, and a resize only shares the room out again.
 
 ### Why the first file of a session is measured against guessed metrics
 

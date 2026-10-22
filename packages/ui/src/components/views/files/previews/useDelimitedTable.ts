@@ -168,9 +168,9 @@ export const useDelimitedTable = (
    *
    * A count that finishes late has to tell whether the file it was started
    * for is still the one that is open, so that the widths of a file the user
-   * has left are not counted here: that walk is over the whole text of the
-   * file, and it would hold the thread of the preview for as long as it
-   * takes.
+   * has left are not counted here: that walk is over the text of every row
+   * the preview holds, and it would hold the thread of the preview for as
+   * long as it takes.
    */
   const openTableRef = React.useRef<DelimitedTable | null>(null);
   React.useLayoutEffect(() => {

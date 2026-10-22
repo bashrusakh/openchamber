@@ -1075,6 +1075,9 @@ describe('TableArtifact', () => {
     await render(content);
     const afterOpen = widthCounts;
     expect(afterOpen).toBeGreaterThan(0);
+    // The character takes five and a third cells, so the first column is as
+    // wide as the text the browser lays out for it.
+    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(8.334ch + 16px + 1px)');
 
     // A file without rows has no table to measure, so the widths of the file
     // before it stay counted.
@@ -1087,6 +1090,7 @@ describe('TableArtifact', () => {
     await render(content);
 
     expect(widthCounts).toBeGreaterThan(afterOpen);
+    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(8.334ch + 16px + 1px)');
   });
 
   test('does not publish the widths of a count whose measurements are old', async () => {
