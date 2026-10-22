@@ -80,6 +80,10 @@ import { highlightSelectionMatches } from '@codemirror/search';
 import { codeFolding } from '@/lib/codemirror/codeFolding';
 import { bracketAids, multipleCursors } from '@/lib/codemirror/editingAids';
 import { gitChangeGutter, setGitChangeBaseline } from '@/lib/codemirror/gitChangeGutter';
+import { importLinks, resolveRelativeImport } from '@/lib/codemirror/importLinks';
+import { indentGuides } from '@/lib/codemirror/indentGuides';
+import { isLintedJsonPath, jsonSyntaxLint } from '@/lib/codemirror/jsonSyntaxLint';
+import { stickyScope } from '@/lib/codemirror/stickyScope';
 import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { normalizeContextPanelDirectoryKey, useUIStore } from '@/stores/useUIStore';
 import { useFilesViewTabsStore } from '@/stores/useFilesViewTabsStore';
@@ -3758,6 +3762,31 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     },
   }), []);
 
+  // Cmd/Ctrl+click on a relative import opens the file it names. The handler
+  // reads the latest render through a ref, so the extension keeps its identity.
+  const openRelativeImportRef = React.useRef<(specifier: string) => void>(() => {});
+  openRelativeImportRef.current = (specifier) => {
+    const fromFile = selectedFile?.path;
+    if (!fromFile || !panelRoot) return;
+    void resolveRelativeImport(fromFile, specifier, async (directory) => {
+      try {
+        const listing = await files.listDirectory(directory);
+        return new Map(listing.entries.map((entry) => [entry.name, entry.isDirectory]));
+      } catch {
+        return null;
+      }
+    }).then((resolution) => {
+      if (resolution.status === 'found') {
+        useUIStore.getState().openContextFile(panelRoot, resolution.path);
+        return;
+      }
+      toast.error(resolution.status === 'missing'
+        ? t('filesView.editor.importNotFound', { path: specifier })
+        : t('filesView.editor.importLookupFailed', { path: specifier }));
+    });
+  };
+  const importLinksExtension = React.useMemo(() => importLinks((specifier) => openRelativeImportRef.current(specifier)), []);
+
   const editorExtensions = React.useMemo(() => {
     if (!selectedFile?.path) {
       return [createFlexokiCodeMirrorTheme(currentTheme, { fontSize: editorFontSize })];
@@ -3789,13 +3818,26 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
         added: diffColors?.diffAdded ?? currentTheme.colors.status.success,
         modified: diffColors?.diffModified ?? currentTheme.colors.status.info,
         removed: diffColors?.diffRemoved ?? currentTheme.colors.status.error,
+      }, {
+        revert: t('filesView.editor.gitHunk.revert'),
+        close: t('filesView.editor.gitHunk.close'),
       }),
       highlightSelectionMatches({ highlightWordAroundCursor: true, minSelectionLength: 2 }),
       pinPreviewOnEditExtension,
       bracketAids(),
+      indentGuides(),
+      importLinksExtension,
     );
+    if (isLintedJsonPath(selectedFile.path)) {
+      extensions.push(jsonSyntaxLint(t('filesView.editor.jsonSyntaxError'), {
+        error: currentTheme.colors.status.error,
+        tooltipBackground: currentTheme.colors.surface.elevated,
+        tooltipForeground: currentTheme.colors.surface.elevatedForeground,
+        border: currentTheme.colors.interactive.border,
+      }));
+    }
     if (!isMobile) {
-      extensions.push(codeFolding(), multipleCursors({ vimMode: fileEditorKeymap === 'vim' }));
+      extensions.push(codeFolding(), multipleCursors({ vimMode: fileEditorKeymap === 'vim' }), stickyScope());
     }
     if (isMobile) {
       extensions.push(EditorView.updateListener.of((update) => {
@@ -3812,7 +3854,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
       }));
     }
     return extensions;
-  }, [currentTheme, selectedFile?.path, staticLanguageExtension, dynamicLanguageExtension, wrapLines, isMobile, nudgeEditorSelectionAboveKeyboard, editorFontSize, pinPreviewOnEditExtension, fileEditorKeymap]);
+  }, [currentTheme, selectedFile?.path, staticLanguageExtension, dynamicLanguageExtension, wrapLines, isMobile, nudgeEditorSelectionAboveKeyboard, editorFontSize, pinPreviewOnEditExtension, fileEditorKeymap, t, importLinksExtension]);
 
   const pierreTheme = React.useMemo(
     () => ({ light: lightTheme.metadata.id, dark: darkTheme.metadata.id }),
@@ -4081,17 +4123,13 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
     connectFullscreenVirtualizer(node);
     setFullscreenCodeScroller(node);
   }, [connectFullscreenVirtualizer, setFullscreenCodeScroller]);
-  const [mdPreviewNode, setMdPreviewNode] = React.useState<HTMLDivElement | null>(null);
-  const [mdFullscreenPreviewNode, setMdFullscreenPreviewNode] = React.useState<HTMLDivElement | null>(null);
   const setMainMarkdownScroller = React.useCallback((node: HTMLDivElement | null) => {
     markdownPreviewRef.current = node;
     mdPreviewContainerRef.current = node;
-    setMdPreviewNode(node);
     setMainMarkdownScroll(node);
   }, [setMainMarkdownScroll]);
   const setFullscreenMarkdownScroller = React.useCallback((node: HTMLDivElement | null) => {
     mdFullscreenPreviewContainerRef.current = node;
-    setMdFullscreenPreviewNode(node);
     setFullscreenMarkdownScroll(node);
   }, [setFullscreenMarkdownScroll]);
   // A relative link in a rendered Markdown file opens that file here; on
@@ -4103,16 +4141,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
   }, [panelRoot]);
   const markdownLocalAssetsActive = isMarkdown && mdViewMode === 'preview' && !fileLoading;
   const markdownColorScheme = currentTheme.metadata.variant === 'light' ? 'light' : 'dark';
-  useMarkdownLocalAssets({
-    container: mdPreviewNode,
-    filePath: selectedFile?.path ?? null,
-    workspaceRoot: root || null,
-    onOpenFile: openLinkedFile,
-    enabled: markdownLocalAssetsActive,
-    colorScheme: markdownColorScheme,
-  });
-  useMarkdownLocalAssets({
-    container: mdFullscreenPreviewNode,
+  const markdownDocumentAssets = useMarkdownLocalAssets({
     filePath: selectedFile?.path ?? null,
     workspaceRoot: root || null,
     onOpenFile: openLinkedFile,
@@ -5194,8 +5223,11 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
             >
               <div className="h-full overflow-auto">
                 <JsonTreeView
+                  className="h-full"
                   jsonString={fileContent}
-                  format={selectedFile.path.toLowerCase().endsWith('.jsonc') ? 'jsonc' : 'json'}
+                  // Config files under a .json name (tsconfig, opencode.json) carry
+                  // comments and trailing commas; the editor's check accepts them too.
+                  format="jsonc"
                   maxHeight="100%"
                   initiallyExpandedDepth={2}
                 />
@@ -5235,6 +5267,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                   <div style={previewFontStyle}>
                     <SimpleMarkdownRenderer
                       content={fileContent}
+                      documentAssets={markdownDocumentAssets}
                       className="typography-markdown-body"
                       frontmatter="properties"
                       enableFileReferences={false}
@@ -5551,6 +5584,7 @@ export const FilesView: React.FC<FilesViewProps> = ({ mode = 'full', visible = t
                 <div style={previewFontStyle}>
                   <SimpleMarkdownRenderer
                     content={fileContent}
+                    documentAssets={markdownDocumentAssets}
                     className="typography-markdown-body"
                     frontmatter="properties"
                     enableFileReferences={false}

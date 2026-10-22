@@ -16,6 +16,7 @@ import { branchRefLabel } from '@/components/views/git/baseBranch';
 import { useGitStore, useGitStatus, useIsGitRepo, useGitLoadingStatus } from '@/stores/useGitStore';
 import { useGitBaseBranchStore } from '@/stores/useGitBaseBranchStore';
 import { useBranchComparisonBase } from '@/hooks/useBranchComparisonBase';
+import { useBranchPullRequestRequest } from '@/hooks/useBranchPullRequestRequest';
 import { DIFF_TOOLBAR_MENU_STEPS, useDiffToolbarFit } from '@/components/views/useDiffToolbarFit';
 import { branchPathRevisions, coerceDiffScope, isBranchScopeAvailable, isBranchScopeDefinitelyUnavailable, useRangeKeyedCache, useBoundedDirectoryRetry } from './branchDiffScope';
 import { getRuntimeKey } from '@/lib/runtime-switch';
@@ -1674,7 +1675,12 @@ export const DiffView: React.FC<DiffViewProps> = ({
     // status row it hangs off did not move.
     const [workingTreeRevision, setWorkingTreeRevision] = React.useState(0);
     const [reviewDialogOpen, setReviewDialogOpen] = React.useState(false);
-    const [activeDiffScope, setActiveDiffScope] = React.useState<DiffScope>(diffScope ?? 'working');
+    // With no view picked, Changes opens on Branch and waits there for the
+    // base; it falls back to Changed only once the branch has none, so the
+    // view never switches under the person a moment after it opened.
+    const [activeDiffScope, setActiveDiffScope] = React.useState<DiffScope>(
+        diffScope === null && !isVSCodeRuntime() ? 'branch' : diffScope ?? 'working'
+    );
 
     React.useEffect(() => {
         if (diffScope !== null) setActiveDiffScope(diffScope);
@@ -1884,12 +1890,18 @@ export const DiffView: React.FC<DiffViewProps> = ({
         visible && !isVSCodeRuntime() && isGitRepo !== false,
         { branches, remoteNames, primaryRemote: binding.contexts[0]?.primaryRemote, readContext: binding.contexts[0] ?? null },
     );
+    // The base above reads the branch's pull request; ask for it while shown,
+    // so a stacked branch checked out here compares against its parent.
+    const asksBranchPullRequest = visible && !isVSCodeRuntime() && isGitRepo !== false;
+    useBranchPullRequestRequest(asksBranchPullRequest ? effectiveDirectory ?? null : null, asksBranchPullRequest ? currentBranch : null, binding);
     const showBranchOption = !isVSCodeRuntime() && isBranchScopeAvailable(currentBranch, qualifiedBranchBase);
     // On a branch with a base, the default view is the whole branch against
     // it, uncommitted work included: what its pull request will merge. It
-    // follows the branch until the person picks a view.
+    // follows the branch until the person picks a view. While the base is
+    // still being found the view stays where it is; the coercion below moves
+    // it to Changed once the branch is known to have none.
     React.useEffect(() => {
-        if (diffScope === null) setActiveDiffScope(showBranchOption ? 'branch' : 'working');
+        if (diffScope === null && showBranchOption) setActiveDiffScope('branch');
     }, [diffScope, showBranchOption]);
     // Coercion acts only on CONFIRMED unavailability: the runtime has no branch
     // scope at all, a settled status has no branch (detached HEAD), every base
@@ -1902,6 +1914,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
     // read as "settled without a branch".
     const isBranchStatusResolved = status !== null;
     const branchScopeDefinitelyUnavailable = isVSCodeRuntime()
+        || isGitRepo === false
         || branchMetadataExhausted
         || isBranchScopeDefinitelyUnavailable(
             currentBranch,
@@ -3087,7 +3100,10 @@ export const DiffView: React.FC<DiffViewProps> = ({
         }
 
         if (activeDiffScope === 'branch') {
-            if (!isBranchBaseResolved) {
+            // A base not found while the status or the binding (whose pull
+            // request names it) still load is still being resolved, not missing.
+            const baseInputsLoading = status === null || binding.status === 'idle' || binding.status === 'loading';
+            if (!isBranchBaseResolved || (!qualifiedBranchBase && baseInputsLoading)) {
                 return (
                     <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
                         <Icon name="loader-4" className="size-4 animate-spin" />

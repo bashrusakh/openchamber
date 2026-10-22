@@ -50,7 +50,20 @@ one it was created from, or the default branch; never the branch itself), so a
 repository without a remote gets it from the reflog and the default branch
 does not get it at all. The default follows the branch until the person picks a scope,
 which is persisted on the tab; coercing a default Branch view back to the
-working tree is not persisted either. Entry points that name what they show keep
+working tree is not persisted either. Such a tab starts on Branch and shows
+the base being resolved until the base is known; it moves to the working tree
+only once the branch is known to have no base, so the view never switches
+under the person a moment after opening (it used to open on the working tree
+and jump to Branch when the base arrived). The Git view and the pull request
+view take the same base for a new pull request and for updates
+(`useBranchPullRequestBase`): a base chosen for the branch, its open pull
+request's target, or the parent it was made on (a lower layer of a stack),
+and the worktree's own guess only when none of those answers. Changes, mobile Changes and
+Walkthrough each ask for the branch's pull request themselves
+(`hooks/useBranchPullRequestRequest.ts`) while shown: the base prefers its
+target, and without asking a stacked branch checked out in the same worktree
+compared against the default branch until the Git view or the sidebar happened
+to ask. Entry points that name what they show keep
 their scope: the work-status Changes row counts working-tree changes and opens
 `working`, and a file opened from the Git panel or a tool card opens its own
 working or staged diff.
@@ -138,6 +151,10 @@ walkthrough behaves the same on every surface. The panel header never wraps:
 then the step arrows and Generate, then the scope label), with the CSS in
 `index.css`.
 
+The walkthrough's stream column has a zero minimum width so long diff lines
+cannot widen it beyond the panel. Explanations wrap within that column; code
+uses the shared diff wrap preference and scrolls horizontally when wrap is off.
+
 The Git panel header (`git/GitHeader.tsx`) collapses the same way. The
 repository picker truncates down to its icon and chevron first, then the
 branch picker; their names sit in a grid track with no minimum, so neither
@@ -176,6 +193,8 @@ under the OpenChamber data directory and repository plans in a custom folder.
 accepts comments and trailing commas for preview without changing the source
 text. `JsonTreeView` defaults to strict JSON parsing for other callers.
 
+`FilesView` gives `JsonTreeView` the pane's full height. Its toolbar does not shrink, and its flex body has `min-height: 0`, so `JsonTreeViewer` gets the remaining height as its scroll viewport. Above 200 rows, the virtualizer mounts only the visible range and overscan. Chat callers keep their absolute `400px` and `70vh` height caps.
+
 `JsonTreeViewer` (Files, chat tool output) draws its rows with the file
 tree's parts, `fileTreeRowPaddingLeft` and `FileTreeIndentGuides`, plus a
 copy of `FileTreeChevron`'s look, so nesting reads the same in both trees.
@@ -191,6 +210,10 @@ so it renders `dir="ltr"` in every language; mirrored, it flipped brackets
 and showed `"</head>"` as `"<head/>"`. That is why the chevron is a copy:
 `FileTreeChevron`'s `rtl:-rotate-90` follows `<html dir>` and would point the
 unmirrored arrow up inside the LTR block.
+
+### Why a bounded flex body and not percentage max-height alone
+
+A percentage max-height inside auto-height wrappers let the inner viewport grow to the entire virtual list. The Files pane then scrolled outside the virtualizer, which mounted every row and froze the renderer on large JSON. The flex layout keeps the virtualizer's viewport bounded without changing file limits, preview preferences or saved tabs.
 
 ## Pull request comparisons
 

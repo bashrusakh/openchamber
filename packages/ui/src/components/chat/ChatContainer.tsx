@@ -19,6 +19,7 @@ import {
 import { MobileCommentComposerContext, useMobileCommentComposerOwner } from './composer/comment/MobileCommentComposerContext';
 import { DraftPresetChips } from './DraftPresetChips';
 import { useInputStore } from '@/sync/input-store';
+import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { Skeleton } from '@/components/ui/skeleton';
 import ChatEmptyState from './ChatEmptyState';
@@ -70,6 +71,9 @@ import { useChatTurnNavigation } from './hooks/useChatTurnNavigation';
 import { ChatQuoteHighlightContext, useChatQuoteHighlightStore } from './hooks/chatQuoteHighlightStore';
 import { ChatQuoteHighlightLayer } from './message/ChatQuoteHighlightLayer';
 import { useChatSurfaceMode } from './useChatSurfaceMode';
+import { useMessageTTS } from '@/hooks/useMessageTTS';
+import { useAutoReadAloud } from '@/hooks/useAutoReadAloud';
+import { findLatestCompletedReply } from '@/lib/messages/latestReply';
 import { useDeviceInfo } from '@/lib/device';
 import { Button } from '@/components/ui/button';
 import { StopIcon } from '@/components/icons/StopIcon';
@@ -106,7 +110,7 @@ import { WorkStatusPanel } from './work-status/WorkStatusPanel';
 import { useWorkStatusVisibility } from './work-status/useWorkStatusVisibility';
 import { useShownSessionSelection } from './useShownSessionSelection';
 import { useRightSlotStore } from '@/components/layout/rightSlot';
-import { normalizeUserDisplayParts } from './message/normalizeUserDisplayParts';
+import { buildPromptPreviewsByTurnId } from './lib/promptPreviews';
 import { resolveChatPromptReadOnly } from './chatPromptReadOnly';
 import { PermissionDock } from './PermissionDock';
 import { FormDock } from './FormDock';
@@ -287,30 +291,8 @@ const ChatViewport = React.memo(({
 }: ChatViewportProps) => {
     const { t } = useI18n();
     const promptPreviewsByTurnIdRef = React.useRef<Map<string, Part[]>>(new Map());
-    // Cache normalized parts per source array so unchanged messages keep the
-    // same reference and the memo below can bail out to the previous map.
-    const normalizedPromptPartsCache = React.useRef(new WeakMap<Part[], Part[]>());
     const promptPreviewsByTurnId = React.useMemo(() => {
-        const next = new Map<string, Part[]>();
-        for (let index = 0; index < renderedMessages.length; index += 1) {
-            const message = renderedMessages[index];
-            if (message.info.role !== 'user') {
-                continue;
-            }
-            // v2 keeps injected context out of the user message: loop
-            // continuations and plan-mode injections arrive as their own
-            // `synthetic`-role messages, so every remaining user message is a
-            // turn the user actually sent and stays navigable.
-            let displayParts = normalizedPromptPartsCache.current.get(message.parts);
-            if (!displayParts) {
-                displayParts = normalizeUserDisplayParts(message.parts);
-                normalizedPromptPartsCache.current.set(message.parts, displayParts);
-            }
-            if (displayParts.length === 0) {
-                continue;
-            }
-            next.set(message.info.id, displayParts);
-        }
+        const next = buildPromptPreviewsByTurnId(renderedMessages);
         const prev = promptPreviewsByTurnIdRef.current;
         if (prev.size === next.size) {
             let unchanged = true;
@@ -1019,6 +1001,30 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
         // turn is still running only per the last conversation message.
         return isIncompleteAssistantTurn(getLastConversationRecord(sessionMessages)?.info);
     }, [currentSessionId, sessionMessages, sessionPermissions.length, sessionForms.length, sessionStatusForCurrent.type]);
+
+    const latestCompletedReply = React.useMemo(
+        () => findLatestCompletedReply(sessionMessages),
+        [sessionMessages],
+    );
+    const autoReadAloudEnabled = useConfigStore((state) => state.autoReadAloudEnabled);
+    // Use the reply's own message id as the reading key so the message
+    // button shows the auto-started reading as playing and can stop it.
+    const { play: playAutoReadAloud } = useMessageTTS(latestCompletedReply?.messageId);
+    // Permission prompts pause `sessionIsWorking` while the turn is still
+    // running, so status also marks the session as active for the auto-read
+    // baseline.
+    const sessionIsActive = sessionIsWorking
+        || sessionStatusForCurrent.type === 'busy'
+        || sessionStatusForCurrent.type === 'retry';
+    useAutoReadAloud({
+        sessionKey: currentSessionKey ?? '',
+        ready: hasRenderableSessionSnapshot && sessionMessageLoadState.status === 'ready',
+        sessionIsActive,
+        reply: latestCompletedReply,
+        enabled: autoReadAloudEnabled && !pinned,
+        play: playAutoReadAloud,
+    });
+
     const activeRetryStatus = React.useMemo(() => {
         if (!currentSessionId || sessionStatusForCurrent.type !== 'retry') {
             return null;

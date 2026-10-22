@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
-import type { GitHubChecksSummary, GitHubPullStatus, GitHubReference, GitHubReferenceComment, GitHubReferenceDetail, LinearIssue, LinearIssueSummary } from '@/lib/api/types';
+import type { GitHubChecksSummary, GitHubPullStatus, GitHubReference, GitHubReferenceComment, GitHubReferenceDetail, LinearIssue, LinearIssueSummary, PullRequestStackLayer } from '@/lib/api/types';
 import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
@@ -16,6 +16,7 @@ import { getSourceControlProviderLabel } from '@/lib/source-control/identity';
 import { ReferenceComments, type ReferenceThreadActions } from './ReferenceComments';
 import { buildReferenceTimeline, type ReferenceCommentItem, type ReferenceTimelineEntry } from './referenceTimeline';
 import { ChecksGlyph, ReferenceLabelChips } from './ReferencePickerRow';
+import { PullStackRows } from './PullStackRows';
 import { useReferenceImagePreview } from './useReferenceImagePreview';
 import {
     githubStateLook,
@@ -38,7 +39,8 @@ const ZOOMABLE_IMAGE_CLASS = '[&_[data-markdown-content]_img:not(a_img):not([ari
  * `pinned` (desktop pane): the item header and the send summary stay in view
  * while the meta grid, description and comments scroll between them, so a
  * long preview never hides the diff switch. Inline (mobile): one flow inside
- * the sheet's own scroll.
+ * the sheet's own scroll. Either way a divider sets the meta grid apart from
+ * what follows it.
  */
 const PreviewFrame: React.FC<{ pinned: boolean; header: React.ReactNode; meta: React.ReactNode; footer: React.ReactNode; children: React.ReactNode }> = ({ pinned, header, meta, footer, children }) => {
     const imagePreview = useReferenceImagePreview();
@@ -60,7 +62,7 @@ const PreviewFrame: React.FC<{ pinned: boolean; header: React.ReactNode; meta: R
             </div>
             <ScrollableOverlay outerClassName="min-h-0 flex-1" className="px-6 pb-5 pt-4" disableHorizontal>
                 <article className={cn('flex flex-col gap-4', ZOOMABLE_IMAGE_CLASS)} onClick={imagePreview.onClick}>
-                    {meta}
+                    <div className="border-b border-border/60 pb-4">{meta}</div>
                     {children}
                 </article>
             </ScrollableOverlay>
@@ -266,15 +268,19 @@ const PullDetailRows: React.FC<{
 const NO_CHECKS: CachedValue<GitHubChecksSummary | null> = { status: 'ready', value: null };
 
 /**
- * The previewed PR's checks come with its own detail (GitHub's head commit,
- * GitLab's pipeline), one PR at a time, so the preview never waits for the
- * statuses a whole list asks for. Closed and merged PRs have none to show.
+ * The previewed PR's checks as its row has them, the status that stays
+ * current while the preview is open. Until that arrives they come with the
+ * PR's own detail (GitHub's head commit, GitLab's pipeline), so the preview
+ * never waits for the statuses a whole list asks for. Closed and merged PRs
+ * have none to show.
  */
 const previewChecks = (
     reference: GitHubReference,
+    pullStatus: CachedValue<GitHubPullStatus | null>,
     detail: CachedValue<GitHubReferenceDetail>,
 ): CachedValue<GitHubChecksSummary | null> => {
     if (reference.kind !== 'pull' || reference.state !== 'open') return NO_CHECKS;
+    if (pullStatus.status === 'ready' && pullStatus.value?.checks) return { status: 'ready', value: pullStatus.value.checks };
     return mapDetail(detail, (value) => value.pull?.checks ?? null);
 };
 
@@ -297,7 +303,8 @@ const GitHubPreview: React.FC<{
     stateMenu?: React.ReactNode;
     onRefresh?: () => Promise<void>;
     threadActions?: ReferenceThreadActions;
-}> = ({ reference, pullStatus, detail, purpose, pinned, includeDiff, onIncludeDiffChange, now, footer: footerOverride, pullLinks, reply, labelsControl, reviewersControl, onOpenChecks, commentAttachments, stateMenu, onRefresh, threadActions }) => {
+    onOpenStackLayer?: (layer: PullRequestStackLayer) => void;
+}> = ({ reference, pullStatus, detail, purpose, pinned, includeDiff, onIncludeDiffChange, now, footer: footerOverride, pullLinks, reply, labelsControl, reviewersControl, onOpenChecks, commentAttachments, stateMenu, onRefresh, threadActions, onOpenStackLayer }) => {
     const { t } = useI18n();
     const [refreshing, setRefreshing] = React.useState(false);
     const refresh = onRefresh ? () => {
@@ -343,6 +350,10 @@ const GitHubPreview: React.FC<{
     const labels = reference.labels.map((label) => ({ name: label.name, color: labelColor(label.color) }));
     const updated = relative(reference.updatedAt);
     const body = reference.body.trim() ? reference.body : '';
+    const stack = reference.kind === 'pull' && detail.status === 'ready' ? detail.value.pull?.stack ?? null : null;
+    const numberLabel = (number: number) => referenceNumberLabel({ ...reference, number });
+    // Counted from the bottom, as GitHub numbers layers.
+    const stackPosition = stack ? stack.layers.findIndex((layer) => layer.number === reference.number) + 1 : 0;
 
     const footer = footerOverride ?? (
         <div className="flex flex-col gap-2">
@@ -438,7 +449,7 @@ const GitHubPreview: React.FC<{
                                     <span className="truncate">{reference.base}</span>
                                 </span>
                             </MetaRow>
-                            <PullDetailRows detail={detail} checks={previewChecks(reference, detail)} links={pullLinks} onOpenChecks={onOpenChecks} />
+                            <PullDetailRows detail={detail} checks={previewChecks(reference, pullStatus, detail)} links={pullLinks} onOpenChecks={onOpenChecks} />
                         </>
                     ) : null}
                     {reviewersControl && reference.kind === 'pull' ? (
@@ -453,6 +464,32 @@ const GitHubPreview: React.FC<{
                 </dl>
             }
         >
+            {stack ? (
+                <section className="flex flex-col gap-2 border-b border-border/60 pb-4">
+                    <h4 className="flex items-center gap-2 typography-ui-label font-semibold text-foreground">
+                        {t('stacks.preview.label')}
+                        {stackPosition > 0 ? (
+                            <span className={cn('typography-meta font-normal tabular-nums', REFERENCE_META_TEXT)}>
+                                {t('stacks.preview.position', { position: stackPosition, size: stack.layers.length })}
+                            </span>
+                        ) : null}
+                        {stack.number !== null && stack.layers.filter((layer) => layer.state === 'open').length > 1 ? (
+                            // GitHub rebases a stack only from its own page; its API has no such action.
+                            <a
+                                href={reference.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={cn('ms-auto inline-flex items-center gap-1 typography-meta font-normal hover:text-foreground', REFERENCE_META_TEXT)}
+                            >
+                                {t('stacks.preview.rebaseOnHost')}
+                                <Icon name="external-link" className="size-3.5" />
+                            </a>
+                        ) : null}
+                    </h4>
+                    <PullStackRows stack={stack} current={reference.number} numberLabel={numberLabel} currentLook={look} onOpen={onOpenStackLayer} />
+                </section>
+            ) : null}
+
             <div className="min-w-0 flex-1">
                 {body ? (
                     <ReferenceBody content={body} />
@@ -682,7 +719,9 @@ export const ReferencePreview: React.FC<{
     onRefresh?: () => Promise<void>;
     /** Answer and resolve a PR's review threads; without it they are read only. */
     threadActions?: ReferenceThreadActions;
-}> = ({ item, directory, pullStatus, linearDetail, githubDetail, purpose, pinned, includeDiff, onIncludeDiffChange, now, footer, pullLinks, linearStateControl, reply, labelsControl, reviewersControl, onOpenChecks, commentAttachments, stateMenu, onOpenLinearIssue, onRefresh, threadActions }) => {
+    /** Opens another layer of the previewed PR's stack; without it the layers are plain text. */
+    onOpenStackLayer?: (layer: PullRequestStackLayer) => void;
+}> = ({ item, directory, pullStatus, linearDetail, githubDetail, purpose, pinned, includeDiff, onIncludeDiffChange, now, footer, pullLinks, linearStateControl, reply, labelsControl, reviewersControl, onOpenChecks, commentAttachments, stateMenu, onOpenLinearIssue, onRefresh, threadActions, onOpenStackLayer }) => {
     const { t } = useI18n();
     const rewriteMarkdown = useGitLabUploadRewrite(directory, item?.source === 'github' ? item.reference : null);
     if (!item) {
@@ -716,6 +755,7 @@ export const ReferencePreview: React.FC<{
                 stateMenu={stateMenu}
                 onRefresh={onRefresh}
                 threadActions={threadActions}
+                onOpenStackLayer={onOpenStackLayer}
             />
         </ReferenceMarkdownRewriteContext.Provider>
     );

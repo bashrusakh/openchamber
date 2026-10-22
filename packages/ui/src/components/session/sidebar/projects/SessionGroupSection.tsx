@@ -94,7 +94,6 @@ export type SessionGroupSectionProps = {
   openNewSessionDraft: (options?: { selectedProjectId?: string | null; directoryOverride?: string | null; preserveDirectoryOverride?: boolean; targetFolderId?: string; target?: 'chat' | 'project' }) => void;
   pinnedSessionIds: Set<string>;
   sessionOrderIndex: Map<string, number>;
-  notifyOnSubtasks: boolean;
   expandedParents: Set<string>;
   editingId: string | null;
   editingRowKey: string | null;
@@ -129,12 +128,8 @@ export type SessionGroupSectionProps = {
 
 const CollapsedFolderActivity: React.FC<{
   nodes: SessionNode[];
-  includeUnreadSubtasks: boolean;
   children: (state: ReturnType<typeof useCollapsedSessionActivityState>) => React.ReactNode;
-}> = ({ nodes, includeUnreadSubtasks, children }) => children(useCollapsedSessionActivityState({
-  nodes,
-  includeUnreadSubtasks,
-}));
+}> = ({ nodes, children }) => children(useCollapsedSessionActivityState({ nodes }));
 
 const groupContainsSessionId = (group: SessionGroup, sessionId: string | null): boolean => {
   if (!sessionId) return false;
@@ -252,7 +247,6 @@ const areGroupPropsEqual = (prev: SessionGroupSectionProps, next: SessionGroupSe
     && prev.onToggleCollapsedGroup === next.onToggleCollapsedGroup
     && prev.dragHandleProps === next.dragHandleProps
     && prev.renderBody === next.renderBody
-    && prev.notifyOnSubtasks === next.notifyOnSubtasks
     && prev.setEditingId === next.setEditingId
     && prev.setEditingRowKey === next.setEditingRowKey
     && prev.setEditTitle === next.setEditTitle
@@ -352,7 +346,6 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     openNewSessionDraft,
     pinnedSessionIds,
     sessionOrderIndex,
-    notifyOnSubtasks,
     onToggleCollapsedGroup,
     dragHandleProps,
     compactBodyPadding = false,
@@ -686,7 +679,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     return byKey.size > 0 ? [...byKey.values()] : EMPTY_GROUP_ISSUES;
   }, [allGroupSessions, group.isArchivedBucket, group.isMain, groupPrSummary, hideGroupLabel]);
   const groupGitHubIssueItems = React.useMemo(
-    () => groupIssues.flatMap((issue) => (issue.source === 'github' ? [githubThread('issue', issue)] : [])),
+    () => groupIssues.flatMap((issue) => (issue.source === 'github' ? [githubThread('issue', issue, issue.instance)] : [])),
     [groupIssues],
   );
   const groupIssueStates = useTrackedIssueStates(groupGitHubIssueItems);
@@ -751,7 +744,7 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     ? { label: group.branch, color: null as string | null }
     : null;
   const groupActivityIndicator = isCollapsed
-    ? <CollapsedSessionActivityIndicator nodes={sourceGroupNodes} includeUnreadSubtasks={notifyOnSubtasks} />
+    ? <CollapsedSessionActivityIndicator nodes={sourceGroupNodes} />
     : null;
 
   type FolderEntry = (typeof allFoldersForGroup)[number];
@@ -837,7 +830,6 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
               expandedParents={expandedParents}
               hasSessionSearchQuery={hasSessionSearchQuery}
               normalizedSessionSearchQuery={normalizedSessionSearchQuery}
-              notifyOnSubtasks={notifyOnSubtasks}
               editingId={editingId}
               editingRowKey={editingRowKey}
                editTitle={editTitle}
@@ -871,7 +863,6 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     return <CollapsedFolderActivity
       key={folder.id}
       nodes={activityNodesByFolderId.get(folder.id) ?? nodes}
-      includeUnreadSubtasks={notifyOnSubtasks}
     >{item}</CollapsedFolderActivity>;
   };
 
@@ -939,10 +930,10 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
   const groupHeaderRightPadding = alwaysShowActions
     ? (hasThirdHeaderAction ? 'pe-20' : hasSecondHeaderAction ? 'pe-14' : 'pe-7')
     : cn('pe-2', hasThirdHeaderAction
-        ? '[--oc-actions-reserve:68px]'
+        ? '[--oc-actions-reserve:4.25rem]'
         : hasSecondHeaderAction
-        ? '[--oc-actions-reserve:44px]'
-        : '[--oc-actions-reserve:18px]');
+        ? '[--oc-actions-reserve:2.75rem]'
+        : '[--oc-actions-reserve:1.125rem]');
   const headerActionsMaskClass = alwaysShowActions ? undefined : 'group-hover/gh:oc-actions-mask group-has-[:focus-visible]/gh:oc-actions-mask';
   const headerCoveredFadeClass = alwaysShowActions ? undefined : 'transition-opacity group-hover/gh:opacity-0 group-has-[:focus-visible]/gh:opacity-0';
   // An empty group keeps the chevron's place, so its label stays in line.
@@ -1011,7 +1002,6 @@ function SessionGroupSectionBase(props: SessionGroupSectionProps): React.ReactNo
     expandedParents={expandedParents}
     hasSessionSearchQuery={hasSessionSearchQuery}
     normalizedSessionSearchQuery={normalizedSessionSearchQuery}
-    notifyOnSubtasks={notifyOnSubtasks}
     editingId={editingId}
     editingRowKey={editingRowKey}
      editTitle={editTitle}

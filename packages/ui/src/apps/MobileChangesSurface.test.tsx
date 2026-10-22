@@ -645,3 +645,106 @@ test('mobile changes last turn scope paints loading before the turn fetch settle
     }
   }
 }, 30_000);
+
+// The working list swaps the resolution header for the comparison chrome.
+// The nested repository picker has to survive that swap: once auto-selection
+// resolves a nested repository there is no other way to switch repositories.
+test('keeps the nested repository picker reachable once the working list resolves a nested repository', async () => {
+  const dom = new Window({ url: 'http://localhost' });
+  dom.happyDOM.setWindowSize({ width: 390, height: 844 });
+  const originals = new Map<string, PropertyDescriptor | undefined>();
+  const globals = {
+    window: dom, document: dom.document, navigator: dom.navigator, location: dom.location, localStorage: dom.localStorage,
+    Element: dom.Element, HTMLElement: dom.HTMLElement, HTMLInputElement: dom.HTMLInputElement, Node: dom.Node,
+    customElements: dom.customElements, CSSStyleSheet: dom.CSSStyleSheet,
+    Event: dom.Event, CustomEvent: dom.CustomEvent, KeyboardEvent: dom.KeyboardEvent, MouseEvent: dom.MouseEvent,
+    MutationObserver: dom.MutationObserver, ResizeObserver: dom.ResizeObserver,
+    getComputedStyle: dom.getComputedStyle.bind(dom), requestAnimationFrame: dom.requestAnimationFrame.bind(dom),
+    cancelAnimationFrame: dom.cancelAnimationFrame.bind(dom), IS_REACT_ACT_ENVIRONMENT: true,
+  };
+  for (const [name, value] of Object.entries(globals)) {
+    originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+  const commits: GitLogEntry[] = ['a'].map((letter) => ({
+    hash: letter.repeat(40), date: '2026-09-09T09:22:00Z', message: `Commit ${letter}`,
+    refs: '', body: '', author_name: 'Test Author', author_email: 'test@example.com',
+    filesChanged: 1, insertions: 0, deletions: 0, parents: [],
+  }));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = Object.assign(async (input: RequestInfo | URL) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), 'http://localhost');
+    if (url.pathname === '/api/fs/home' || url.pathname === '/api/session-folders') return new Promise<Response>(() => {});
+    switch (url.pathname) {
+      case '/api/git/remotes': return Response.json([]);
+      case '/api/git/identities': return Response.json([]);
+      case '/api/git/global-identity': return Response.json(null);
+      case '/api/source-control/binding': return Response.json({
+        status: 'bound', revision: 1,
+        repository: { supported: true, repositoryId: 'repo', configRevision: 'rev', bare: false,
+          remotes: [{ name: 'origin', fetch: ENDPOINT, push: ENDPOINT }] },
+        binding: { repositoryId: 'repo', configRevision: 'rev', revision: 1, state: 'bound',
+          providers: [], remotes: [], auxiliary: [] },
+      });
+      case '/api/git/branch-base': return Response.json({ base: null });
+      case '/api/git/log': return Response.json({ all: commits, latest: commits[0], total: commits.length });
+      default: throw new Error(`Unexpected request ${url.pathname}`);
+    }
+  }, originalFetch);
+  const { createRoot } = await import('react-dom/client');
+  const { I18nProvider } = await import('@/lib/i18n');
+  const { RuntimeAPIContext } = await import('@/contexts/runtimeAPIContext');
+  const { createWebAPIs } = await import('../../../web/src/api/index');
+  const { useGitStore } = await import('@/stores/useGitStore');
+  const { MobileChangesPane } = await import('./MobileChangesSurface');
+  const apis = createWebAPIs();
+  const status: GitStatus = { current: 'feature', tracking: null, ahead: 0, behind: 0, files: [], isClean: true, diffStats: { staged: {}, working: {} } };
+  const seed = (directory: string) => {
+    useGitStore.getState().setActiveDirectory(directory);
+    const previous = useGitStore.getState().getDirectoryState(directory);
+    if (!previous) throw new Error('Missing repository state');
+    const now = Date.now();
+    const directories = new Map(useGitStore.getState().directories);
+    directories.set(directory, {
+      ...previous, status, isGitRepo: true,
+      branches: { all: ['feature', 'main'], current: 'feature', branches: {}, defaultBranches: { origin: 'main' } },
+      log: { all: commits, latest: commits[0], total: commits.length }, identity: { userName: 'Test Author', userEmail: 'test@example.com' },
+      lastStatusFetch: now, lastBranchesFetch: now, lastLogFetch: now, lastIdentityFetch: now, lastRepoCheckAt: now,
+    });
+    useGitStore.setState({ directories });
+  };
+  seed('/root/one');
+  seed('/repo');
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  const settle = async (done: () => boolean) => {
+    for (let tick = 0; tick < 20 && !done(); tick += 1) {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    }
+  };
+  const render = (rootDirectory: string, repository: { rootIsGitRepo: boolean; gitDirectory: string; nestedRepos: string[] | null; nestedRepoSelection: string | null; repositoryOptions: string[] | null }) => act(async () => {
+    root.render(<SyncProvider sdk={SYNC_SDK} directory={rootDirectory}><I18nProvider><RuntimeAPIContext.Provider value={apis}>
+      <MobileChangesPane rootDirectory={rootDirectory} repository={repository} visible />
+    </RuntimeAPIContext.Provider></I18nProvider></SyncProvider>);
+  });
+  try {
+    await render('/root', { rootIsGitRepo: false, gitDirectory: '/root/one', nestedRepos: ['/root/one', '/root/two'], nestedRepoSelection: '/root/one', repositoryOptions: ['/root/one', '/root/two'] });
+    await settle(() => Boolean(container.querySelector('[aria-label="Select a repository..."]')));
+    const picker = container.querySelector('[aria-label="Select a repository..."]');
+    if (!picker) throw new Error('Missing nested repository picker in the working list header');
+    if (!picker.textContent?.includes('one')) throw new Error('Picker does not show the resolved repository');
+    // A root that is itself a repository keeps the picker hidden.
+    await render('/repo', { rootIsGitRepo: true, gitDirectory: '/repo', nestedRepos: null, nestedRepoSelection: null, repositoryOptions: null });
+    await settle(() => !container.querySelector('[aria-label="Select a repository..."]'));
+    if (container.querySelector('[aria-label="Select a repository..."]')) throw new Error('Picker should stay hidden for a root repository');
+  } finally {
+    await act(async () => root.unmount());
+    globalThis.fetch = originalFetch;
+    await dom.happyDOM.abort();
+    for (const [name, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else Reflect.deleteProperty(globalThis, name);
+    }
+  }
+}, 30_000);

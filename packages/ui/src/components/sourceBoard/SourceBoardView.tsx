@@ -27,14 +27,16 @@ import { IDLE_PULL_STATUS, useReferenceBrowser } from '@/components/references/u
 import { ReferencePreview } from '@/components/references/ReferencePreview';
 import { DEFAULT_REPOSITORY_FILTER, referenceNumberLabel, referencePickerItemKey, type ReferencePickerItem, type ReferencePickerSelection } from '@/components/references/referencePickerItems';
 import { itemDirectory } from '@/components/references/acrossRepositories';
-import { forgetGitHubPullStatuses, useGitHubAcrossReferenceList, useGitHubReadContext, useGitHubReferenceList, useLinearIssueDetail, useRepositoryHostProvider } from '@/components/references/referenceSources';
+import { forgetGitHubPullStatus, forgetGitHubPullStatuses, useGitHubAcrossReferenceList, useGitHubReadContext, useGitHubReferenceList, useLinearIssueDetail, useRepositoryHostProvider } from '@/components/references/referenceSources';
 import { openExternalUrl } from '@/lib/url';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
-import type { GitHubReference, GitHubReferenceKind, LinearMappingResult, ProjectEntry, SourceControlReadContext } from '@/lib/api/types';
+import type { GitHubReference, GitHubReferenceKind, LinearMappingResult, ProjectEntry, PullRequestStackLayer, SourceControlReadContext } from '@/lib/api/types';
 import { isRightToLeft, useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { resolveLinearMappedProjectPath } from '@/lib/linearProjectMapping';
+import { useTrackedItems } from '@/lib/trackedItems/interest';
+import type { TrackedItem } from '@/lib/trackedItems/model';
 import { normalizeProjectPath, resolveProjectForSessionDirectory } from '@/lib/projectResolution';
 import { useLinearAuthStore } from '@/stores/useLinearAuthStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -56,6 +58,7 @@ import { useThreadActions } from './threadActions';
 import { useBoardRevalidation } from './useBoardRevalidation';
 
 const NO_REPOSITORIES: readonly string[] = [];
+const NO_FOLLOWED: TrackedItem[] = [];
 const LIST_MIN_WIDTH = 280;
 /** Below this the list leaves its column for a dropdown, so the preview keeps the width. */
 const NARROW_BOARD_WIDTH = 960;
@@ -162,7 +165,8 @@ const SourceBoard: React.FC<{ layout: SourceBoardLayout; onLeave?: () => void; o
     const [repositoryKind, setRepositoryKind] = React.useState<GitHubReferenceKind | undefined>(undefined);
     // The phone's board page is mounted only while shown.
     const desktopBoardOpen = useUIStore((state) => state.isSourceBoardOpen);
-    useBoardRevalidation(layout === 'mobile' || desktopBoardOpen);
+    const onScreen = layout === 'mobile' || desktopBoardOpen;
+    useBoardRevalidation(onScreen);
 
     // The remembered project while it still exists, else the app's own.
     const project = projects.find((entry) => entry.id === choice.projectId)
@@ -294,6 +298,7 @@ const SourceBoard: React.FC<{ layout: SourceBoardLayout; onLeave?: () => void; o
             initialRepositoryKind={repositoryKind}
             onSelectKind={selectKind}
             layout={layout}
+            onScreen={onScreen}
             onLeave={onLeave}
             onClose={onClose}
         />
@@ -316,13 +321,15 @@ const SourceBoardBody: React.FC<{
     initialRepositoryKind?: GitHubReferenceKind;
     onSelectKind: (kind: SourceBoardKind) => void;
     layout: SourceBoardLayout;
+    /** False while the desktop board is kept mounted but closed: nothing it lists is followed then. */
+    onScreen: boolean;
     onLeave?: () => void;
     /** The phone page's close button. */
     onClose?: () => void;
-}> = ({ tab, project, directory, allRepositories, linearTeamId, mapping, projects, scopePicker, kinds, initialRepositoryKind, onSelectKind, layout, onLeave, onClose }) => {
+}> = ({ tab, project, directory, allRepositories, linearTeamId, mapping, projects, scopePicker, kinds, initialRepositoryKind, onSelectKind, layout, onScreen, onLeave, onClose }) => {
     const isMobile = layout === 'mobile';
     const { t } = useI18n();
-    const { sourceControl } = useRuntimeAPIs();
+    const { sourceControl, linear } = useRuntimeAPIs();
     const source = tab === 'linear' ? 'linear' : 'github';
     // An item another surface asked to show: an issue or PR by its link, a
     // Linear issue by its identifier. It is read on its own, not typed into the
@@ -347,7 +354,7 @@ const SourceBoardBody: React.FC<{
         query: pinnedLink?.url ?? '',
     });
     const pinnedLookup = allRepositories ? pinnedAcross : pinnedSingle;
-    const { detail: pinnedLinear } = useLinearIssueDetail(tab === 'linear' ? pinnedLinearId : null, true);
+    const { detail: pinnedLinear, followed: pinnedLinearFollowed } = useLinearIssueDetail(tab === 'linear' ? pinnedLinearId : null, true);
     // Only the item the link names: a lookup that fell back to a search lists others.
     const namesPinnedLink = (item: GitHubReference) => pinnedLink !== null && isSameRepositoryItemLink(item.url, pinnedLink.url);
     const pinnedAcrossItem = tab === 'repository' && allRepositories ? pinnedAcross.items.find(namesPinnedLink) ?? null : null;
@@ -368,7 +375,15 @@ const SourceBoardBody: React.FC<{
         linearTeamId,
         initialGitHubKind: initialRepositoryKind,
         pinnedItem,
+        onScreen,
     });
+    // The item a link asked to show is followed like a listed one; a lookup
+    // that fell back to a search lists others, which are not.
+    const pinnedFollowed = React.useMemo(() => (pinnedItem?.source === 'linear'
+        ? pinnedLinearFollowed
+        : pinnedLookup.followed.filter((item) => item.provider !== 'linear' && item.number === pinnedReference?.number)
+    ), [pinnedItem, pinnedLinearFollowed, pinnedLookup.followed, pinnedReference]);
+    useTrackedItems(onScreen && pinnedItem ? pinnedFollowed : NO_FOLLOWED);
     const { previewItem, setQuery, selectGitHubKind, showItem } = browser;
     const shownPinRequestRef = React.useRef(0);
     const linearFocus = useSourceBoardStore((state) => (tab === 'linear' ? state.linearFocus : null));
@@ -412,7 +427,17 @@ const SourceBoardBody: React.FC<{
     }, [pinnedLinearId, pinnedLinearStatus, setQuery]);
     const currentDirectory = useEffectiveDirectory();
     const worktreesByProject = useSessionUIStore((state) => state.availableWorktreesByProject);
-    const [worktreeRequest, setWorktreeRequest] = React.useState<{ project: SourceBoardProject; selection: ReferencePickerSelection } | null>(null);
+    // New Worktree opens on the previewed item, or on a new branch on top of a PR's.
+    const [worktreeRequest, setWorktreeRequest] = React.useState<
+        | { project: SourceBoardProject; selection: ReferencePickerSelection; onTopOf?: undefined }
+        | { project: SourceBoardProject; selection?: undefined; onTopOf: string }
+        | null
+    >(null);
+    // Another layer of the previewed PR's stack opens here, read on its own like a link.
+    const openStackLayer = React.useCallback((layer: PullRequestStackLayer) => {
+        setPinRequest((request) => request + 1);
+        setPinnedLink({ kind: 'pull', url: layer.url });
+    }, []);
 
     // A Linear issue starts in its team's project, else the mapping's default,
     // else the project the board was last on; the user can pick another.
@@ -470,6 +495,8 @@ const SourceBoardBody: React.FC<{
             startIn={startIn}
             onLeave={onLeave}
             worktreeAvailable={!readsNestedRepository}
+            stack={previewItem?.source === 'github' && browser.githubDetail.status === 'ready' ? browser.githubDetail.value.pull?.stack ?? null : null}
+            onStartOnTop={actionProject ? (pull) => setWorktreeRequest({ project: actionProject, onTopOf: pull.head }) : undefined}
         />
     ) : null;
 
@@ -496,14 +523,53 @@ const SourceBoardBody: React.FC<{
         [refreshGithubDetail, retryList],
     );
     const threadActions = useThreadActions(previewItem?.source === 'github' ? previewItem.reference : null, context, refreshRepositoryItem);
-    // The refresh button: for a change made on the host's own site, which the
-    // server's short-lived answers would otherwise hide for up to half a minute.
+    // The preview's refresh button, for a change made on the host's own site,
+    // which the server's short-lived answers would otherwise hide for up to
+    // half a minute: the shown item alone, its state and checks included.
     const refreshFromHost = async () => {
-        if (context) await sourceControl.refreshProviderReads(context).catch(() => undefined);
-        forgetGitHubPullStatuses();
-        // The button spins until the item and the list are read again.
-        await refreshRepositoryItem();
+        if (context && previewItem?.source === 'github') {
+            const { sourceRepo, number } = previewItem.reference;
+            const item = { owner: sourceRepo.owner, repo: sourceRepo.repo, number };
+            await sourceControl.refreshProviderReads(context, { item }).catch(() => undefined);
+            forgetGitHubPullStatus(item);
+        }
+        await refreshGithubDetail();
     };
+
+    // The list's refresh button: what is listed, and the checks of its PRs, read
+    // again, such as a PR just opened on the host's own site.
+    const listContextValue = useGitHubReadContext(tab === 'linear' ? null : allRepositories?.[0] ?? directory);
+    const listContext = listContextValue && listContextValue !== 'missing' ? listContextValue : null;
+    const [listRefreshing, setListRefreshing] = React.useState(false);
+    const refreshList = async () => {
+        if (listRefreshing) return;
+        setListRefreshing(true);
+        try {
+            if (tab === 'linear') {
+                await linear?.refreshListReads().catch(() => undefined);
+            } else {
+                if (listContext) await sourceControl.refreshProviderReads(listContext, { lists: true }).catch(() => undefined);
+                forgetGitHubPullStatuses();
+            }
+            await retryList();
+        } finally {
+            setListRefreshing(false);
+        }
+    };
+    const listRefreshButton = (
+        <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className={cn('shrink-0 px-0', isMobile ? 'size-8' : 'size-7')}
+            aria-label={t('sourceBoard.list.refresh')}
+            title={t('sourceBoard.list.refresh')}
+            disabled={listRefreshing}
+            onClick={() => void refreshList()}
+        >
+            <Icon name="refresh" className={cn('size-4', listRefreshing && 'animate-spin')} />
+        </Button>
+    );
 
     const preview = (
         <ReferencePreview
@@ -520,6 +586,7 @@ const SourceBoardBody: React.FC<{
             footer={actions}
             linearStateControl={previewItem?.source === 'linear' ? <SourceBoardLinearStatus issue={previewItem.issue} onChanged={browser.list.retry} /> : undefined}
             onOpenLinearIssue={(issue) => browser.openItem({ source: 'linear', issue })}
+            onOpenStackLayer={openStackLayer}
             onOpenChecks={previewPull && context ? () => setChecksOpenFor(previewKey) : undefined}
             onRefresh={previewItem?.source === 'github' && context ? refreshFromHost : undefined}
             threadActions={threadActions}
@@ -593,6 +660,7 @@ const SourceBoardBody: React.FC<{
     const search = (
         <ReferenceBrowserSearch
             browser={browser}
+            trailing={listRefreshButton}
             onKeyDown={(event) => {
                 if (narrow) {
                     // Typing or arrows show the results; Enter keeps the one picked.
@@ -634,6 +702,7 @@ const SourceBoardBody: React.FC<{
             onOpenChange={(next) => { if (!next) setWorktreeRequest(null); }}
             project={worktreeRequest?.project}
             initialSelection={worktreeRequest?.selection}
+            initialSourceBranch={worktreeRequest?.onTopOf}
             onWorktreeCreated={(worktreePath) => {
                 useSessionUIStore.getState().openNewSessionDraft({ directoryOverride: worktreePath, preserveDirectoryOverride: true });
                 onLeave?.();

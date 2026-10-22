@@ -1,5 +1,5 @@
 import { Popover } from '@base-ui/react/popover';
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@/components/icon/Icon';
 import { Button } from '@/components/ui/button';
 import {
@@ -18,6 +18,7 @@ import { isRightToLeft, useI18n } from '@/lib/i18n';
 import { changeRequestCopy } from '@/lib/source-control/changeRequestCopy';
 import type { WalkthroughSource, WalkthroughTarget, WalkthroughWorkingTreeScope } from '@/lib/walkthrough/types';
 import { useBranchComparisonBase } from '@/hooks/useBranchComparisonBase';
+import { useBranchPullRequestRequest } from '@/hooks/useBranchPullRequestRequest';
 import { useCommitComparison } from '@/hooks/useCommitComparison';
 import { usePullRequestComparison } from '@/hooks/usePullRequestComparison';
 import { PullRequestComparisonSelector } from '@/components/views/git/PullRequestComparisonSelector';
@@ -26,10 +27,6 @@ import { BranchComparisonSelector } from '@/components/views/git/BranchCompariso
 import { useGitBaseBranchStore } from '@/stores/useGitBaseBranchStore';
 import { gitPushScopeKey, subscribeGitPush } from '@/lib/gitPushEvents';
 import { useGitBranches, useGitStatus, useGitStore, useIsGitRepo } from '@/stores/useGitStore';
-import {
-  getSourceControlStatusKey,
-  useGitHubPrStatusStore,
-} from '@/stores/useGitHubPrStatusStore';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { useNestedGitDirectory } from '@/hooks/useNestedGitDirectory';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
@@ -55,7 +52,6 @@ import { MENU_GROUP_LABEL_CLASS, openWalkthroughGuide } from './walkthroughActio
 import { useWalkthroughReview } from './useWalkthroughReview';
 import { useToolbarFit } from '@/components/views/useDiffToolbarFit';
 import { useRepositoryBinding } from '@/lib/source-control/repository-binding';
-import { getSourceControlAuthKey, getSourceControlReadContextAuthState, useSourceControlAuthStore } from '@/stores/useSourceControlAuthStore';
 import { NestedRepoResolutionStates } from '@/components/views/git/NestedRepoResolutionStates';
 import { NestedRepoPicker } from '@/components/views/git/NestedRepoPicker';
 import { ContextPanelHeaderToolbar } from '@/components/layout/contextPanelHeaderSlot';
@@ -238,63 +234,9 @@ export const WalkthroughView = ({ directory: rootDirectory, visible = true }: Wa
     currentBranch && comparisonBase ? { kind: 'branch', baseRef: comparisonBase, headRef: currentBranch } : null
   ), [comparisonBase, currentBranch]);
 
-  // The pull request for this branch used to appear only after visiting the PR
-  // panel, because nothing else asked GitHub about it. Ask here too: the status
-  // store already dedupes by signature and throttles by TTL, so several panels
-  // wanting the same answer produce one request.
-  const sourceControlAuthEntries = useSourceControlAuthStore((state) => state.entries);
-  const ensurePrStatusEntry = useGitHubPrStatusStore((state) => state.ensureEntry);
-  const setPrStatusParams = useGitHubPrStatusStore((state) => state.setParams);
-  const beginActiveSourceControlContextsLoad = useGitHubPrStatusStore((state) => state.beginActiveContextsLoad);
-  const commitActiveSourceControlContexts = useGitHubPrStatusStore((state) => state.commitActiveContexts);
-  const releaseActiveSourceControlContexts = useGitHubPrStatusStore((state) => state.releaseActiveContexts);
-  const sourceControlContextsOwnerId = useId();
-  const refreshPrStatusTargets = useGitHubPrStatusStore((state) => state.refreshTargets);
-
-  useEffect(() => {
-    if (!directory) return;
-    const capturedRuntimeKey = binding.scope.runtimeKey;
-    const contextRequestId = beginActiveSourceControlContextsLoad(capturedRuntimeKey, directory, sourceControlContextsOwnerId);
-    const activeContexts = binding.contexts.filter((context) => getSourceControlReadContextAuthState(
-      sourceControlAuthEntries[getSourceControlAuthKey(context)], context,
-    ).connected);
-    commitActiveSourceControlContexts(capturedRuntimeKey, directory, sourceControlContextsOwnerId, contextRequestId, activeContexts);
-    return () => {
-      releaseActiveSourceControlContexts(capturedRuntimeKey, directory, sourceControlContextsOwnerId);
-    };
-  }, [beginActiveSourceControlContextsLoad, binding.contexts, binding.scope.runtimeKey, commitActiveSourceControlContexts, directory, releaseActiveSourceControlContexts, sourceControlAuthEntries, sourceControlContextsOwnerId]);
+  // The branch comparison reads its pull request base; ask for it here too.
+  useBranchPullRequestRequest(directory || null, currentBranch, binding);
   const readContext = binding.contexts[0] ?? null;
-  const readAuthEntry = readContext ? sourceControlAuthEntries[getSourceControlAuthKey(readContext)] : undefined;
-  const readAuth = readContext
-    ? getSourceControlReadContextAuthState(readAuthEntry, readContext)
-    : { authChecked: false, connected: false };
-
-  useEffect(() => {
-    if (!readContext || !currentBranch) return;
-    const key = getSourceControlStatusKey(readContext, currentBranch);
-    ensurePrStatusEntry(key);
-    setPrStatusParams(key, {
-      directory: readContext.directory,
-      branch: currentBranch,
-      remoteName: readContext.primaryRemote,
-      canShow: true,
-      identity: readContext,
-      readContext,
-      sourceControl,
-      authChecked: readAuth.authChecked,
-      connected: readAuth.connected,
-    });
-    void refreshPrStatusTargets([{ context: readContext, branch: currentBranch }]);
-  }, [
-    currentBranch,
-    ensurePrStatusEntry,
-    readContext,
-    readAuth.authChecked,
-    readAuth.connected,
-    refreshPrStatusTargets,
-    setPrStatusParams,
-    sourceControl,
-  ]);
 
   const choosingPr = pendingSourceSelection?.directory === directory && pendingSourceSelection.kind === 'pr' && !requestedTarget;
   const isPrScope = choosingPr || requestedTarget?.source.kind === 'pr';
@@ -717,7 +659,7 @@ export const WalkthroughView = ({ directory: rootDirectory, visible = true }: Wa
                 />
               </>
             )}
-            <div className="relative flex min-h-0 flex-1 flex-col">
+            <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
               {diffFind.isOpen && (
                 <DiffFindBar
                   query={diffFind.query}

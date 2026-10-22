@@ -77,7 +77,9 @@ describe('ReferencePreview layout', () => {
 
                 expect(scroller?.contains(meta)).toBe(true);
                 expect(scroller?.classList.contains('overflow-y-auto')).toBe(true);
-                expect(scroller?.querySelector('article')?.firstElementChild).toBe(meta);
+                // The meta grid opens the scroll, its divider below it.
+                expect(scroller?.querySelector('article')?.firstElementChild).toBe(meta?.parentElement ?? null);
+                expect(meta?.parentElement?.classList.contains('border-b')).toBe(true);
                 expect(scroller?.contains(header)).toBe(false);
                 expect(header?.querySelector('h3')?.textContent).toBe('Preview layout');
                 expect(header?.querySelector('a')?.textContent).toBe(item.source === 'github' ? 'GitHub' : 'Linear');

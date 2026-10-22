@@ -10,13 +10,16 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -144,13 +147,16 @@ export const dict: Record<I18nKey, string> = {
   ...surfacePanelI18n.pl,
   ...fileArtifactsI18n.pl,
   ...fileContentSearchI18n.pl,
+  ...fileEditorAidsI18n.pl,
   ...htmlRenderI18n.pl,
   ...sessionNoticesI18n.pl,
   ...usageStatsI18n.pl,
   ...webSearchI18n.pl,
   ...sessionWarmingI18n.pl,
+  ...overviewI18n.pl,
   ...isolatedSpacesI18n.pl,
   ...sourceBoardI18n.pl,
+  ...stacksI18n.pl,
   ...projectActionsI18n.pl,
   ...gitIdentityEditorI18n.pl,
   ...environmentI18n.pl,
@@ -529,6 +535,7 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.work.markDone': 'Oznacz jako gotowe',
   'sessions.sidebar.session.work.doneSuggested': 'Wygląda na gotowe',
   'sessions.sidebar.session.work.updateFailed': 'Nie udało się zaktualizować sesji',
+  'sessions.sidebar.session.work.folderDeleted': 'Folder tej sesji został usunięty',
   'sessions.sidebar.session.pin.pinFailed': 'Nie udało się przypiąć sesji',
   'sessions.sidebar.session.pin.unpinFailed': 'Nie udało się odpiąć sesji',
   'chat.work.doneHint.text': 'Ta praca wygląda na skończoną.',
@@ -2480,6 +2487,7 @@ export const dict: Record<I18nKey, string> = {
   'gitView.conflict.noActiveSession': 'Brak aktywnej sesji',
   'gitView.conflict.noActiveSessionDescription': 'Otwórz lub utwórz sesję, aby rozwiązać konflikty.',
   'gitView.conflict.noDetailsAvailable': 'Brak szczegółów konfliktu',
+  'magicPrompts.toast.loadFailed': 'Nie udało się wczytać Magicznych Promptów. Nic nie zostało wysłane.',
   'gitView.conflict.resolveCurrentSession': 'Rozwiąż w bieżącej sesji',
   'gitView.conflict.resolveNewSession': 'Rozwiąż w nowej sesji',
   'gitView.empty.cleanDescription': 'All changes have been committed',
@@ -3860,4 +3868,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'To zadanie już trwa',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'To zadanie już czeka w kolejce i uruchomi się, gdy zwolni się miejsce',
   'chat.modelControls.agentFavoriteAdd': 'Dodaj do ulubionych. Gdy są ulubione, Tab przełącza tylko między nimi',
+  'notifications.error.bodyFallback': 'Wystąpił błąd',
+  'notifications.question.bodyFallback': 'Agent czeka na Twoją odpowiedź',
+  'notifications.permission.bodyFallback': 'Agent czeka na Twoją zgodę',
+  'notifications.permission.title': 'Wymagane uprawnienie',
 } as const;

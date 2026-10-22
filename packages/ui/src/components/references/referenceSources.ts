@@ -14,6 +14,7 @@ import * as React from 'react';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import type {
     SourceControlBindingRead,
+    GitHubPullRequestRef,
     GitHubPullStatus,
     GitHubReference,
     GitHubReferenceDetail,
@@ -55,7 +56,8 @@ import {
     type PullStatusGroup,
     type ReadContextState,
 } from './acrossRepositories';
-import { createListCache, createValueCache, useCachedList, useCachedValue, useReferenceRevalidation, type CachedValue, type ListPage } from './referenceCache';
+import { isNewerThanRead, useLiveLinearIssues, useLivePullStatuses, useLiveReferences, type LivePullStatus } from './liveReferences';
+import { createListCache, createValueCache, useCachedList, useCachedValue, useReferenceRevalidation, type CachedValue, type ListPage, type PageRead, type ReadStamp } from './referenceCache';
 import type { LinearReferenceFilter } from './referencePickerItems';
 
 const githubLists = createListCache<GitHubReference>();
@@ -287,7 +289,11 @@ export function useGitHubReferenceList(options: {
         if (!result.repo) return { kind: 'unavailable', reason: 'no-repo' };
         return { kind: 'page', items: result.items, cursor: result.cursor, hasMore: result.hasMore };
     }, [context, kind, people, sourceControl, state, text]);
-    return useCachedList(githubLists, key, fetchPage);
+    const list = useCachedList(githubLists, key, fetchPage);
+    const readable = context && context !== 'missing' ? context : null;
+    const contextOf = React.useCallback(() => readable, [readable]);
+    const live = useLiveReferences(list.items, contextOf, list.pageReads);
+    return { ...list, items: live.items, followed: live.followed };
 }
 
 const NO_ACROSS_ITEMS: AcrossReference[] = [];
@@ -320,7 +326,12 @@ export function useGitHubAcrossReferenceList(options: {
         return fetchAcrossPage(search, contexts.github, { kind, state, people, query: text, cursor });
     }, [contexts.github, kind, people, sourceControl, state, text]);
     const list = useCachedList(githubAcrossLists, key, fetchPage);
-    return { ...list, items: list.items.length === 0 ? NO_ACROSS_ITEMS : list.items, contexts };
+    const contextOf = React.useCallback(
+        (item: AcrossReference) => contexts.github.find((entry) => entry.directory === item.directory)?.context ?? null,
+        [contexts.github],
+    );
+    const live = useLiveReferences(list.items, contextOf, list.pageReads);
+    return { ...list, items: live.items.length === 0 ? NO_ACROSS_ITEMS : live.items, followed: live.followed, contexts };
 }
 
 export function useLinearReferenceList(options: {
@@ -350,7 +361,9 @@ export function useLinearReferenceList(options: {
         if (result.connected === false) return { kind: 'unavailable', reason: 'disconnected' };
         return { kind: 'page', items: result.issues ?? [], cursor: result.cursor ?? null, hasMore: Boolean(result.hasMore) };
     }, [linear, people, priority, status, teamId, text]);
-    return useCachedList(linearLists, key, fetchPage);
+    const list = useCachedList(linearLists, key, fetchPage);
+    const live = useLiveLinearIssues(list.items, list.pageReads);
+    return { ...list, items: live.items, followed: live.followed };
 }
 
 /**
@@ -396,8 +409,14 @@ const githubPullStatuses = createValueCache<GitHubPullStatus | null>(200);
 const PULL_STATUS_BATCH = 10;
 const IDLE: CachedValue<GitHubPullStatus | null> = { status: 'idle' };
 
-/** Forgets every PR's checks and mergeability, so the lists showing them ask again: the board's refresh. */
+/** Forgets every PR's checks and mergeability, so the lists showing them ask again: the board's list refresh. */
 export const forgetGitHubPullStatuses = (): void => githubPullStatuses.clear();
+
+/** Forgets one PR's checks and mergeability, at any head commit: the preview's refresh. */
+export const forgetGitHubPullStatus = (pull: GitHubPullRequestRef): void => {
+    const marker = `|${pull.owner}/${pull.repo}#${pull.number}@`.toLowerCase();
+    githubPullStatuses.forget((key) => key.toLowerCase().includes(marker));
+};
 
 const pullStatusScope = (group: PullStatusGroup): string => (
     JSON.stringify([getRuntimeKey(), readContextCacheKey(group.context), group.directory])
@@ -443,27 +462,47 @@ function usePullStatusGroups(groups: readonly PullStatusGroup[]) {
         );
     }, [groups, revalidation, sourceControl, version]);
 
-    return (reference: GitHubReference, directory: string | null): CachedValue<GitHubPullStatus | null> => {
+    return (reference: GitHubReference, directory: string | null): AskedPullStatus => {
         const group = groups.find((candidate) => candidate.directory === directory);
-        if (!group || !needsPullStatus(reference)) return IDLE;
-        return githubPullStatuses.read(pullStatusKey(pullStatusScope(group), reference)) ?? IDLE;
+        if (!group || !needsPullStatus(reference)) return { value: IDLE, read: null };
+        const key = pullStatusKey(pullStatusScope(group), reference);
+        return { value: githubPullStatuses.read(key) ?? IDLE, read: githubPullStatuses.readOf(key) };
     };
 }
 
+/** A PR's status as asked for its list, and when it was read (null before an answer). */
+type AskedPullStatus = { value: CachedValue<GitHubPullStatus | null>; read: ReadStamp | null };
+
 /**
- * Checks and mergeability of the open PRs a list shows. GitHub only: a GitLab
- * project's items, issues and closed PRs ask nothing and answer `idle`. A ready
- * null is a PR GitHub could not resolve.
+ * A PR's status as asked for its list, or the followed one when that was
+ * answered later (`liveReferences.ts`): checks that finish while the list
+ * stays on screen recolour its row.
+ */
+const newerStatus = (asked: AskedPullStatus, live: LivePullStatus | null): CachedValue<GitHubPullStatus | null> => {
+    if (!live || (asked.read && !isNewerThanRead(live.fetchedAt, asked.read))) return asked.value;
+    return { status: 'ready', value: live.status };
+};
+
+/**
+ * Checks and mergeability of the open PRs a list shows. A GitHub project asks
+ * for them with the list; a GitLab project's come from its followed merge
+ * requests' pipelines. Issues and closed PRs answer `idle`. A ready null is a
+ * PR GitHub could not resolve.
  */
 export function useGitHubPullStatuses(directory: string | null, references: readonly GitHubReference[]) {
     const context = useGitHubReadContext(directory);
-    const github = context && context !== 'missing' && context.provider === 'github' ? context : null;
+    const readable = context && context !== 'missing' ? context : null;
+    const github = readable?.provider === 'github' ? readable : null;
     const groups = React.useMemo(
         () => (github && directory ? groupPullsByDirectory(references.map((reference) => ({ reference, directory })), partitionAcrossContexts([{ directory, state: github }])) : []),
         [directory, github, references],
     );
-    const statusOf = usePullStatusGroups(groups);
-    return (reference: GitHubReference): CachedValue<GitHubPullStatus | null> => statusOf(reference, directory);
+    const askedOf = usePullStatusGroups(groups);
+    const pulls = React.useMemo(() => references.map((reference) => ({ reference, context: readable })), [readable, references]);
+    const liveOf = useLivePullStatuses(pulls);
+    return (reference: GitHubReference): CachedValue<GitHubPullStatus | null> => (
+        newerStatus(askedOf(reference, directory), liveOf(reference, readable))
+    );
 }
 
 /** The same for a list across repositories: each PR is asked through the context of the folder it came from. */
@@ -472,7 +511,16 @@ export function useGitHubPullStatusesAcross(contexts: AcrossContexts, items: rea
         () => groupPullsByDirectory(items.map((item) => ({ reference: item, directory: item.directory })), contexts),
         [contexts, items],
     );
-    return usePullStatusGroups(groups);
+    const askedOf = usePullStatusGroups(groups);
+    const contextOf = React.useCallback(
+        (directory: string | null) => contexts.github.find((entry) => entry.directory === directory)?.context ?? null,
+        [contexts.github],
+    );
+    const pulls = React.useMemo(() => items.map((item) => ({ reference: item, context: contextOf(item.directory) })), [contextOf, items]);
+    const liveOf = useLivePullStatuses(pulls);
+    return (reference: GitHubReference, directory: string | null): CachedValue<GitHubPullStatus | null> => (
+        newerStatus(askedOf(reference, directory), liveOf(reference, contextOf(directory)))
+    );
 }
 
 const linearDetailKey = (workspace: string, issueId: string) => JSON.stringify([getRuntimeKey(), workspace, issueId]);
@@ -502,11 +550,26 @@ export function useLinearIssueDetail(issueId: string | null, settled: boolean) {
         if (!linear || !issueId) throw new Error('Linear is not available here');
         return fetchLinearIssue(linear, issueId);
     }, [issueId, linear]);
-    const detail = useCachedValue(linearDetails, key, fetch, settled);
+    const cached = useCachedValue(linearDetails, key, fetch, settled);
+    // The issue's state as the server follows it, once that is newer than the read.
+    const issues = React.useMemo(() => (cached.status === 'ready' ? [cached.value] : []), [cached]);
+    const read = key ? linearDetails.readOf(key) : null;
+    const readAt = read?.at ?? 0;
+    const readForced = read?.forced ?? false;
+    const reads = React.useMemo<PageRead[]>(
+        () => (readAt ? [{ start: 0, read: { at: readAt, forced: readForced } }] : []),
+        [readAt, readForced],
+    );
+    const live = useLiveLinearIssues(issues, reads);
+    const liveIssue = live.items[0];
+    const detail = React.useMemo<CachedValue<LinearIssue>>(
+        () => (cached.status === 'ready' && liveIssue && liveIssue !== cached.value ? { status: 'ready', value: liveIssue } : cached),
+        [cached, liveIssue],
+    );
     // After a change of state, read again without waiting for staleness.
     const refresh = React.useCallback(
         () => (key ? linearDetails.ensure(key, fetch, { force: true }).then(() => undefined, () => undefined) : Promise.resolve()),
         [fetch, key],
     );
-    return { detail, refresh };
+    return { detail, refresh, followed: live.followed };
 }

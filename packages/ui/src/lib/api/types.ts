@@ -11,6 +11,7 @@ import type {
   IssueComment,
   MergeChangeRequestInput,
   PageResult,
+  PullRequestStack,
   ProjectUpstream,
   ReadyChangeRequestInput,
   CommentInput,
@@ -26,6 +27,7 @@ import type {
   SourceControlDeviceFlowStart,
   SourceControlIdentity,
   SourceControlEmptyMutationResult,
+  SourceControlCreateMutationResult,
   SourceControlMergeMutationResult,
   SourceControlMutationReceipt,
   SourceControlReadyMutationResult,
@@ -1503,6 +1505,8 @@ export type GitHubUserSummary = {
 type GitHubRepoRef = {
   owner: string;
   repo: string;
+  /** GitHub Enterprise host (e.g. "ghe.example.com"); github.com when absent. */
+  host?: string;
   url: string;
 };
 
@@ -1637,6 +1641,8 @@ export type GitHubPullRequestContextResult = {
   diff?: string;
   checks?: GitHubChecksSummary | null;
   checkRuns?: GitHubCheckRun[];
+  /** Sent only when the PR is a layer of a stack. */
+  stack?: PullRequestStack;
 };
 
 export type GitHubPullRequestStatus = {
@@ -1652,7 +1658,10 @@ export type GitHubPullRequestStatus = {
   resolvedRemoteName?: string | null;
 };
 
-export type GitHubPullRequestRef = GitHubRepoSelector & { number: number };
+export type GitHubPullRequestRef = GitHubRepoSelector & { number: number; host?: string };
+
+/** What a refresh of the server's short-lived provider answers covers. */
+export type ProviderReadsRefreshScope = { item: GitHubPullRequestRef } | { lists: true };
 
 /** Live fields of a known PR, refreshed in batches for list surfaces. */
 export type GitHubPullRequestLiveSummary = GitHubPullRequestRef & {
@@ -1660,6 +1669,8 @@ export type GitHubPullRequestLiveSummary = GitHubPullRequestRef & {
   draft: boolean;
   title: string;
   headSha?: string;
+  /** The branch it targets, so a PR retargeted on the host is followed too. */
+  base?: string;
   mergeable: boolean | null;
   mergeableState: string | null;
   /** Null for closed/merged PRs, whose checks are not actionable. */
@@ -1829,8 +1840,11 @@ export type GitHubReferenceDetail = {
     commits: GitHubReferenceCommit[];
     /** How many commits the PR has in all; null when the host does not say. */
     commitTotal: number | null;
+    /** The stack the PR is a layer of; null when it is in none, absent when the host could not say. */
+    stack?: PullRequestStack | null;
   } | null;
 };
+
 
 export type GitHubReferenceCommit = {
   sha: string;
@@ -1974,7 +1988,7 @@ export interface SourceControlAPI {
     branch: string,
     options?: { force?: boolean },
   ): Promise<ChangeRequestStatus>;
-  changeRequestCreate(payload: CreateChangeRequestInput): Promise<SourceControlMutationReceipt<SourceControlEmptyMutationResult>>;
+  changeRequestCreate(payload: CreateChangeRequestInput): Promise<SourceControlMutationReceipt<SourceControlCreateMutationResult>>;
   changeRequestUpdate(payload: UpdateChangeRequestInput): Promise<SourceControlMutationReceipt<SourceControlEmptyMutationResult>>;
   changeRequestMerge(payload: MergeChangeRequestInput): Promise<SourceControlMutationReceipt<SourceControlMergeMutationResult>>;
   changeRequestReady(payload: ReadyChangeRequestInput): Promise<SourceControlMutationReceipt<SourceControlReadyMutationResult>>;
@@ -1990,8 +2004,13 @@ export interface SourceControlAPI {
   changeRequestSetLabels(payload: SetLabelsInput): Promise<SourceControlMutationReceipt<SourceControlEmptyMutationResult>>;
   issueSetLabels(payload: SetLabelsInput): Promise<SourceControlMutationReceipt<SourceControlEmptyMutationResult>>;
   changeRequestSetReviewers(payload: SetReviewersInput): Promise<SourceControlMutationReceipt<SourceControlEmptyMutationResult>>;
-  /** Forgets the server's short-lived answers from this host, so the next reads ask it again. */
-  refreshProviderReads(identity: SourceControlIdentity): Promise<void>;
+  /**
+   * Forgets the server's short-lived answers from this host, so the next
+   * reads ask it again: those about one item (a preview's refresh, which also
+   * reads that item's followed state again), or the lists (the board's list
+   * refresh).
+   */
+  refreshProviderReads(identity: SourceControlIdentity, scope: ProviderReadsRefreshScope): Promise<void>;
   /** One page of a project's labels, for the board's picker. */
   referenceLabels(context: SourceControlReadContext, project: GitHubRepoSelector): Promise<GitHubIssueLabel[]>;
   /** One page of the people who can be asked to review in a project. */
@@ -2352,6 +2371,8 @@ export interface LinearAPI {
   authDisconnect(): Promise<{ removed: boolean }>;
   authActivate(organizationId: string): Promise<LinearAuthStatus>;
   issuesList(options?: LinearIssuesListOptions): Promise<LinearIssuesListResult>;
+  /** Forgets the server's short-lived Linear lists, so the next list read asks Linear: the board's list refresh. */
+  refreshListReads(): Promise<void>;
   issueGet(id: string): Promise<LinearIssueGetResult>;
   issueStates(teamId: string): Promise<LinearIssueStatesResult>;
   issueUpdate(input: LinearIssueUpdateInput): Promise<LinearIssueUpdateResult>;

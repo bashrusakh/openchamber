@@ -91,7 +91,8 @@ import { spaceIdOfDirectory } from "@/lib/spaces/space-route"
 import { isDirectoryOfKnownSpace, isSpaceDirectoryStopped, isSpaceStopped, knownSpaceIds, refreshSpacesJourney, spaceIdsGone, spacesRuntimeGeneration, useSpacesStore } from "@/lib/spaces/spaces-store"
 import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
 import { toast } from "@/components/ui"
-import { appendNotification } from "./notification-store"
+import { appendErrorNotification, markSessionViewed } from "./notification-store"
+import { isSessionUnread } from "./session-unread"
 import { recordSessionError, responseBodyOf, summarizeOpenCodeError } from "./session-error-log"
 import {
   applyGlobalSessionStatusEvent,
@@ -102,6 +103,8 @@ import {
   useGlobalSessionStatusStore,
 } from "./global-session-status"
 import { applyGlobalBlockingRequestEvents, applyWaitingPageEvent, useGlobalBlockingRequestsStore } from "./global-blocking-requests"
+import { requestHostTurnStarts } from "./host-session-status-seed"
+import { setHostTurnStartRequester } from "./session-activity-timing"
 import { applyBackgroundShellEvents, directoriesWithRunningShells, refreshBackgroundShells } from "./background-shells"
 import {
   CHAT_LOCATION_RELEASE_DELAY_MS,
@@ -175,6 +178,10 @@ type SyncSystem = SyncRuntime & {
 // Subagent sessions keep their parent's turn open in the status index; the
 // global sessions list knows every session's parent, children included.
 setSessionParentResolver((sessionId) => useGlobalSessionsStore.getState().entityById.get(sessionId)?.parentID)
+
+// A turn this page did not see begin counts from the host's record of its
+// start, read from the host's status map.
+setHostTurnStartRequester(requestHostTurnStarts)
 
 const SYNC_CONTEXT_GLOBAL_KEY = "__openchamber_sync_context__"
 const SYNC_RUNTIME_CONTEXT_GLOBAL_KEY = "__openchamber_sync_runtime_context__"
@@ -368,9 +375,18 @@ const RECONNECT_MESSAGE_LIMIT = 30
 const SESSION_MATERIALIZATION_MESSAGE_LIMIT = 30
 const ACTIVE_SESSION_WATCHDOG_INTERVAL_MS = 5_000
 const ACTIVE_SESSION_STATUS_POLL_INTERVAL_MS = 5_000
+const ACTIVE_SESSION_STATUS_POLL_MAX_BACKOFF_MS = 60_000
 const ACTIVE_SESSION_STALE_EVENT_MS = 20_000
 const ACTIVE_SESSION_FULL_RESYNC_COOLDOWN_MS = 15_000
 const CHILD_SESSION_DISCOVERY_INTERVAL_MS = 15_000
+const WATCHDOG_READ_MAX_BACKOFF_MS = 60_000
+
+type DirectoryReadBackoff = Map<string, { delay: number; retryAt: number }>
+
+function recordWatchdogReadFailure(backoff: DirectoryReadBackoff, directory: string, interval: number): void {
+  const delay = Math.min((backoff.get(directory)?.delay ?? interval) * 2, WATCHDOG_READ_MAX_BACKOFF_MS)
+  backoff.set(directory, { delay, retryAt: Date.now() + delay })
+}
 
 // Active-session watchdog network calls run under the shared
 // background-network gate (see lib/background-network.ts). The watchdog walks
@@ -679,6 +695,7 @@ const handleUiNotificationEvent = (notification: OpenchamberNotification, fallba
 }
 
 export function setActiveSession(directory: string, sessionId: string) {
+  ensureViewedSessionWatcher()
   const previousDirectory = _activeDirectory
   _activeDirectory = directory
   _activeSession = sessionId
@@ -695,6 +712,7 @@ export function setExternallyViewedSession(directory: string, sessionId: string,
     return
   }
   externallyViewedSessions.set(key, Date.now() + EXTERNAL_VIEW_TTL_MS)
+  ensureViewedSessionWatcher()
 }
 
 /** A side panel in this window shows a session of `directory`. */
@@ -725,6 +743,29 @@ function isViewedInCurrentSession(directory: string, sessionId?: string): boolea
   ) return true
   pruneExternallyViewedSessions()
   return externallyViewedSessions.has(viewedSessionKey(directory, sessionId))
+}
+
+// A turn that ends in a session the user is looking at is seen as it ends.
+// Only the sessions on screen are checked, and only when their record changed.
+// Installed when a session is first shown, not at module load: the global
+// store and this module import each other.
+let viewedSessionWatcherInstalled = false
+function ensureViewedSessionWatcher() {
+  if (viewedSessionWatcherInstalled) return
+  viewedSessionWatcherInstalled = true
+  useGlobalSessionsStore.subscribe((state, previous) => {
+    if (state.entityById === previous.entityById) return
+    const seeIfViewed = (directory: string, sessionId: string): void => {
+      const session = state.entityById.get(sessionId)
+      if (!session || session === previous.entityById.get(sessionId) || !isSessionUnread(session)) return
+      if (isViewedInCurrentSession(directory, sessionId)) markSessionViewed(sessionId)
+    }
+    if (_activeDirectory && _activeSession) seeIfViewed(_activeDirectory, _activeSession)
+    for (const key of externallyViewedSessions.keys()) {
+      const separator = key.indexOf("\n")
+      seeIfViewed(key.slice(0, separator), key.slice(separator + 1))
+    }
+  })
 }
 
 function isRecentBoot() {
@@ -1381,8 +1422,9 @@ export async function resyncBlockingRequestsForDirectory(
     ...Object.keys(before.form ?? {}),
     ...Object.keys(before.permission ?? {}),
   ])
-  if (candidateIds.size === 0) return
+  if (candidateIds.size === 0) return true
   const candidates = Array.from(candidateIds)
+  let succeeded = true
 
   // Re-fetch pending forms that may have been asked during an SSE gap,
   // reconnect window, or directory materialization gap.
@@ -1436,9 +1478,10 @@ export async function resyncBlockingRequestsForDirectory(
     })
   } catch {
     // Non-fatal: form resync best-effort
+    succeeded = false
   }
 
-  if (options?.includePermissions === false) return
+  if (options?.includePermissions === false) return succeeded
 
   // Re-fetch pending permissions — same rationale as forms.
   try {
@@ -1511,7 +1554,9 @@ export async function resyncBlockingRequestsForDirectory(
     })
   } catch {
     // Non-fatal: permission resync best-effort
+    succeeded = false
   }
+  return succeeded
 }
 
 export async function resyncBlockingRequestsForActiveDirectory(
@@ -1533,9 +1578,10 @@ async function resyncDirectoryAfterReconnect(
   if (isStale()) return
   const current = store.getState()
   const candidateSessionIds = getActiveSessionCandidateIds(directory, current)
-  if (candidateSessionIds.length === 0) return
+  if (candidateSessionIds.length === 0) return true
 
-  await resyncDirectorySessionStatuses(directory, store, candidateSessionIds, "authoritative", isStale)
+  const statuses = await resyncDirectorySessionStatuses(directory, store, candidateSessionIds, "authoritative", isStale)
+  let succeeded = statuses !== null
   if (isStale()) return
 
   await Promise.all(candidateSessionIds.map(async (sessionId) => {
@@ -1546,6 +1592,7 @@ async function resyncDirectoryAfterReconnect(
       loader?.refreshTail({ directory, sessionID: sessionId }, RECONNECT_MESSAGE_LIMIT) ?? Promise.resolve(),
     ])
     if (isStale()) return
+    if (!session || loader?.getSnapshot({ directory, sessionID: sessionId }).status === "error") succeeded = false
     markRecordedInterruptedTurn(store, sessionId)
     if (!session) return
 
@@ -1570,10 +1617,11 @@ async function resyncDirectoryAfterReconnect(
   }))
 
   if (isStale()) return
-  await resyncBlockingRequestsForDirectory(directory, store, candidateSessionIds)
+  const blockingRequestsSucceeded = await resyncBlockingRequestsForDirectory(directory, store, candidateSessionIds)
 
   if (isStale()) return
   ingestDirectoryStateIntoRoutingIndex(routingIndex, directory, store.getState())
+  return succeeded && blockingRequestsSucceeded
 }
 
 /**
@@ -1883,15 +1931,14 @@ const recordTurnOutcomeNotification = (
   if (errorSummary) {
     recordSessionError({ sessionId: sessionID, directory, ...errorSummary })
   }
-  if (isSubtaskSession(sessionID, directory, childStores, batch)) return
-  appendNotification({
+  // The unread mark itself is OpenCode's (`session-unread.ts`); only the error
+  // details the chat shows under a failed turn are kept here.
+  if (!errorSummary || isSubtaskSession(sessionID, directory, childStores, batch)) return
+  appendErrorNotification({
     directory,
     session: sessionID,
     time: Date.now(),
-    viewed: isViewedInCurrentSession(directory, sessionID),
-    ...(errorSummary
-      ? { type: "error" as const, error: { ...errorSummary, responseBody } }
-      : { type: "turn-complete" as const }),
+    error: { ...errorSummary, responseBody },
   })
 }
 
@@ -2723,8 +2770,11 @@ export function SyncProvider(props: {
   }, [props.directory])
   const lastStreamActivityAtRef = useRef(0)
   const lastStatusPollAtByDirectoryRef = useRef(new Map<string, number>())
+  const statusPollBackoffByDirectoryRef = useRef(new Map<string, number>())
   const lastFullResyncAtByDirectoryRef = useRef(new Map<string, number>())
   const lastChildDiscoveryAtByDirectoryRef = useRef(new Map<string, number>())
+  const staleResyncBackoffByDirectoryRef = useRef<DirectoryReadBackoff>(new Map())
+  const childDiscoveryBackoffByDirectoryRef = useRef<DirectoryReadBackoff>(new Map())
   const resyncingDirectoriesRef = useRef(new Set<string>())
   const blockingRequestResyncingDirectoriesRef = useRef(new Set<string>())
   const pipelineReconnectRef = useRef<((reason?: string) => void) | null>(null)
@@ -2740,9 +2790,16 @@ export function SyncProvider(props: {
     [props.directory, runtime],
   )
 
+  useEffect(() => {
+    staleResyncBackoffByDirectoryRef.current = new Map()
+    childDiscoveryBackoffByDirectoryRef.current = new Map()
+  }, [childStores, props.sdk, runtimeKey])
+
   const triggerDirectoryResync = useCallback((directory: string, reason: SessionMaterializationReason) => {
     const store = childStores.children.get(directory)
     if (!store) return
+    const staleResyncBackoff = staleResyncBackoffByDirectoryRef.current
+    if (reason === "stale-status-resync" && Date.now() < (staleResyncBackoff.get(directory)?.retryAt ?? 0)) return
     const resyncing = resyncingDirectoriesRef.current
     if (resyncing.has(directory)) return
 
@@ -2752,9 +2809,15 @@ export function SyncProvider(props: {
     const expectedRuntimeKey = getRuntimeKey()
     const isStale = () => getRuntimeKey() !== expectedRuntimeKey
       || opencodeClient.getSdkClient() !== sdk || childStores.children.get(directory) !== store
+      || staleResyncBackoffByDirectoryRef.current !== staleResyncBackoff
     void resyncDirectoryAfterReconnect(directory, store, routingIndex, reason, isStale)
+      .then((succeeded) => {
+        if (isStale()) return
+        if (succeeded) staleResyncBackoff.delete(directory)
+        else recordWatchdogReadFailure(staleResyncBackoff, directory, ACTIVE_SESSION_FULL_RESYNC_COOLDOWN_MS)
+      })
       .catch(() => {
-        // Transient failure — the watchdog, next SSE event, or reconnect will catch up.
+        if (!isStale()) recordWatchdogReadFailure(staleResyncBackoff, directory, ACTIVE_SESSION_FULL_RESYNC_COOLDOWN_MS)
       })
       .finally(() => {
         resyncing.delete(directory)
@@ -2939,8 +3002,11 @@ export function SyncProvider(props: {
       onDispose: (directory) => {
         messageLoader.invalidateDirectory(directory)
         lastStatusPollAtByDirectoryRef.current.delete(directory)
+        statusPollBackoffByDirectoryRef.current.delete(directory)
         lastFullResyncAtByDirectoryRef.current.delete(directory)
         lastChildDiscoveryAtByDirectoryRef.current.delete(directory)
+        staleResyncBackoffByDirectoryRef.current.delete(directory)
+        childDiscoveryBackoffByDirectoryRef.current.delete(directory)
       },
       isLoadingSessions: () => false,
     })
@@ -3157,6 +3223,10 @@ export function SyncProvider(props: {
   useEffect(() => {
     let stopped = false
     let running = false
+    const statusPollBackoff = new Map<string, number>()
+    statusPollBackoffByDirectoryRef.current = statusPollBackoff
+    const staleResyncBackoff = staleResyncBackoffByDirectoryRef.current
+    const childDiscoveryBackoff = childDiscoveryBackoffByDirectoryRef.current
 
     const discoverChildSessions = async (
       directory: string,
@@ -3173,6 +3243,8 @@ export function SyncProvider(props: {
         const { active: allSessions } = splitGlobalSessionsByArchived(
           await listGlobalSessionPages(listSessionPage, { directory, pageSize: 200 }),
         )
+        if (stopped || childStores.getChild(directory) !== store) return
+        childDiscoveryBackoff.delete(directory)
         const state = store.getState()
         const globalEntities = useGlobalSessionsStore.getState().entityById
         const newChildSessions = selectNewChildSessions(
@@ -3199,7 +3271,9 @@ export function SyncProvider(props: {
           enqueueSessionMaterialization(directory, pid, childStores, { reason: "child-session-discovered" })
         }
       } catch {
-        // Best-effort — next tick will retry.
+        if (!stopped && childStores.getChild(directory) === store) {
+          recordWatchdogReadFailure(childDiscoveryBackoff, directory, CHILD_SESSION_DISCOVERY_INTERVAL_MS)
+        }
       } finally {
         childDiscoveryDirectories.delete(directory)
       }
@@ -3213,16 +3287,30 @@ export function SyncProvider(props: {
       const polling = statusPollingDirectories
       if (polling.has(directory)) return
       polling.add(directory)
+      const recordFailure = () => {
+        if (stopped || childStores.getChild(directory) !== store) return
+        const previousDelay = statusPollBackoff.get(directory) ?? ACTIVE_SESSION_STATUS_POLL_INTERVAL_MS
+        statusPollBackoff.set(directory, Math.min(previousDelay * 2, ACTIVE_SESSION_STATUS_POLL_MAX_BACKOFF_MS))
+        // Count the wait from completion, including when the request was slow.
+        lastStatusPollAtByDirectoryRef.current.set(directory, Date.now())
+      }
       try {
         const before = store.getState()
         const statuses = await runBackgroundNetworkTask(() => resyncDirectorySessionStatuses(directory, store, candidateSessionIds, "monotonic"), "active-session")
-        if (!statuses) return
+        if (statuses === null) {
+          recordFailure()
+          return
+        }
+        if (stopped || childStores.getChild(directory) !== store) return
+        statusPollBackoff.delete(directory)
         const needsSnapshot = candidateSessionIds.some((sessionId) => (
           needsSnapshotAfterStatusPoll(before, sessionId, statuses[sessionId])
         ))
         if (needsSnapshot) {
           triggerDirectoryResync(directory, "stale-status-resync")
         }
+      } catch {
+        recordFailure()
       } finally {
         polling.delete(directory)
       }
@@ -3243,19 +3331,25 @@ export function SyncProvider(props: {
             const candidateSessionIds = getActiveSessionCandidateIds(directory, state)
             if (candidateSessionIds.length === 0) {
               lastStatusPollAtByDirectoryRef.current.delete(directory)
+              statusPollBackoff.delete(directory)
               lastFullResyncAtByDirectoryRef.current.delete(directory)
+              staleResyncBackoff.delete(directory)
+              childDiscoveryBackoff.delete(directory)
+              lastChildDiscoveryAtByDirectoryRef.current.delete(directory)
               continue
             }
 
             const liveSessionIds = getLiveSessionCandidateIds(state)
             const lastStatusPollAt = lastStatusPollAtByDirectoryRef.current.get(directory) ?? 0
-            if (liveSessionIds.length > 0 && now - lastStatusPollAt >= ACTIVE_SESSION_STATUS_POLL_INTERVAL_MS) {
+            const statusPollInterval = statusPollBackoff.get(directory) ?? ACTIVE_SESSION_STATUS_POLL_INTERVAL_MS
+            if (liveSessionIds.length > 0 && now - lastStatusPollAt >= statusPollInterval) {
               lastStatusPollAtByDirectoryRef.current.set(directory, now)
               void pollDirectoryStatuses(directory, store, liveSessionIds).catch(() => undefined)
             }
 
             const lastFullResyncAt = lastFullResyncAtByDirectoryRef.current.get(directory) ?? 0
-            if (shouldTriggerStaleResync(lastStreamActivityAtRef.current, lastFullResyncAt, now)) {
+            if (now >= (staleResyncBackoff.get(directory)?.retryAt ?? 0)
+              && shouldTriggerStaleResync(lastStreamActivityAtRef.current, lastFullResyncAt, now)) {
               pipelineReconnectRef.current?.("active_stream_stale")
               triggerDirectoryResync(directory, "stale-status-resync")
             }
@@ -3263,7 +3357,8 @@ export function SyncProvider(props: {
             // Discover child sessions created by other OpenCode instances
             // that didn't broadcast a session.created event on this stream.
             const lastChildDiscoveryAt = lastChildDiscoveryAtByDirectoryRef.current.get(directory) ?? 0
-            if (liveSessionIds.length > 0 && now - lastChildDiscoveryAt >= CHILD_SESSION_DISCOVERY_INTERVAL_MS) {
+            if (liveSessionIds.length > 0 && now - lastChildDiscoveryAt >= CHILD_SESSION_DISCOVERY_INTERVAL_MS
+              && now >= (childDiscoveryBackoff.get(directory)?.retryAt ?? 0)) {
               lastChildDiscoveryAtByDirectoryRef.current.set(directory, now)
               void discoverChildSessions(directory, store, liveSessionIds)
             }
@@ -3284,7 +3379,7 @@ export function SyncProvider(props: {
       stopped = true
       clearInterval(interval)
     }
-  }, [childStores, props.sdk, triggerDirectoryResync])
+  }, [childStores, props.sdk, triggerDirectoryResync, runtimeKey])
 
   // Ensure current directory's child store exists
   useEffect(() => {

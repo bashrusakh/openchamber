@@ -129,7 +129,9 @@ all tools are on, and the flattened calls already work through
    is off, so a tool switched on later can call back without a restart. The URL
    points at loopback, except when the listener is bound to one concrete
    address (`--host <ip>`): that socket does not answer on loopback, so the URL
-   uses the bound address instead.
+   uses the bound address instead. The limit failover plugin
+   (`../limit-failover/`) calls back with the same address and token, and its
+   route checks them with `authorizeRequest`.
 4. The plugin calls `POST /api/openchamber/agent-tool` with its typed input and
    the session id OpenCode gives the tool; OpenChamber resolves the session's
    directory on its own side.

@@ -21,6 +21,7 @@ import { NestedRepoResolutionStates } from './git/NestedRepoResolutionStates';
 import { NestedRepoPicker } from './git/NestedRepoPicker';
 import { deriveBaseBranch } from './git/baseBranch';
 import { useRepositoryBinding } from '@/lib/source-control/repository-binding';
+import { useBranchPullRequestBase } from '@/hooks/useBranchComparisonBase';
 
 // Remotes rarely change; remembering the last fetched list per directory lets
 // a remount pick the same PR-status key immediately instead of flashing
@@ -143,7 +144,7 @@ export const PullRequestView: React.FC = () => {
     return primaryRemote ? branches?.defaultBranches?.[primaryRemote] : undefined;
   }, [binding.contexts, branches]);
 
-  const baseBranch = React.useMemo(() => deriveBaseBranch({
+  const derivedBaseBranch = React.useMemo(() => deriveBaseBranch({
     remoteNames: new Set(binding.contexts[0]?.primaryRemote ? [binding.contexts[0].primaryRemote] : []),
     knownRemoteNames: new Set(binding.read?.repository.remotes.map((remote) => remote.name) ?? []),
     localBranches,
@@ -161,6 +162,9 @@ export const PullRequestView: React.FC = () => {
     rootBranchHint,
     worktreeMetadata?.createdFromBranch,
   ]);
+  // The branch's own parent (a chosen base, its pull request's target, the
+  // layer below it in a stack) wins over the worktree's guess.
+  const baseBranch = useBranchPullRequestBase(gitDirectory ?? null, currentBranch, true, binding, branches, derivedBaseBranch);
 
   // Empty states name the host's own kind of change request.
   const repositoryProvider = useRepositoryHost(currentDirectory ?? null)?.provider;

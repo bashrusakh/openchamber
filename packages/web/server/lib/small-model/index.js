@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import os from 'os';
 import path from 'path';
 import { readMergedSettingsSync } from '../opencode/settings-files.js';
+import { asNonEmptyString } from '../shared/guards.js';
 import {
   findModelInfo,
   getConfiguredSmallModelRef,
@@ -50,13 +51,20 @@ const OPENCHAMBER_SETTINGS_FILE = path.join(
   'settings.json',
 );
 
-// OpenChamber's own settings: when the user unchecks "use default small model"
-// their explicit override outranks the model OpenCode would pick.
+/**
+ * OpenChamber's own settings: when the user unchecks "use default small model"
+ * their explicit override outranks the model OpenCode would pick. The chosen
+ * thinking variant belongs to that override, and is ignored with the rest of
+ * it while "use default" is on.
+ */
 const readSmallModelSettingsOverride = () => {
   const settings = readMergedSettingsSync({ fs, path, settingsFilePath: OPENCHAMBER_SETTINGS_FILE });
   if (settings.smallModelUseDefault !== false) return null;
-  const override = typeof settings.smallModelOverride === 'string' ? settings.smallModelOverride.trim() : '';
-  return override || null;
+  const model = parseModelRef(asNonEmptyString(settings.smallModelOverride));
+  if (!model) return null;
+  const variant = asNonEmptyString(settings.smallModelVariant);
+  if (variant) model.variant = variant;
+  return model;
 };
 
 export function parseModelRef(value) {
@@ -69,6 +77,23 @@ export function parseModelRef(value) {
     modelID: trimmed.slice(slash + 1),
   };
 }
+
+/**
+ * The variant to actually send for a resolved model. A model the catalog does
+ * not know yet keeps the saved variant, so a discovery gap does not silently
+ * lose the user's choice. A model it knows uses only listed variants, the same
+ * rule session defaults apply.
+ */
+const resolveModelVariant = (modelInfo, variant) => {
+  const normalized = asNonEmptyString(variant);
+  if (!normalized) return undefined;
+  // An unlisted model is not evidence either way. A known model must list the
+  // variant; a missing or malformed list counts as no levels, the same rule
+  // session defaults and the VS Code bridge apply.
+  if (!modelInfo) return normalized;
+  const variants = Array.isArray(modelInfo.variants) ? modelInfo.variants : [];
+  return variants.some((entry) => entry?.id === normalized) ? normalized : undefined;
+};
 
 // Rough safety clamp so a huge input never blows the model's context window.
 // Token estimate is ~4 chars/token; when OpenCode reports no limit for the
@@ -176,9 +201,10 @@ const pickSmallModel = (models, accept) => {
  * Which model this call runs on, in order:
  *
  * 1. An explicit request model.
- * 2. OpenChamber's settings override (Settings → Sessions → Small Model).
+ * 2. OpenChamber's settings override (Settings → Sessions → Small Model),
+ *    including the thinking variant chosen beside the model.
  * 3. The small model configured for OpenCode itself: the `title` agent's
- *    model (`agents.title.model`, or v1 `small_model`) — `config`.
+ *    model and variant (`agents.title.model`, or v1 `small_model`) — `config`.
  * 4. The small model of the caller's provider — the session's, or the one
  *    in the composer (family scan above) — `session-provider-small`. Without
  *    one the caller's own model (`session-model`): costlier, but never
@@ -196,7 +222,7 @@ const resolveSmallModel = async ({ client, directory, model, preferredProviderID
   const explicit = parseModelRef(model);
   if (explicit) return { ...explicit, source: 'request' };
 
-  const fromSettings = parseModelRef(readSmallModelSettingsOverride());
+  const fromSettings = readSmallModelSettingsOverride();
   if (fromSettings) return { ...fromSettings, source: 'settings' };
 
   // A config can outlive the login behind it. OpenCode's own titles then move
@@ -317,6 +343,7 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
 
   const models = await listModelInfos(client, directory);
   const modelInfo = findModelInfo(models, resolved.providerID, resolved.modelID);
+  const variant = resolveModelVariant(modelInfo, resolved.variant);
 
   const outputTokens = resolveOutputTokens({ modelInfo, maxOutputTokens });
 
@@ -349,8 +376,10 @@ export async function generateSmallModelText({ prompt, system, maxOutputTokens, 
   );
 
   const send = async () => {
+    const model = { id: resolved.modelID, providerID: resolved.providerID };
+    if (variant) model.variant = variant;
     const result = await client.generate.text(
-      { prompt: fullPrompt, model: { id: resolved.modelID, providerID: resolved.providerID } },
+      { prompt: fullPrompt, model },
       generationOptions,
     );
     return typeof result?.text === 'string' ? result.text : '';
@@ -457,7 +486,7 @@ const resolveReserveTokens = (outputReserveTokens, limits) => (
 );
 
 /**
- * Reports which model would be used, without calling it.
+ * Reports which model and thinking variant would be used, without calling it.
  *
  * `structuredOutput` stays `null`: `/api/experimental/generate` has no structured-output
  * mode for any model, and this module emulates it through the prompt. Callers
@@ -481,6 +510,7 @@ export async function describeSmallModel({ directory, preferredProviderID, prefe
 
   const models = await listModelInfos(client, directory);
   const modelInfo = findModelInfo(models, resolved.providerID, resolved.modelID);
+  const variant = resolveModelVariant(modelInfo, resolved.variant);
   const outputTokenLimit = Number(modelInfo?.limit?.output) > 0 ? Number(modelInfo.limit.output) : null;
 
   // Two passes: the first only to learn the context, which a caller-supplied
@@ -497,6 +527,7 @@ export async function describeSmallModel({ directory, preferredProviderID, prefe
 
   return {
     ...resolved,
+    variant,
     hasLogin,
     localEndpoint: isLocalModelEndpoint(modelInfo),
     inputCharBudget: maxChars,

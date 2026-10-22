@@ -60,9 +60,17 @@ other.
   `openchamber:page-waiting` / `openchamber:page-settled` to the clients, and
   sends the same "Input needed" notification a form gets.
   `renderPageImageSources` lists the local images a page names by absolute
-  path (in quotes or a CSS `url()`, PNG, JPEG, GIF or WebP, at most 12). The
-  image grant route (`../markdown-image-grants/`) allows exactly those, and the
-  chat reads them with the same rule.
+  path (in quotes or a CSS `url()`, PNG, JPEG, GIF or WebP), every one of them.
+  The image grant route (`../markdown-image-grants/`) allows exactly those, and
+  the chat reads them with the same rule. `fitRenderPageImages` checks the
+  files and takes them in page order while they add up to at most
+  `RENDER_PAGE_IMAGE_BUDGET_BYTES` (25 MB); the grant route serves a page by it.
+  The action checks the page the same way before answering, so the agent hears
+  what the user will see: when an image will not show, the result carries
+  `images` (`shown`, `notShown` with each path and its reason, and `weightMB`
+  against `budgetMB` when the budget cut it) and a note telling the agent to
+  split the page or use smaller images. A page whose images all show answers
+  as before.
 - `routes.js` is the authenticated CLI HTTP adapter. It forwards one action,
   preserves service status and partial-result details, and propagates request
   cancellation. It also carries the chat's answer to a waiting page.

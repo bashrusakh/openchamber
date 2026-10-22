@@ -82,6 +82,18 @@ describe('settings search', () => {
     expect(results.some((result) => result.id === 'integrations.linear.mapping')).toBe(true);
   });
 
+  test('finds the small model effort setting by thinking and reasoning keywords', () => {
+    for (const query of ['small model effort', 'small model thinking', 'small model variant']) {
+      const results = buildSettingsSearchResults({
+        query,
+        runtimeCtx,
+        t,
+        getPageTitle: (page) => page,
+      });
+      expect(results.some((result) => result.id === 'sessions.small-model')).toBe(true);
+    }
+  });
+
   test('finds the chat input history scope setting', () => {
     const results = buildSettingsSearchResults({
       query: 'input history scope',

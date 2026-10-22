@@ -10,6 +10,7 @@
 - `parsers.ts` — value-level boundary parsers (zod schemas wrapped as `SettingsParser<T>`). `undefined` means "reject", never "default".
 - `registry-snapshot.ts` — renders the plain-JSON snapshot for the two consumers that cannot import the UI's TypeScript: the OpenChamber server (`packages/web/server/lib/opencode/settings-registry.json`) and the VS Code extension host (`packages/vscode/src/settings-registry.json`). Regenerate with `bun run settings-registry:generate`; `registry.test.ts` fails when a checked-in copy is stale.
 - `metadata.ts`, `search.ts` — Settings page metadata and the search index (unchanged by the registry; see `.agents/skills/settings-ui-patterns`).
+- `vscodeNavigation.ts` defines and parses navigation intent crossing the extension-host bridge. It carries a page, optional item and Settings directory, plus provider-connect and new-snippet entry intent. It carries no saved settings, credentials or conversation content. `apps/vscodeSettingsNavigation.ts` connects chat-side Settings requests to the native tab and applies delivered intent there; settings persistence keeps its existing owner.
 
 ## Invariants
 

@@ -13,6 +13,8 @@ import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { useMinuteTickerNow } from '@/hooks/useDurationTicker';
 import type { GitHubPullStatus, GitHubReference, GitHubReferenceKind, RepositoryReferenceFilter } from '@/lib/api/types';
 import { isIMECompositionEvent } from '@/lib/ime';
+import { useTrackedItems } from '@/lib/trackedItems/interest';
+import type { TrackedItem } from '@/lib/trackedItems/model';
 
 import { itemDirectory, leftOutFolders, type AcrossReference } from './acrossRepositories';
 import type { CachedValue } from './referenceCache';
@@ -46,6 +48,7 @@ const NO_REFERENCES: GitHubReference[] = [];
 const NO_DIRECTORIES: readonly string[] = [];
 const NO_ACROSS_ITEMS: AcrossReference[] = [];
 const NO_ITEMS: ReadonlyMap<string, ReferencePickerItem> = new Map();
+const NO_FOLLOWED: TrackedItem[] = [];
 const SEARCH_DEBOUNCE_MS = 300;
 const DETAIL_DEBOUNCE_MS = 250;
 
@@ -71,6 +74,8 @@ export type ReferenceBrowserOptions = {
     retainedItems?: ReadonlyMap<string, ReferencePickerItem>;
     /** One item another surface asked to show, read on its own: it can be highlighted while the list does not hold it. */
     pinnedItem?: ReferencePickerItem | null;
+    /** Whether the surface is on screen; the open items its list shows are then followed live. */
+    onScreen?: boolean;
 };
 
 export function useReferenceBrowser({
@@ -82,6 +87,7 @@ export function useReferenceBrowser({
     linearTeamId,
     retainedItems = NO_ITEMS,
     pinnedItem = null,
+    onScreen = true,
 }: ReferenceBrowserOptions) {
     const [githubKind, setGitHubKind] = React.useState<GitHubReferenceKind>(initialGitHubKind ?? lastGitHubKind);
     const [githubFilter, setGitHubFilter] = React.useState<RepositoryReferenceFilter>(lastGitHubFilter.get(initialGitHubKind ?? lastGitHubKind) ?? DEFAULT_REPOSITORY_FILTER);
@@ -140,6 +146,8 @@ export function useReferenceBrowser({
         query: '',
     });
     const list = source === 'github' ? (across ? acrossList : githubList) : linearList;
+    // Only the list on screen is followed; the other tab is read again when shown.
+    useTrackedItems(onScreen ? list.followed : NO_FOLLOWED);
     // Failed checks and conflicts colour open PRs once their statuses arrive.
     const singlePullStatusOf = useGitHubPullStatuses(across ? null : directory, source === 'github' && !across ? githubList.items : NO_REFERENCES);
     const acrossPullStatusOf = useGitHubPullStatusesAcross(acrossList.contexts, source === 'github' && across ? acrossList.items : NO_ACROSS_ITEMS);

@@ -480,6 +480,8 @@ Rows that name something the app can already show are buttons:
 
 ### Project actions outside the panel
 
+Auto-discovery reuses a personal action when its name identifies a dev server or its command runs a conventional dev script. A shared action needs a matching script command as well as the same trust confirmation as choosing it from the menu: renaming an already trusted shared action does not change its trust hash. Arbitrary `start` substrings and unrelated `start:*` scripts must not launch through discovery.
+
 The panel hides whenever a rail panel opens, so the actions cannot depend on
 it. `components/layout/ProjectActionsProvider` mounts one runner
 (`useProjectActionsRunner`) in `MainLayout` for the project

@@ -75,6 +75,11 @@ describe('settings runtime', () => {
 
       await runtime.persistSettings({ agentWebToolEnabled: false });
       expect(onManagedPluginSettingsChanged).toHaveBeenCalledTimes(1);
+
+      // The limit failover plugin loads only while one of its options is set.
+      await runtime.persistSettings({ fallbackModel: 'openai/gpt-5.6' });
+      await runtime.persistSettings({ accountSwitchProviders: ['anthropic'] });
+      expect(onManagedPluginSettingsChanged).toHaveBeenCalledTimes(3);
     } finally {
       await cleanup();
     }
@@ -686,6 +691,65 @@ describe('settings runtime: per-surface profile keys', () => {
       const stored = await readJson(path.join(tempRoot, 'preferences.json'));
       expect(stored.fields.fontSize.value).toBe(90);
       expect(stored.fields.fontSize.surfaces).toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe('settings runtime: notification templates', () => {
+  const emptyTemplates = {
+    completion: { title: '', message: '' },
+    error: { title: '', message: '' },
+    question: { title: '', message: '' },
+    subtask: { title: '', message: '' },
+  };
+  const legacySeed = {
+    completion: { title: '{agent_name} is ready', message: '{model_name} completed the task' },
+    error: { title: 'Tool error', message: '{last_message}' },
+    question: { title: 'Input needed', message: '{last_message}' },
+    subtask: { title: '{agent_name} is ready', message: '{model_name} completed the task' },
+  };
+
+  it('clears the English seed older builds wrote, so the defaults follow the interface language', async () => {
+    const { runtime, settingsFilePath, cleanup } = await createRuntime();
+    try {
+      await fsPromises.writeFile(settingsFilePath, JSON.stringify({ locale: 'zh-CN', notificationTemplates: legacySeed }));
+      const settings = await runtime.readSettingsFromDiskMigrated();
+      expect(settings.notificationTemplates).toEqual(emptyTemplates);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('keeps templates the user wrote', async () => {
+    const custom = {
+      completion: { title: 'Fertig', message: '{last_message}' },
+      error: { title: 'Fehler', message: '{last_message}' },
+      question: { title: 'Eingabe', message: '{last_message}' },
+      subtask: { title: 'Unteraufgabe fertig', message: '' },
+    };
+    const { runtime, settingsFilePath, cleanup } = await createRuntime();
+    try {
+      await fsPromises.writeFile(settingsFilePath, JSON.stringify({ notificationTemplates: custom }));
+      const settings = await runtime.readSettingsFromDiskMigrated();
+      expect(settings.notificationTemplates).toEqual(custom);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('fills a missing event with empty fields and leaves the others alone', async () => {
+    const { runtime, settingsFilePath, cleanup } = await createRuntime();
+    try {
+      await fsPromises.writeFile(settingsFilePath, JSON.stringify({
+        notificationTemplates: { completion: { title: 'Fertig', message: '' } },
+      }));
+      const settings = await runtime.readSettingsFromDiskMigrated();
+      expect(settings.notificationTemplates).toEqual({
+        ...emptyTemplates,
+        completion: { title: 'Fertig', message: '' },
+      });
     } finally {
       await cleanup();
     }

@@ -91,10 +91,16 @@ no Recent zone any more (removed 2026-10): In work holds the sessions being
 worked on, and the List view sorted by time answers "what was I doing" across
 projects. Chats use
 their shared managed root for folders and never expose worktree actions. Project
-display can be all projects or one selected project. The mobile sessions sheet
+display can be all projects or one selected project in both Tree and List;
+Chats, Pinned and In work keep their global scope. A single-project List keeps
+the selected project's picker even when empty or searched, in both session
+groupings, and ignores saved project collapse state. The mobile sessions sheet
 (`apps/MobileSessionsSheet.tsx`) partitions the same way through
 `partitionSidebarSessions` and lists Chats as a collapsible section above the
-project tree. Its header has no title: close, Add project, the display menu
+project tree — only while the per-surface show-chats sidebar setting is on,
+which Settings owns; the phone's display menu has no Chats toggle, so a hidden
+section here is the setting at work, not a missing section (#5354). Its header
+has no title: close, Add project, the display menu
 (a dropdown with the view, the project sort, the section toggles and Reorder
 projects, which swaps the menu's button for Done while it runs) and New chat;
 Chats has no "+" of its own, as New chat starts the same chat. Its footer
@@ -377,15 +383,16 @@ all / Expand all.
   header per project followed by that project's non-archived root sessions
   from every worktree and space, in the shared lifecycle order with pinned
   sessions first; with the Pinned zone shown, its sessions are listed there
-  only. Projects keep the manual order whatever the stored project
-  sort: dragging a header is the timeline's only sort, and the display menu
-  hides both sort sections. A project reveals 7 sessions, 7 more per Show more
+  only. Projects keep the manual order whatever the stored project sort:
+  dragging a header is the timeline's only sort, and the display menu hides
+  both sort sections. The all-projects/single-project choice applies in both
+  Tree and List. A project reveals 7 sessions, 7 more per Show more
   (`timelineProjectContainerKey`); collapsing it, from its header or Collapse
   all, forgets that state, so expanding starts from 7 again. A project without
   sessions shows its load status, or nothing under its header.
 - Sorted by time (`listSessionGrouping`, `sidebarListSessionGrouping`, per
   surface, by project by default; the display menu's Sessions submenu, List
-  only), the project headers give way to one `timeline` zone titled Projects:
+  only), all-projects mode replaces project headers with one `timeline` zone titled Projects:
   every project's non-archived root sessions in the shared lifecycle order,
   pinned first, as `renderContext: 'timeline-by-time'` rows; Pinned and In
   work take the same three-line rows above it, on the phone too, so the zones
@@ -395,7 +402,8 @@ all / Expand all.
   the list holds them too. Without project headers to carry load status, the
   list ends with the statuses a project header would show, for projects it
   lists nothing for: one loading line while any of them loads and one line
-  per failed directory. Spaces without chats, which have no session row, show only
+  per failed directory. Single-project mode keeps its project header as the
+  picker above the same time-ordered rows and that project's status. Spaces without chats, which have no session row, show only
   when sorted by project. This is the cross-project list the pre-2.3.0
   Timeline view had (issue #5005), kept beside the per-project layout.
 - An isolated space without chats has no session row, so its group header,
@@ -628,8 +636,8 @@ matching and ordering. Search does not fetch sessions or broaden list membership
   The TouchSensor owns movement only after activation; disabling touch panning on
   the whole row prevents quick swipes from scrolling even when no drag starts.
 - `folders/SessionSidebarFolderItem.tsx` owns activity subscriptions for mounted
-  collapsed folder headers. It includes descendant activity and respects the
-  unread-subtask preference without mounting those sessions. Expanded and archived
+  collapsed folder headers. It includes descendant activity without mounting
+  those sessions; a subtask is never unread on its own. Expanded and archived
   folders do not derive hidden activity.
 - Single-project flat mode reveals 20 root sessions initially and 20 per Show
   more; Show fewer resets to 20. Chats keeps its reveal of 3. Elsewhere a
@@ -656,7 +664,7 @@ matching and ordering. Search does not fetch sessions or broaden list membership
 - Directory permission failures remain visible even when stale sessions are retained. Flat groups inspect every represented root/worktree directory; local Desktop may open the native picker for the exact failed directory, while other runtimes keep the ordinary Retry action.
 - Pins and folder assignments are not pruned from the first startup snapshot or from optimistic mutations. Confirmed local deletion and routed external deletion clean immediately; a later authoritative omission after an established baseline covers missed external delete events.
 - Pending-permission/question row badges ride in the meta cluster at the row's end with the time and status, and fade with it on hover or while the row menu is open, except on non-VS Code always-visible-actions rows, which reserve permanent padding and keep the cluster shown. VS Code hover-reveals its actions over the row's right edge even under `alwaysShowActions`, so its cluster keeps fading.
-- Hover-revealed actions on session rows, worktree headers and project headers cross-fade over the row's end (the right, or the left in a right-to-left layout); they do not re-lay the row out. What they cover (date, branch, badges, indicators) fades with opacity, and the title or label's tail fades away under them through the `oc-actions-mask` utility (`index.css`): the row's text line is an `@container`, `--oc-actions-reserve` says how far the actions reach in from its end edge, `--oc-actions-inset` how far the masked text starts from its start edge. A title whose own direction differs from the interface (`dir="auto"`) starts under the actions, so it takes `padding-inline-start` of the reserve instead of the fade. Change a reserve whenever an action's size, count or offset changes. Only permanently shown actions (`alwaysShowActions`) take layout room.
+- Hover-revealed actions on session rows, worktree headers and project headers cross-fade over the row's end (the right, or the left in a right-to-left layout); they do not re-lay the row out. What they cover (date, branch, badges, indicators) fades with opacity, and the title or label's tail fades away under them through the `oc-actions-mask` utility (`index.css`): the row's text line is an `@container`, `--oc-actions-reserve` says how far the actions reach in from its end edge, `--oc-actions-inset` how far the masked text starts from its start edge. A title whose own direction differs from the interface (`dir="auto"`) starts under the actions, so it takes `padding-inline-start` of the reserve instead of the fade. Reserves, insets and the mask's own gradient stops are rem so they track the interface font size, and the mask multiplies reserves and insets by `--padding-scale` because the buttons and offsets they describe are spacing tokens that grow with the density setting; a pixel reserve would stop short of the buttons at larger sizes and let the title show through. Change a reserve whenever an action's size, count or offset changes. Only permanently shown actions (`alwaysShowActions`) take layout room.
 - Tooltips that list PRs or issues (session rows, timeline PR badges, worktree headers) render them as links through `sessions/SidebarRefLinks.tsx`. The PR badge and header tooltips close 750 ms after the pointer leaves, so the pointer can travel in; the whole-row tooltip closes at once and relies on the popup staying open while the pointer heads into it. The row and header action buttons sit in their own `TooltipProvider`: the pointer crosses them on the way, and a same-group tooltip would replace the open one at once. Every row but VS Code's has the whole-row tooltip, opening to the right (title, time, project, branch, links, recap); every other tooltip on a row, a header's folder name included, opens above its element (`sessions/RowMarkTooltip.tsx` for status marks), so it never covers the neighbouring marks and actions. A session menu item that opens a submenu explains itself only while disabled: the hint would cover the open submenu.
 
 

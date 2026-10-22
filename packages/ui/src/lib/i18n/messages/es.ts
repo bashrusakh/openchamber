@@ -10,13 +10,16 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -154,13 +157,16 @@ export const dict: Record<I18nKey, string> = {
   ...surfacePanelI18n.es,
   ...fileArtifactsI18n.es,
   ...fileContentSearchI18n.es,
+  ...fileEditorAidsI18n.es,
   ...htmlRenderI18n.es,
   ...sessionNoticesI18n.es,
   ...usageStatsI18n.es,
   ...webSearchI18n.es,
   ...sessionWarmingI18n.es,
+  ...overviewI18n.es,
   ...isolatedSpacesI18n.es,
   ...sourceBoardI18n.es,
+  ...stacksI18n.es,
   ...projectActionsI18n.es,
   ...gitIdentityEditorI18n.es,
   ...environmentI18n.es,
@@ -707,6 +713,7 @@ export const dict: Record<I18nKey, string> = {
   "sessions.sidebar.session.work.markDone": "Marcar como hecho",
   "sessions.sidebar.session.work.doneSuggested": "Parece terminado",
   "sessions.sidebar.session.work.updateFailed": "No se pudo actualizar la sesión",
+  "sessions.sidebar.session.work.folderDeleted": "Se eliminó la carpeta de esta sesión",
   "sessions.sidebar.session.pin.pinFailed": "No se pudo anclar la sesión",
   "sessions.sidebar.session.pin.unpinFailed": "No se pudo desanclar la sesión",
   "chat.work.doneHint.text": "Este trabajo parece terminado.",
@@ -1192,6 +1199,7 @@ export const dict: Record<I18nKey, string> = {
   "gitView.sync.syncCounts": "{behind}↓ {ahead}↑",
   "gitView.branch.actionsUnavailable": "Acciones de rama no disponibles en este estado del repositorio",
   "gitView.conflict.noDetailsAvailable": "No hay detalles de conflicto disponibles",
+  "magicPrompts.toast.loadFailed": "No se pudieron cargar los prompts mágicos. No se envió nada.",
   "gitView.empty.notGitRepository": "Este directorio no es un repositorio Git",
   "gitView.empty.notGitRepositoryDescription": "Inicializa Git en este directorio o abre un repositorio.",
   "gitView.empty.selectSessionOrDirectory": "Selecciona una sesión o directorio para ver el estado de Git",
@@ -3856,4 +3864,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'Esta tarea ya tiene una ejecución en curso',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'Esta tarea ya está en la cola y se ejecutará cuando haya un hueco libre',
   'chat.modelControls.agentFavoriteAdd': 'Añadir a favoritos. Con favoritos, Tab alterna solo entre ellos',
+  'notifications.error.bodyFallback': 'Se produjo un error',
+  'notifications.question.bodyFallback': 'El agente espera tu respuesta',
+  'notifications.permission.bodyFallback': 'El agente espera tu aprobación',
+  'notifications.permission.title': 'Permiso necesario',
 };

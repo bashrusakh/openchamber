@@ -9,13 +9,16 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -674,6 +677,7 @@ export const dict = {
   'sessions.sidebar.session.work.markDone': 'סמן כהושלם',
   'sessions.sidebar.session.work.doneSuggested': 'נראה שהושלם',
   'sessions.sidebar.session.work.updateFailed': 'לא ניתן היה לעדכן את ההפעלה',
+  'sessions.sidebar.session.work.folderDeleted': 'התיקייה של ההפעלה הזו נמחקה',
   'sessions.sidebar.session.pin.pinFailed': 'לא ניתן היה להצמיד את ההפעלה',
   'sessions.sidebar.session.pin.unpinFailed': 'לא ניתן היה לבטל את הצמדת ההפעלה',
   'chat.work.doneHint.text': 'נראה שהעבודה הזו הושלמה.',
@@ -1168,6 +1172,7 @@ export const dict = {
   'gitView.sync.syncCounts': '{behind}↓ {ahead}↑',
   'gitView.branch.actionsUnavailable': 'פעולות ענף לא זמינות במצב הנוכחי של המאגר',
   'gitView.conflict.noDetailsAvailable': 'אין פרטי התנגשות זמינים',
+  'magicPrompts.toast.loadFailed': 'לא ניתן לטעון את הנחיות הקסם. דבר לא נשלח.',
   'gitView.empty.notGitRepository': 'התיקייה הזו אינה מאגר Git',
   'gitView.empty.notGitRepositoryDescription': 'אפשר לאתחל Git בתיקייה הזו או לפתוח מאגר.',
   'gitView.empty.selectSessionOrDirectory': 'יש לבחור הפעלה או תיקייה כדי לראות את מצב Git',
@@ -3809,13 +3814,16 @@ export const dict = {
   ...surfacePanelI18n.he,
   ...fileArtifactsI18n.he,
   ...fileContentSearchI18n.he,
+  ...fileEditorAidsI18n.he,
   ...htmlRenderI18n.he,
   ...sessionNoticesI18n.he,
   ...usageStatsI18n.he,
   ...webSearchI18n.he,
   ...sessionWarmingI18n.he,
+  ...overviewI18n.he,
   ...isolatedSpacesI18n.he,
   ...sourceBoardI18n.he,
+  ...stacksI18n.he,
   ...projectActionsI18n.he,
   ...gitIdentityEditorI18n.he,
   ...environmentI18n.he,
@@ -3880,4 +3888,8 @@ export const dict = {
   'diffView.whitespace.shown': 'שינויי רווחים מוצגים',
   'session.newWorktree.trust.skip': 'דילוג',
   'chat.revertPopover.toast.restoreFailed': 'לא ניתן היה לשחזר את ההודעות שבוטלו',
+  'notifications.error.bodyFallback': 'אירעה שגיאה',
+  'notifications.question.bodyFallback': 'הסוכן ממתין לתשובתך',
+  'notifications.permission.bodyFallback': 'הסוכן ממתין לאישורך',
+  'notifications.permission.title': 'נדרשת הרשאה',
 } as const;

@@ -118,6 +118,29 @@ const browserProviderResetSchema = z.object({
 });
 type BrowserProviderResetEvent = { type: 'browser-provider-reset' } & z.infer<typeof browserProviderResetSchema>;
 
+/**
+ * A usage limit stopped a session and the server moved on: the provider to
+ * its next account (for every session), or this session to the fallback model.
+ */
+const limitFailoverSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('account'),
+    sessionId: z.string().min(1),
+    providerId: z.string().min(1),
+    fromAccount: z.string().nullable(),
+    toAccount: z.string().min(1),
+  }),
+  z.object({
+    kind: z.literal('model'),
+    sessionId: z.string().min(1),
+    providerId: z.string().min(1),
+    modelId: z.string().min(1),
+    toProviderId: z.string().min(1),
+    toModelId: z.string().min(1),
+  }),
+]);
+type LimitFailoverEvent = { type: 'limit-failover'; failover: z.infer<typeof limitFailoverSchema> };
+
 /** Jev routing events; each carries what the routing store needs and nothing the UI must re-derive. */
 const routingUpdatedSchema = z.object({
   available: z.boolean(),
@@ -203,6 +226,7 @@ type OpenChamberEvent =
   | FileOpenRequestEvent
   | PlanOpenRequestEvent
   | BrowserProviderResetEvent
+  | LimitFailoverEvent
   | ProjectContextChangedEvent
   | SessionFoldersChangedEvent
   | AgentMemoryChangedEvent;
@@ -459,6 +483,12 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
   if (envelope.type === 'openchamber:browser-provider-reset') {
     const parsed = browserProviderResetSchema.safeParse(envelope.properties);
     if (parsed.success) for (const listener of listeners) listener({ type: 'browser-provider-reset', ...parsed.data });
+    return;
+  }
+
+  if (envelope.type === 'openchamber:limit-failover') {
+    const parsed = limitFailoverSchema.safeParse(envelope.properties);
+    if (parsed.success) for (const listener of listeners) listener({ type: 'limit-failover', failover: parsed.data });
     return;
   }
 

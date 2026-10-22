@@ -10,13 +10,16 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -154,13 +157,16 @@ export const dict: Record<I18nKey, string> = {
   ...surfacePanelI18n['pt-BR'],
   ...fileArtifactsI18n['pt-BR'],
   ...fileContentSearchI18n['pt-BR'],
+  ...fileEditorAidsI18n['pt-BR'],
   ...htmlRenderI18n['pt-BR'],
   ...sessionNoticesI18n['pt-BR'],
   ...usageStatsI18n['pt-BR'],
   ...webSearchI18n['pt-BR'],
   ...sessionWarmingI18n['pt-BR'],
+  ...overviewI18n['pt-BR'],
   ...isolatedSpacesI18n['pt-BR'],
   ...sourceBoardI18n['pt-BR'],
+  ...stacksI18n['pt-BR'],
   ...projectActionsI18n['pt-BR'],
   ...gitIdentityEditorI18n['pt-BR'],
   ...environmentI18n['pt-BR'],
@@ -707,6 +713,7 @@ export const dict: Record<I18nKey, string> = {
   "sessions.sidebar.session.work.markDone": "Marcar como concluído",
   "sessions.sidebar.session.work.doneSuggested": "Parece concluído",
   "sessions.sidebar.session.work.updateFailed": "Não foi possível atualizar a sessão",
+  "sessions.sidebar.session.work.folderDeleted": "A pasta desta sessão foi excluída",
   "sessions.sidebar.session.pin.pinFailed": "Não foi possível fixar a sessão",
   "sessions.sidebar.session.pin.unpinFailed": "Não foi possível desafixar a sessão",
   "chat.work.doneHint.text": "Este trabalho parece concluído.",
@@ -1192,6 +1199,7 @@ export const dict: Record<I18nKey, string> = {
   "gitView.sync.syncCounts": "{behind}↓ {ahead}↑",
   "gitView.branch.actionsUnavailable": "Ações de branch não disponíveis neste estado do repositório",
   "gitView.conflict.noDetailsAvailable": "Não há detalhes de conflito disponíveis",
+  "magicPrompts.toast.loadFailed": "Não foi possível carregar os prompts mágicos. Nada foi enviado.",
   "gitView.empty.notGitRepository": "Este diretório não é um repositório Git",
   "gitView.empty.notGitRepositoryDescription": "Inicialize Git neste diretório ou abra um repositório.",
   "gitView.empty.selectSessionOrDirectory": "Selecione uma sessão ou diretório para ver o status do Git",
@@ -3856,4 +3864,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'Esta tarefa já tem uma execução em andamento',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'Esta tarefa já está na fila e será executada quando houver uma vaga',
   'chat.modelControls.agentFavoriteAdd': 'Adicionar aos favoritos. Com favoritos, o Tab alterna só entre eles',
+  'notifications.error.bodyFallback': 'Ocorreu um erro',
+  'notifications.question.bodyFallback': 'O agente está aguardando sua resposta',
+  'notifications.permission.bodyFallback': 'O agente está aguardando sua aprovação',
+  'notifications.permission.title': 'Permissão necessária',
 };

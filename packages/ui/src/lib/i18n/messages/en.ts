@@ -9,13 +9,16 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -143,13 +146,16 @@ export const dict = {
   ...surfacePanelI18n.en,
   ...fileArtifactsI18n.en,
   ...fileContentSearchI18n.en,
+  ...fileEditorAidsI18n.en,
   ...htmlRenderI18n.en,
   ...sessionNoticesI18n.en,
   ...usageStatsI18n.en,
   ...webSearchI18n.en,
   ...sessionWarmingI18n.en,
+  ...overviewI18n.en,
   ...isolatedSpacesI18n.en,
   ...sourceBoardI18n.en,
+  ...stacksI18n.en,
   ...projectActionsI18n.en,
   ...gitIdentityEditorI18n.en,
   ...environmentI18n.en,
@@ -705,6 +711,7 @@ export const dict = {
   'sessions.sidebar.session.work.markDone': 'Mark done',
   'sessions.sidebar.session.work.doneSuggested': 'Looks done',
   'sessions.sidebar.session.work.updateFailed': 'Couldn\'t update the session',
+  'sessions.sidebar.session.work.folderDeleted': 'This session\'s folder was deleted',
   'sessions.sidebar.session.pin.pinFailed': 'Couldn\'t pin the session',
   'sessions.sidebar.session.pin.unpinFailed': 'Couldn\'t unpin the session',
   'chat.work.doneHint.text': 'This work looks done.',
@@ -1200,6 +1207,7 @@ export const dict = {
   'gitView.sync.syncCounts': '{behind}↓ {ahead}↑',
   'gitView.branch.actionsUnavailable': 'Branch actions unavailable in this repository state',
   'gitView.conflict.noDetailsAvailable': 'No conflict details available',
+  'magicPrompts.toast.loadFailed': 'Could not load magic prompts. Nothing was sent.',
   'gitView.empty.notGitRepository': 'This directory is not a Git repository',
   'gitView.empty.notGitRepositoryDescription': 'Initialize Git in this directory or open a repository.',
   'gitView.empty.selectSessionOrDirectory': 'Select a session or directory to view Git status',
@@ -3855,6 +3863,10 @@ export const dict = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'This task already has a run in progress',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'This task is already waiting in the queue and will run when a slot frees up',
   'chat.modelControls.agentFavoriteAdd': 'Add to favorites. With favorites, Tab cycles through them only',
+  'notifications.error.bodyFallback': 'An error occurred',
+  'notifications.question.bodyFallback': 'Agent is waiting for your response',
+  'notifications.permission.bodyFallback': 'Agent is waiting for your approval',
+  'notifications.permission.title': 'Permission required',
 } as const;
 
 export type I18nKey = keyof typeof dict;

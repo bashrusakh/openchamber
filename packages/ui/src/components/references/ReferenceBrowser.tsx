@@ -135,7 +135,9 @@ const ReferenceFilterMenu: React.FC<{ browser: ReferenceBrowser }> = ({ browser 
 export const ReferenceBrowserSearch: React.FC<{
     browser: ReferenceBrowser;
     onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => void;
-}> = ({ browser, onKeyDown }) => {
+    /** After the filter, such as the board's list refresh. */
+    trailing?: React.ReactNode;
+}> = ({ browser, onKeyDown, trailing }) => {
     const { t } = useI18n();
     const { source, isGitLab, isMobile, list, query, searchRef } = browser;
     const placeholder = t(source === 'linear' ? 'references.picker.search.linear' : isGitLab ? 'references.picker.search.gitlab' : 'references.picker.search.github');
@@ -180,6 +182,7 @@ export const ReferenceBrowserSearch: React.FC<{
                 </div>
             </div>
             <ReferenceFilterMenu browser={browser} />
+            {trailing}
         </div>
     );
 };
