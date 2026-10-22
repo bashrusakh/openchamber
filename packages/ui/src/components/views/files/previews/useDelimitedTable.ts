@@ -101,12 +101,16 @@ type FailedFile = {
 };
 
 /**
- * The characters the widths of a file were counted with, and the file they
+ * The characters the widths of a file were counted with, and the table they
  * were counted for.
+ *
+ * A count belongs to one table. A file that is opened again is parsed again,
+ * and the table of the new parse starts from the widths the parser counted,
+ * so the widths that were counted for the file before it are not the widths
+ * of the new table.
  */
 type CountedWidths = {
-  content: string;
-  delimiter: ',' | '\t';
+  table: DelimitedTable;
   widths: TableCharacterWidths;
 };
 
@@ -159,6 +163,23 @@ export const useDelimitedTable = (
    * file do not change with them.
    */
   const countedRef = React.useRef<CountedWidths | null>(null);
+  /**
+   * The table of the file that is open now.
+   *
+   * A count that finishes late has to tell whether the file it was started
+   * for is still the one that is open, so that the widths of a file the user
+   * has left are not counted here: that walk is over the whole text of the
+   * file, and it would hold the thread of the preview for as long as it
+   * takes.
+   */
+  const openTableRef = React.useRef<DelimitedTable | null>(null);
+  React.useLayoutEffect(() => {
+    openTableRef.current = state?.table ?? null;
+    return () => {
+      // A preview that is gone does not count the widths of a file any more.
+      openTableRef.current = null;
+    };
+  }, [state]);
 
   // The file that is open now is not the file the state holds, so the state
   // is made for it here, in the render. A file that is small enough is
@@ -258,29 +279,43 @@ export const useDelimitedTable = (
     if (file === null || file.table === null) return;
     const counted = countedRef.current;
     if (counted !== null
-      && counted.content === file.content
-      && counted.delimiter === file.delimiter
+      && counted.table === file.table
       && sameCharacterWidths(counted.widths, characterWidths)) {
       return;
     }
-    countedRef.current = { content: file.content, delimiter: file.delimiter, widths: characterWidths };
+    // The measurements changed, so every count that is running was asked for
+    // with other characters and must not publish its widths.
+    const count = ++countRef.current;
+    countedRef.current = { table: file.table, widths: characterWidths };
     // Every character of the file is counted right, so the widths the parse
     // counted are the exact ones and nothing is counted again.
     if (!hasWiderCharacter(characterWidths)) {
       publishWidths(file, file.table.columnCells);
       return;
     }
-    const count = ++countRef.current;
+    const parseId = file.id;
+    if (parseId === null) {
+      // The file was parsed on this thread, so its widths are counted here.
+      publishWidths(file, countDelimitedColumnCells(
+        file.content,
+        file.delimiter,
+        DEFAULT_TABLE_ROW_CAP,
+        characterWidths,
+      ));
+      return;
+    }
     void (async () => {
-      const cells = file.id === null
-        ? null
-        : await countDelimitedColumnCellsInWorker(
-          file.id,
-          characterWidths,
-          requestBudgetMs(file.content.length),
-        );
+      const cells = await countDelimitedColumnCellsInWorker(
+        parseId,
+        characterWidths,
+        requestBudgetMs(file.content.length),
+      );
       // A count that a newer one replaced does not publish its widths.
       if (countRef.current !== count) return;
+      // The file is not the one that is open any more, so its widths are
+      // neither published nor counted here: that walk is over the whole text
+      // of a file the user has left.
+      if (openTableRef.current !== file.table) return;
       // The worker could not answer, so the widths are counted here.
       const countedCells = cells ?? countDelimitedColumnCells(
         file.content,

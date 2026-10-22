@@ -142,6 +142,19 @@ class FakeResizeObserver implements ResizeObserver {
 }
 
 /**
+ * The parse the worker holds the text of.
+ *
+ * The count of the widths walks the text of the rows the parse kept, so the
+ * worker holds the text of the parse it answered and the count does not have
+ * to carry the text of the file again.
+ */
+type HeldParse = {
+  content: string;
+  delimiter: ',' | '\t';
+  rowCap: number;
+};
+
+/**
  * A worker that parses a file the way the worker of the preview does.
  *
  * The worker of the preview is a script of its own, and the test gives it
@@ -152,8 +165,21 @@ class FakeResizeObserver implements ResizeObserver {
 class FakeWorker {
   /** Every worker the preview has made. */
   static instances: FakeWorker[] = [];
+  /**
+   * Whether the worker holds the answer of a count back.
+   *
+   * The preview asks the worker to count the widths of the columns again,
+   * and the answer of that count can arrive after the measurements of the
+   * preview have changed. A test that holds the answer back decides when it
+   * arrives.
+   */
+  static holdsCounts = false;
   /** The requests the preview sent to this worker. */
   readonly requests: DelimitedWorkerRequest[] = [];
+  /** The parses the worker holds, so it can count their widths again. */
+  private readonly parses = new Map<number, HeldParse>();
+  /** The counts the worker has not answered yet. */
+  private readonly held: { id: number; cells: number[] }[] = [];
   onmessage: ((event: { data: DelimitedWorkerResponse }) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessageerror: (() => void) | null = null;
@@ -164,12 +190,50 @@ class FakeWorker {
 
   postMessage(request: DelimitedWorkerRequest): void {
     this.requests.push(request);
-    if (request.type !== 'parse') return;
-    const table = parseDelimitedText(request.content, request.delimiter, request.rowCap);
-    // The worker answers in a task of its own, the way a worker does.
+    if (request.type === 'parse') {
+      const table = parseDelimitedText(request.content, request.delimiter, request.rowCap);
+      this.parses.set(request.id, {
+        content: request.content,
+        delimiter: request.delimiter,
+        rowCap: request.rowCap,
+      });
+      // The worker answers in a task of its own, the way a worker does.
+      setTimeout(() => {
+        this.onmessage?.({ data: { type: 'parsed', id: request.id, table } });
+      }, 0);
+      return;
+    }
+    const parse = this.parses.get(request.parseId);
+    if (parse === undefined) {
+      // The worker does not hold the parse any more, so the text the count
+      // walks over is gone.
+      setTimeout(() => {
+        this.onmessage?.({
+          data: { type: 'error', id: request.id, message: 'The worker does not hold this parse.' },
+        });
+      }, 0);
+      return;
+    }
+    const cells = countDelimitedColumnCells(
+      parse.content,
+      parse.delimiter,
+      parse.rowCap,
+      request.characterWidths,
+    );
+    if (FakeWorker.holdsCounts) {
+      this.held.push({ id: request.id, cells });
+      return;
+    }
     setTimeout(() => {
-      this.onmessage?.({ data: { type: 'parsed', id: request.id, table } });
+      this.onmessage?.({ data: { type: 'counted', id: request.id, cells } });
     }, 0);
+  }
+
+  /** Answer the counts the worker held back. */
+  releaseCounts(): void {
+    for (const count of this.held.splice(0, this.held.length)) {
+      this.onmessage?.({ data: { type: 'counted', id: count.id, cells: count.cells } });
+    }
   }
 
   terminate(): void {}
@@ -271,6 +335,22 @@ const buildLargeCsv = (columns: number): string => {
     lines.push(line);
     length += line.length + 1;
   }
+  return lines.join('\n');
+};
+
+/**
+ * A file that is parsed in a worker, and whose first data row holds a
+ * character the browser can lay out wider than the monospace font of the
+ * preview.
+ *
+ * The widths of such a file are counted again with the measured characters,
+ * and that count runs in the worker.
+ */
+const buildLargeCsvWithWideCharacter = (columns: number): string => {
+  const lines = buildLargeCsv(columns).split('\n');
+  const first = lines[1];
+  if (first === undefined) return lines.join('\n');
+  lines[1] = `Ω${first}`;
   return lines.join('\n');
 };
 
@@ -437,6 +517,7 @@ describe('TableArtifact', () => {
     rowCuts = 0;
     parseCalls = 0;
     FakeWorker.instances = [];
+    FakeWorker.holdsCounts = false;
     viewportWidth = VIEWPORT_WIDTH;
     cellPadding = 8;
     cellBorder = 1;
@@ -983,6 +1064,83 @@ describe('TableArtifact', () => {
     await render(buildCsvWithWideCharacter(20, 8));
 
     expect(widthCounts).toBeGreaterThan(afterOpen);
+  });
+
+  test('counts the widths of the columns again when a file is opened again', async () => {
+    // A file with a character the browser lays out wider than the count gives
+    // it, so the widths of the body are counted again with the measured
+    // table.
+    characterAdvances.set('Ω', 40);
+    const content = buildCsvWithWideCharacter(20, 4);
+    await render(content);
+    const afterOpen = widthCounts;
+    expect(afterOpen).toBeGreaterThan(0);
+
+    // A file without rows has no table to measure, so the widths of the file
+    // before it stay counted.
+    await render('');
+
+    // The file is opened again. It is parsed again, and the table of the new
+    // parse starts from the widths the parser counted, so the widths that
+    // were counted for the file before it are not the widths of the new
+    // table and are counted again.
+    await render(content);
+
+    expect(widthCounts).toBeGreaterThan(afterOpen);
+  });
+
+  test('does not publish the widths of a count whose measurements are old', async () => {
+    Object.assign(globalThis, { Worker: FakeWorker });
+    // The worker holds the answer of the count back, so the test decides when
+    // it arrives.
+    FakeWorker.holdsCounts = true;
+    characterAdvances.set('Ω', 40);
+    await render(buildLargeCsvWithWideCharacter(50));
+    const worker = FakeWorker.instances[0];
+    if (!worker) throw new Error('The worker was not asked for the file');
+    // The widths of the file are counted again in the worker, with the
+    // characters the browser measured.
+    const count = worker.requests.find((request) => request.type === 'count');
+    if (!count || count.type !== 'count') throw new Error('The worker was not asked to count the widths');
+    expect([...count.characterWidths.values()].some((width) => width > 1)).toBe(true);
+
+    // The font changes, and the character is not wider than the count any
+    // more, so the widths the parser counted are the exact ones.
+    characterAdvances.set('Ω', 7.5);
+    await resize(VIEWPORT_WIDTH);
+    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(5ch + 16px + 1px)');
+
+    // The answer of the count arrives now. It was asked for with the
+    // measurements of the font before it, so its widths belong to a font that
+    // is not the one on the screen, and they are not published.
+    await act(async () => {
+      worker.releaseCounts();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(host.querySelector('col')?.getAttribute('style')).toContain('calc(5ch + 16px + 1px)');
+  });
+
+  test('does not count the widths of a file that is closed on this thread', async () => {
+    Object.assign(globalThis, { Worker: FakeWorker });
+    // The worker holds the answer of the count back, so the test decides when
+    // it arrives.
+    FakeWorker.holdsCounts = true;
+    characterAdvances.set('Ω', 40);
+    await render(buildLargeCsvWithWideCharacter(50));
+
+    // The file is closed, and a file without rows takes its place. A file
+    // without rows has no table to measure, so nothing is counted for it.
+    await render('');
+
+    // The worker gives up, and the request of the count fails.
+    await act(async () => {
+      resetDelimitedWorkerClientForTests();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The widths of the file that is closed are not counted on this thread:
+    // that walk is over the whole text of a file nobody is looking at.
+    expect(widthCounts).toBe(0);
   });
 
   test('does not count the widths of the columns again for a file of plain latin', async () => {

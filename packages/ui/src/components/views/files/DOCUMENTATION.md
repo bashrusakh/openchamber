@@ -328,6 +328,11 @@ user has left is of no use to the file that is open now. A count for a parse
 the worker does not hold any more is answered as a failure, and the preview
 counts the widths on the main thread instead.
 
+A count for a file the user has left is dropped instead of counted on the
+main thread: that walk is over the whole text of the file, and it would hold
+the thread of the preview for as long as it takes, for a file nobody is
+looking at.
+
 ### Why a small file is parsed on the thread of the preview
 
 A file of at most 200,000 characters is parsed on the thread the preview is
@@ -396,6 +401,14 @@ The count again walks over the text of the rows the preview holds and stops
 at the end of the last of them, because the rows it holds are a prefix of the
 file and the rows after them are not counted. It runs when the measured table
 changes, and not when the panel is resized, scrolled or rendered again.
+
+A count belongs to one table and to one set of measurements. A file that is
+opened again is parsed again, and the table of the new parse starts from the
+widths the parser counted, so the widths that were counted for the file before
+it are not the widths of the new table and are counted again. A count that was
+asked for with other measurements does not publish its widths either: the
+measurements changed while it ran, and its widths belong to a font that is not
+the one on the screen.
 
 It costs a little more than the walk over the cells it replaces, because a
 walk over the text cannot use the early-out that walk had: the length of a
