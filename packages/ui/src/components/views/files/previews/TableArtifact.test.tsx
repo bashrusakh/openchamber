@@ -355,6 +355,15 @@ const buildLargeCsvWithWideCharacter = (columns: number): string => {
 };
 
 /**
+ * A file of exactly the given number of characters, in rows of forty.
+ */
+const buildCsvOfLength = (length: number): string => {
+  const rows = Math.floor(length / 41);
+  const text = `${'x'.repeat(40)}\n`.repeat(rows);
+  return text + 'x'.repeat(length - text.length);
+};
+
+/**
  * A table whose first data row holds a character the browser can lay out
  * wider than the monospace font of the preview.
  *
@@ -1249,6 +1258,26 @@ describe('TableArtifact', () => {
     // The file was parsed here, and no worker was asked for it.
     expect(parseCalls).toBe(1);
     expect(FakeWorker.instances).toHaveLength(0);
+  });
+
+  test('parses a file of the limit on this thread and one character over it in the worker', async () => {
+    // The limit is where the preview stops parsing on the thread of the
+    // preview, so the file that is exactly as long is parsed here and the
+    // file that is one character longer is read in the worker.
+    Object.assign(globalThis, { Worker: FakeWorker });
+    const atLimit = buildCsvOfLength(SMALL_FILE_CHAR_LIMIT);
+    expect(atLimit.length).toBe(SMALL_FILE_CHAR_LIMIT);
+    await render(atLimit);
+
+    // The file was parsed here, and no worker was asked for it.
+    expect(parseCalls).toBe(1);
+    expect(FakeWorker.instances).toHaveLength(0);
+
+    // One character more and the file is read in the worker.
+    await render(buildCsvOfLength(SMALL_FILE_CHAR_LIMIT + 1));
+
+    expect(parseCalls).toBe(1);
+    expect(FakeWorker.instances).toHaveLength(1);
   });
 
   test('parses the file in the worker when the runtime has one', async () => {
