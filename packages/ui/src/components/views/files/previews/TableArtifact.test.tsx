@@ -6,6 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '@/lib/i18n';
 
 import type { DelimitedWorkerRequest, DelimitedWorkerResponse } from './delimited-worker-protocol';
+import type { DelimitedTable } from './delimitedText';
 
 // Bun cannot load Vite's `?worker&url` import that the client of the worker
 // makes. The preview itself never starts a worker in this test, because the
@@ -174,12 +175,15 @@ class FakeWorker {
    * arrives.
    */
   static holdsCounts = false;
+  /** Whether parse responses wait for a test to release them. */
+  static holdsParses = false;
   /** The requests the preview sent to this worker. */
   readonly requests: DelimitedWorkerRequest[] = [];
   /** The parses the worker holds, so it can count their widths again. */
   private readonly parses = new Map<number, HeldParse>();
   /** The counts the worker has not answered yet. */
   private readonly held: { id: number; cells: number[] }[] = [];
+  private readonly heldParses: { id: number; table: DelimitedTable }[] = [];
   onmessage: ((event: { data: DelimitedWorkerResponse }) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessageerror: (() => void) | null = null;
@@ -197,10 +201,18 @@ class FakeWorker {
         delimiter: request.delimiter,
         rowCap: request.rowCap,
       });
-      // The worker answers in a task of its own, the way a worker does.
-      setTimeout(() => {
-        this.onmessage?.({ data: { type: 'parsed', id: request.id, table } });
-      }, 0);
+      if (FakeWorker.holdsParses) {
+        this.heldParses.push({ id: request.id, table });
+      } else {
+        // The worker answers in a task of its own, the way a worker does.
+        setTimeout(() => {
+          this.onmessage?.({ data: { type: 'parsed', id: request.id, table } });
+        }, 0);
+      }
+      return;
+    }
+    if (request.type === 'release') {
+      this.parses.delete(request.parseId);
       return;
     }
     const parse = this.parses.get(request.parseId);
@@ -234,6 +246,17 @@ class FakeWorker {
     for (const count of this.held.splice(0, this.held.length)) {
       this.onmessage?.({ data: { type: 'counted', id: count.id, cells: count.cells } });
     }
+  }
+
+  /** Answer the parses held back by the test. */
+  releaseParses(): void {
+    for (const parse of this.heldParses.splice(0, this.heldParses.length)) {
+      this.onmessage?.({ data: { type: 'parsed', id: parse.id, table: parse.table } });
+    }
+  }
+
+  hasParse(id: number): boolean {
+    return this.parses.has(id);
   }
 
   terminate(): void {}
@@ -527,6 +550,7 @@ describe('TableArtifact', () => {
     parseCalls = 0;
     FakeWorker.instances = [];
     FakeWorker.holdsCounts = false;
+    FakeWorker.holdsParses = false;
     viewportWidth = VIEWPORT_WIDTH;
     cellPadding = 8;
     cellBorder = 1;
@@ -793,6 +817,46 @@ describe('TableArtifact', () => {
   const spanOfGroup = (cells: Element[]): number => (
     cells.reduce((sum, cell) => sum + spanOf(cell), 0)
   );
+
+  test('releases a parse that finishes after the preview unmounts', async () => {
+    Object.assign(globalThis, { Worker: FakeWorker });
+    FakeWorker.holdsParses = true;
+    await render(buildCsv(10_000, 4));
+
+    const worker = FakeWorker.instances[0];
+    if (!worker) throw new Error('The preview did not make a worker');
+    const parse = worker.requests.find((request) => request.type === 'parse');
+    if (!parse || parse.type !== 'parse') throw new Error('The preview did not request a parse');
+
+    await act(async () => root.render(null));
+    worker.releaseParses();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    expect(worker.requests.some((request) => request.type === 'release' && request.parseId === parse.id)).toBe(true);
+    expect(worker.hasParse(parse.id)).toBe(false);
+  });
+
+  test('a stale cleanup leaves the replacement file parse held', async () => {
+    Object.assign(globalThis, { Worker: FakeWorker });
+    FakeWorker.holdsParses = true;
+    await render(buildCsv(10_000, 4));
+    const worker = FakeWorker.instances[0];
+    if (!worker) throw new Error('The preview did not make a worker');
+    const first = worker.requests.find((request) => request.type === 'parse');
+    if (!first || first.type !== 'parse') throw new Error('The preview did not request its first parse');
+
+    await render(`${buildCsv(10_000, 4)}\nreplacement`);
+    const parses = worker.requests.filter((request) => request.type === 'parse');
+    const second = parses[1];
+    if (!second || second.type !== 'parse') throw new Error('The preview did not request its replacement parse');
+
+    worker.releaseParses();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    expect(worker.hasParse(first.id)).toBe(false);
+    expect(worker.hasParse(second.id)).toBe(true);
+    expect(worker.requests.some((request) => request.type === 'release' && request.parseId === first.id)).toBe(true);
+  });
 
   test('mounts only the cells in view of a wide export', async () => {
     await render(buildCsv(2_100, 50));

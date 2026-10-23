@@ -48,10 +48,12 @@ type DelimitedParse = {
 let worker: Worker | undefined;
 let workerCreation: Promise<Worker | undefined> | undefined;
 let workerObjectUrl: string | undefined;
+let workerGeneration = 0;
 let nextId = 0;
 const pending = new Map<number, PendingEntry>();
 
 const disposeWorker = (): void => {
+  workerGeneration += 1;
   worker?.terminate();
   worker = undefined;
   workerCreation = undefined;
@@ -75,9 +77,10 @@ const failAll = (): void => {
   disposeWorker();
 };
 
-const createWorker = async (): Promise<Worker | undefined> => {
+const createWorker = async (generation: number): Promise<Worker | undefined> => {
   // A runtime without a worker cannot make one.
   if (!('Worker' in globalThis)) return undefined;
+  let objectUrl: string | undefined;
   try {
     let workerUrl = DelimitedTextWorkerUrl;
     if (isVSCodeRuntime(null)) {
@@ -85,9 +88,15 @@ const createWorker = async (): Promise<Worker | undefined> => {
       // is fetched and started from a blob URL.
       const response = await fetch(workerUrl);
       if (!response.ok) throw new Error(`Delimited worker request failed with ${response.status}`);
-      workerObjectUrl = URL.createObjectURL(await response.blob());
-      workerUrl = workerObjectUrl;
+      objectUrl = URL.createObjectURL(await response.blob());
+      if (generation !== workerGeneration) {
+        URL.revokeObjectURL(objectUrl);
+        return undefined;
+      }
+      workerObjectUrl = objectUrl;
+      workerUrl = objectUrl;
     }
+    if (generation !== workerGeneration) return undefined;
     const instance = new Worker(workerUrl, { type: 'module' });
     worker = instance;
     instance.onmessage = (event: MessageEvent<DelimitedWorkerResponse>) => {
@@ -101,9 +110,9 @@ const createWorker = async (): Promise<Worker | undefined> => {
     instance.onmessageerror = failAll;
     return instance;
   } catch (error) {
-    if (workerObjectUrl !== undefined) {
-      URL.revokeObjectURL(workerObjectUrl);
-      workerObjectUrl = undefined;
+    if (objectUrl !== undefined) {
+      URL.revokeObjectURL(objectUrl);
+      if (workerObjectUrl === objectUrl) workerObjectUrl = undefined;
     }
     console.error('Failed to create the delimited worker:', error);
     return undefined;
@@ -112,17 +121,19 @@ const createWorker = async (): Promise<Worker | undefined> => {
 
 const getWorker = async (): Promise<Worker | undefined> => {
   if (worker) return worker;
-  workerCreation ??= createWorker().finally(() => {
-    workerCreation = undefined;
-  });
+  if (!workerCreation) {
+    const generation = workerGeneration;
+    const wrappedCreation = createWorker(generation).finally(() => {
+      if (workerCreation === wrappedCreation) workerCreation = undefined;
+    });
+    workerCreation = wrappedCreation;
+  }
   return workerCreation;
 };
 
 /**
- * Post one request and arm its budget.
- *
- * The timer starts here and not when the caller asked, so a request that
- * waited for the worker to be made gets the whole budget.
+ * Post one request. Its budget starts when the caller asks, including worker
+ * startup and reading the worker response body in runtimes that fetch it.
  *
  * A request that cannot be posted fails like every other failure: the
  * worker is given up on, the way it is given up on when it crashes and when
@@ -133,18 +144,16 @@ const dispatch = async (
   id: number,
   resolve: (outcome: RequestOutcome) => void,
   payload: DelimitedWorkerRequest,
-  budgetMs: number,
 ): Promise<void> => {
   const instance = await getWorker();
+  const entry = pending.get(id);
+  if (!entry) return;
   if (!instance) {
+    clearTimeout(entry.timer);
+    pending.delete(id);
     resolve({ status: 'failed' });
     return;
   }
-  const timer = setTimeout(() => {
-    console.warn(`The delimited worker did not answer within ${budgetMs}ms; terminating it`);
-    failAll();
-  }, budgetMs);
-  pending.set(id, { resolve, timer });
   try {
     instance.postMessage(payload);
   } catch (error) {
@@ -160,12 +169,27 @@ const request = async (
   const id = ++nextId;
   const message = build(id);
   return new Promise<RequestOutcome>((resolve) => {
+    const timer = setTimeout(() => {
+      console.warn(`The delimited worker did not answer within ${budgetMs}ms; terminating it`);
+      failAll();
+    }, budgetMs);
+    pending.set(id, { resolve, timer });
     // A request that cannot be made at all fails like every other failure,
     // so the promise the caller waits for always settles.
-    void dispatch(id, resolve, message, budgetMs).catch(() => {
+    void dispatch(id, resolve, message).catch(() => {
       resolve({ status: 'failed' });
     });
   });
+};
+
+/** Drop text retained for this parse, without affecting a newer parse. */
+export const releaseDelimitedParseInWorker = (parseId: number): void => {
+  if (!worker) return;
+  try {
+    worker.postMessage({ type: 'release', parseId });
+  } catch (error) {
+    console.error('The delimited worker did not take the release:', error);
+  }
 };
 
 /**

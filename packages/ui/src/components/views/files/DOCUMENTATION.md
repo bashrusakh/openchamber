@@ -166,11 +166,18 @@ the worker answers, capped rows stated in the meta line, the
 rows and columns in view mounted unless the grid of the file is small enough
 to be kept whole), and `BinaryArtifact` (name, type,
 size, download; never a decode attempt).
-`FilesView.renderArtifactPreview` is the single switch both the docked and
-the fullscreen viewer use. SVG, Mermaid (`.mmd`) and delimited files are text
+`FilesView.renderArtifactPreview` is the single switch for artifact views.
+SVG, Mermaid (`.mmd`) and delimited files are text
 with an artifact view: each has a per-path preview/source toggle, and opens
 in preview regardless of the text-first setting because an agent-produced
 artifact is opened to be looked at.
+
+The CSV/TSV preview stays mounted when it enters fullscreen. Its existing
+viewer panel fills the Files surface and hides the tree and docked toolbars;
+the fullscreen controls stay over the same scroller. A fullscreen transition
+therefore does not start another parse, and the worker's single held parse is
+not competed for by a second table instance. Other preview kinds keep their
+existing fullscreen viewer.
 
 The table preview mounts only the rows and the columns in view, unless the
 grid of the file is small enough to be kept whole. A wide export holds far
@@ -319,14 +326,19 @@ one that does not take the request and one that does not answer within its
 budget all end the same way: the file is parsed on the main thread, which is
 slower for the user and the last resort. The budget grows with the size of
 the file, because the parse walks the text once and a big file takes longer
-than a small one.
+than a small one. It covers worker startup, including the VS Code fetch and
+response-body read, and the worker response. A worker that starts after the
+budget is retired and cannot replace a newer worker.
 
 The worker keeps the text of the parse it answers, so the count of the widths
 does not have to carry the text of the file again. Only the newest parse is
 kept: the preview has one file open at a time, and the text of a file the
-user has left is of no use to the file that is open now. A count for a parse
-the worker does not hold any more is answered as a failure, and the preview
-counts the widths on the main thread instead.
+user has left is of no use to the file that is open now. When a preview closes
+or changes to source, it releases its parse; the worker clears it only if that
+parse is still the one held. A parse that finishes after its preview leaves is
+released when its response arrives. A count for a parse the worker does not
+hold any more is answered as a failure, and the preview counts the widths on
+the main thread instead.
 
 A count for a file the user has left is dropped instead of counted on the
 main thread: that walk is over the text of every row the preview holds, and

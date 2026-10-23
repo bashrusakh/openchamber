@@ -3,6 +3,7 @@ import React from 'react';
 import {
   countDelimitedColumnCellsInWorker,
   parseDelimitedTextInWorker,
+  releaseDelimitedParseInWorker,
 } from './delimited-worker';
 import {
   DEFAULT_TABLE_ROW_CAP,
@@ -238,6 +239,8 @@ export const useDelimitedTable = (
       // worker for.
       return;
     }
+    let cancelled = false;
+    let parseId: number | null = null;
     void (async () => {
       const result = await parseDelimitedTextInWorker(
         content,
@@ -245,6 +248,11 @@ export const useDelimitedTable = (
         DEFAULT_TABLE_ROW_CAP,
         requestBudgetMs(content.length),
       );
+      if (result !== null) parseId = result.id;
+      if (cancelled) {
+        if (parseId !== null) releaseDelimitedParseInWorker(parseId);
+        return;
+      }
       if (generationRef.current !== generation) return;
       if (result !== null) {
         publishTable(content, delimiter, result.id, result.table);
@@ -269,6 +277,8 @@ export const useDelimitedTable = (
     })();
 
     return () => {
+      cancelled = true;
+      if (parseId !== null) releaseDelimitedParseInWorker(parseId);
       // A file that is left behind must not publish its table.
       generationRef.current += 1;
     };

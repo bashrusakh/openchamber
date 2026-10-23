@@ -47,6 +47,10 @@ self.onmessage = (event: MessageEvent<DelimitedWorkerRequest>) => {
     }
     return;
   }
+  if (request.type === 'release') {
+    if (held?.id === request.parseId) held = null;
+    return;
+  }
   const parse = held;
   if (parse === null || parse.id !== request.parseId) {
     // The worker does not hold the parse any more, so the text the count

@@ -88,4 +88,27 @@ describe('the worker that parses a delimited file', () => {
     if (!answer || answer.type !== 'error') throw new Error('The worker did not fail the count');
     expect(answer.id).toBe(8);
   });
+
+  test('releases only the parse whose text is still held', () => {
+    ask({ type: 'parse', id: 7, content: 'a,b\n1,2', delimiter: ',', rowCap: 100 });
+    ask({ type: 'parse', id: 8, content: 'c,d\n3,4', delimiter: ',', rowCap: 100 });
+    ask({ type: 'release', parseId: 7 });
+
+    const current = ask({
+      type: 'count',
+      id: 9,
+      parseId: 8,
+      characterWidths: new Map(),
+    });
+    if (!current || current.type !== 'counted') throw new Error('A stale release cleared the current parse');
+
+    ask({ type: 'release', parseId: 8 });
+    const released = ask({
+      type: 'count',
+      id: 10,
+      parseId: 8,
+      characterWidths: new Map(),
+    });
+    if (!released || released.type !== 'error') throw new Error('The released parse is still held');
+  });
 });

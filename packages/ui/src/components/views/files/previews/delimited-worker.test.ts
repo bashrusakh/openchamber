@@ -79,10 +79,18 @@ const currentWorker = async (): Promise<FakeWorker> => {
 describe('the client of the delimited worker', () => {
   let originalWorker: unknown;
   let originalWindow: unknown;
+  let originalFetch: typeof fetch;
+  let originalCreateObjectURL: typeof URL.createObjectURL;
+  let originalRevokeObjectURL: typeof URL.revokeObjectURL;
+  let originalVSCodeConfig: PropertyDescriptor | undefined;
 
   beforeEach(() => {
     originalWorker = globalThis.Worker;
     originalWindow = globalThis.window;
+    originalFetch = globalThis.fetch;
+    originalCreateObjectURL = URL.createObjectURL;
+    originalRevokeObjectURL = URL.revokeObjectURL;
+    originalVSCodeConfig = Object.getOwnPropertyDescriptor(globalThis, '__VSCODE_CONFIG__');
     FakeWorker.instances = [];
     FakeWorker.refuses = false;
     // The client makes a worker in a browser, and this test is not one.
@@ -93,6 +101,14 @@ describe('the client of the delimited worker', () => {
   afterEach(() => {
     resetDelimitedWorkerClientForTests();
     Object.assign(globalThis, { Worker: originalWorker, window: originalWindow });
+    globalThis.fetch = originalFetch;
+    URL.createObjectURL = originalCreateObjectURL;
+    URL.revokeObjectURL = originalRevokeObjectURL;
+    if (originalVSCodeConfig) {
+      Object.defineProperty(globalThis, '__VSCODE_CONFIG__', originalVSCodeConfig);
+    } else {
+      Reflect.deleteProperty(globalThis, '__VSCODE_CONFIG__');
+    }
   });
 
   test('parses a file in the worker', async () => {
@@ -143,6 +159,40 @@ describe('the client of the delimited worker', () => {
 
     expect(await parseDelimitedTextInWorker('a,b\n1,2', ',', 100, 1_000)).toBeNull();
     expect(FakeWorker.instances).toHaveLength(0);
+  });
+
+  test('includes a stalled VS Code worker fetch in the request budget', async () => {
+    let finishFetch: ((response: Response) => void) | undefined;
+    globalThis.fetch = () => new Promise<Response>((resolve) => { finishFetch = resolve; });
+    Object.assign(globalThis, { __VSCODE_CONFIG__: { workspaceFolder: '/repo' } });
+
+    const pending = parseDelimitedTextInWorker('large csv', ',', 100, 25);
+    expect(await pending).toBeNull();
+
+    finishFetch?.(new Response(new Blob()));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(FakeWorker.instances).toHaveLength(0);
+  });
+
+  test('includes a stalled VS Code response body in the request budget and revokes late URLs', async () => {
+    let finishBody: ((blob: Blob) => void) | undefined;
+    const revoked: string[] = [];
+    globalThis.fetch = async () => {
+      const response = new Response();
+      response.blob = () => new Promise<Blob>((resolve) => { finishBody = resolve; });
+      return response;
+    };
+    URL.createObjectURL = () => 'blob:late-delimited-worker';
+    URL.revokeObjectURL = (url) => { revoked.push(url); };
+    Object.assign(globalThis, { __VSCODE_CONFIG__: { workspaceFolder: '/repo' } });
+
+    const pending = parseDelimitedTextInWorker('large csv', ',', 100, 25);
+    expect(await pending).toBeNull();
+
+    finishBody?.(new Blob());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(FakeWorker.instances).toHaveLength(0);
+    expect(revoked).toEqual(['blob:late-delimited-worker']);
   });
 
   test('fails a request when the worker crashes', async () => {

@@ -22,6 +22,8 @@ export type DelimitedWorkerRequest =
    * follows does not have to carry the text of the file again.
    */
   | { type: 'parse'; id: number; content: string; delimiter: ',' | '\t'; rowCap: number }
+  /** Release the text held for a parse, if it is still the worker's current parse. */
+  | { type: 'release'; parseId: number }
   /**
    * Count the widths of the columns of a parse again, with the characters the
    * browser measured.
