@@ -249,6 +249,17 @@ true:
   without columns has no table to measure, so the next file is measured from
   scratch.
 
+### Why boundary points follow source intervals and not mounted cells
+
+A row or section offset counts DOM children, while a spacer can cover many
+parsed columns or rows. The preview projects structural points through those
+represented intervals and keeps the resulting parsed-cell cut stable when the
+window changes. A React commit can replace a spacer and move a live element-
+boundary Range, so the preview restores that structural endpoint to the same
+source cut. Text and cell endpoints keep their original nodes and offsets, and
+the browser's Selection keeps its anchor and focus order. Mapping a boundary to
+the nearest mounted cell omitted source cells from the native range.
+
 How much each of them costs was measured on one machine, so the figures below
 describe that machine and say nothing about the code itself. The parse counts
 the width of every value as it reads it and finds the characters outside latin

@@ -33,6 +33,11 @@ import {
   type TableRange,
   type TableWindow,
 } from './tableLayout';
+import {
+  projectNativeTableSelection,
+  resolveNativeSelectionEndpointOffset,
+  type NativeTableSelection,
+} from './tableSelection';
 import { useDelimitedTable } from './useDelimitedTable';
 
 /**
@@ -124,14 +129,6 @@ type TableLayout = {
   rowHeight: number;
   /** The direction the table is laid out in. */
   direction: TableDirection;
-};
-
-type NativeSelection = {
-  startRow: number;
-  startColumn: number;
-  endRow: number;
-  endColumn: number;
-  wholeTable: boolean;
 };
 
 type NativeSelectionBuffer = {
@@ -410,99 +407,60 @@ const TableView: React.FC<{
     rows: { start: 0, end: 1 },
     columns: { start: 0, end: 1 },
   });
-  const [nativeSelection, setNativeSelection] = React.useState<NativeSelection | null>(null);
+  const [nativeSelection, setNativeSelection] = React.useState<NativeTableSelection | null>(null);
+  const nativeSelectionRef = React.useRef<NativeTableSelection | null>(null);
 
   React.useLayoutEffect(() => {
+    nativeSelectionRef.current = null;
     setNativeSelection(null);
+  }, [table]);
+
+  const readSelection = React.useCallback(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) {
+      nativeSelectionRef.current = null;
+      setNativeSelection(null);
+      return;
+    }
+    const ownerDocument = scroller.ownerDocument;
+    const selection = ownerDocument.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      nativeSelectionRef.current = null;
+      setNativeSelection(null);
+      return;
+    }
+    const tableElement = scroller.querySelector('table');
+    if (!tableElement) {
+      nativeSelectionRef.current = null;
+      setNativeSelection(null);
+      return;
+    }
+    const next = projectNativeTableSelection(
+      tableElement,
+      selection.getRangeAt(0),
+      selection,
+      table.rows.length,
+      table.columnCount,
+    );
+    nativeSelectionRef.current = next;
+    setNativeSelection((current) => (
+      current
+      && next
+      && current.start === next.start
+      && current.end === next.end
+      && current.wholeTable === next.wholeTable
+        ? current
+        : next
+    ));
   }, [table]);
 
   React.useEffect(() => {
     const scroller = scrollerRef.current;
     if (!scroller) return;
-    const readSelection = () => {
-      const selection = document.getSelection();
-      if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
-        setNativeSelection(null);
-        return;
-      }
-      const tableElement = scroller.querySelector('table');
-      if (!tableElement) {
-        setNativeSelection(null);
-        return;
-      }
-      const range = selection.getRangeAt(0);
-      const cellFor = (node: Node | null): Element | null => {
-        const element = node instanceof Element ? node : node?.parentElement;
-        const cell = element?.closest('td[aria-colindex], th[aria-colindex]') ?? null;
-        return cell && scroller.contains(cell) ? cell : null;
-      };
-      const cellAtRowBoundary = (node: Node, offset: number, side: 'start' | 'end'): Element | null => {
-        const element = node instanceof Element ? node : node.parentElement;
-        const row = element?.closest('tr');
-        if (!row || !tableElement.contains(row)) return null;
-        const cells = Array.from(row.querySelectorAll('td[aria-colindex], th[aria-colindex]'));
-        if (cells.length === 0) return null;
-        const childOffset = element === row ? offset : row.childNodes.length;
-        const cellsBefore = Array.from(row.childNodes)
-          .slice(0, childOffset)
-          .filter((child) => cellFor(child) !== null)
-          .length;
-        const index = side === 'start' ? cellsBefore : Math.max(0, cellsBefore - 1);
-        return cells[Math.min(index, cells.length - 1)] ?? null;
-      };
-      const start = cellFor(range.startContainer)
-        ?? cellAtRowBoundary(range.startContainer, range.startOffset, 'start');
-      const end = cellFor(range.endContainer)
-        ?? cellAtRowBoundary(range.endContainer, range.endOffset, 'end');
-      const includesTableStart = range.comparePoint(tableElement, 0) === 0;
-      const includesTableEnd = range.comparePoint(tableElement, tableElement.childNodes.length) === 0;
-      const point = (cell: Element) => ({
-        row: cell.tagName === 'TH'
-          ? 0
-          : Number(cell.parentElement?.getAttribute('aria-rowindex') ?? 2) - 1,
-        column: Number(cell.getAttribute('aria-colindex')) - 1,
-      });
-      const startPoint = start
-        ? point(start)
-        : includesTableStart ? { row: 0, column: 0 } : null;
-      const endPoint = end
-        ? point(end)
-        : includesTableEnd
-          ? { row: table.rows.length, column: table.columnCount - 1 }
-          : null;
-      if (!startPoint || !endPoint) {
-        setNativeSelection(null);
-        return;
-      }
-      const forward = startPoint.row < endPoint.row
-        || (startPoint.row === endPoint.row && startPoint.column <= endPoint.column);
-      const first = forward ? startPoint : endPoint;
-      const last = forward ? endPoint : startPoint;
-      const next = {
-        startRow: first.row,
-        startColumn: first.column,
-        endRow: last.row,
-        endColumn: last.column,
-        wholeTable: (includesTableStart && includesTableEnd)
-          || (first.row === 0
-            && first.column === 0
-            && last.row === table.rows.length
-            && last.column === table.columnCount - 1),
-      };
-      setNativeSelection((current) => (
-        current
-        && current.startRow === next.startRow
-        && current.startColumn === next.startColumn
-        && current.endRow === next.endRow
-        && current.endColumn === next.endColumn
-        && current.wholeTable === next.wholeTable
-          ? current
-          : next
-      ));
-    };
-    document.addEventListener('selectionchange', readSelection);
-    return () => document.removeEventListener('selectionchange', readSelection);
-  }, [table]);
+    const ownerDocument = scroller.ownerDocument;
+    ownerDocument.addEventListener('selectionchange', readSelection);
+    return () => ownerDocument.removeEventListener('selectionchange', readSelection);
+  }, [readSelection]);
 
   // The width every column asks for comes from the data and the
   // measurements, so it is measured again when one of them changes and not
@@ -730,13 +688,18 @@ const TableView: React.FC<{
     ? { rows: { start: 0, end: table.rows.length }, columns: { start: 0, end: table.columnCount } }
     : clampTableWindow(visible, table.columnCount, table.rows.length);
   const selectionRows = React.useMemo<TableRange | null>(
-    () => nativeSelection
-      ? {
-        start: Math.max(1, nativeSelection.startRow) - 1,
-        end: Math.min(table.rows.length, nativeSelection.endRow),
+    () => {
+      if (!nativeSelection || nativeSelection.end <= nativeSelection.start || table.columnCount === 0) {
+        return null;
       }
-      : null,
-    [nativeSelection, table.rows.length],
+      const firstTableRow = Math.floor(nativeSelection.start / table.columnCount);
+      const endTableRow = Math.ceil(nativeSelection.end / table.columnCount);
+      return {
+        start: Math.max(0, Math.max(1, firstTableRow) - 1),
+        end: Math.max(0, Math.min(table.rows.length + 1, endTableRow) - 1),
+      };
+    },
+    [nativeSelection, table.columnCount, table.rows.length],
   );
   const selectionBuffer = React.useMemo<NativeSelectionBuffer>(() => {
     if (!nativeSelection || nativeSelection.wholeTable || table.columnCount === 0) {
@@ -745,6 +708,13 @@ const TableView: React.FC<{
 
     const bodyColumns = new Map<number, Set<number>>();
     const headerColumns = new Set<number>();
+    const totalCells = (table.rows.length + 1) * table.columnCount;
+    const endpointSlots = [...new Set([
+      Math.min(nativeSelection.start, totalCells - 1),
+      Math.max(0, Math.min(nativeSelection.end - 1, totalCells - 1)),
+    ])];
+    const firstSelectedRow = Math.floor(nativeSelection.start / table.columnCount);
+    const lastSelectedRow = Math.floor(Math.max(nativeSelection.start, nativeSelection.end - 1) / table.columnCount);
     const endpointColumns = (column: number): number[] => [...new Set([
       0,
       table.columnCount - 1,
@@ -753,10 +723,11 @@ const TableView: React.FC<{
       column + 1,
     ].filter((candidate) => candidate >= 0 && candidate < table.columnCount))];
 
-    for (const endpoint of [
-      { row: nativeSelection.startRow, column: nativeSelection.startColumn },
-      { row: nativeSelection.endRow, column: nativeSelection.endColumn },
-    ]) {
+    for (const slot of endpointSlots) {
+      const endpoint = {
+        row: Math.floor(slot / table.columnCount),
+        column: slot % table.columnCount,
+      };
       // Keep text in source order beside each endpoint. A native keypress can
       // move from the end of one cell into the next cell in the same row.
       // The row's viewport may be far away, so that next cell must already be
@@ -764,8 +735,8 @@ const TableView: React.FC<{
       for (const adjacentRow of [endpoint.row - 1, endpoint.row, endpoint.row + 1]) {
         if (
           adjacentRow !== endpoint.row
-          && adjacentRow >= nativeSelection.startRow
-          && adjacentRow <= nativeSelection.endRow
+          && adjacentRow >= firstSelectedRow
+          && adjacentRow <= lastSelectedRow
         ) continue;
         const columns = endpointColumns(endpoint.column);
         if (adjacentRow === 0) {
@@ -784,6 +755,70 @@ const TableView: React.FC<{
       headerColumns: [...headerColumns],
     };
   }, [nativeSelection, table.columnCount, table.rows.length]);
+
+  React.useLayoutEffect(() => {
+    const snapshot = nativeSelectionRef.current;
+    if (!snapshot || (!snapshot.anchor.structural && !snapshot.focus.structural)) return;
+    const scroller = scrollerRef.current;
+    const tableElement = scroller?.querySelector('table');
+    const selection = scroller?.ownerDocument.getSelection();
+    if (
+      !tableElement
+      || !selection
+      || selection.isCollapsed
+      || selection.rangeCount === 0
+    ) return;
+
+    const structureChanged = (endpoint: NativeTableSelection['anchor']): boolean => (
+      endpoint.structural
+      && endpoint.sourceOffset !== endpoint.sourceStart
+      && (
+        endpoint.node.childNodes.length !== endpoint.childNodes.length
+        || endpoint.childNodes.some((child, index) => endpoint.node.childNodes.item(index) !== child)
+      )
+    );
+    const rebaseEndpoint = (
+      endpoint: NativeTableSelection['anchor'],
+      node: Node | null,
+      offset: number,
+    ) => {
+      if (
+        !structureChanged(endpoint)
+        || !node
+        || (node !== endpoint.node && !endpoint.node.contains(node))
+      ) return { node, offset, refresh: false };
+      const nextOffset = resolveNativeSelectionEndpointOffset(
+        tableElement,
+        endpoint,
+        table.rows.length,
+        table.columnCount,
+      );
+      if (nextOffset === null) return { node, offset, refresh: false };
+      return {
+        node: endpoint.node,
+        offset: nextOffset,
+        refresh: true,
+      };
+    };
+    const anchor = rebaseEndpoint(snapshot.anchor, selection.anchorNode, selection.anchorOffset);
+    const focus = rebaseEndpoint(snapshot.focus, selection.focusNode, selection.focusOffset);
+    if (anchor.refresh || focus.refresh) {
+      if (!anchor.node || !focus.node) return;
+      // Reapply the native points after structural children change. A live
+      // Range can keep its numeric offset while its selected source cut drifts.
+      selection.collapse(anchor.node, anchor.offset);
+      selection.extend(focus.node, focus.offset);
+    }
+
+    const refreshChildren = (endpoint: NativeTableSelection['anchor']) => (
+      endpoint.structural ? { ...endpoint, childNodes: Array.from(endpoint.node.childNodes) } : endpoint
+    );
+    nativeSelectionRef.current = {
+      ...snapshot,
+      anchor: refreshChildren(snapshot.anchor),
+      focus: refreshChildren(snapshot.focus),
+    };
+  }, [nativeSelection, table, visible]);
 
   // The cache holds the rows that are on screen and drops the rows that
   // leave the screen, so a scroll or a render does not cut a row that was
@@ -814,24 +849,23 @@ const TableView: React.FC<{
     const inViewport = row >= mountedWindow.rows.start && row < mountedWindow.rows.end
       ? visibleColumns
       : [];
-    let retained: number[] = [];
-    const rangeRow = row + 1;
-    if (nativeSelection && rangeRow >= nativeSelection.startRow && rangeRow <= nativeSelection.endRow) {
-      const start = nativeSelection.startRow === nativeSelection.endRow
-        ? nativeSelection.startColumn
-        : rangeRow === nativeSelection.startRow ? nativeSelection.startColumn : 0;
-      const end = nativeSelection.startRow === nativeSelection.endRow
-        ? nativeSelection.endColumn
-        : rangeRow === nativeSelection.endRow ? nativeSelection.endColumn : table.columnCount - 1;
-      retained = Array.from({ length: Math.max(0, end - start + 1) }, (_, index) => start + index);
+    const retained: number[] = [];
+    const sourceRow = row + 1;
+    const rowStart = sourceRow * table.columnCount;
+    if (nativeSelection) {
+      const start = Math.max(nativeSelection.start, rowStart) - rowStart;
+      const end = Math.min(nativeSelection.end, rowStart + table.columnCount) - rowStart;
+      for (let column = Math.max(0, start); column < Math.min(table.columnCount, end); column += 1) {
+        retained.push(column);
+      }
     }
     retained.push(...(selectionBuffer.bodyRows.find((buffer) => buffer.row === row)?.columns ?? []));
     return [...new Set([...inViewport, ...retained])].sort((a, b) => a - b);
   };
-  const retainedHeaderColumns = nativeSelection && nativeSelection.startRow === 0
-    ? Array.from({ length: nativeSelection.endRow === 0
-      ? nativeSelection.endColumn - nativeSelection.startColumn + 1
-      : table.columnCount - nativeSelection.startColumn }, (_, index) => nativeSelection.startColumn + index)
+  const headerStart = nativeSelection ? Math.max(0, nativeSelection.start) : 0;
+  const headerEnd = nativeSelection ? Math.min(table.columnCount, nativeSelection.end) : 0;
+  const retainedHeaderColumns = nativeSelection && headerStart < headerEnd
+    ? Array.from({ length: headerEnd - headerStart }, (_, index) => headerStart + index)
     : [];
   const columnsForHeader = [...new Set([
     ...visibleColumns,
@@ -990,7 +1024,12 @@ const TableView: React.FC<{
                   // height it asks for, and the rows would sit lower than
                   // the model says. The cells hold no text, so they add
                   // nothing to that height.
-                  <tr aria-hidden="true" style={{ height: mountedRows[0]! * layout.rowHeight }}>
+                  <tr
+                    aria-hidden="true"
+                    data-source-row-start={1}
+                    data-source-row-end={mountedRows[0]! + 1}
+                    style={{ height: mountedRows[0]! * layout.rowHeight }}
+                  >
                     {rowSpans.map((span, index) => (
                       <td key={`rows-above-${index}`} colSpan={span} />
                     ))}
@@ -1038,7 +1077,12 @@ const TableView: React.FC<{
                   return (
                     <React.Fragment key={row}>
                       {previousRow !== undefined && row > previousRow + 1 && (
-                        <tr aria-hidden="true" style={{ height: (row - previousRow - 1) * layout.rowHeight }}>
+                        <tr
+                          aria-hidden="true"
+                          data-source-row-start={previousRow + 2}
+                          data-source-row-end={row + 1}
+                          style={{ height: (row - previousRow - 1) * layout.rowHeight }}
+                        >
                           {rowSpans.map((span, spacerIndex) => <td key={spacerIndex} colSpan={span} />)}
                         </tr>
                       )}
@@ -1075,6 +1119,8 @@ const TableView: React.FC<{
                 {mountedRows.length > 0 && mountedRows[mountedRows.length - 1]! < table.rows.length - 1 && (
                   <tr
                     aria-hidden="true"
+                    data-source-row-start={mountedRows[mountedRows.length - 1]! + 2}
+                    data-source-row-end={table.rows.length + 1}
                     style={{ height: (table.rows.length - mountedRows[mountedRows.length - 1]! - 1) * layout.rowHeight }}
                   >
                     {rowSpans.map((span, index) => (
