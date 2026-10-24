@@ -870,6 +870,140 @@ describe('TableArtifact', () => {
     expect(host.querySelectorAll('td').length).toBeLessThan(2_000);
   });
 
+  test('keeps a native character range mounted while scrolling into a separate region', async () => {
+    windowInstance.document.documentElement.setAttribute('dir', 'rtl');
+    await render(buildCsv(300, 50));
+    const selectedCell = windowInstance.document.querySelector('td[title="r1c0"]');
+    const bufferedCell = windowInstance.document.querySelector('td[title="r2c0"]');
+    const nextCell = windowInstance.document.querySelector('td[title="r1c1"]');
+    if (!selectedCell?.firstChild) throw new Error('The initial cell was not mounted');
+    const selection = windowInstance.getSelection();
+    if (!selection) throw new Error('The DOM has no Selection API');
+    const range = windowInstance.document.createRange();
+    range.selectNodeContents(selectedCell);
+    const text = range.startContainer.firstChild;
+    if (!text) throw new Error('The selected cell has no text node');
+    range.setStart(text, 1);
+    range.setEnd(text, 3);
+    await act(async () => {
+      selection.removeAllRanges();
+      selection.addRange(range);
+      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
+    });
+
+    await scrollTo(ROW_HEIGHT * 200, -1200);
+
+    expect(selectedCell.isConnected).toBe(true);
+    expect(bufferedCell?.isConnected).toBe(true);
+    expect(nextCell?.isConnected).toBe(true);
+    expect(selection.toString()).toBe('1c');
+    expect(dataCells().length).toBeLessThan(2_000);
+    expect(mountedRowNames()).toContain('r201');
+
+    await act(async () => {
+      selection.removeAllRanges();
+      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
+    });
+    expect(selectedCell.isConnected).toBe(false);
+    expect(bufferedCell?.isConnected).toBe(false);
+    expect(dataCells().length).toBeLessThan(2_000);
+
+    await render('new-a,new-b');
+    expect(host.querySelectorAll('th[scope="col"]')).toHaveLength(2);
+    expect(dataCells()).toHaveLength(0);
+  });
+
+  test('keeps the next source cell mounted at a native text boundary', async () => {
+    await render(buildCsv(300, 50));
+    const selectedCell = windowInstance.document.querySelector('td[title="r1c0"]');
+    const nextCell = windowInstance.document.querySelector('td[title="r1c1"]');
+    if (!selectedCell?.firstChild || !nextCell) throw new Error('The range cells were not mounted');
+    const text = selectedCell.firstChild;
+    const selection = windowInstance.getSelection();
+    if (!selection) throw new Error('The DOM has no Selection API');
+    const range = windowInstance.document.createRange();
+    range.setStart(text, 1);
+    range.setEnd(text, text.textContent?.length ?? 0);
+    await act(async () => {
+      selection.removeAllRanges();
+      selection.addRange(range);
+      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
+    });
+
+    await scrollTo(ROW_HEIGHT * 200, -1200);
+
+    expect(selectedCell.isConnected).toBe(true);
+    expect(nextCell.isConnected).toBe(true);
+    expect(selection.toString()).toBe('1c0');
+    expect(dataCells().length).toBeLessThan(2_000);
+    expect(mountedRowNames()).toContain('r201');
+  });
+
+  test('retains the complete table text for a native range on its scroll-container boundaries', async () => {
+    await render(buildCsv(100, 50));
+    const scroller = windowInstance.document.querySelector('.overflow-auto');
+    if (!scroller) throw new Error('The table scroller is missing');
+    const selection = windowInstance.getSelection();
+    if (!selection) throw new Error('The DOM has no Selection API');
+    const range = windowInstance.document.createRange();
+    range.selectNodeContents(scroller);
+    await act(async () => {
+      selection.removeAllRanges();
+      selection.addRange(range);
+      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
+    });
+
+    expect(dataCells()).toHaveLength(99 * 50);
+    expect(host.querySelectorAll('tbody tr[aria-rowindex]')).toHaveLength(99);
+  });
+
+  test('keeps a native range whose endpoint is a table-row boundary', async () => {
+    await render(buildCsv(100, 50));
+    const startCell = windowInstance.document.querySelector('td[title="r1c0"]');
+    const endRow = windowInstance.document.querySelector('tr[aria-rowindex="22"]');
+    if (!startCell?.firstChild || !endRow) throw new Error('The native range endpoints are missing');
+    const selection = windowInstance.getSelection();
+    if (!selection) throw new Error('The DOM has no Selection API');
+    const oracleTable = windowInstance.document.createElement('table');
+    const oracleBody = oracleTable.createTBody();
+    for (let row = 0; row < 21; row += 1) {
+      const tr = oracleBody.insertRow();
+      for (let column = 0; column < 50; column += 1) {
+        tr.insertCell().textContent = `r${row + 1}c${column}`;
+      }
+    }
+    windowInstance.document.body.append(oracleTable);
+    const oracleRange = windowInstance.document.createRange();
+    const oracleRows = oracleBody.querySelectorAll('tr');
+    const firstOracleText = oracleRows.item(0)?.querySelector('td')?.firstChild;
+    const lastOracleRow = oracleRows.item(20);
+    if (!firstOracleText || !lastOracleRow) throw new Error('The full native range oracle is incomplete');
+    oracleRange.setStart(
+      firstOracleText,
+      1,
+    );
+    oracleRange.setEnd(lastOracleRow, 0);
+    selection.addRange(oracleRange);
+    const expectedText = selection.toString();
+    selection.removeAllRanges();
+    oracleTable.remove();
+
+    const range = windowInstance.document.createRange();
+    range.setStart(startCell.firstChild, 1);
+    range.setEnd(endRow, 0);
+    await act(async () => {
+      selection.removeAllRanges();
+      selection.addRange(range);
+      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
+    });
+
+    expect(host.querySelector('td[title="r20c0"]')?.isConnected).toBe(true);
+    await scrollTo(ROW_HEIGHT * 70, -1200);
+    expect(selection.toString()).toBe(expectedText);
+    expect(startCell.isConnected).toBe(true);
+    expect(host.querySelector('td[title="r20c0"]')?.isConnected).toBe(true);
+  });
+
   test('keeps the header, its scope and the title on every cell', async () => {
     await render(buildCsv(20, 4));
 
