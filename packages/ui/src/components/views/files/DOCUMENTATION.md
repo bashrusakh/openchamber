@@ -198,9 +198,14 @@ true:
 - a file whose grid is small enough is kept whole and a file whose grid is
   large enough is windowed. The decision is a property of the file, so the
   same file is kept whole in a narrow panel and in a wide one;
-- the mounted cells stay bounded by the viewport on both axes, so the cost of
-  drawing a file does not grow with the file. The files that are kept whole
-  are the exception, and the limit bounds what they cost. Two things grow
+- the mounted cells cover the viewport and the browser's current native text
+  range. The range's real text stays in connected cells, including all cells
+  between its endpoints; the viewport remains a separate region when it scrolls
+  away. A few cells beside the range endpoints remain mounted so the browser
+  can extend it natively. A range that covers the whole table mounts the whole
+  table. Selection cost can grow with the selected content, while an ordinary
+  open and unselected scroll stay bounded by the viewport. The files that are
+  kept whole are the other exception, and the limit bounds what they cost. Two things grow
   with the file anyway: the `<col>` the table holds for every column of the
   file, because the parser does not bound the number of columns, and the rows
   the cache of the cut rows holds, because a row of a file with many columns
@@ -213,11 +218,10 @@ true:
 - the column widths stay the same while scrolling, and a column is as wide as
   the text the browser lays out for its longest value, so nothing that fits
   today is cut short;
-- only the rows and the columns in view are in the document, so the browser's
-  find-in-page, a selection of the whole file and a screen reader see the
-  window and not the file. A value outside the window is in the document only
-  while the window is over it. A file that is kept whole holds every row and
-  every column of it, so those three see the file;
+- only the rows and columns in view and the text cells inside the browser's
+  active native range are in the document. Find-in-page and a screen reader
+  see the window and retained selection, while a file that is kept whole holds
+  every row and every column;
 - the table states how many rows and how many columns it has, and every
   mounted row and cell states where it sits in the file, so a screen reader
   is told the size of the table and not the size of the window;
@@ -736,6 +740,16 @@ The spacer rows carry no background of their own, so the region they cover is
 one flat colour where the preview stripes every row. They stand at least
 five rows beyond the edges of the viewport, so the region they cover is never
 on screen and the stripes of the mounted rows carry on unbroken.
+
+### Why native selection uses arbitrary range boundaries
+
+The browser may place range endpoints at cells, row boundaries or a container
+that encloses the table. The preview maps row boundaries to adjacent cells and
+detects when an enclosing range covers the table. It keeps a small set of real
+cells beside ordinary range endpoints, including source-adjacent cells in the
+same row, so native keyboard extension can land on connected text instead of
+entering a virtual spacer. A range enclosing the table retains every cell it
+selects; the viewport remains a separate region.
 
 ### Why a range of columns wider than a cell may span is carried by more than one cell
 
