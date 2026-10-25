@@ -219,7 +219,9 @@ export function projectAssistantContent(
           // OpenCode 2.1.4 records no timestamp on text content. A message
           // creation time places an unsplit message, but cannot timestamp each
           // text stretch around an inline tool or reasoning event.
-          time: hasInlineBoundary ? undefined : compact({ start: owner.created, end: owner.completed ?? (followed ? owner.created : undefined) }),
+          time: hasInlineBoundary
+            ? owner.completed !== undefined || followed ? { end: owner.completed ?? owner.created } : undefined
+            : compact({ start: owner.created, end: owner.completed ?? (followed ? owner.created : undefined) }),
         })
         break
       }

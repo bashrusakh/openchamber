@@ -4,6 +4,7 @@ import { buildRuntimeAuthHeaders } from './runtime-auth';
 import { observeRuntimeAuthResponse } from './runtime-auth-expiry';
 import { getRuntimeUrlResolver, type RuntimeUrlQuery } from './runtime-url';
 import { spaceDirectoryHeaders } from './spaces/space-route';
+import { getRuntimeKey } from './runtime-switch';
 
 export interface RuntimeFetchOptions extends RequestInit {
   query?: RuntimeUrlQuery;
@@ -13,6 +14,8 @@ export interface RuntimeFetchOptions extends RequestInit {
    * space; see `withSpaceDirectory`.
    */
   directory?: string | null;
+  /** Runtime ownership captured by an SDK client before its request was queued. */
+  expectedRuntimeKey?: string;
 }
 
 const shouldResolveApiPath = (input: string): boolean => {
@@ -317,7 +320,7 @@ const coalesceReadKey = (method: string, url: string, hasSignal: boolean, header
 };
 
 export const runtimeFetch = async (rawInput: string | URL | Request, init: RuntimeFetchOptions = {}): Promise<Response> => {
-  const { query, directory, ...ownInit } = init;
+  const { query, directory, expectedRuntimeKey, ...ownInit } = init;
   // Before either transport: the relay and the network see the same headers.
   const input = rawInput;
   const requestInit = withSpaceDirectory(input, ownInit, directory);
@@ -371,6 +374,10 @@ export const runtimeFetch = async (rawInput: string | URL | Request, init: Runti
   // A Request always carries a (possibly default) signal; treat any Request, or
   // an explicit init.signal, as "has signal" and skip coalescing for safety.
   const hasSignal = requestInit.signal != null || input instanceof Request;
+
+  if (expectedRuntimeKey && expectedRuntimeKey !== getRuntimeKey()) {
+    throw new Error('OpenCode request was cancelled because the runtime changed.');
+  }
 
   const key = coalesceReadKey(method, url, hasSignal, scopeHeaders);
   if (!key) return doFetch();

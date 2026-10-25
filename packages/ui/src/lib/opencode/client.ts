@@ -350,10 +350,11 @@ const requestMethodOf = (input: string | URL | Request, init?: RequestInit): str
 
 export const createRuntimeOpencodeClient = (config: RuntimeOpencodeClientConfig): OpenCodeClient => {
   const requestTimeoutMs = config.requestTimeoutMs ?? OPENCODE_REQUEST_TIMEOUT_MS
+  const runtimeKey = getRuntimeKey()
   const send = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = requestUrlOf(input)
     if (isEventStreamUrl(url) || requestMethodOf(input, init) === "POST") {
-      return validateRuntimeResponse(await runtimeFetch(input, init))
+      return validateRuntimeResponse(await runtimeFetch(input, { ...init, expectedRuntimeKey: runtimeKey }))
     }
     const timeout = createTimeoutSignal(requestTimeoutMs)
     const callerSignal = init?.signal !== undefined
@@ -396,7 +397,7 @@ export const createRuntimeOpencodeClient = (config: RuntimeOpencodeClientConfig)
     }
     let responseHasBody = false
     try {
-      const response = await runtimeFetch(input, { ...init, signal })
+      const response = await runtimeFetch(input, { ...init, signal, expectedRuntimeKey: runtimeKey })
       validateRuntimeResponse(response)
       responseHasBody = response.body !== null
       return response

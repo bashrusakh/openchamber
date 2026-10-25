@@ -272,20 +272,20 @@ export function usePrefetchSessionMessages() {
 
 export function useSessionMessageRecordsForExport() {
   const { childStores, messageLoader, runtimeKey } = useSyncRuntime()
-  const touch = useSessionCacheTouch()
 
   return useCallback(async ({ directory, sessionID }: { directory: string; sessionID: string }) => {
     if (getRuntimeKey() !== runtimeKey) return null
     const store = childStores.ensureChild(directory, { bootstrap: false })
-    touch(sessionID, directory)
     const target = { directory, sessionID }
-    const release = messageLoader.retainSessionHistory(target)
-    try {
-      await messageLoader.loadComplete(target)
-      if (getRuntimeKey() !== runtimeKey) return null
-      return buildSessionMessageRecordsSnapshot(store.getState(), sessionID).list
-    } finally {
-      release()
-    }
-  }, [childStores, messageLoader, runtimeKey, touch])
+    const records = await messageLoader.readCompleteSnapshot(target)
+    if (getRuntimeKey() !== runtimeKey) return null
+    const current = store.getState()
+    const parts = { ...current.part }
+    for (const record of records) parts[record.info.id] = record.parts
+    return buildSessionMessageRecordsSnapshot({
+      ...current,
+      message: { ...current.message, [sessionID]: records.map((record) => record.info) },
+      part: parts,
+    }, sessionID).list
+  }, [childStores, messageLoader, runtimeKey])
 }

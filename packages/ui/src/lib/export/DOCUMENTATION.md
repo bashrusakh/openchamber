@@ -153,13 +153,13 @@ cannot name them differently.
   identity, output, failure and attachments belong to one entry. Search and
   filters hide that entry's rendered content together, while a matching child
   message can keep the containing block visible.
-- **Export hydrates page shells through the message adapter.** Ordinary
-  transcript pages keep completed tool results shelled for collapsed rows.
-  Complete-history readers resolve those marked records with the single-message
-  SDK operation, which returns the recorded content and attachments. Those
-  reads use the existing session-page network lane, which caps concurrent
-  requests at two. A failed hydration fails that session's export and cannot
-  produce a complete result.
+- **Export reads a private complete-history snapshot.** It requests unshelled
+  message pages through the OpenCode adapter, follows the server cursor, and
+  includes the session's pending inbox records. The pages and parts stay in the
+  export snapshot; they never replace live chat records. Each page enters the
+  shared session-page lane separately, so interactive history can run between
+  export pages. A failed page fails that session's read and cannot produce an
+  empty or complete result.
 - **A partial export says so.** Everything the export could not establish —
   a child that would not load, a call that named no child, a session that was
   resumed, a part the model does not cover — lands in `findings`, and the
@@ -567,14 +567,17 @@ most of what the projection spent: at 3000 tool calls the projection took
 about 200 ms, and the errors for the fields that were not there were the bulk
 of it.
 
-### Why complete history resolves shelled tool results
+### Why export reads a private complete-history snapshot
 
-The runtime shells completed tool results out of message pages because a
-collapsed transcript row does not use those bytes. A detailed export does use
-them. The complete-history reader follows each shell marker through the
-OpenCode message adapter's single-message read, preserving normal page loading
-and transport behavior while making the export complete. The existing session
-page network lane caps the per-record reads at two concurrent requests, so a
-long transcript cannot occupy the browser connection pool with an unbounded
-fan-out. The rejected alternative was disabling shells for every transcript
-read, which would send large hidden results on ordinary navigation.
+The runtime can shell completed tool results out of pages because a collapsed
+transcript row does not use those bytes. A detailed export does. The export
+requests the unshelled records through the same OpenCode message adapter and
+reads one page at a time through the shared network lane. The rejected
+alternative was hydrating every shell while writing those results into the live
+chat cache: an export could then replace newer parts from a concurrent stream,
+and many per-message reads could occupy the lane ahead of navigation.
+
+The snapshot is complete according to the page cursor and inbox response the
+runtime returned during that read. It does not claim an atomic server snapshot
+across concurrent live mutations. Runtime identity, SDK epoch, directory and
+session remain bound to the read; a runtime change stops later page admission.

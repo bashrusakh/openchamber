@@ -63,7 +63,8 @@ function getUpdatedDeltaFields(previous: Part, next: Part): string[] {
 function withStreamedStart(previous: Part, next: Part): Part {
   if (next.type !== "text" && next.type !== "reasoning") return next
   if (previous.type !== next.type || !previous.time || !next.time) return next
-  if (next.time.end === undefined || previous.time.start >= next.time.start) return next
+  if (next.time.end === undefined || previous.time.start === undefined || next.time.start === undefined
+    || previous.time.start >= next.time.start) return next
   return { ...next, time: { ...next.time, start: previous.time.start } }
 }
 

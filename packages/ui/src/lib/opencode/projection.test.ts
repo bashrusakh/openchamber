@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { ConfigEntry, SessionInfo, SessionMessageAssistant, SessionMessageInfo } from "@opencode/client"
+import { resolveAssistantDisplayText, resolveAssistantTextStreaming } from "@/components/chat/message/parts/assistantTextVisibility"
 
 import { partIds, type ConfigDocument } from "./model"
 import {
@@ -136,9 +137,32 @@ describe("projectMessage (assistant)", () => {
       [{ type: "text", text: "Which one?" }, toolItem, { type: "text", text: "still streaming" }],
       { sessionID: "s", messageID: "m", created: 1 },
     )
-    expect(parts[0].type === "text" && parts[0].time).toBeUndefined()
+    expect(parts[0].type === "text" && parts[0].time).toEqual({ end: 1 })
     const trailing = parts[parts.length - 1]
     expect(trailing.type === "text" && trailing.time).toBeUndefined()
+  })
+
+  test("wire-projected inline text keeps completion without inventing a start", () => {
+    const toolItem = assistant.content.find((item) => item.type === "tool")
+    if (!toolItem) throw new Error("fixture has a tool item")
+    const projected = projectMessage({
+      ...assistant,
+      id: "m",
+      time: { created: 1, completed: 9 },
+      content: [{ type: "text", text: "Which one?" }, toolItem],
+    }, "s")
+    const textPart = projected.parts.find((part) => part.type === "text")
+    if (!textPart || textPart.type !== "text") throw new Error("expected projected text part")
+    expect(textPart.time).toEqual({ end: 9 })
+    const isFinalized = Boolean(textPart.time?.end)
+    const isStreaming = resolveAssistantTextStreaming({ streamPhase: "streaming", isFinalized })
+    expect(isFinalized).toBe(true)
+    expect(isStreaming).toBe(false)
+    expect(resolveAssistantDisplayText({
+      textContent: "Which one?",
+      throttledTextContent: "",
+      isStreaming,
+    })).toBe("Which one?")
   })
 })
 

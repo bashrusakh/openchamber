@@ -1,11 +1,10 @@
 import type { Message, Part } from "@/lib/opencode/model"
 import type { MessagePage, PendingInboxMessage } from "@/lib/opencode/client"
-import { toolContentShellChars } from "@/lib/opencode/toolContentShells"
 import { olderMessagesCursor } from "@/lib/opencode/messageCursor"
 import type { ChildStoreManager, DirectoryStore } from "./child-store"
 import { retry } from "./retry"
 import { mergeOptimisticPage, type OptimisticItem } from "./optimistic"
-import { findMessageIndex, insertMessageChronologically, sortMessagesChronologically } from "./message-ordering"
+import { compareMessagesChronologically, findMessageIndex, insertMessageChronologically, sortMessagesChronologically } from "./message-ordering"
 import { getSessionMaterializationStatus, materializeSessionSnapshots } from "./materialization"
 import {
   clearDirectorySessionPrefetch,
@@ -22,6 +21,7 @@ import { dropSessionCaches } from "./session-cache"
 import { SessionCacheRetention } from "./session-cache-retention"
 import { SESSION_CACHE_LIMIT } from "./types"
 import { runSessionListNetworkTask } from "@/lib/background-network"
+import { getRuntimeKey } from "@/lib/runtime-switch"
 
 // One agent turn can span well over a hundred tool steps, so the first
 // request is sized to hold a long last turn without a follow-up read.
@@ -120,7 +120,6 @@ export type SessionMessagePageSource = {
     options?: { limit?: number; cursor?: string; order?: "asc" | "desc"; partShells?: boolean },
     directory?: string | null,
   ): Promise<MessagePage>
-  getSessionMessage?(id: string, messageID: string, directory?: string | null): Promise<{ info: Message; parts: Part[] }>
   /**
    * Pending inbox items for one session, when the runtime can read them. A
    * cold load uses this to repaint messages the live `session.inbox.*` events
@@ -657,7 +656,6 @@ export class SessionMessageLoader {
         const snapshot = this.getSnapshot(normalized)
         if (snapshot.status === "error") throw snapshot.error ?? new Error("Session history could not be loaded")
         if (snapshot.complete) {
-          await this.hydrateContentShells(normalized)
           return
         }
         if (!snapshot.cursor) throw new Error("Session history coverage is unresolved")
@@ -673,38 +671,55 @@ export class SessionMessageLoader {
     }
   }
 
-  private async hydrateContentShells(target: SessionMessageTarget): Promise<void> {
-    const store = this.childStores.ensureChild(target.directory, { bootstrap: false })
-    const state = store.getState()
-    const messages = state.message[target.sessionID] ?? []
-    const parts = state.part
-    const messageIDs = messages
-      .filter((message) => (parts[message.id] ?? []).some((part) => toolContentShellChars(part) !== null))
-      .map((message) => message.id)
-    if (messageIDs.length === 0) return
+  /** Reads complete export records into a private snapshot without publishing history to the live directory store. */
+  async readCompleteSnapshot(target: SessionMessageTarget): Promise<Array<{ info: Message; parts: Part[] }>> {
+    const normalized = this.normalizeTarget(target)
+    if (!normalized || this.disposed) throw new Error("Session message loader is unavailable")
     const sdk = this.sdk
-    const getSessionMessage = sdk.getSessionMessage
-    if (!getSessionMessage) throw new Error("Complete session history source cannot hydrate tool results")
     const sdkEpoch = this.sdkEpoch
-    const entry = this.getEntry(target)
-    const generation = entry.snapshot.generation
+    const runtimeKey = this.runtimeKey
+    const isCurrent = () => !this.disposed && this.sdk === sdk && this.sdkEpoch === sdkEpoch
+      && this.runtimeKey === runtimeKey && getRuntimeKey() === runtimeKey
+    const readPage = (cursor?: string) => retry(() => runSessionListNetworkTask(() => {
+      if (!isCurrent()) throw new Error("Session history changed while export was loading")
+      return sdk.getSessionMessages(normalized.sessionID, {
+        limit: HISTORY_MESSAGE_PAGE_SIZE,
+        cursor,
+        partShells: false,
+      }, normalized.directory)
+    }))
+    const records = new Map<string, { info: Message; parts: Part[] }>()
+    const visited = new Set<string>()
+    let cursor: string | undefined
+    do {
+      const page = await readPage(cursor)
+      if (!isCurrent()) throw new Error("Session history changed while export was loading")
+      for (const record of page.items) {
+        if (record.info?.id) records.set(record.info.id, { info: record.info, parts: filterIdentifiedParts(record.parts ?? []) })
+      }
+      cursor = page.cursor.next
+      if (cursor && visited.has(cursor)) throw new Error("Session history pagination made no progress")
+      if (cursor) visited.add(cursor)
+    } while (cursor)
 
-    const hydrated = await Promise.all(messageIDs.map((messageID) => runSessionListNetworkTask(
-      () => getSessionMessage.call(sdk, target.sessionID, messageID, target.directory),
-    )))
-    if (this.disposed || this.sdk !== sdk || this.sdkEpoch !== sdkEpoch || entry.snapshot.generation !== generation) {
-      throw new Error("Session history changed while tool results were loading")
+    if (sdk.getSessionInbox) {
+      const inbox = await runSessionListNetworkTask(() => {
+        if (!isCurrent()) throw new Error("Session history changed while export was loading")
+        return sdk.getSessionInbox?.(normalized.sessionID, normalized.directory) ?? Promise.resolve([])
+      })
+      if (!isCurrent()) throw new Error("Session history changed while export was loading")
+      for (const item of inbox) {
+        if (!records.has(item.info.id)) records.set(item.info.id, { info: item.info, parts: item.parts ?? [] })
+      }
     }
-    const current = store.getState()
-    const nextParts = { ...current.part }
-    let changed = false
-    for (const record of hydrated) {
-      const currentParts = nextParts[record.info.id] ?? []
-      if (!currentParts.some((part) => toolContentShellChars(part) !== null)) continue
-      nextParts[record.info.id] = filterIdentifiedParts(record.parts)
-      changed = true
+    const existingEntry = this.entries.get(this.keyFor(normalized))
+    const liveStore = this.childStores.getChild(normalized.directory)?.getState()
+    for (const messageID of existingEntry?.inboxSeededIDs ?? []) {
+      if (records.has(messageID)) continue
+      const info = liveStore?.message[normalized.sessionID]?.find((message) => message.id === messageID)
+      if (info) records.set(messageID, { info, parts: liveStore?.part[messageID] ?? [] })
     }
-    if (changed) store.setState({ part: nextParts })
+    return [...records.values()].sort((left, right) => compareMessagesChronologically(left.info, right.info))
   }
 
   refreshTail(target: SessionMessageTarget, limit: number): Promise<void> {
@@ -1170,12 +1185,12 @@ export class SessionMessageLoader {
     let attempts = 0
     let recordCount = 0
     try {
-      const page = await retry(async () => {
+      const page = await retry(() => runSessionListNetworkTask(async () => {
         attempts += 1
         // Finished tool results arrive as shells; a row that shows one
         // completes its message (`tool-content-completion.ts`).
         return this.sdk.getSessionMessages(target.sessionID, { limit, cursor, partShells: true }, target.directory)
-      })
+      }))
       const records = page.items.filter((record) => Boolean(record?.info?.id))
       recordCount = records.length
       if (performance) performance.recordCount += recordCount

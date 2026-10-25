@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test"
 import type { MessagePage } from "@/lib/opencode/client"
 import { projectInboxMessage, type InboxMessageItem } from "@/lib/opencode/projection"
 import type { Message, Part, Session, ToolPart, UserMessage } from "@/lib/opencode/model"
+import { getRuntimeKey } from "@/lib/runtime-switch"
 import { ChildStoreManager } from "./child-store"
 import { SessionMessageLoader, type SessionMessagePageSource } from "./session-message-loader"
 import { olderMessagesCursor } from "@/lib/opencode/messageCursor"
+import { getBackgroundNetworkState, runSessionListNetworkTask } from "@/lib/background-network"
 import {
   createFirstVisibleSessionPerformanceTracker,
   startSessionLoadPerformanceEvent,
@@ -64,6 +66,148 @@ const createLoader = (
 }
 
 describe("SessionMessageLoader", () => {
+  test("interactive history is admitted between pages of a 300-record export", async () => {
+    const heldA = deferred<void>()
+    const heldB = deferred<void>()
+    const firstExportPage = deferred<MessagePage>()
+    const calls: string[] = []
+    let active = 0
+    let maximumActive = 0
+    const childStores = new ChildStoreManager()
+    const sdk: SessionMessagePageSource = {
+      getSessionMessages: async (sessionID, options) => {
+        active += 1
+        maximumActive = Math.max(maximumActive, active)
+        calls.push(`${sessionID}:${options?.cursor ?? "first"}`)
+        try {
+          if (sessionID === "export" && !options?.cursor) return await firstExportPage.promise
+          if (sessionID === "navigation") return response([createRecord(sessionID)])
+          const page = options?.cursor === "cursor-1" ? 1 : options?.cursor === "cursor-2" ? 2 : 0
+          const items = Array.from({ length: 100 }, (_, index) => createRecord(sessionID, `${page}-${index}`, page * 100 + index))
+          return response(items, page < 2 ? `cursor-${page + 1}` : undefined)
+        } finally {
+          active -= 1
+        }
+      },
+    }
+    const loader = new SessionMessageLoader(childStores, { sdk, runtimeKey: getRuntimeKey() })
+    const occupiedA = runSessionListNetworkTask(() => heldA.promise)
+    const occupiedB = runSessionListNetworkTask(() => heldB.promise)
+    expect(getBackgroundNetworkState().active + getBackgroundNetworkState().sessionLists.active).toBe(2)
+    const exporting = loader.readCompleteSnapshot({ directory: "/repo", sessionID: "export" })
+    const navigating = loader.ensure({ directory: "/repo", sessionID: "navigation" })
+    heldA.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(calls).toEqual(["export:first"])
+    expect(getBackgroundNetworkState().active + getBackgroundNetworkState().sessionLists.active).toBe(2)
+    firstExportPage.resolve(response(Array.from({ length: 100 }, (_, index) => createRecord("export", `0-${index}`, index)), "cursor-1"))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(calls).toEqual(["export:first", "navigation:first"])
+    expect(maximumActive).toBeLessThanOrEqual(1)
+    expect(getBackgroundNetworkState().active + getBackgroundNetworkState().sessionLists.active).toBe(2)
+    heldB.resolve()
+    await Promise.all([occupiedA, occupiedB, navigating])
+    expect((await exporting)).toHaveLength(300)
+    expect(calls.indexOf("navigation:first")).toBeLessThan(calls.indexOf("export:cursor-1"))
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("reads export pages and pending inbox into a private snapshot while live messages change", async () => {
+    const childStores = new ChildStoreManager()
+    const target = { directory: "/repo", sessionID: "session-a" }
+    const liveBefore = createRecord(target.sessionID, "live-before", 1, "assistant")
+    const liveDuring = createRecord(target.sessionID, "live-during", 5)
+    const sourceA = createRecord(target.sessionID, "source-a", 2)
+    const sourceB = createRecord(target.sessionID, "source-b", 3)
+    const liveToolShell: ToolPart = {
+      id: "live-call", sessionID: target.sessionID, messageID: "live-before", type: "tool", tool: "read",
+      callID: "live-call", executed: true,
+      state: { status: "completed", input: {}, output: "", time: { start: 1, end: 2 }, metadata: { openchamberContentShell: { chars: 7 } } },
+    }
+    const liveToolFinal: ToolPart = {
+      ...liveToolShell,
+      state: { status: "completed", input: {}, output: "settled live result", time: { start: 1, end: 3 } },
+    }
+    const inboxInfo: UserMessage = { ...createRecord(target.sessionID, "pending", 4).info, role: "user" }
+    let pageCalls = 0
+    const store = childStores.ensureChild(target.directory, { bootstrap: false })
+    store.setState({ message: { [target.sessionID]: [liveBefore.info] }, part: { [liveBefore.info.id]: [liveToolShell] } })
+    const sdk: SessionMessagePageSource = {
+      getSessionMessages: async (_sessionID, options) => {
+        expect(options?.partShells).toBe(false)
+        pageCalls += 1
+        if (pageCalls === 1) {
+          store.setState({ message: { [target.sessionID]: [liveBefore.info, liveDuring.info] }, part: { [liveBefore.info.id]: [liveToolFinal], [liveDuring.info.id]: liveDuring.parts } })
+          return response([sourceB], "older")
+        }
+        return response([sourceA])
+      },
+      getSessionInbox: async () => [{ info: inboxInfo, parts: [] }],
+    }
+    const loader = new SessionMessageLoader(childStores, { sdk, runtimeKey: getRuntimeKey() })
+
+    const records = await loader.readCompleteSnapshot(target)
+
+    expect(records.map((record) => record.info.id)).toEqual(["source-a", "source-b", "pending"])
+    expect(store.getState().message[target.sessionID]?.map((message) => message.id)).toEqual(["live-before", "live-during"])
+    expect(store.getState().part["live-before"]?.[0]).toMatchObject({ state: { output: "settled live result" } })
+    expect(loader.getSnapshot(target)).toMatchObject({ resolved: false, complete: false })
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("keeps previously recorded inbox content when it leaves the pending inbox", async () => {
+    const childStores = new ChildStoreManager()
+    const target = { directory: "/repo", sessionID: "session-a" }
+    const pending = createRecord(target.sessionID, "pending", 2)
+    const source = createRecord(target.sessionID, "source", 1)
+    let inboxReads = 0
+    const loader = new SessionMessageLoader(childStores, {
+      sdk: {
+        getSessionMessages: async () => response([source]),
+        getSessionInbox: async () => {
+          inboxReads += 1
+          return inboxReads === 1 ? [{ info: { ...pending.info, role: "user" }, parts: pending.parts }] : []
+        },
+      },
+      runtimeKey: getRuntimeKey(),
+    })
+
+    await loader.ensure(target)
+    const records = await loader.readCompleteSnapshot(target)
+
+    expect(records.map((record) => record.info.id)).toEqual(["source", "pending"])
+    expect(records.find((record) => record.info.id === "pending")?.parts).toEqual(pending.parts)
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("rejects a private export snapshot when a later history page fails", async () => {
+    let calls = 0
+    const childStores = new ChildStoreManager()
+    const loader = new SessionMessageLoader(childStores, {
+      sdk: {
+        getSessionMessages: async (sessionID, options) => {
+          calls += 1
+          return options?.cursor ? failure(400, "later page unavailable")
+            : response([createRecord(sessionID)], "older")
+        },
+      },
+      runtimeKey: getRuntimeKey(),
+    })
+
+    await expect(loader.readCompleteSnapshot({ directory: "/repo", sessionID: "session-a" }))
+      .rejects.toThrow("session.messages failed (400): later page unavailable")
+
+    expect(calls).toBe(2)
+    expect(loader.getSnapshot({ directory: "/repo", sessionID: "session-a" })).toMatchObject({ resolved: false, complete: false })
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
   test("opens a confirmed new session without fetching history", async () => {
     let calls = 0
     const { childStores, loader } = createLoader(async () => {
@@ -226,7 +370,7 @@ describe("SessionMessageLoader", () => {
     childStores.disposeAll()
   })
 
-  test("complete history reads replace server-shell records with the full message from the same directory", async () => {
+  test("export snapshots read complete records without replacing live server shells", async () => {
     const target = { directory: "/repo/child", sessionID: "session-a" }
     const shellPart: ToolPart = {
       id: "call_1", sessionID: target.sessionID, messageID: "assistant_1", type: "tool", tool: "read",
@@ -243,21 +387,22 @@ describe("SessionMessageLoader", () => {
     const shell = { ...createRecord(target.sessionID, "assistant_1", 2, "assistant"), parts: [shellPart] }
     const { childStores } = createLoader(async () => response([shell]))
     const sdk: SessionMessagePageSource = {
-      getSessionMessages: async () => response([shell]),
-      getSessionMessage: async (sessionID, messageID, directory) => {
-        expect([sessionID, messageID, directory]).toEqual([target.sessionID, "assistant_1", target.directory])
-        return {
-          info: shell.info,
-          parts: [fullPart],
-        }
-      },
+      getSessionMessages: async (_sessionID, options) => response([options?.partShells ? shell : { ...shell, parts: [fullPart] }]),
     }
-    const loader = new SessionMessageLoader(childStores, { sdk, runtimeKey: "runtime-a" })
+    const loader = new SessionMessageLoader(childStores, { sdk, runtimeKey: getRuntimeKey() })
 
     await loader.loadComplete(target)
 
-    expect(childStores.getChild(target.directory)?.getState().part.assistant_1?.[0]).toMatchObject({
+    const store = childStores.getChild(target.directory)
+    expect(store?.getState().part.assistant_1?.[0]).toMatchObject({
+      state: { output: "", metadata: { openchamberContentShell: { chars: 12 } } },
+    })
+    const exportRecords = await loader.readCompleteSnapshot(target)
+    expect(exportRecords[0].parts[0]).toMatchObject({
       state: { status: "completed", output: "full result", attachments: [{ filename: "a.txt", mime: "text/plain" }] },
+    })
+    expect(store?.getState().part.assistant_1?.[0]).toMatchObject({
+      state: { output: "", metadata: { openchamberContentShell: { chars: 12 } } },
     })
     // Ordinary navigation keeps the server's shell and does not hydrate it.
     const ordinary = { directory: "/repo/ordinary", sessionID: "session-b" }

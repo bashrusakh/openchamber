@@ -318,8 +318,8 @@ type PartBase = {
 export type TextPart = PartBase & {
   type: "text"
   text: string
-  /** Set while the text is still streaming; `end` lands with the final text. */
-  time?: { start: number; end?: number }
+  /** The recorded end can settle text around an inline event without a recorded start. */
+  time?: { start?: number; end?: number }
   metadata?: Metadata
 }
 

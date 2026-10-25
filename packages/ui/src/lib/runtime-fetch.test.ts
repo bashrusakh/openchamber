@@ -3,6 +3,7 @@ import { createRuntimeOpencodeClient } from '@/lib/opencode/client';
 import { addRuntimeProxyHeaders, buildRuntimeFetchUrl, isLatin1Safe, runtimeFetch, sanitizeHeadersForBrowser } from './runtime-fetch';
 import { clearRuntimeAuthCredentialProvider, setRuntimeBearerToken } from './runtime-auth';
 import { configureRuntimeUrlResolver, getRuntimeUrlResolver, setRuntimeUrlResolver } from './runtime-url';
+import { getRuntimeKey, getRuntimeApiBaseUrl, switchRuntimeEndpoint } from './runtime-switch';
 
 const originalFetch = globalThis.fetch;
 
@@ -62,6 +63,29 @@ describe('addRuntimeProxyHeaders', () => {
 });
 
 describe('runtimeFetch transport contract', () => {
+  test('rejects a queued SDK read after runtime ownership changes before transport admission', async () => {
+    const previousUrl = getRuntimeApiBaseUrl();
+    const previousKey = getRuntimeKey();
+    const requests: string[] = [];
+    try {
+      const expectedRuntimeKey = getRuntimeKey();
+      const client = createRuntimeOpencodeClient({ baseUrl: 'https://initial-runtime.example/api' });
+      switchRuntimeEndpoint({ apiBaseUrl: 'https://other-runtime.example', runtimeKey: 'other-runtime' });
+      globalThis.fetch = async (input) => {
+        requests.push(input instanceof Request ? input.url : String(input));
+        return new Response(null, { status: 204 });
+      };
+
+      await expect(client.session.list({ limit: 1 })).rejects.toThrow('runtime changed');
+      await expect(runtimeFetch('/api/session', { expectedRuntimeKey })).rejects.toThrow('runtime changed');
+
+      expect(requests.some((url) => url.includes('/api/session'))).toBe(false);
+    } finally {
+      switchRuntimeEndpoint({ apiBaseUrl: previousUrl, runtimeKey: previousKey });
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test('adds the ngrok bypass header to runtime requests', async () => {
     const previous = getRuntimeUrlResolver();
     let capturedHeaders = new Headers();

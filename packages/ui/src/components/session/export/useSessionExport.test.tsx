@@ -14,6 +14,7 @@ import { Window } from 'happy-dom';
 import { z } from 'zod';
 import type { SessionMessageAssistant } from '@opencode/client';
 import type { Session } from '@/lib/opencode/model';
+import { getRuntimeKey } from '@/lib/runtime-switch';
 import type { ExportFormat, SessionMessageRecord } from '@/lib/exportSession';
 
 const browser = new Window({ url: 'http://localhost/' });
@@ -363,6 +364,10 @@ test('the user export action serializes real shelled history through the SDK in 
     if (url.pathname.endsWith('/message')) {
       if (sessionID === 'ses_child' && childPageFailure) return new Response(JSON.stringify({ message: 'child history unavailable' }), { status: 503, headers: { 'content-type': 'application/json' } });
       const wireRecords = sessionID === 'ses_root' ? rootRecordsWire : childRecordsWire;
+      if (!request.headers.has('x-openchamber-part-shells')) {
+        if (sessionID === 'ses_root' && rootMessageFailure) return new Response(JSON.stringify({ message: 'full root record unavailable' }), { status: 400, headers: { 'content-type': 'application/json' } });
+        return new Response(JSON.stringify({ data: wireRecords.map((record) => fullRecords.get(record.id) ?? record), cursor: {} }), { headers: { 'content-type': 'application/json' } });
+      }
       return new Response(JSON.stringify({ data: wireRecords, cursor: {} }), { headers: { 'content-type': 'application/json' } });
     }
     const messageID = url.pathname.split('/').at(-1) ?? '';
@@ -379,16 +384,13 @@ test('the user export action serializes real shelled history through the SDK in 
     session('ses_child', { title: 'Child', parentID: 'ses_root', directory: '/other' }),
   ]);
   const childStores = new ChildStoreManager();
-  const loader = new SessionMessageLoader(childStores, { sdk: opencodeClient, runtimeKey: 'test-runtime' });
+  const loader = new SessionMessageLoader(childStores, { sdk: opencodeClient, runtimeKey: getRuntimeKey() });
   loadRecordsOverride = async ({ directory, sessionID }) => {
     try {
-      await loader.loadComplete({ directory, sessionID });
+      return await loader.readCompleteSnapshot({ directory, sessionID });
     } finally {
       if (rootMessageFailure && sessionID === 'ses_root') finishRootFailureRead();
     }
-    const state = childStores.getChild(directory)?.getState();
-    if (!state) return null;
-    return (state.message[sessionID] ?? []).map((info) => ({ info, parts: state.part[info.id] ?? [] }));
   };
 
   try {
@@ -427,6 +429,9 @@ test('the user export action serializes real shelled history through the SDK in 
     }
     const rootParts = exported.source.ses_root.records.flatMap((record) => record.parts);
     const childParts = exported.source.ses_child.records.flatMap((record) => record.parts);
+    const jsonDocument = JSON.stringify(exported);
+    expect(jsonDocument.indexOf('root before')).toBeLessThan(jsonDocument.indexOf('complete root output'));
+    expect(jsonDocument.indexOf('complete root output')).toBeLessThan(jsonDocument.indexOf('root after'));
     expect(exported.events.filter((event) => event.origin.messageID === 'root_answer').map((event) => event.kind)).toEqual(['message', 'tool', 'message']);
     expect(exported.events.filter((event) => event.origin.messageID === 'child_answer').map((event) => event.kind)).toEqual(['message', 'tool', 'message']);
     expect(rootParts.some((part) => part.type === 'tool' && part.state?.output === 'complete root output'
@@ -434,13 +439,14 @@ test('the user export action serializes real shelled history through the SDK in 
     expect(childParts.some((part) => part.type === 'tool' && part.state?.output === 'complete child output')).toBe(true);
     expect(partial.findings.some((finding) => finding.kind === 'missing-session')).toBe(true);
     expect(partial.source.ses_child).toBeUndefined();
-    expect(requests.some((request) => request.url.includes('/api/session/ses_root/message/root_answer'))).toBe(true);
+    const rootHistoryRequests = requests.filter((request) => new URL(request.url).pathname.endsWith('/api/session/ses_root/message'));
+    expect(rootHistoryRequests.length > 0).toBe(true);
+    expect(rootHistoryRequests.every((request) => !request.headers.has('x-openchamber-part-shells'))).toBe(true);
     expect(savedDocumentCount).toBe(savesBeforeRootFailure);
     expect(recordReads.some((read) => read.directory === '/other' && read.sessionID === 'ses_child')).toBe(true);
     expect(requests.some((request) => request.headers.get('x-opencode-part-shells') === 'v1')).toBe(false);
-    expect(requests.some((request) => request.headers.get('x-openchamber-part-shells') === 'v1')).toBe(true);
-    expect(requests.some((request) => request.url.includes('/api/session/ses_root/message/root_answer'))).toBe(true);
-    expect(requests.some((request) => request.url.includes('/api/session/ses_child/message/child_answer'))).toBe(true);
+    expect(requests.some((request) => new URL(request.url).pathname.includes('/message/root_answer'))).toBe(false);
+    expect(requests.some((request) => new URL(request.url).pathname.includes('/message/child_answer'))).toBe(false);
   } finally {
     childPageFailure = false;
     rootMessageFailure = false;

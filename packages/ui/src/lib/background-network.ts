@@ -29,15 +29,20 @@ const sessionLists: NetworkLane = { active: 0, waiters: [], activeSessionWaiters
 const TOTAL_LIMIT = 3
 const LANE_LIMIT = 2
 
+const nextLane = (): NetworkLane | null => {
+  if (background.active + sessionLists.active >= TOTAL_LIMIT) return null
+  // Background reads never occupy the reserved list slot. Either lane may
+  // use a second slot, without serializing independent background queries.
+  return sessionLists.active < LANE_LIMIT && sessionLists.waiters.length > 0
+    ? sessionLists
+    : background.active < LANE_LIMIT && (background.activeSessionWaiters.length > 0 || background.waiters.length > 0)
+      ? background
+      : null
+}
+
 const pump = () => {
-  while (background.active + sessionLists.active < TOTAL_LIMIT) {
-    // Background reads never occupy the reserved list slot. Either lane may
-    // use a second slot, without serializing independent background queries.
-    const lane = sessionLists.active < LANE_LIMIT && sessionLists.waiters.length > 0
-      ? sessionLists
-      : background.active < LANE_LIMIT && (background.activeSessionWaiters.length > 0 || background.waiters.length > 0)
-        ? background
-        : null
+  while (true) {
+    const lane = nextLane()
     if (!lane) return
     const next = lane.activeSessionWaiters.shift() ?? lane.waiters.shift()
     if (!next) return
@@ -47,17 +52,24 @@ const pump = () => {
 }
 
 async function run<T>(lane: NetworkLane, task: () => Promise<T>, priority: "normal" | "active-session"): Promise<T> {
-  await new Promise<void>((resolve) => {
-    if (priority === "active-session") lane.activeSessionWaiters.push(resolve)
-    else lane.waiters.push(resolve)
+  const execute = async (): Promise<T> => {
+    try {
+      return await task()
+    } finally {
+      lane.active -= 1
+      pump()
+    }
+  }
+  if (nextLane() === lane) {
+    lane.active += 1
+    return execute()
+  }
+  return new Promise<T>((resolve, reject) => {
+    const start = () => { void execute().then(resolve, reject) }
+    if (priority === "active-session") lane.activeSessionWaiters.push(start)
+    else lane.waiters.push(start)
     pump()
   })
-  try {
-    return await task()
-  } finally {
-    lane.active -= 1
-    pump()
-  }
 }
 
 export const runBackgroundNetworkTask = <T>(task: () => Promise<T>, priority: "normal" | "active-session" = "normal") => run(background, task, priority)
