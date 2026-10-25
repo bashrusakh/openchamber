@@ -191,6 +191,7 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
   }
 
   const consumedDispatchEvents = new Set<string>();
+  const activityCalls = new WeakMap<SubagentBlock, ExportToolCall[]>();
 
   /**
    * The block for one child session: its own events in order, with its own
@@ -227,17 +228,10 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
       .filter((event): event is Extract<ExportEvent, { kind: 'tool' }> => event.kind === 'tool')
       .map((event) => event.call.startedAt)
       .filter((value): value is number => readTimestamp(value) !== undefined);
-    const toolEnds = own
-      .filter((event): event is Extract<ExportEvent, { kind: 'tool' }> => event.kind === 'tool')
-      .map((event) => event.call.endedAt)
-      .filter((value): value is number => readTimestamp(value) !== undefined);
-
     const startedAt = dispatchCall && !background && dispatchCall.startedAt !== undefined
       ? dispatchCall.startedAt
       : (times.length + toolStarts.length > 0 ? Math.min(...times, ...toolStarts) : undefined);
-    const endedAt = dispatchCall && !background && dispatchCall.endedAt !== undefined
-      ? dispatchCall.endedAt
-      : (toolEnds.length > 0 ? Math.max(...toolEnds) : undefined);
+    const endedAt = dispatchCall && !background ? dispatchCall.endedAt : undefined;
 
     // The nested blocks sit in the parent's own sequence, at the call that
     // started them. A parent that delegated work and then answered keeps the
@@ -269,7 +263,7 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
       }),
     ).map((entry) => entry.node);
 
-    return {
+    const block: SubagentBlock = {
       kind: 'subagent',
       childSessionID,
       session,
@@ -295,6 +289,10 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
         : undefined,
       resumedBy: resumedByChildID.get(childSessionID),
     };
+    activityCalls.set(block, own
+      .filter((event): event is Extract<ExportEvent, { kind: 'tool' }> => event.kind === 'tool')
+      .map((event) => event.call));
+    return block;
   };
 
   /**
@@ -375,7 +373,7 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
 
   return {
     rootSessionID: timeline.rootSessionID,
-    nodes: markConcurrency([...spine, ...anchorless]),
+    nodes: markConcurrency([...spine, ...anchorless], activityCalls),
     sessions: timeline.sessions,
   };
 };
@@ -388,12 +386,15 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
  * starts ran after it, not beside it. Two calls that only touch are
  * sequential, and the runtime never recorded them as running together.
  */
-const markConcurrency = (nodes: ExportNode[]): ExportNode[] => {
+const markConcurrency = (
+  nodes: ExportNode[],
+  activityCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
+): ExportNode[] => {
   const blocks = nodes.filter((node): node is Extract<ExportNode, { kind: 'subagent' }> => node.kind === 'subagent');
   for (const block of blocks) {
     const overlapping = blocks.filter((other) => {
       if (other === block) return false;
-      return observedWorkOverlaps(block, other);
+      return observedWorkOverlaps(block, other, activityCalls);
     });
     if (overlapping.length > 0) {
       block.concurrentWith = overlapping.map((other) => ({
@@ -401,7 +402,7 @@ const markConcurrency = (nodes: ExportNode[]): ExportNode[] => {
         title: other.session.title || other.childSessionID,
       }));
     }
-    block.children = markConcurrency(block.children);
+    block.children = markConcurrency(block.children, activityCalls);
   }
   return nodes;
 };
@@ -414,9 +415,13 @@ const markConcurrency = (nodes: ExportNode[]): ExportNode[] => {
  * falls inside the other subagent's recorded interval. An earlier point does
  * not prove that the open-ended work continued into a later interval.
  */
-const observedWorkOverlaps = (left: SubagentBlock, right: SubagentBlock): boolean => {
-  const leftIntervals = workIntervals(left);
-  const rightIntervals = workIntervals(right);
+const observedWorkOverlaps = (
+  left: SubagentBlock,
+  right: SubagentBlock,
+  activityCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
+): boolean => {
+  const leftIntervals = workIntervals(left, activityCalls);
+  const rightIntervals = workIntervals(right, activityCalls);
   const leftPoints = workPoints(left);
   const rightPoints = workPoints(right);
 
@@ -433,13 +438,13 @@ const observedWorkOverlaps = (left: SubagentBlock, right: SubagentBlock): boolea
 };
 
 /** The completed tool intervals directly recorded in this subagent's work. */
-const workIntervals = (block: SubagentBlock): Array<readonly [number, number]> => {
-  const calls: ExportToolCall[] = [];
+const workIntervals = (
+  block: SubagentBlock,
+  activityCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
+): Array<readonly [number, number]> => {
+  const calls: ExportToolCall[] = [...(activityCalls.get(block) ?? [])];
   if (block.dispatchedBy?.call && !block.dispatchedBy.call.call.background) {
     calls.push(block.dispatchedBy.call.call);
-  }
-  for (const child of block.children) {
-    if (child.kind === 'event' && child.event.kind === 'tool') calls.push(child.event.call);
   }
   return calls.flatMap((call) => (
     call.startedAt !== undefined && call.endedAt !== undefined

@@ -120,7 +120,9 @@ cannot name them differently.
   not find a word the reader cannot read. The reasoning the readable view does
   not draw is not in the index at all. Search includes rendered shell output
   and attachment filenames, and visible sub-agent result attribution is
-  available through the agent filter.
+  available through the agent filter. Visible delegation failures and
+  readable fallback results are indexed in the selected mode; readable search
+  does not include detailed payload hidden from that view.
 - **Compact never means lost.** The readable view cuts a long tool result
   down and marks the cut. The mark says where the whole result is: the
   export of this session with full details, which carries the recorded
@@ -136,6 +138,10 @@ cannot name them differently.
   not establish, so it does not belong in the findings at the end. Completed
   tool-result attachments keep their filename, MIME type and URL in the
   normalized event and detailed rendering; readable rendering shows filenames.
+- **Detailed message attachments retain their payload.** A file part on an
+  ordinary message or a sub-agent's first prompt carries its filename, MIME
+  type and URL in detailed Markdown and HTML. Readable output shows its
+  compact filename form. The JSON source records remain unchanged.
 - **A partial export says so.** Everything the export could not establish —
   a child that would not load, a call that named no child, a session that was
   resumed, a part the model does not cover — lands in `findings`, and the
@@ -145,6 +151,18 @@ cannot name them differently.
   never carries a diagnostic line.
   A child the user left out on purpose is not a gap: the export knows it was
   left out.
+- **A missing transcript can still have a recorded parent result.** When the
+  child history cannot be loaded, the readable view keeps the parent's
+  recorded result as a compact marked excerpt. It does not invent child
+  messages, and the missing-history finding appears once at the end.
+- **Activity does not establish session completion.** Recorded tool intervals
+  can establish observed activity and overlap. An individual tool's end time
+  does not establish when a background session finished, so the block has no
+  finish duration without authoritative lifecycle evidence.
+- **Consumed calls still establish activity.** A nested invocation can become
+  a child block while its recorded interval still contributes to overlap for
+  the session that recorded it. Message timestamps in a grandchild do not
+  establish activity in its parent.
 - **A session cut out of the tree is named, not reported.** An archived
   session is not attached to the session you exported, so the export does not
   carry it. The document says that once, as a fact under the header: the
@@ -422,6 +440,12 @@ title alone does not tell two sub-agents apart: the runtime names a child
 after the call that started it, so two children of one call carry the same
 title. The rejected alternative was the title on its own, which left the
 reader with a name that pointed at two different things.
+
+Activity intervals include a call that the readable tree consumes into a
+nested block. The rejected alternative was deriving activity only from the
+remaining displayed entries: consuming the call would erase the interval that
+proves the parent session overlapped another one. A tool interval still says
+nothing about when a background session itself finished.
 
 ### Why the document names the agent instead of a role
 

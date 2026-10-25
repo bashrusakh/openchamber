@@ -652,10 +652,10 @@ describe('the coverage of the sub-agent transcripts', () => {
     const blocks = tree.nodes.filter((node) => node.kind === 'subagent');
     const background = blocks.find((node) => node.kind === 'subagent' && node.childSessionID === 'ses_bg');
 
-    // The child's directly recorded tool interval supplies its start and end;
-    // the short-lived background dispatch does not supply either endpoint.
+    // The child's recorded tool interval establishes activity and its start.
+    // Neither the dispatch nor that individual tool establishes session completion.
     expect(background?.kind === 'subagent' && background.startedAt).toBe(2000);
-    expect(background?.kind === 'subagent' && background.endedAt).toBe(8500);
+    expect(background?.kind === 'subagent' && background.endedAt).toBeUndefined();
     // The two agents overlapped, so the export says so.
     const output = markdown(input);
     expect(output).toContain('Ran at the same time as');
@@ -712,6 +712,40 @@ describe('the coverage of the sub-agent transcripts', () => {
     const atEnd = backgroundBlock(5000);
     expect(atEnd?.kind === 'subagent' && atEnd.endedAt).toBeUndefined();
     expect(atEnd?.kind === 'subagent' && atEnd.concurrentWith).toBeUndefined();
+  });
+
+  test('a consumed nested invocation still establishes its background parent activity', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const background = session('ses_bg', { title: 'Background', parentID: root.id, agent: 'worker' });
+    const first = session('ses_nested', { title: 'Nested', parentID: background.id, agent: 'reviewer' });
+    const second = session('ses_sibling', { title: 'Sibling', parentID: root.id, agent: 'tester' });
+    const input = fixture({
+      root,
+      sessions: [root, background, first, second],
+      records: {
+        ses_root: [{
+          info: assistantMessage(root.id, 'a1', 1000, '').info,
+          parts: [
+            subagentCall('a1', {
+              childSessionID: background.id, status: 'completed', startedAt: 1000, endedAt: 1001,
+              metadata: { status: 'running' },
+            }),
+            subagentCall('a1b', { childSessionID: second.id, startedAt: 3000, endedAt: 5000 }),
+          ],
+        }],
+        ses_bg: [{
+          info: assistantMessage(background.id, 'b1', 2000, '').info,
+          parts: [subagentCall('b1', { sessionID: background.id, childSessionID: first.id, startedAt: 2000, endedAt: 8000 })],
+        }],
+        ses_nested: [assistantMessage(first.id, 'n1', 2500, 'Nested work')],
+        ses_sibling: [assistantMessage(second.id, 's1', 3500, 'Sibling work')],
+      },
+    });
+
+    const backgroundBlock = build(input).tree.nodes.find((node) => node.kind === 'subagent' && node.childSessionID === background.id);
+    expect(backgroundBlock?.kind === 'subagent' && backgroundBlock.concurrentWith).toEqual([
+      { agent: 'tester', title: 'Sibling' },
+    ]);
   });
 
   test('a child the session list does not name is not loaded', async () => {

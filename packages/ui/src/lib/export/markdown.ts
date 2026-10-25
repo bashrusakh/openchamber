@@ -151,9 +151,11 @@ const toolLine = (tool: ProjectedNode & { kind: 'tool' }): string => {
  * A message that carried only files has no text but is not empty: the files
  * are what it said.
  */
-const attachmentList = (entry: ProjectedEntry & { kind: 'message' }): string => (
+const attachmentList = (entry: ProjectedEntry & { kind: 'message' }, mode: ProjectionMode = 'readable'): string => (
   entry.attachments?.length
-    ? entry.attachments.map((file) => `- ${file.filename ?? file.mime}`).join('\n')
+    ? entry.attachments.map((file) => mode === 'detailed'
+      ? `- ${file.filename ?? file.mime} (${file.mime}) ${file.url}`
+      : `- ${file.filename ?? file.mime}`).join('\n')
     : ''
 );
 
@@ -192,7 +194,7 @@ const renderEntry = (
     case 'message': {
       const heading = messageHeading(entry, model, rootAgent);
       const body = entry.text.trim();
-      const attachments = attachmentList(entry);
+      const attachments = attachmentList(entry, mode);
       if (!body && !attachments) return '';
       const sections = [heading];
       if (body) sections.push(body);
@@ -326,7 +328,7 @@ const renderSubagent = (subagent: ProjectedSubagent, mode: ProjectionMode): stri
   // The task's own record carries what the first prompt carried besides its
   // text: the files it came with. A prompt that carried only files is still
   // a task, so the task line is shown even when there is no text to quote.
-  const taskAttachments = subagent.taskEntry ? attachmentList(subagent.taskEntry) : '';
+  const taskAttachments = subagent.taskEntry ? attachmentList(subagent.taskEntry, mode) : '';
   if (subagent.task || taskAttachments) {
     const task = subagent.task
       ? (mode === 'readable' ? readablePrompt(subagent.task) : subagent.task)
@@ -356,6 +358,16 @@ const renderSubagent = (subagent: ProjectedSubagent, mode: ProjectionMode): stri
   if (mode === 'detailed' && (dispatched?.output || dispatched?.call?.output)) {
     const output = dispatched.output ?? dispatched.call?.output;
     if (output) parts.push(`**${exportText('export.dispatch.result')}**\n\n${asQuote(output)}`);
+  }
+  const missingTranscript = subagent.entries.some((entry) => entry.kind === 'gap' && entry.reason === 'unavailable');
+  if (mode === 'readable' && missingTranscript) {
+    const output = dispatched?.call?.output ?? dispatched?.output;
+    if (output) {
+      const visible = dispatched?.call?.outputTruncated
+        ? `${output}\n\n*[${exportText('export.excerpt')} — ${exportText('export.restInFullDetails')}]*`
+        : output;
+      parts.push(`**${exportText('export.dispatch.result')}**\n\n${asQuote(visible)}`);
+    }
   }
   // The runtime cut the call's result short. The same fact an ordinary tool
   // call carries, on the call that started this sub-agent.
@@ -391,7 +403,7 @@ const renderSubagent = (subagent: ProjectedSubagent, mode: ProjectionMode): stri
       // name as the fallback.
       const heading = subagentMessageLine(entry, subagentMessageLabel(subagent, entry.agent), model);
       const body = entry.text.trim();
-       const attachments = attachmentList(entry);
+        const attachments = attachmentList(entry, mode);
       if (!body && !attachments) continue;
        const shell = entry.shell
          ? [

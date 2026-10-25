@@ -153,7 +153,7 @@ const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode): string => {
 const searchTextOf = (entry: ProjectedEntry, mode: ProjectionMode): string => {
   switch (entry.kind) {
     case 'message':
-      return `${entry.role} ${entry.text} ${entry.shell?.output ?? ''} ${entry.shell?.status ?? ''} ${entry.shell?.exit ?? ''} ${(entry.attachments ?? []).map((file) => file.filename ?? file.mime).join(' ')}`;
+      return `${entry.role} ${entry.text} ${entry.shell?.output ?? ''} ${entry.shell?.status ?? ''} ${entry.shell?.exit ?? ''} ${(entry.attachments ?? []).flatMap((file) => mode === 'detailed' ? [file.filename ?? '', file.mime, file.url] : [file.filename ?? file.mime]).join(' ')}`;
     case 'tool':
       return toolSearchText(entry.tool, mode);
     case 'reasoning':
@@ -210,7 +210,9 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
           agent: node.agent,
           search: [
             node.task ? promptOnPage(node.task, mode) : '',
-            ...(node.taskEntry?.attachments ?? []).map((file) => file.filename ?? file.mime),
+            ...(node.taskEntry?.attachments ?? []).flatMap((file) => mode === 'detailed'
+              ? [file.filename ?? '', file.mime, file.url]
+              : [file.filename ?? file.mime]),
           ].join(' ').toLowerCase(),
           depth: node.depth,
         });
@@ -233,6 +235,25 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
           search: toolSearchText(call, mode).toLowerCase(),
           depth: node.depth,
           timestamp: call.startedAt,
+        });
+      }
+      const dispatch = node.dispatchedBy;
+      const hasUnavailableTranscript = node.entries.some((entry) => entry.kind === 'gap' && entry.reason === 'unavailable');
+      const readableFallback = mode === 'readable' && hasUnavailableTranscript
+        && (dispatch?.output || dispatch?.call?.output || dispatch?.call?.attachments?.length);
+      if (dispatch?.error || dispatch?.status || readableFallback) {
+        entries.push({
+          id: `${node.childSessionID}:dispatch-result`,
+          kind: 'subagent-result',
+          agent: node.agent,
+          search: [
+            dispatch.error ?? '',
+            dispatch.status ? statusLabel(dispatch.status) : '',
+            ...(readableFallback ? [dispatch.call?.output ?? dispatch.output ?? ''] : []),
+            ...(readableFallback ? (dispatch.call?.attachments ?? []).map((file) => file.filename ?? file.mime) : []),
+          ].join(' ').toLowerCase(),
+          depth: node.depth,
+          timestamp: dispatch.timestamp,
         });
       }
       subagents.push({
@@ -382,7 +403,7 @@ const renderEntryHtml = (
         .map((value) => `<span>${escapeHtml(value)}</span>`)
         .join('');
       const attachments = entry.attachments?.length
-        ? `<ul class="files">${entry.attachments.map((file) => `<li>${escapeHtml(file.filename ?? file.mime)}</li>`).join('')}</ul>`
+        ? `<ul class="files">${entry.attachments.map((file) => `<li>${mode === 'detailed' ? `<span>${escapeHtml(file.filename ?? file.mime)} (${escapeHtml(file.mime)})</span><br><code>${escapeHtml(file.url)}</code>` : escapeHtml(file.filename ?? file.mime)}</li>`).join('')}</ul>`
         : '';
       const body = entry.text
         ? `<div class="body">${escapeHtml(entry.text)}</div>`
@@ -501,14 +522,18 @@ const renderSubagentHtml = (subagent: ProjectedSubagent, mode: ProjectionMode, d
   // moved into this block. The block says how that call ended, so a failed
   // delegation is not silently missing.
   const dispatched = subagent.dispatchedBy;
-  const dispatchNote = dispatched?.error
+  const dispatchNoteText = dispatched?.error
     ? `<p class="note">${escapeHtml(exportText('export.dispatch.error', { error: dispatched.error }))}</p>`
     : dispatched?.status
       ? `<p class="note">${escapeHtml(exportText('export.dispatch.status', { status: statusLabel(dispatched.status) }))}</p>`
       : '';
   const dispatchOutput = dispatched?.output ?? dispatched?.call?.output;
-  const dispatchResult = mode === 'detailed' && dispatchOutput
-    ? `<details><summary>${escapeHtml(exportText('export.dispatch.result'))}</summary><pre>${escapeHtml(dispatchOutput)}</pre></details>`
+  const unavailableTranscript = subagent.entries.some((entry) => entry.kind === 'gap' && entry.reason === 'unavailable');
+  const readableDispatchOutput = dispatched?.call?.output;
+  const dispatchResult = (mode === 'detailed' || unavailableTranscript) && dispatchOutput
+    ? mode === 'detailed'
+      ? `<details><summary>${escapeHtml(exportText('export.dispatch.result'))}</summary><pre>${escapeHtml(dispatchOutput)}</pre></details>`
+      : `<p class="role">${escapeHtml(exportText('export.dispatch.result'))}</p><pre>${escapeHtml(readableDispatchOutput ?? dispatchOutput)}</pre>${subagent.dispatchedBy?.call?.outputTruncated ? `<p class="note">${escapeHtml(exportText('export.html.shownInPart'))}</p>` : ''}`
     : '';
   // The runtime cut the call's result short. The same fact an ordinary tool
   // call carries, on the call that started this sub-agent.
@@ -517,6 +542,14 @@ const renderSubagentHtml = (subagent: ProjectedSubagent, mode: ProjectionMode, d
     ? `<p class="note">${escapeHtml(dispatchTruncation)}</p>`
     : '';
   const dispatchDetails = renderDispatchCallDetails(subagent, mode);
+  const fallbackAttachments = mode === 'readable' && unavailableTranscript && dispatched?.call?.attachments?.length
+    ? `<ul class="files">${(dispatched?.call?.attachments ?? []).map((file) => `<li>${escapeHtml(file.filename ?? file.mime)}</li>`).join('')}</ul>`
+    : '';
+  const dispatchContent = [dispatchNoteText, unavailableTranscript && mode === 'readable' ? dispatchResult : '', fallbackAttachments]
+    .filter(Boolean).join('');
+  const dispatchNote = dispatchContent
+    ? `<article class="entry result" data-id="${escapeHtml(`${subagent.childSessionID}:dispatch-result`)}" data-kind="subagent-result" data-agent="${escapeHtml(subagent.agent ?? '')}">${dispatchContent}</article>`
+    : '';
 
   // The agent the call named, when it differs from the agent that ran: the
   // call asked for one agent, the session records the one that answered.
@@ -541,7 +574,7 @@ const renderSubagentHtml = (subagent: ProjectedSubagent, mode: ProjectionMode, d
     ? `<article class="entry task" data-id="${escapeHtml(`${subagent.childSessionID}:task`)}" data-kind="task" data-agent="${escapeHtml(subagent.agent ?? '')}">
   <header><span class="role">${escapeHtml(exportText('export.section.task'))}</span></header>
   ${subagent.task ? `<pre>${escapeHtml(promptOnPage(subagent.task, mode))}</pre>` : ''}
-  ${subagent.taskEntry?.attachments?.length ? `<ul class="files">${subagent.taskEntry.attachments.map((file) => `<li>${escapeHtml(file.filename ?? file.mime)}</li>`).join('')}</ul>` : ''}
+   ${subagent.taskEntry?.attachments?.length ? `<ul class="files">${subagent.taskEntry.attachments.map((file) => `<li>${mode === 'detailed' ? `<span>${escapeHtml(file.filename ?? file.mime)} (${escapeHtml(file.mime)})</span><br><code>${escapeHtml(file.url)}</code>` : escapeHtml(file.filename ?? file.mime)}</li>`).join('')}</ul>` : ''}
 </article>`
     : '';
 
@@ -571,9 +604,9 @@ const renderSubagentHtml = (subagent: ProjectedSubagent, mode: ProjectionMode, d
   <details class="subagent-fold" open><summary><span class="subagent-label">${escapeHtml(label)}</span>${title}${meta ? `<span class="meta">${meta}</span>` : ''}</summary>
   ${concurrent}
   ${dispatchNote}
-  ${dispatchResult}
+   ${mode === 'detailed' ? dispatchResult : ''}
   ${dispatchTruncationNote}
-  ${dispatchDetails}
+   ${dispatchDetails}
   ${invoked}
   ${task}
 ${own}

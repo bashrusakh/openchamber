@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import type { Session } from '@/lib/opencode/model';
+import type { Part, Session } from '@/lib/opencode/model';
 import { useI18nStore } from '@/lib/i18n';
 import { dict as deDict } from '@/lib/i18n/messages/de';
 import { buildExport, buildExportFromRecords } from './pipeline';
@@ -412,6 +412,13 @@ describe('export pipeline', () => {
               providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 5000 },
             },
             parts: [subagentCall('a2', { childSessionID: 'ses_child', description: 'Continue the review' })],
+          },
+          {
+            info: {
+              id: 'a3', sessionID: 'ses_root', role: 'assistant', agent: 'build',
+              providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 7000 },
+            },
+            parts: [subagentCall('a3', { childSessionID: 'ses_child', description: 'Continue once more' })],
           },
         ],
         ses_child: [assistantMessage('ses_child', 'ca1', 3000, 'The one transcript')],
@@ -1367,6 +1374,42 @@ describe('export pipeline', () => {
     }
   });
 
+  test('a readable export keeps the parent result when the child cannot be loaded', async () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: 'ses_root', agent: 'reviewer' });
+    const longResult = `PARENT_RESULT_SENTINEL ${'parent result '.repeat(800)}`;
+    const result = await buildExport({
+      root,
+      sessions: [root, child],
+      load: async (sessionID) => sessionID === root.id
+        ? [{
+            info: assistantMessage(root.id, 'a1', 1000, '').info,
+            parts: [subagentCall('a1', {
+              sessionID: root.id, childSessionID: child.id, output: longResult,
+            })],
+          }]
+        : null,
+    }, 'readable');
+
+    const document = renderExportMarkdown(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    expect(document).toContain('PARENT_RESULT_SENTINEL');
+    expect(document).toContain('excerpt');
+    expect(document).not.toContain('Child transcript');
+    expect(document.split('Incomplete export')).toHaveLength(2);
+    const html = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    expect(html).toContain('PARENT_RESULT_SENTINEL');
+    expect(html).toContain('Shown in part.');
+    expect(html.split('PARENT_RESULT_SENTINEL')).toHaveLength(2);
+    expect(html.split('Incomplete export')).toHaveLength(2);
+    expect(result.timeline.findings.filter((finding) => finding.kind === 'missing-session')).toHaveLength(1);
+  });
+
   test('a child the session list does not name is reported as missing', async () => {
     const root = session('ses_root', { title: 'Root' });
 
@@ -1694,6 +1737,54 @@ describe('export pipeline', () => {
           part.state?.attachments?.some((file) => file.url === 'data:image/png;base64,AA==')
         )))).toBe(true);
       }
+    }
+  });
+
+  test('message and first-prompt files retain detailed payloads and compact readable names', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: root.id, agent: 'reviewer' });
+    const file = (sessionID: string, messageID: string, filename?: string): Part => ({
+      id: `${messageID}-file`, sessionID, messageID, type: 'file',
+      filename, mime: 'image/png', url: `data:image/png;base64,${messageID}`,
+    });
+    const input = fixture({
+      root,
+      sessions: [root, child],
+      records: {
+        ses_root: [
+          { info: userMessage(root.id, 'u1', 1000, 'Root prompt').info, parts: [textPart('u1', 'Root prompt'), file(root.id, 'u1', 'ROOT_FILE_SENTINEL.png')] },
+          { info: assistantMessage(root.id, 'a1', 2000, '').info, parts: [subagentCall('a1', { childSessionID: child.id })] },
+        ],
+        ses_child: [
+          { info: userMessage(child.id, 'cu1', 3000, '').info, parts: [file(child.id, 'cu1')] },
+        ],
+      },
+    });
+
+    for (const mode of ['readable', 'detailed'] as const) {
+      const { projection, timeline } = build(input, mode);
+      const markdownDocument = renderExportMarkdown(projection, {
+        title: 'Root', mode, findings: timeline.findings,
+        excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+      });
+      const htmlDocument = renderExportHtml(projection, {
+        title: 'Root', mode, findings: timeline.findings,
+        excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+      });
+      expect(markdownDocument).toContain('ROOT_FILE_SENTINEL.png');
+      expect(markdownDocument).toContain('image/png');
+      expect(htmlDocument).toContain('image/png');
+      if (mode === 'detailed') {
+        expect(markdownDocument).toContain('data:image/png;base64,u1');
+        expect(markdownDocument).toContain('data:image/png;base64,cu1');
+        expect(htmlDocument).toContain('data:image/png;base64,u1');
+        expect(htmlDocument).toContain('data:image/png;base64,cu1');
+      } else {
+        expect(markdownDocument).not.toContain('data:image/png;base64');
+        expect(htmlDocument).not.toContain('data:image/png;base64');
+      }
+      const parsed = JSON.parse(renderExportJson(timeline));
+      expect(parsed.source.ses_child.records[0].parts[0].url).toBe('data:image/png;base64,cu1');
     }
   });
 

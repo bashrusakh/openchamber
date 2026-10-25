@@ -500,6 +500,7 @@ export const normalizeExportTimeline = (options: {
           // A caller that left the transcripts out on purpose has no
           // transcript to keep, and nothing to report about it.
           if (includeSubagents) {
+          if (!localFindings.some((finding) => finding.kind === 'resumed-session' && finding.childSessionID === childSessionID)) {
             localFindings.push({
               kind: 'resumed-session',
               sessionID: collected.sessionID,
@@ -507,6 +508,7 @@ export const normalizeExportTimeline = (options: {
               messageKey: 'export.finding.resumedSession',
               messageParams: { id: childSessionID },
             });
+          }
           }
           continue;
         }

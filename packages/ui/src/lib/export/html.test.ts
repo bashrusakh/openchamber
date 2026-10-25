@@ -13,7 +13,7 @@ import { describe, expect, test } from 'bun:test';
 import { Window, type Element } from 'happy-dom';
 import type { Session } from '@/lib/opencode/model';
 import { useI18nStore } from '@/lib/i18n';
-import { buildExportFromRecords } from './pipeline';
+import { buildExport, buildExportFromRecords } from './pipeline';
 import { renderExportHtml } from './html';
 import { assistantMessage, reasoningPart, shellCall, subagentCall, subagentReport, type Record_ } from './fixtures';
 
@@ -168,6 +168,40 @@ const pageData = (dom: Window): {
 };
 
 describe('the HTML page keeps the match on the page', () => {
+  test('delegation failures keep their block visible in actual DOM search in both modes', async () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: root.id, agent: 'reviewer' });
+    const result = await buildExport({
+      root,
+      sessions: [root, child],
+      load: async (sessionID) => sessionID === root.id
+        ? [{
+            info: assistantMessage(root.id, 'a1', 1000, '').info,
+            parts: [subagentCall('a1', {
+              sessionID: root.id, childSessionID: child.id, status: 'error',
+              error: 'VISIBLE_FAILURE_NEEDLE',
+            })],
+          }]
+        : null,
+    }, 'readable');
+    for (const mode of ['readable', 'detailed'] as const) {
+      const html = renderExportHtml(result.projection, {
+        title: 'Root', mode, findings: result.timeline.findings,
+        excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      });
+      const dom = new Window({ url: 'https://localhost/' });
+      dom.document.write(html);
+      const script = html.match(/<script>([\s\S]*?)<\/script>/);
+      if (!script) throw new Error('The export wrote no page script');
+      new Function('document', script[1])(dom.document);
+
+      search(dom, 'failed');
+
+      expect(dom.document.querySelector('section.subagent')?.classList.contains('hidden')).toBe(false);
+      expect(dom.document.body.textContent).toContain('failed');
+    }
+  });
+
   test('a match inside a nested block keeps the blocks above it visible', () => {
     const dom = openPage();
 
