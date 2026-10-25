@@ -214,6 +214,8 @@ type ExportReasoningEvent = ExportEventBase & {
 type ExportSubagentResultEvent = ExportEventBase & {
   kind: 'subagent-result';
   childSessionID: string;
+  /** Agent named by the recorded completion report, when present. */
+  agent?: string;
   state: 'running' | 'completed' | 'error' | 'cancelled';
   /** The child's own description of the work, when it had one. */
   description?: string;

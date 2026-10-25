@@ -101,6 +101,7 @@ export type ProjectedEntry =
       kind: 'subagent-result';
       event: ExportEvent;
       childSessionID: string;
+      agent?: string;
       state: string;
       description?: string;
       output: string;
@@ -350,6 +351,7 @@ const projectEvent = (event: ExportEvent, mode: ProjectionMode): ProjectedEntry 
         kind: 'subagent-result',
         event,
         childSessionID: event.childSessionID,
+        agent: event.agent,
         state: event.state,
         description: event.description,
         output: truncated ? trimmed.slice(0, MAX_READABLE_SUBAGENT_RESULT) : event.output,

@@ -80,6 +80,98 @@ const timelineOf = (input: Fixture): ExportTimeline => build(input).timeline;
 const sessionsOf = (timeline: ExportTimeline): ExportSessionInfo[] => [...timeline.sessions.values()];
 
 describe('export pipeline', () => {
+  test('nested shell results and first-prompt files reach Markdown and HTML', () => {
+    const child = session('ses_child', { title: 'Child', parentID: 'ses_root', agent: 'reviewer' });
+    const input = fixture({
+      root: session('ses_root', { title: 'Root' }),
+      sessions: [session('ses_root', { title: 'Root' }), child],
+      records: {
+        ses_root: [{
+          info: assistantMessage('ses_root', 'a1', 1000, '').info,
+          parts: [subagentCall('a1', { childSessionID: child.id, startedAt: 1000, endedAt: 5000 })],
+        }],
+        ses_child: [
+          {
+            info: { id: 'u1', sessionID: child.id, role: 'user', time: { created: 2100 } },
+            parts: [{ id: 'f1', sessionID: child.id, messageID: 'u1', type: 'file', mime: 'text/plain', filename: 'TASK_FILE_SENTINEL.txt', url: 'file:///brief.txt' }],
+          },
+          {
+            info: {
+              id: 's1', sessionID: child.id, role: 'shell', time: { created: 2200 }, shellID: 'sh1',
+              command: 'check.sh', status: 'exited', exit: 7,
+              output: { output: 'CHILD_SHELL_FAILURE_SENTINEL', cursor: 28, size: 28, truncated: false },
+            },
+            parts: [],
+          },
+        ],
+      },
+    });
+
+    const result = build(input, 'detailed');
+    const markdownOutput = renderExportMarkdown(result.projection, {
+      title: 'Root', mode: 'detailed', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    const htmlOutput = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'detailed', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    for (const output of [markdownOutput, htmlOutput]) {
+      expect(output).toContain('TASK_FILE_SENTINEL.txt');
+      expect(output).toContain('CHILD_SHELL_FAILURE_SENTINEL');
+      expect(output).toContain('7');
+    }
+    expect(htmlOutput).toContain('data-kind="task"');
+    expect(htmlOutput).toContain('task_file_sentinel.txt');
+  });
+
+  test('completion reports retain recorded agent and task attribution without child transcripts', () => {
+    const input = fixture({
+      root: session('ses_root', { title: 'Root' }),
+      records: {
+        ses_root: [
+          subagentReport('ses_root', 'r1', 3000, {
+            childSessionID: 'ses_a', agent: 'reviewer', description: 'Review dependency changes', output: 'RESULT_ALPHA',
+          }),
+          subagentReport('ses_root', 'r2', 4000, {
+            childSessionID: 'ses_b', agent: 'tester', description: 'Run behavioral tests', output: 'RESULT_BETA',
+          }),
+        ],
+      },
+    });
+    const { projection, timeline } = buildExportFromRecords({
+      root: input.root, sessions: input.sessions, records: input.records, includeSubagents: false,
+    }, 'readable');
+    const markdownOutput = renderExportMarkdown(projection, {
+      title: 'Root', mode: 'readable', findings: timeline.findings,
+      excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+    });
+    const htmlOutput = renderExportHtml(projection, {
+      title: 'Root', mode: 'readable', findings: timeline.findings,
+      excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+    });
+    for (const [output, format] of [[markdownOutput, 'markdown'], [htmlOutput, 'html']] as const) {
+      expect(output).toContain('reviewer');
+      expect(output).toContain('Review dependency changes');
+      expect(output).toContain('tester');
+      expect(output).toContain('Run behavioral tests');
+      expect(output).toContain('RESULT_ALPHA');
+      expect(output).toContain('RESULT_BETA');
+      if (format === 'html') {
+        expect(output).toContain('data-agent="reviewer"');
+        expect(output).toContain('data-agent="tester"');
+      }
+    }
+    expect(timeline.sessions.has('ses_a')).toBe(false);
+    expect(timeline.sessions.has('ses_b')).toBe(false);
+    const reports = timeline.events.filter((event) => event.kind === 'subagent-result');
+    expect(reports.map((event) => event.kind === 'subagent-result' ? event.agent : undefined)).toEqual(['reviewer', 'tester']);
+    const json = JSON.parse(renderExportJson(timeline)) as { events: Array<{ agent?: string; description?: string }> };
+    expect(json.events.map((event) => [event.agent, event.description])).toEqual([
+      ['reviewer', 'Review dependency changes'],
+      ['tester', 'Run behavioral tests'],
+    ]);
+  });
   test('a parent with one child and one grandchild keeps the nesting', () => {
     const input = fixture({
       root: session('ses_root', { title: 'Root' }),

@@ -262,6 +262,7 @@ const renderEntry = (
       const label = entry.state === 'completed'
         ? `**${exportText('export.section.subagentResult')}**`
         : `**${exportText('export.section.subagentState', { state: entry.state })}**`;
+      const attribution = [entry.agent, entry.description].filter(Boolean).join(' · ');
       const output = entry.output.trim();
       // The readable view's own cut of the result. The note says where the
       // whole result is: the export of this session with full details, which
@@ -270,7 +271,7 @@ const renderEntry = (
       const body = entry.outputTruncated
         ? `${output}\n\n… [${exportText('export.excerpt')} — ${exportText('export.restInFullDetails')}]`
         : output;
-      return [label, body].filter(Boolean).join('\n\n');
+      return [label, attribution, body].filter(Boolean).join('\n\n');
     }
     case 'gap': {
       return `*${entry.detail}*`;
@@ -381,9 +382,17 @@ const renderSubagent = (subagent: ProjectedSubagent, mode: ProjectionMode): stri
       // name as the fallback.
       const heading = subagentMessageLine(entry, subagentMessageLabel(subagent, entry.agent), model);
       const body = entry.text.trim();
-      const attachments = attachmentList(entry);
+       const attachments = attachmentList(entry);
       if (!body && !attachments) continue;
-      parts.push([heading, body, attachments].filter(Boolean).join('\n\n'));
+       const shell = entry.shell
+         ? [
+             entry.shell.output ? asQuote(entry.shell.output) : '',
+             entry.shell.status ? exportText('export.shell.status', { status: entry.shell.status }) : '',
+             entry.shell.exit !== undefined ? exportText('export.shell.exit', { code: entry.shell.exit }) : '',
+           ].filter(Boolean).join('\n\n')
+         : '';
+       const result = shell ? `**${exportText('export.section.result')}**\n\n${shell}` : '';
+       parts.push([heading, body, attachments, result].filter(Boolean).join('\n\n'));
       continue;
     }
     const rendered = renderEntry(entry, mode);

@@ -631,6 +631,7 @@ export const normalizeExportTimeline = (options: {
           id: `${collected.sessionID}:${message.id}:run`,
           kind: 'subagent-result',
           childSessionID: run.childSessionID,
+          agent: run.agent,
           state: run.state,
           description: run.description,
           output: run.output,

@@ -159,7 +159,7 @@ const searchTextOf = (entry: ProjectedEntry, mode: ProjectionMode): string => {
       // cannot read. The detailed view draws it, and the index holds it.
       return mode === 'detailed' ? entry.text : '';
     case 'subagent-result':
-      return `${entry.state} ${entry.description ?? ''} ${entry.output}`;
+      return `${entry.state} ${entry.agent ?? ''} ${entry.description ?? ''} ${entry.output}`;
     case 'gap':
       return entry.detail;
   }
@@ -200,12 +200,15 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
 
   const visit = (node: ProjectedNode, owner: EntryOwner): void => {
     if (node.kind === 'subagent') {
-      if (node.task) {
+      if (node.task || node.taskEntry?.attachments?.length) {
         entries.push({
           id: `${node.childSessionID}:task`,
           kind: 'task',
           agent: node.agent,
-          search: promptOnPage(node.task, mode).toLowerCase(),
+          search: [
+            node.task ? promptOnPage(node.task, mode) : '',
+            ...(node.taskEntry?.attachments ?? []).map((file) => file.filename ?? file.mime),
+          ].join(' ').toLowerCase(),
           depth: node.depth,
         });
       }
@@ -464,8 +467,8 @@ const renderEntryHtml = (
       const note = entry.outputTruncated
         ? `<p class="note">${escapeHtml(exportText('export.html.shownInPart'))}</p>`
         : '';
-      return `<article class="entry result" data-id="${escapeHtml(entry.event.id)}" data-kind="subagent-result" data-role="subagent-result" data-agent="">
-  <header><span class="role">${escapeHtml(label)}</span><span class="meta"><span>${escapeHtml(entry.description ?? '')}</span></span></header>
+      return `<article class="entry result" data-id="${escapeHtml(entry.event.id)}" data-kind="subagent-result" data-role="subagent-result" data-agent="${escapeHtml(entry.agent ?? '')}">
+  <header><span class="role">${escapeHtml(label)}</span><span class="meta"><span>${escapeHtml([entry.agent, entry.description].filter(Boolean).join(' · '))}</span></span></header>
   <div class="body">${escapeHtml(entry.output)}</div>
   ${note}
 </article>`;
@@ -531,10 +534,11 @@ const renderSubagentHtml = (subagent: ProjectedSubagent, mode: ProjectionMode, d
   // The task is an entry of its own, so a search for a word in it keeps
   // the task and hides the rest of the block. The index holds the text the
   // page shows, so a word the page cut away is not found.
-  const task = subagent.task
+  const task = subagent.task || subagent.taskEntry?.attachments?.length
     ? `<article class="entry task" data-id="${escapeHtml(`${subagent.childSessionID}:task`)}" data-kind="task" data-agent="${escapeHtml(subagent.agent ?? '')}">
   <header><span class="role">${escapeHtml(exportText('export.section.task'))}</span></header>
-  <pre>${escapeHtml(promptOnPage(subagent.task, mode))}</pre>
+  ${subagent.task ? `<pre>${escapeHtml(promptOnPage(subagent.task, mode))}</pre>` : ''}
+  ${subagent.taskEntry?.attachments?.length ? `<ul class="files">${subagent.taskEntry.attachments.map((file) => `<li>${escapeHtml(file.filename ?? file.mime)}</li>`).join('')}</ul>` : ''}
 </article>`
     : '';
 
