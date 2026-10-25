@@ -15,7 +15,7 @@
  * the order it has instead of promising a chronology it does not have.
  */
 
-import type { ExportEvent, ExportSessionInfo, ExportTimeline } from './events';
+import type { ExportEvent, ExportSessionInfo, ExportTimeline, ExportToolCall } from './events';
 import { readTimestamp } from './values';
 import { orderByRecordedTime } from './ordering';
 import { exportText } from './i18n';
@@ -220,15 +220,24 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
     const dispatchCall = dispatch?.event.kind === 'tool' ? dispatch.event.call : undefined;
     const background = dispatchCall?.background === true;
     const times = own
+      .filter((event) => event.kind !== 'tool')
       .map((event) => event.timestamp)
+      .filter((value): value is number => readTimestamp(value) !== undefined);
+    const toolStarts = own
+      .filter((event): event is Extract<ExportEvent, { kind: 'tool' }> => event.kind === 'tool')
+      .map((event) => event.call.startedAt)
+      .filter((value): value is number => readTimestamp(value) !== undefined);
+    const toolEnds = own
+      .filter((event): event is Extract<ExportEvent, { kind: 'tool' }> => event.kind === 'tool')
+      .map((event) => event.call.endedAt)
       .filter((value): value is number => readTimestamp(value) !== undefined);
 
     const startedAt = dispatchCall && !background && dispatchCall.startedAt !== undefined
       ? dispatchCall.startedAt
-      : (times.length > 0 ? Math.min(...times) : undefined);
+      : (times.length + toolStarts.length > 0 ? Math.min(...times, ...toolStarts) : undefined);
     const endedAt = dispatchCall && !background && dispatchCall.endedAt !== undefined
       ? dispatchCall.endedAt
-      : (times.length > 0 ? Math.max(...times) : undefined);
+      : (toolEnds.length > 0 ? Math.max(...toolEnds) : undefined);
 
     // The nested blocks sit in the parent's own sequence, at the call that
     // started them. A parent that delegated work and then answered keeps the
@@ -384,10 +393,7 @@ const markConcurrency = (nodes: ExportNode[]): ExportNode[] => {
   for (const block of blocks) {
     const overlapping = blocks.filter((other) => {
       if (other === block) return false;
-      if (block.startedAt === undefined || other.startedAt === undefined) return false;
-      const blockEnd = block.endedAt ?? Number.MAX_SAFE_INTEGER;
-      const otherEnd = other.endedAt ?? Number.MAX_SAFE_INTEGER;
-      return block.startedAt < otherEnd && other.startedAt < blockEnd;
+      return observedWorkOverlaps(block, other);
     });
     if (overlapping.length > 0) {
       block.concurrentWith = overlapping.map((other) => ({
@@ -398,4 +404,63 @@ const markConcurrency = (nodes: ExportNode[]): ExportNode[] => {
     block.children = markConcurrency(block.children);
   }
   return nodes;
+};
+
+/**
+ * Whether the recorded work proves that two subagents ran at the same time.
+ *
+ * Completed calls provide half-open intervals. A running tool provides an
+ * observed start point, but no end; that point proves overlap only when it
+ * falls inside the other subagent's recorded interval. An earlier point does
+ * not prove that the open-ended work continued into a later interval.
+ */
+const observedWorkOverlaps = (left: SubagentBlock, right: SubagentBlock): boolean => {
+  const leftIntervals = workIntervals(left);
+  const rightIntervals = workIntervals(right);
+  const leftPoints = workPoints(left);
+  const rightPoints = workPoints(right);
+
+  const intersects = (a: readonly [number, number], b: readonly [number, number]): boolean => (
+    a[0] < b[1] && b[0] < a[1]
+  );
+  const contains = (interval: readonly [number, number], point: number): boolean => (
+    interval[0] <= point && point < interval[1]
+  );
+
+  return leftIntervals.some((a) => rightIntervals.some((b) => intersects(a, b)))
+    || leftIntervals.some((interval) => rightPoints.some((point) => contains(interval, point)))
+    || rightIntervals.some((interval) => leftPoints.some((point) => contains(interval, point)));
+};
+
+/** The completed tool intervals directly recorded in this subagent's work. */
+const workIntervals = (block: SubagentBlock): Array<readonly [number, number]> => {
+  const calls: ExportToolCall[] = [];
+  if (block.dispatchedBy?.call && !block.dispatchedBy.call.call.background) {
+    calls.push(block.dispatchedBy.call.call);
+  }
+  for (const child of block.children) {
+    if (child.kind === 'event' && child.event.kind === 'tool') calls.push(child.event.call);
+  }
+  return calls.flatMap((call) => (
+    call.startedAt !== undefined && call.endedAt !== undefined
+      ? [[call.startedAt, call.endedAt] as const]
+      : []
+  ));
+};
+
+/** Recorded moments of activity that have no duration of their own. */
+const workPoints = (block: SubagentBlock): number[] => {
+  const points: number[] = [];
+  for (const child of block.children) {
+    if (child.kind !== 'event') continue;
+    if (child.event.kind === 'tool') {
+      if (child.event.call.status === 'running' && child.event.call.startedAt !== undefined) {
+        points.push(child.event.call.startedAt);
+      }
+      continue;
+    }
+    const timestamp = readTimestamp(child.event.timestamp);
+    if (timestamp !== undefined) points.push(timestamp);
+  }
+  return points;
 };

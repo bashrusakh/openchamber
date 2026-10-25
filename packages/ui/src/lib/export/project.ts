@@ -65,6 +65,8 @@ export type ProjectedTool = {
   metadata?: Record<string, JsonValue>;
   /** The call's own identifier, as the runtime recorded it. */
   callID?: string;
+  /** Files attached to the completed tool result, as recorded. */
+  attachments?: Array<{ filename?: string; mime: string; url: string }>;
 };
 
 /** One projected entry of the export. */
@@ -278,6 +280,7 @@ const projectTool = (call: ExportToolCall, mode: ProjectionMode): ProjectedTool 
     input: call.input,
     metadata: call.metadata,
     callID: call.callID,
+    attachments: call.attachments,
     outputTruncated: false,
   };
 

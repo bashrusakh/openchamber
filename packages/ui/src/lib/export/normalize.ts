@@ -325,6 +325,9 @@ const exportToolCall = (
     call.output = state.output;
     call.startedAt = state.time.start;
     call.endedAt = state.time.end;
+    if (state.attachments?.length) {
+      call.attachments = state.attachments.map(({ filename, mime, url }) => ({ filename, mime, url }));
+    }
   } else if (state.status === 'error') {
     call.output = state.output;
     call.error = state.error;
@@ -361,8 +364,8 @@ type NormalizeResult = {
  * not.
  *
  * A descendant whose history could not be loaded becomes a gap event and a
- * finding: the export says the sub-agent is missing instead of leaving a
- * hole that reads as a complete history.
+ * finding. The event preserves structural context; the finding is rendered
+ * once in the final integrity section.
  */
 export const normalizeExportTimeline = (options: {
   rootSessionID: string;

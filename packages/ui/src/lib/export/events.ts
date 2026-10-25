@@ -126,6 +126,8 @@ export type ExportToolCall = {
   metadata?: Record<string, JsonValue>;
   /** The result text, verbatim, for a call that produced one. */
   output?: string;
+  /** Files attached to the completed tool result, as recorded. */
+  attachments?: Array<{ filename?: string; mime: string; url: string }>;
   /** The failure text, verbatim, for a call that failed. */
   error?: string;
   status: 'pending' | 'running' | 'completed' | 'error';

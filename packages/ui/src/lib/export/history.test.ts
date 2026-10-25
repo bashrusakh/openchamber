@@ -634,7 +634,16 @@ describe('the coverage of the sub-agent transcripts', () => {
             ],
           },
         ],
-        ses_bg: [assistantMessage('ses_bg', 'b1', 5000, 'Background work')],
+        ses_bg: [
+          assistantMessage('ses_bg', 'b1', 5000, 'Background work'),
+          {
+            info: {
+              id: 'b2', sessionID: 'ses_bg', role: 'assistant', agent: 'worker',
+              providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 8500 },
+            },
+            parts: [shellCall('b2', 'long-running-task', 2000, 8500)],
+          },
+        ],
         ses_fg: [assistantMessage('ses_fg', 'f1', 5200, 'Foreground work')],
       },
     });
@@ -643,12 +652,66 @@ describe('the coverage of the sub-agent transcripts', () => {
     const blocks = tree.nodes.filter((node) => node.kind === 'subagent');
     const background = blocks.find((node) => node.kind === 'subagent' && node.childSessionID === 'ses_bg');
 
-    // The background child's span comes from its own activity, not from the
-    // call that settled at once.
-    expect(background?.kind === 'subagent' && background.startedAt).toBe(5000);
+    // The child's directly recorded tool interval supplies its start and end;
+    // the short-lived background dispatch does not supply either endpoint.
+    expect(background?.kind === 'subagent' && background.startedAt).toBe(2000);
+    expect(background?.kind === 'subagent' && background.endedAt).toBe(8500);
     // The two agents overlapped, so the export says so.
     const output = markdown(input);
     expect(output).toContain('Ran at the same time as');
+  });
+
+  test('an open tool start proves only overlap inside another recorded interval', () => {
+    const backgroundBlock = (runningAt: number) => {
+      const input = fixture({
+      root: session('ses_root', { title: 'Root' }),
+      sessions: [
+        session('ses_root', { title: 'Root' }),
+        session('ses_bg', { title: 'Background', parentID: 'ses_root', agent: 'worker' }),
+        session('ses_other', { title: 'Other', parentID: 'ses_root', agent: 'reviewer' }),
+      ],
+      records: {
+        ses_root: [{
+          info: {
+            id: 'a1', sessionID: 'ses_root', role: 'assistant', agent: 'build',
+            providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 1000 },
+          },
+          parts: [
+            subagentCall('a1', {
+              childSessionID: 'ses_bg', status: 'completed', startedAt: 1000, endedAt: 1001,
+              metadata: { status: 'running' },
+            }),
+            subagentCall('a1', { childSessionID: 'ses_other', startedAt: 3000, endedAt: 5000 }),
+          ],
+        }],
+        ses_bg: [{
+          info: assistantMessage('ses_bg', 'b1', runningAt, 'Background work').info,
+          parts: [{
+            id: 'b1-tool', sessionID: 'ses_bg', messageID: 'b1', type: 'tool',
+            callID: 'b1-call', tool: 'shell',
+            state: { status: 'running', input: { command: 'work' }, time: { start: runningAt } },
+          }],
+        }],
+        ses_other: [assistantMessage('ses_other', 'o1', 3000, 'Other work')],
+      },
+    });
+
+      return build(input).tree.nodes.find((node) => node.kind === 'subagent' && node.childSessionID === 'ses_bg');
+    };
+
+    const earlier = backgroundBlock(2000);
+    expect(earlier?.kind === 'subagent' && earlier.endedAt).toBeUndefined();
+    expect(earlier?.kind === 'subagent' && earlier.concurrentWith).toBeUndefined();
+
+    const inside = backgroundBlock(4000);
+    expect(inside?.kind === 'subagent' && inside.endedAt).toBeUndefined();
+    expect(inside?.kind === 'subagent' && inside.concurrentWith).toEqual([
+      { agent: 'reviewer', title: 'Other' },
+    ]);
+
+    const atEnd = backgroundBlock(5000);
+    expect(atEnd?.kind === 'subagent' && atEnd.endedAt).toBeUndefined();
+    expect(atEnd?.kind === 'subagent' && atEnd.concurrentWith).toBeUndefined();
   });
 
   test('a child the session list does not name is not loaded', async () => {

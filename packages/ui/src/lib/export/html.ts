@@ -132,6 +132,9 @@ const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode): string => {
     tool.prompt === undefined ? '' : promptOnPage(tool.prompt, mode),
     tool.target ?? '',
     tool.command ?? '',
+    ...(tool.attachments ?? []).flatMap((file) => mode === 'detailed'
+      ? [file.filename ?? '', file.mime, file.url]
+      : [file.filename ?? file.mime]),
   ];
   if (mode === 'detailed') {
     parts.push(JSON.stringify(tool.input));
@@ -150,7 +153,7 @@ const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode): string => {
 const searchTextOf = (entry: ProjectedEntry, mode: ProjectionMode): string => {
   switch (entry.kind) {
     case 'message':
-      return `${entry.role} ${entry.text}`;
+      return `${entry.role} ${entry.text} ${entry.shell?.output ?? ''} ${entry.shell?.status ?? ''} ${entry.shell?.exit ?? ''} ${(entry.attachments ?? []).map((file) => file.filename ?? file.mime).join(' ')}`;
     case 'tool':
       return toolSearchText(entry.tool, mode);
     case 'reasoning':
@@ -299,6 +302,7 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
           id,
           kind: 'subagent-result',
           role: 'subagent-result',
+          agent: entry.agent,
           search: searchTextOf(entry, mode).toLowerCase(),
           depth: entry.depth,
           timestamp: entry.timestamp,
@@ -306,13 +310,6 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
         return;
       }
       case 'gap': {
-        entries.push({
-          id,
-          kind: 'gap',
-          search: searchTextOf(entry, mode).toLowerCase(),
-          depth: entry.depth,
-          timestamp: entry.timestamp,
-        });
         return;
       }
     }
@@ -433,6 +430,11 @@ const renderEntryHtml = (
         ].join('');
         details.push(`<details><summary>${escapeHtml(exportText('export.section.output'))}</summary><pre>${escapeHtml(entry.tool.output)}</pre>${notes}</details>`);
       }
+      if (entry.tool.attachments?.length) {
+        details.push(mode === 'detailed'
+          ? `<ul class="files">${entry.tool.attachments.map((file) => `<li><span>${escapeHtml(file.filename ?? file.mime)} (${escapeHtml(file.mime)})</span><br><code>${escapeHtml(file.url)}</code></li>`).join('')}</ul>`
+          : `<ul class="files">${entry.tool.attachments.map((file) => `<li>${escapeHtml(file.filename ?? file.mime)}</li>`).join('')}</ul>`);
+      }
       // The detailed view carries what the readable one leaves out: the
       // call's own arguments and the metadata the runtime reported.
       if (mode === 'detailed') {
@@ -474,9 +476,7 @@ const renderEntryHtml = (
 </article>`;
     }
     case 'gap': {
-      return `<article class="entry gap" data-id="${escapeHtml(entry.event.id)}" data-kind="gap">
-  <div class="body">${escapeHtml(entry.detail)}</div>
-</article>`;
+      return '';
     }
   }
 };

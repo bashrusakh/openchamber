@@ -468,6 +468,59 @@ describe('the HTML page searches what it shows', () => {
   });
 });
 
+describe('the HTML index follows rendered shell and result fields', () => {
+  test('visible shell fields and report attribution are searchable and filterable in both modes', () => {
+    for (const mode of ['readable', 'detailed'] as const) {
+    const result = buildExportFromRecords({
+      root: session('ses_root', { title: 'Root' }),
+      sessions: [session('ses_root', { title: 'Root' })],
+      records: new Map([['ses_root', [
+        {
+          info: {
+            id: 's1', sessionID: 'ses_root', role: 'shell', time: { created: 1000 },
+            shellID: 'sh1', command: 'run', status: 'exited',
+            exit: 7,
+            output: { output: 'SHELL_OUTPUT_SENTINEL', cursor: 0, size: 20, truncated: false },
+          },
+          parts: [],
+        },
+        subagentReport('ses_root', 'r1', 2000, {
+          childSessionID: 'ses_child', agent: 'reviewer', description: 'VISIBLE_REPORT_DESCRIPTION', output: 'Result',
+        }),
+      ]]]),
+    }, mode);
+    const html = renderExportHtml(result.projection, {
+      title: 'Root', mode, findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    const dom = new Window({ url: 'https://localhost/' });
+    dom.document.write(html);
+    const script = html.match(/<script>([\s\S]*?)<\/script>/);
+    if (!script) throw new Error('The page has no script');
+    new Function('document', script[1])(dom.document);
+
+    for (const term of ['SHELL_OUTPUT_SENTINEL', 'exited', '7']) {
+      search(dom, term);
+      const shell = [...dom.document.querySelectorAll('.entry.message')]
+        .find((entry) => (entry.textContent ?? '').includes('run'));
+      expect(isOnPage(shell ?? null)).toBe(true);
+    }
+
+    for (const term of ['reviewer', 'VISIBLE_REPORT_DESCRIPTION']) {
+      search(dom, term);
+      expect(isOnPage(dom.document.querySelector('.entry.result'))).toBe(true);
+    }
+
+    search(dom, '');
+    const agents = dom.document.querySelector('#filter-agent')?.textContent ?? '';
+    expect(agents).toContain('reviewer');
+    chooseFilter(dom, 'filter-agent', 'reviewer');
+    const report = dom.document.querySelector('.entry.result');
+    expect(isOnPage(report)).toBe(true);
+    }
+  });
+});
+
 /**
  * A sub-agent's result long enough for the readable view to cut it.
  *

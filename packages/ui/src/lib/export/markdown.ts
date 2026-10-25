@@ -211,6 +211,11 @@ const renderEntry = (
     case 'tool': {
       const line = toolLine(entry);
       const details: string[] = [];
+      if (entry.tool.attachments?.length) {
+        details.push(entry.tool.attachments.map((file) => mode === 'detailed'
+          ? `- ${file.filename ?? file.mime} (${file.mime}) ${file.url}`
+          : `- ${file.filename ?? file.mime}`).join('\n'));
+      }
       // The runtime's own cut of the result. It belongs next to the output:
       // the reader is looking at the result there, and the note is what stops
       // them from taking the part the runtime kept for the whole result.
@@ -274,7 +279,7 @@ const renderEntry = (
       return [label, attribution, body].filter(Boolean).join('\n\n');
     }
     case 'gap': {
-      return `*${entry.detail}*`;
+      return '';
     }
   }
 };

@@ -16,6 +16,7 @@ import { renderExportMarkdown } from './markdown';
 import { renderExportHtml } from './html';
 import { renderExportJson } from './json';
 import type { ExportSessionInfo, ExportTimeline } from './events';
+import type { ProjectedNode } from './project';
 import {
   assistantMessage,
   futurePart,
@@ -1283,8 +1284,15 @@ describe('export pipeline', () => {
       findings: result.timeline.findings, excluded: result.timeline.excluded,
       sessionCount: result.timeline.sessions.size,
     });
-    expect(document).toContain('could not be loaded');
+    expect(document.split('could not be loaded')).toHaveLength(2);
     expect(document).toContain('Incomplete export');
+    expect(document.indexOf('Incomplete export')).toBeGreaterThan(document.indexOf('Go'));
+    const html = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    expect(html.split('could not be loaded')).toHaveLength(2);
+    expect(html.indexOf('Incomplete export')).toBeGreaterThan(html.indexOf('Go'));
     // The sub-agent is named, so the reader knows what is missing.
     expect(document).toContain('Child');
   });
@@ -1543,6 +1551,80 @@ describe('export pipeline', () => {
     const parts = parsed.source.ses_root.records[0].parts;
 
     expect(parts.map((part: { type: string }) => part.type)).toEqual(['text', 'future']);
+  });
+
+  test('completed tool attachments survive root and nested exports', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: 'ses_root', agent: 'reviewer' });
+    const toolRecord = (sessionID: string, messageID: string): Record_ => ({
+          info: {
+            id: messageID, sessionID, role: 'assistant', agent: 'build',
+            providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 1000 },
+          },
+          parts: [{
+            id: `${messageID}-tool`, sessionID, messageID, type: 'tool', callID: `${messageID}-call`, tool: 'openchamber_web',
+            state: {
+              status: 'completed', input: {}, output: 'Result', time: { start: 1000, end: 2000 },
+              attachments: [{ id: `${messageID}-file`, sessionID, messageID, type: 'file', filename: 'TOOL_IMAGE_SENTINEL.png', mime: 'image/png', url: 'data:image/png;base64,AA==' }],
+            },
+          }],
+    });
+    const rootInput = fixture({ root, records: { ses_root: [toolRecord('ses_root', 'a1')] } });
+    const nestedInput = fixture({
+      root,
+      sessions: [root, child],
+      records: {
+        ses_root: [{
+          info: assistantMessage('ses_root', 'a1', 1000, '').info,
+          parts: [subagentCall('a1', { childSessionID: child.id, startedAt: 1000, endedAt: 5000 })],
+        }],
+        ses_child: [toolRecord(child.id, 'ca1')],
+      },
+    });
+
+    for (const [depth, input] of [['root', rootInput], ['nested', nestedInput]] as const) {
+      for (const mode of ['readable', 'detailed'] as const) {
+        const output = markdown(input, mode);
+        expect(output).toContain('TOOL_IMAGE_SENTINEL.png');
+        if (mode === 'detailed') {
+          expect(output).toContain('(image/png) data:image/png;base64,AA==');
+        } else {
+          expect(output).not.toContain('data:image/png;base64,AA==');
+        }
+        const projection = build(input, mode).projection;
+        const findTool = (nodes: ProjectedNode[]): Extract<ProjectedNode, { kind: 'tool' }> | undefined => {
+          for (const node of nodes) {
+            if (node.kind === 'tool') return node;
+            if (node.kind === 'subagent') {
+              const nested = findTool(node.entries);
+              if (nested) return nested;
+            }
+          }
+          return undefined;
+        };
+        const tool = findTool(projection);
+        expect(tool?.tool.attachments?.[0]?.mime).toBe('image/png');
+        expect(tool?.tool.attachments?.[0]?.url).toBe('data:image/png;base64,AA==');
+        const result = buildExportFromRecords({
+          root: input.root,
+          sessions: input.sessions,
+          records: input.records,
+        }, mode);
+        const html = renderExportHtml(result.projection, {
+          title: 'Root', mode, findings: result.timeline.findings,
+          excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+        });
+        expect(html).toContain('TOOL_IMAGE_SENTINEL.png');
+        if (mode === 'detailed') expect(html).toContain('data:image/png;base64,AA==');
+        const parsed = JSON.parse(renderExportJson(result.timeline));
+        const sourceSessionID = depth === 'root' ? 'ses_root' : 'ses_child';
+        type SourceRecord = { parts: Array<{ state?: { attachments?: Array<{ url: string }> } }> };
+        const sourceRecords = parsed.source[sourceSessionID].records as SourceRecord[];
+        expect(sourceRecords.some((record) => record.parts.some((part) => (
+          part.state?.attachments?.some((file) => file.url === 'data:image/png;base64,AA==')
+        )))).toBe(true);
+      }
+    }
   });
 });
 

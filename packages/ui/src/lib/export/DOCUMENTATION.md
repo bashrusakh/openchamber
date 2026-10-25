@@ -118,7 +118,9 @@ cannot name them differently.
   holds the text the page shows: a long prompt and a long sub-agent result are
   cut in the readable view, and the index holds those cuts, so a search does
   not find a word the reader cannot read. The reasoning the readable view does
-  not draw is not in the index at all.
+  not draw is not in the index at all. Search includes rendered shell output
+  and attachment filenames, and visible sub-agent result attribution is
+  available through the agent filter.
 - **Compact never means lost.** The readable view cuts a long tool result
   down and marks the cut. The mark says where the whole result is: the
   export of this session with full details, which carries the recorded
@@ -131,13 +133,16 @@ cannot name them differently.
   a long result itself and keeps the prefix, so the document says so where
   the reader looks at the output, and names the file the runtime wrote the
   rest to. That is a property of the record, not something the export could
-  not establish, so it does not belong in the findings at the end.
+  not establish, so it does not belong in the findings at the end. Completed
+  tool-result attachments keep their filename, MIME type and URL in the
+  normalized event and detailed rendering; readable rendering shows filenames.
 - **A partial export says so.** Everything the export could not establish —
   a child that would not load, a call that named no child, a session that was
   resumed, a part the model does not cover — lands in `findings`, and the
   readable document reports them once at the end. A child that would not load
-  also becomes a `gap` event, so the hole is visible where the sub-agent's
-  work would have been. An ordinary message never carries a diagnostic line.
+  also becomes a `gap` event to preserve its structural position, while its
+  diagnostic appears once in the final integrity section. An ordinary message
+  never carries a diagnostic line.
   A child the user left out on purpose is not a gap: the export knows it was
   left out.
 - **A session cut out of the tree is named, not reported.** An archived
