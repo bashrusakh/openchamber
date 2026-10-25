@@ -748,6 +748,52 @@ describe('the coverage of the sub-agent transcripts', () => {
     ]);
   });
 
+  test('a consumed running invocation proves activity only at points inside a sibling interval', () => {
+    const fixtureAt = (startedAt: number) => {
+      const root = session('ses_root', { title: 'Root' });
+      const background = session('ses_bg', { title: 'Background', parentID: root.id, agent: 'worker' });
+      const nested = session('ses_nested', { title: 'Nested', parentID: background.id, agent: 'reviewer' });
+      const sibling = session('ses_sibling', { title: 'Sibling', parentID: root.id, agent: 'tester' });
+      return fixture({
+        root,
+        sessions: [root, background, nested, sibling],
+        records: {
+          ses_root: [{
+            info: assistantMessage(root.id, 'root-call', 1000, '').info,
+            parts: [
+              subagentCall('root-call', {
+                childSessionID: background.id, startedAt: 1000, endedAt: 1001,
+                metadata: { status: 'running' },
+              }),
+              subagentCall('sibling-call', { childSessionID: sibling.id, startedAt: 3000, endedAt: 5000 }),
+            ],
+          }],
+          ses_bg: [{
+            info: assistantMessage(background.id, 'nested-call', 2000, '').info,
+            parts: [{
+              id: 'nested-running', sessionID: background.id, messageID: 'nested-call', type: 'tool',
+              callID: 'nested-call-id', tool: 'subagent',
+              state: { status: 'running', input: { agent: 'reviewer' }, metadata: { sessionID: nested.id }, time: { start: startedAt } },
+            }],
+          }],
+          ses_nested: [assistantMessage(nested.id, 'nested-work', 4500, 'Nested work')],
+          ses_sibling: [assistantMessage(sibling.id, 'sibling-work', 3500, 'Sibling work')],
+        },
+      });
+    };
+
+    for (const [startedAt, expected] of [
+      [2000, false],
+      [4000, true],
+      [5000, false],
+    ] as const) {
+      const input = fixtureAt(startedAt);
+      const backgroundBlock = build(input).tree.nodes.find((node) => node.kind === 'subagent' && node.childSessionID === 'ses_bg');
+      expect(backgroundBlock?.kind === 'subagent' && backgroundBlock.concurrentWith !== undefined).toBe(expected);
+      expect(backgroundBlock?.kind === 'subagent' && backgroundBlock.endedAt).toBeUndefined();
+    }
+  });
+
   test('a child the session list does not name is not loaded', async () => {
     // The session list names the root only. The root's own records name the
     // child, but the app does not attach that child to this session, so the

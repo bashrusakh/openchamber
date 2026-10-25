@@ -126,6 +126,7 @@ type HtmlExportData = {
 const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode): string => {
   const parts = [
     tool.name,
+    mode === 'detailed' ? tool.callID ?? '' : '',
     tool.description ?? '',
     tool.output ?? '',
     tool.error ?? '',
@@ -138,6 +139,7 @@ const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode): string => {
   ];
   if (mode === 'detailed') {
     parts.push(JSON.stringify(tool.input));
+    if (tool.raw) parts.push(tool.raw);
     if (tool.metadata) parts.push(JSON.stringify(tool.metadata));
   }
   return parts.join(' ');
@@ -222,8 +224,12 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
       // word that only appears in the call's arguments finds the block. The
       // detailed view is the one that shows the arguments, so the readable
       // view does not promise them.
+      const dispatch = node.dispatchedBy;
+      const hasUnavailableTranscript = node.entries.some((entry) => entry.kind === 'gap' && entry.reason === 'unavailable');
+      const readableFallback = mode === 'readable' && hasUnavailableTranscript
+        && (dispatch?.output || dispatch?.call?.output || dispatch?.call?.attachments?.length);
       const call = node.dispatchedBy?.call;
-      if (call && mode === 'detailed') {
+      if (call) {
         tools.add(call.name);
         statuses.add(call.status);
         entries.push({
@@ -232,16 +238,22 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
           agent: node.agent,
           tool: call.name,
           status: call.status,
-          search: toolSearchText(call, mode).toLowerCase(),
+          search: [
+            call.name,
+            statusLabel(call.status),
+            dispatch?.error ?? '',
+            node.invokedAs ?? '',
+            node.invokedDescription ?? '',
+            node.resumedBy?.length ? exportText('export.dispatch.resumed', { count: node.resumedBy.length }) : '',
+            mode === 'detailed' ? toolSearchText(call, mode) : '',
+            mode === 'detailed' ? call.output ?? '' : readableFallback ? call.output ?? dispatch?.output ?? '' : '',
+            mode === 'detailed' ? (call.attachments ?? []).flatMap((file) => [file.filename ?? '', file.mime, file.url]).join(' ') : readableFallback ? (call.attachments ?? []).map((file) => file.filename ?? file.mime).join(' ') : '',
+          ].join(' ').toLowerCase(),
           depth: node.depth,
           timestamp: call.startedAt,
         });
       }
-      const dispatch = node.dispatchedBy;
-      const hasUnavailableTranscript = node.entries.some((entry) => entry.kind === 'gap' && entry.reason === 'unavailable');
-      const readableFallback = mode === 'readable' && hasUnavailableTranscript
-        && (dispatch?.output || dispatch?.call?.output || dispatch?.call?.attachments?.length);
-      if (dispatch?.error || dispatch?.status || readableFallback) {
+      if (!call && (dispatch?.error || dispatch?.status || readableFallback)) {
         entries.push({
           id: `${node.childSessionID}:dispatch-result`,
           kind: 'subagent-result',
@@ -461,9 +473,10 @@ const renderEntryHtml = (
       // The detailed view carries what the readable one leaves out: the
       // call's own arguments and the metadata the runtime reported.
       if (mode === 'detailed') {
-        const { input, metadata } = entry.tool;
-        if (Object.keys(input).length > 0) {
-          details.push(`<details><summary>${escapeHtml(exportText('export.section.input'))}</summary><pre>${escapeHtml(JSON.stringify(input, null, 2))}</pre></details>`);
+        const { input, raw, metadata } = entry.tool;
+        if (Object.keys(input).length > 0 || raw) {
+          const recordedInput = Object.keys(input).length > 0 ? JSON.stringify(input, null, 2) : raw;
+          details.push(`<details><summary>${escapeHtml(exportText('export.section.input'))}</summary><pre>${escapeHtml(recordedInput ?? '')}</pre></details>`);
         }
         if (metadata && Object.keys(metadata).length > 0) {
           details.push(`<details><summary>${escapeHtml(exportText('export.section.metadata'))}</summary><pre>${escapeHtml(JSON.stringify(metadata, null, 2))}</pre></details>`);
@@ -545,12 +558,6 @@ const renderSubagentHtml = (subagent: ProjectedSubagent, mode: ProjectionMode, d
   const fallbackAttachments = mode === 'readable' && unavailableTranscript && dispatched?.call?.attachments?.length
     ? `<ul class="files">${(dispatched?.call?.attachments ?? []).map((file) => `<li>${escapeHtml(file.filename ?? file.mime)}</li>`).join('')}</ul>`
     : '';
-  const dispatchContent = [dispatchNoteText, unavailableTranscript && mode === 'readable' ? dispatchResult : '', fallbackAttachments]
-    .filter(Boolean).join('');
-  const dispatchNote = dispatchContent
-    ? `<article class="entry result" data-id="${escapeHtml(`${subagent.childSessionID}:dispatch-result`)}" data-kind="subagent-result" data-agent="${escapeHtml(subagent.agent ?? '')}">${dispatchContent}</article>`
-    : '';
-
   // The agent the call named, when it differs from the agent that ran: the
   // call asked for one agent, the session records the one that answered.
   const invoked = [
@@ -566,6 +573,15 @@ const renderSubagentHtml = (subagent: ProjectedSubagent, mode: ProjectionMode, d
       ? `<p class="note">${escapeHtml(exportText('export.dispatch.resumed', { count: subagent.resumedBy.length }))}</p>`
       : '',
   ].join('');
+
+  const dispatchBody = [dispatchNoteText, dispatchResult, dispatchTruncationNote, dispatchDetails, fallbackAttachments, invoked]
+    .filter(Boolean).join('');
+  const dispatchCall = dispatched?.call
+    ? `<article class="entry call" data-id="${escapeHtml(`${subagent.childSessionID}:call`)}" data-kind="call" data-tool="${escapeHtml(dispatched.call.name)}" data-status="${escapeHtml(dispatched.call.status)}" data-agent="${escapeHtml(subagent.agent ?? '')}">
+   <header><span class="tool-name">${escapeHtml(dispatched.call.name)}</span><span class="meta"><span>${escapeHtml(statusLabel(dispatched.call.status))}</span></span></header>
+   ${dispatchBody}
+ </article>`
+    : dispatchBody;
 
   // The task is an entry of its own, so a search for a word in it keeps
   // the task and hides the rest of the block. The index holds the text the
@@ -601,14 +617,10 @@ const renderSubagentHtml = (subagent: ProjectedSubagent, mode: ProjectionMode, d
   // the summary's own gap keeps them apart: the time does not run into the
   // title. An entry's header separates its metadata the same way.
   return `<section class="subagent depth-${depth}" data-id="${escapeHtml(subagent.childSessionID)}" data-agent="${escapeHtml(subagent.agent ?? '')}">
-  <details class="subagent-fold" open><summary><span class="subagent-label">${escapeHtml(label)}</span>${title}${meta ? `<span class="meta">${meta}</span>` : ''}</summary>
-  ${concurrent}
-  ${dispatchNote}
-   ${mode === 'detailed' ? dispatchResult : ''}
-  ${dispatchTruncationNote}
-   ${dispatchDetails}
-  ${invoked}
-  ${task}
+   <details class="subagent-fold" open><summary><span class="subagent-label">${escapeHtml(label)}</span>${title}${meta ? `<span class="meta">${meta}</span>` : ''}</summary>
+   ${concurrent}
+    ${dispatchCall}
+   ${task}
 ${own}
   </details>
 </section>`;
@@ -629,8 +641,9 @@ const renderDispatchCallDetails = (
   const call = subagent.dispatchedBy?.call;
   if (!call || mode !== 'detailed') return '';
   const details: string[] = [];
-  if (Object.keys(call.input).length > 0) {
-    details.push(`<details><summary>${escapeHtml(exportText('export.section.input'))}</summary><pre>${escapeHtml(JSON.stringify(call.input, null, 2))}</pre></details>`);
+  if (Object.keys(call.input).length > 0 || call.raw) {
+    const recordedInput = Object.keys(call.input).length > 0 ? JSON.stringify(call.input, null, 2) : call.raw;
+    details.push(`<details><summary>${escapeHtml(exportText('export.section.input'))}</summary><pre>${escapeHtml(recordedInput ?? '')}</pre></details>`);
   }
   if (call.metadata && Object.keys(call.metadata).length > 0) {
     details.push(`<details><summary>${escapeHtml(exportText('export.section.metadata'))}</summary><pre>${escapeHtml(JSON.stringify(call.metadata, null, 2))}</pre></details>`);
@@ -641,11 +654,7 @@ const renderDispatchCallDetails = (
   if (call.attachments?.length) {
     details.push(`<ul class="files">${call.attachments.map((file) => `<li><span>${escapeHtml(file.filename ?? file.mime)} (${escapeHtml(file.mime)})</span><br><code>${escapeHtml(file.url)}</code></li>`).join('')}</ul>`);
   }
-  if (details.length === 0) return '';
-  return `<article class="entry call" data-id="${escapeHtml(`${subagent.childSessionID}:call`)}" data-kind="call" data-tool="${escapeHtml(call.name)}" data-status="${escapeHtml(call.status)}" data-agent="${escapeHtml(subagent.agent ?? '')}">
-  <header><span class="tool-name">${escapeHtml(call.name)}</span><span class="meta"><span>${escapeHtml(statusLabel(call.status))}</span></span></header>
-  ${details.join('\n  ')}
-</article>`;
+  return details.join('\n  ');
 };
 
 /** The page's own stylesheet. */

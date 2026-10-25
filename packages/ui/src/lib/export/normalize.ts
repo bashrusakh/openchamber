@@ -159,6 +159,28 @@ const messageText = (message: UserMessage | AssistantMessage, parts: readonly Pa
   formatMessageText(parts, { user: message.role === 'user' })
 );
 
+/** Formats recorded agent mentions in the position they held among message parts. */
+const messageTextWithAgentMentions = (message: UserMessage | AssistantMessage, parts: readonly Part[]): string => {
+  const blocks: string[] = [];
+  let textParts: Part[] = [];
+  const flushText = () => {
+    const text = messageText(message, textParts).trim();
+    if (text) blocks.push(text);
+    textParts = [];
+  };
+
+  for (const part of parts) {
+    if (part.type === 'agent') {
+      flushText();
+      blocks.push(`@${part.name}`);
+    } else {
+      textParts.push(part);
+    }
+  }
+  flushText();
+  return blocks.join('\n\n');
+};
+
 /**
  * The type a part carries, as the record wrote it.
  *
@@ -317,6 +339,8 @@ const exportToolCall = (
     input: readJsonRecord(state.input),
     status: state.status,
   };
+
+  if (state.status === 'pending') call.raw = state.raw;
 
   const metadata = 'metadata' in state ? readJsonRecord(state.metadata) : undefined;
   if (metadata) call.metadata = metadata;
@@ -672,7 +696,7 @@ export const normalizeExportTimeline = (options: {
         const segments = messageSegments(record.parts);
         const hasOrderedPartBoundaries = record.parts.some((part) => part.type === 'tool' || part.type === 'reasoning');
         for (const segment of segments) {
-          const text = messageText(message, segment.parts);
+          const text = messageTextWithAgentMentions(message, segment.parts);
           const attachments = segment.parts
             .filter((part): part is Extract<Part, { type: 'file' }> => part.type === 'file')
             .map((part) => ({ filename: part.filename, mime: part.mime, url: part.url }));

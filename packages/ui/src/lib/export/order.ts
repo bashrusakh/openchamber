@@ -422,8 +422,8 @@ const observedWorkOverlaps = (
 ): boolean => {
   const leftIntervals = workIntervals(left, activityCalls);
   const rightIntervals = workIntervals(right, activityCalls);
-  const leftPoints = workPoints(left);
-  const rightPoints = workPoints(right);
+  const leftPoints = workPoints(left, activityCalls);
+  const rightPoints = workPoints(right, activityCalls);
 
   const intersects = (a: readonly [number, number], b: readonly [number, number]): boolean => (
     a[0] < b[1] && b[0] < a[1]
@@ -434,7 +434,7 @@ const observedWorkOverlaps = (
 
   return leftIntervals.some((a) => rightIntervals.some((b) => intersects(a, b)))
     || leftIntervals.some((interval) => rightPoints.some((point) => contains(interval, point)))
-    || rightIntervals.some((interval) => leftPoints.some((point) => contains(interval, point)));
+      || rightIntervals.some((interval) => leftPoints.some((point) => contains(interval, point)));
 };
 
 /** The completed tool intervals directly recorded in this subagent's work. */
@@ -454,18 +454,10 @@ const workIntervals = (
 };
 
 /** Recorded moments of activity that have no duration of their own. */
-const workPoints = (block: SubagentBlock): number[] => {
-  const points: number[] = [];
-  for (const child of block.children) {
-    if (child.kind !== 'event') continue;
-    if (child.event.kind === 'tool') {
-      if (child.event.call.status === 'running' && child.event.call.startedAt !== undefined) {
-        points.push(child.event.call.startedAt);
-      }
-      continue;
-    }
-    // Message and report timestamps place records in the transcript. They do
-    // not establish when delegated work was executing.
-  }
-  return points;
-};
+const workPoints = (
+  block: SubagentBlock,
+  activityCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
+): number[] => (activityCalls.get(block) ?? [])
+  .flatMap((call) => call.status === 'running' && call.startedAt !== undefined
+    ? [call.startedAt]
+    : []);

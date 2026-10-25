@@ -122,6 +122,8 @@ export type ExportToolCall = {
   callID: string;
   /** The call's arguments, verbatim. */
   input: Record<string, JsonValue>;
+  /** Raw streamed arguments while a call is pending. */
+  raw?: string;
   /** The call's result metadata, verbatim, when the runtime reported it. */
   metadata?: Record<string, JsonValue>;
   /** The result text, verbatim, for a call that produced one. */

@@ -15,7 +15,9 @@ import type { Session } from '@/lib/opencode/model';
 import { useI18nStore } from '@/lib/i18n';
 import { buildExport, buildExportFromRecords } from './pipeline';
 import { renderExportHtml } from './html';
-import { assistantMessage, reasoningPart, shellCall, subagentCall, subagentReport, type Record_ } from './fixtures';
+import { renderExportMarkdown } from './markdown';
+import { renderExportJson } from './json';
+import { assistantMessage, reasoningPart, shellCall, subagentCall, subagentReport, textPart, userMessage, type Record_ } from './fixtures';
 
 const session = (id: string, overrides: Partial<Session> = {}): Session => ({
   id,
@@ -168,6 +170,90 @@ const pageData = (dom: Window): {
 };
 
 describe('the HTML page keeps the match on the page', () => {
+  test('delegation call ownership stays searchable and filterable in both modes', async () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: root.id, agent: 'reviewer' });
+    const result = await buildExport({
+      root,
+      sessions: [root, child],
+      load: async (sessionID) => sessionID === root.id
+        ? [delegation('a1', child.id, root.id)]
+        : [assistantMessage(child.id, 'ca1', 3000, 'CHILD_MESSAGE_NEEDLE')],
+    }, 'readable');
+
+    const htmlFor = (mode: 'readable' | 'detailed') => renderExportHtml(result.projection, {
+      title: 'Root', mode, findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    const readableHtml = htmlFor('readable');
+    const readable = new Window({ url: 'https://localhost/' });
+    readable.document.write(readableHtml);
+    const readableScript = readableHtml.match(/<script>([\s\S]*?)<\/script>/);
+    if (!readableScript) throw new Error('The export wrote no page script');
+    new Function('document', readableScript[1])(readable.document);
+    expect(filterOptions(readable, 'filter-tool')).toContain('subagent');
+    expect(filterOptions(readable, 'filter-status')).toContain('completed');
+    chooseFilter(readable, 'filter-status', 'completed');
+    const readableCall = readable.document.querySelector('[data-id="ses_child:call"]');
+    expect(isOnPage(readableCall)).toBe(true);
+
+    const detailedHtml = htmlFor('detailed');
+    const detailed = new Window({ url: 'https://localhost/' });
+    detailed.document.write(detailedHtml);
+    const detailedScript = detailedHtml.match(/<script>([\s\S]*?)<\/script>/);
+    if (!detailedScript) throw new Error('The export wrote no page script');
+    new Function('document', detailedScript[1])(detailed.document);
+    search(detailed, 'a1-call');
+    expect(isOnPage(detailed.document.querySelector('[data-id="ses_child:call"]'))).toBe(true);
+    search(detailed, 'blocking defects');
+    expect(isOnPage(detailed.document.querySelector('[data-id="ses_child:call"]'))).toBe(true);
+    search(detailed, 'CHILD_MESSAGE_NEEDLE');
+    expect(isOnPage(detailed.document.querySelector('[data-id="ses_child:call"]'))).toBe(false);
+    expect(isOnPage(entryWith(detailed, 'CHILD_MESSAGE_NEEDLE'))).toBe(true);
+    expect(detailed.document.querySelector('section.subagent')?.classList.contains('hidden')).toBe(false);
+  });
+
+  test('pending raw arguments and agent-only mentions remain readable in HTML', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const record: Record_ = {
+      info: { id: 'pending', sessionID: root.id, role: 'assistant', agent: 'build', providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 1000 } },
+      parts: [{
+        id: 'pending-tool', sessionID: root.id, messageID: 'pending', type: 'tool', callID: 'pending-call', tool: 'shell',
+        state: { status: 'pending', input: {}, raw: '{"command":"streamed-argument"' },
+      }],
+    };
+    const mention: Record_ = {
+      ...userMessage(root.id, 'mention', 2000, ''),
+      parts: [
+        { ...textPart('mention', 'before'), sessionID: root.id },
+        { id: 'mention-agent', sessionID: root.id, messageID: 'mention', type: 'agent', name: 'recorded-reviewer' },
+        { ...textPart('mention', 'after'), sessionID: root.id },
+      ],
+    };
+    const result = buildExportFromRecords({ root, sessions: [root], records: new Map([[root.id, [record, mention]]]) }, 'detailed');
+    const html = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'detailed', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    expect(html).toContain('{&quot;command&quot;:&quot;streamed-argument&quot;');
+    expect(html).toContain('@recorded-reviewer');
+    expect(html).not.toContain('unsupported part');
+    const markdown = renderExportMarkdown(result.projection, {
+      title: 'Root', mode: 'detailed', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    expect(markdown).toContain('{"command":"streamed-argument"');
+    expect(markdown).toContain('before\n\n@recorded-reviewer\n\nafter');
+    const json = JSON.parse(renderExportJson(result.timeline)) as {
+      events: Array<{ kind: string; text?: string; call?: { raw?: string } }>;
+      source: Record<string, { records: Array<{ parts: Array<{ type: string; state?: { raw?: string } }> }> }>;
+    };
+    expect(json.events.find((event) => event.kind === 'tool')?.call?.raw).toBe('{"command":"streamed-argument"');
+    expect(json.events.find((event) => event.kind === 'message')?.text).toBe('before\n\n@recorded-reviewer\n\nafter');
+    expect(json.source[root.id].records[0].parts[0]).toMatchObject({ state: { raw: '{"command":"streamed-argument"' } });
+    expect(json.source[root.id].records[1].parts.map((part) => part.type)).toEqual(['text', 'agent', 'text']);
+  });
+
   test('delegation failures keep their block visible in actual DOM search in both modes', async () => {
     const root = session('ses_root', { title: 'Root' });
     const child = session('ses_child', { title: 'Child', parentID: root.id, agent: 'reviewer' });

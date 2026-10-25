@@ -4,6 +4,9 @@ import { isAmbiguousSendFailure } from '@/sync/send-failure-classification'
 import { adoptRelayTunnel, deactivateRelayTunnel } from "@/lib/relay/runtime-tunnel"
 import type { RelayTunnelClient } from "@/lib/relay/tunnel-client"
 import { useSpacesStore } from "@/lib/spaces/spaces-store"
+import type { Part } from "@/lib/opencode/model"
+import { ChildStoreManager } from "@/sync/child-store"
+import { SessionMessageLoader } from "@/sync/session-message-loader"
 
 // The generated `@opencode/client` runs for real here; only the runtime
 // transport (`runtimeFetch`) and runtime identity are replaced. That keeps
@@ -711,6 +714,162 @@ describe("messages and config", () => {
     }))
     const full = await opencodeClient.getSessionMessages("ses_1", { limit: 1 })
     expect(full.cursor).toEqual({ previous: "p1", next: "n1" })
+  })
+
+  test("projects actual OpenCode content in source order without inventing text-part times", async () => {
+    responses.push(json({ data: [{
+      id: "msg_a",
+      type: "assistant",
+      time: { created: 2000, completed: 4000 },
+      agent: "build",
+      model: { id: "m", providerID: "p" },
+      content: [
+        { type: "text", text: "before" },
+        { type: "tool", id: "call_1", name: "bash", time: { created: 2100, ran: 2500, completed: 3000 }, state: {
+          status: "completed", input: { command: "true" }, content: [{ type: "text", text: "done" }], metadata: {},
+        } },
+        { type: "text", text: "after" },
+      ],
+    }], cursor: {} }))
+
+    const page = await opencodeClient.getSessionMessages("ses_1")
+
+    expect(page.items[0].parts.map((part: Part) => part.type === "text" ? part.text : part.type)).toEqual(["before", "tool", "after"])
+    expect(page.items[0].parts[0].time).toBeUndefined()
+    expect(page.items[0].parts[2].time).toBeUndefined()
+    expect(page.items[0].parts[1]).toMatchObject({ state: { time: { start: 2500, end: 3000 } } })
+  })
+
+  test("complete-history loading hydrates the real adapter's shelled page through its single-message read", async () => {
+    runtimeKey = "complete-export-shells"
+    responses.push(json({ compatibility: { capabilities: ["api.message-part-shells.v1"] } }))
+    opencodeClient.learnMessagePageShellsSupport()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const shellRecord = {
+      id: "msg_a", type: "assistant", time: { created: 2000, completed: 4000 }, agent: "build",
+      model: { id: "m", providerID: "p" },
+      content: [{ type: "tool", id: "call_1", name: "read", time: { created: 2100, ran: 2500, completed: 3000 }, state: {
+        status: "completed", input: { filePath: "a.txt" }, content: [{ type: "text", text: "" }],
+        metadata: { openchamberContentShell: { chars: 11 } },
+      } }],
+    }
+    const wholeRecord = {
+      ...shellRecord,
+      content: [{ type: "tool", id: "call_1", name: "read", time: { created: 2100, ran: 2500, completed: 3000 }, state: {
+        status: "completed", input: { filePath: "a.txt" },
+        content: [{ type: "text", text: "complete body" }, { type: "file", uri: "file:///a.txt", mime: "text/plain", name: "a.txt" }],
+        metadata: {},
+      } }],
+    }
+    responses.push(json({ data: [shellRecord], cursor: {} }), json({ data: [] }), json({ data: wholeRecord }))
+    const childStores = new ChildStoreManager()
+    const target = { directory: "/repo/child", sessionID: "ses_1" }
+    const loader = new SessionMessageLoader(childStores, { sdk: opencodeClient, runtimeKey })
+
+    await loader.loadComplete(target)
+
+    expect(requests.filter((request) => request.url.pathname === "/api/session/ses_1/message").map((request) => request.headers.get("x-openchamber-part-shells"))).toEqual(["v1"])
+    expect(requests.map((request) => request.url.pathname)).toEqual([
+      "/api/version", "/api/session/ses_1/message", "/api/session/ses_1/inbox", "/api/session/ses_1/message/msg_a",
+    ])
+    expect(childStores.getChild(target.directory)?.getState().part.msg_a?.[0]).toMatchObject({
+      state: {
+        status: "completed", output: "complete body",
+        attachments: [{ filename: "a.txt", mime: "text/plain", url: "file:///a.txt" }],
+      },
+    })
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("a failed full-record read rejects complete history instead of returning the shelled page", async () => {
+    runtimeKey = "complete-export-root-hydration-failure"
+    responses.push(json({ compatibility: { capabilities: ["api.message-part-shells.v1"] } }))
+    opencodeClient.learnMessagePageShellsSupport()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const record = {
+      id: "msg_shell", type: "assistant", time: { created: 1, completed: 3 }, agent: "build",
+      model: { id: "m", providerID: "p" },
+      content: [{ type: "tool", id: "call_shell", name: "read", time: { created: 1, ran: 2, completed: 3 }, state: {
+        status: "completed", input: { filePath: "a.txt" }, content: [{ type: "text", text: "" }],
+        metadata: { openchamberContentShell: { chars: 10 } },
+      } }],
+    }
+    responses.push(
+      json({ data: [record], cursor: {} }),
+      json({ data: [] }),
+      json({ message: "full message unavailable" }, 503),
+    )
+    const childStores = new ChildStoreManager()
+    const loader = new SessionMessageLoader(childStores, { sdk: opencodeClient, runtimeKey })
+    const target = { directory: "/repo", sessionID: "ses_1" }
+
+    await expect(loader.loadComplete(target)).rejects.toThrow()
+
+    expect(childStores.getChild(target.directory)?.getState().part.msg_shell?.[0]).toMatchObject({
+      state: { output: "", metadata: { openchamberContentShell: { chars: 10 } } },
+    })
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("hydrates a 300-call transcript within the existing session-page request limit", async () => {
+    runtimeKey = "complete-export-hydration-scale"
+    responses.push(json({ compatibility: { capabilities: ["api.message-part-shells.v1"] } }))
+    opencodeClient.learnMessagePageShellsSupport()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const records = Array.from({ length: 300 }, (_, index) => ({
+      id: `msg_${index}`,
+      type: "assistant",
+      time: { created: index + 1, completed: index + 2 },
+      agent: "build",
+      model: { id: "m", providerID: "p" },
+      content: [{
+        type: "tool", id: `call_${index}`, name: "bash", time: { created: index + 1, ran: index + 1, completed: index + 2 },
+        state: { status: "completed", input: { command: "true" }, content: [{ type: "text", text: "" }], metadata: { openchamberContentShell: { chars: 1 } } },
+      }],
+    }))
+    let activeHydrations = 0
+    let maxActiveHydrations = 0
+    const respond = async (request: CapturedRequest): Promise<Response> => {
+      if (request.url.pathname.endsWith("/inbox")) return json({ data: [] })
+      if (request.url.pathname === "/api/session/ses_1/message") {
+        const cursor = request.url.searchParams.get("cursor")
+        const start = cursor === "next_1" ? 100 : cursor === "next_2" ? 200 : 0
+        const pageSize = start === 0 ? 100 : 200
+        const end = start + pageSize
+        const page = records.slice(start, end)
+        const next = end < records.length ? `next_${end / 100}` : undefined
+        return json({ data: page, cursor: { next } })
+      }
+      const messageID = request.url.pathname.split("/").at(-1) ?? ""
+      const raw = records.find((record) => record.id === messageID)
+      if (!raw) return json({ message: "missing message" }, 404)
+      activeHydrations += 1
+      maxActiveHydrations = Math.max(maxActiveHydrations, activeHydrations)
+      await new Promise((resolve) => setTimeout(resolve, 1))
+      activeHydrations -= 1
+      return json({ data: {
+        ...raw,
+        content: [{
+          type: "tool", id: `call_${messageID.slice(4)}`, name: "bash",
+          time: raw.content[0].time,
+          state: { status: "completed", input: { command: "true" }, content: [{ type: "text", text: "done" }], metadata: {} },
+        }],
+      } })
+    }
+    responses.push(...Array.from({ length: 310 }, () => respond))
+    const childStores = new ChildStoreManager()
+    const loader = new SessionMessageLoader(childStores, { sdk: opencodeClient, runtimeKey })
+
+    await loader.loadComplete({ directory: "/repo", sessionID: "ses_1" })
+
+    expect(childStores.getChild("/repo")?.getState().message.ses_1).toHaveLength(300)
+    expect(maxActiveHydrations).toBe(2)
+    loader.dispose()
+    childStores.disposeAll()
   })
 
   test("asks for shelled pages only from a server that lists the capability, and stops when the header is refused", async () => {

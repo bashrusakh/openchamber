@@ -61,6 +61,8 @@ export type ProjectedTool = {
   descriptionText?: string;
   /** The call's arguments, verbatim. The detailed view shows them. */
   input: Record<string, JsonValue>;
+  /** Raw streamed arguments for a call that is still pending. */
+  raw?: string;
   /** The call's result metadata, verbatim, when the runtime reported it. */
   metadata?: Record<string, JsonValue>;
   /** The call's own identifier, as the runtime recorded it. */
@@ -278,6 +280,7 @@ const projectTool = (call: ExportToolCall, mode: ProjectionMode): ProjectedTool 
     agent: call.agent,
     descriptionText,
     input: call.input,
+    raw: call.raw,
     metadata: call.metadata,
     callID: call.callID,
     attachments: call.attachments,

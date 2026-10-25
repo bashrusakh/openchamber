@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { MessagePage } from "@/lib/opencode/client"
 import { projectInboxMessage, type InboxMessageItem } from "@/lib/opencode/projection"
-import type { Message, Part, Session, UserMessage } from "@/lib/opencode/model"
+import type { Message, Part, Session, ToolPart, UserMessage } from "@/lib/opencode/model"
 import { ChildStoreManager } from "./child-store"
 import { SessionMessageLoader, type SessionMessagePageSource } from "./session-message-loader"
 import { olderMessagesCursor } from "@/lib/opencode/messageCursor"
@@ -222,6 +222,54 @@ describe("SessionMessageLoader", () => {
     ])
     expect(loader.getSnapshot(target).complete).toBe(true)
     expect(childStores.getChild(target.directory)?.getState().message[target.sessionID]).toHaveLength(3)
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("complete history reads replace server-shell records with the full message from the same directory", async () => {
+    const target = { directory: "/repo/child", sessionID: "session-a" }
+    const shellPart: ToolPart = {
+      id: "call_1", sessionID: target.sessionID, messageID: "assistant_1", type: "tool", tool: "read",
+      callID: "call_1", executed: true,
+      state: { status: "completed", input: { filePath: "a.txt" }, output: "", time: { start: 3, end: 4 }, metadata: { openchamberContentShell: { chars: 12 } } },
+    }
+    const fullPart: ToolPart = {
+      ...shellPart,
+      state: {
+        status: "completed", input: { filePath: "a.txt" }, output: "full result", time: { start: 3, end: 4 },
+        attachments: [{ id: "call_1:file:0", sessionID: target.sessionID, messageID: "assistant_1", type: "file", filename: "a.txt", mime: "text/plain", url: "file:///a.txt" }],
+      },
+    }
+    const shell = { ...createRecord(target.sessionID, "assistant_1", 2, "assistant"), parts: [shellPart] }
+    const { childStores } = createLoader(async () => response([shell]))
+    const sdk: SessionMessagePageSource = {
+      getSessionMessages: async () => response([shell]),
+      getSessionMessage: async (sessionID, messageID, directory) => {
+        expect([sessionID, messageID, directory]).toEqual([target.sessionID, "assistant_1", target.directory])
+        return {
+          info: shell.info,
+          parts: [fullPart],
+        }
+      },
+    }
+    const loader = new SessionMessageLoader(childStores, { sdk, runtimeKey: "runtime-a" })
+
+    await loader.loadComplete(target)
+
+    expect(childStores.getChild(target.directory)?.getState().part.assistant_1?.[0]).toMatchObject({
+      state: { status: "completed", output: "full result", attachments: [{ filename: "a.txt", mime: "text/plain" }] },
+    })
+    // Ordinary navigation keeps the server's shell and does not hydrate it.
+    const ordinary = { directory: "/repo/ordinary", sessionID: "session-b" }
+    const ordinaryLoader = new SessionMessageLoader(childStores, {
+      sdk: { getSessionMessages: async () => response([shell]) },
+      runtimeKey: "runtime-a",
+    })
+    await ordinaryLoader.ensure(ordinary)
+    expect(childStores.getChild(ordinary.directory)?.getState().part.assistant_1?.[0]).toMatchObject({
+      state: { output: "", metadata: { openchamberContentShell: { chars: 12 } } },
+    })
+    ordinaryLoader.dispose()
     loader.dispose()
     childStores.disposeAll()
   })

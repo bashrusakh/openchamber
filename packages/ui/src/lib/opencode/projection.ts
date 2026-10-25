@@ -199,6 +199,7 @@ export function projectAssistantContent(
   const parts: Part[] = []
   let textOrdinal = 0
   let reasoningOrdinal = 0
+  const hasInlineBoundary = content.some((item) => item.type === "tool" || item.type === "reasoning")
   for (const [index, item] of content.entries()) {
     switch (item.type) {
       case "text": {
@@ -215,7 +216,10 @@ export function projectAssistantContent(
           messageID: owner.messageID,
           type: "text",
           text: item.text,
-          time: compact({ start: owner.created, end: owner.completed ?? (followed ? owner.created : undefined) }),
+          // OpenCode 2.1.4 records no timestamp on text content. A message
+          // creation time places an unsplit message, but cannot timestamp each
+          // text stretch around an inline tool or reasoning event.
+          time: hasInlineBoundary ? undefined : compact({ start: owner.created, end: owner.completed ?? (followed ? owner.created : undefined) }),
         })
         break
       }

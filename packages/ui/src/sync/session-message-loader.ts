@@ -1,5 +1,6 @@
 import type { Message, Part } from "@/lib/opencode/model"
 import type { MessagePage, PendingInboxMessage } from "@/lib/opencode/client"
+import { toolContentShellChars } from "@/lib/opencode/toolContentShells"
 import { olderMessagesCursor } from "@/lib/opencode/messageCursor"
 import type { ChildStoreManager, DirectoryStore } from "./child-store"
 import { retry } from "./retry"
@@ -20,6 +21,7 @@ import { startSessionLoadPerformanceEvent } from "./session-load-performance"
 import { dropSessionCaches } from "./session-cache"
 import { SessionCacheRetention } from "./session-cache-retention"
 import { SESSION_CACHE_LIMIT } from "./types"
+import { runSessionListNetworkTask } from "@/lib/background-network"
 
 // One agent turn can span well over a hundred tool steps, so the first
 // request is sized to hold a long last turn without a follow-up read.
@@ -118,6 +120,7 @@ export type SessionMessagePageSource = {
     options?: { limit?: number; cursor?: string; order?: "asc" | "desc"; partShells?: boolean },
     directory?: string | null,
   ): Promise<MessagePage>
+  getSessionMessage?(id: string, messageID: string, directory?: string | null): Promise<{ info: Message; parts: Part[] }>
   /**
    * Pending inbox items for one session, when the runtime can read them. A
    * cold load uses this to repaint messages the live `session.inbox.*` events
@@ -653,7 +656,10 @@ export class SessionMessageLoader {
       while (true) {
         const snapshot = this.getSnapshot(normalized)
         if (snapshot.status === "error") throw snapshot.error ?? new Error("Session history could not be loaded")
-        if (snapshot.complete) return
+        if (snapshot.complete) {
+          await this.hydrateContentShells(normalized)
+          return
+        }
         if (!snapshot.cursor) throw new Error("Session history coverage is unresolved")
         if (visitedCursors.has(snapshot.cursor)) {
           throw new Error("Session history pagination made no progress")
@@ -665,6 +671,40 @@ export class SessionMessageLoader {
     } finally {
       release()
     }
+  }
+
+  private async hydrateContentShells(target: SessionMessageTarget): Promise<void> {
+    const store = this.childStores.ensureChild(target.directory, { bootstrap: false })
+    const state = store.getState()
+    const messages = state.message[target.sessionID] ?? []
+    const parts = state.part
+    const messageIDs = messages
+      .filter((message) => (parts[message.id] ?? []).some((part) => toolContentShellChars(part) !== null))
+      .map((message) => message.id)
+    if (messageIDs.length === 0) return
+    const sdk = this.sdk
+    const getSessionMessage = sdk.getSessionMessage
+    if (!getSessionMessage) throw new Error("Complete session history source cannot hydrate tool results")
+    const sdkEpoch = this.sdkEpoch
+    const entry = this.getEntry(target)
+    const generation = entry.snapshot.generation
+
+    const hydrated = await Promise.all(messageIDs.map((messageID) => runSessionListNetworkTask(
+      () => getSessionMessage.call(sdk, target.sessionID, messageID, target.directory),
+    )))
+    if (this.disposed || this.sdk !== sdk || this.sdkEpoch !== sdkEpoch || entry.snapshot.generation !== generation) {
+      throw new Error("Session history changed while tool results were loading")
+    }
+    const current = store.getState()
+    const nextParts = { ...current.part }
+    let changed = false
+    for (const record of hydrated) {
+      const currentParts = nextParts[record.info.id] ?? []
+      if (!currentParts.some((part) => toolContentShellChars(part) !== null)) continue
+      nextParts[record.info.id] = filterIdentifiedParts(record.parts)
+      changed = true
+    }
+    if (changed) store.setState({ part: nextParts })
   }
 
   refreshTail(target: SessionMessageTarget, limit: number): Promise<void> {

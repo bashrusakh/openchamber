@@ -129,16 +129,16 @@ describe("projectMessage (assistant)", () => {
     expect(live[0].type === "text" && live[0].time).toEqual({ start: 1 })
   })
 
-  test("text followed by a tool is sealed while the message is still open", () => {
+  test("text around an inline event does not inherit the message creation timestamp", () => {
     const toolItem = assistant.content.find((item) => item.type === "tool")
     if (!toolItem) throw new Error("fixture has a tool item")
     const parts = projectAssistantContent(
       [{ type: "text", text: "Which one?" }, toolItem, { type: "text", text: "still streaming" }],
       { sessionID: "s", messageID: "m", created: 1 },
     )
-    expect(parts[0].type === "text" && parts[0].time).toEqual({ start: 1, end: 1 })
+    expect(parts[0].type === "text" && parts[0].time).toBeUndefined()
     const trailing = parts[parts.length - 1]
-    expect(trailing.type === "text" && trailing.time).toEqual({ start: 1 })
+    expect(trailing.type === "text" && trailing.time).toBeUndefined()
   })
 })
 

@@ -142,6 +142,24 @@ cannot name them differently.
   ordinary message or a sub-agent's first prompt carries its filename, MIME
   type and URL in detailed Markdown and HTML. Readable output shows its
   compact filename form. The JSON source records remain unchanged.
+- **Recorded agent mentions remain in the message.** A known agent part is
+  rendered from its recorded name at its recorded position among the message
+  parts. It is not reported as unsupported or replaced by a guessed identity.
+- **Pending tool arguments remain available in detail.** When the record has
+  raw streamed arguments and no parsed input, detailed Markdown and HTML show
+  the raw recorded value, and JSON carries it with the normalized call and
+  untouched source record.
+- **A delegated call has one HTML filter owner.** Its visible status, call
+  identity, output, failure and attachments belong to one entry. Search and
+  filters hide that entry's rendered content together, while a matching child
+  message can keep the containing block visible.
+- **Export hydrates page shells through the message adapter.** Ordinary
+  transcript pages keep completed tool results shelled for collapsed rows.
+  Complete-history readers resolve those marked records with the single-message
+  SDK operation, which returns the recorded content and attachments. Those
+  reads use the existing session-page network lane, which caps concurrent
+  requests at two. A failed hydration fails that session's export and cannot
+  produce a complete result.
 - **A partial export says so.** Everything the export could not establish —
   a child that would not load, a call that named no child, a session that was
   resumed, a part the model does not cover — lands in `findings`, and the
@@ -160,9 +178,10 @@ cannot name them differently.
   does not establish when a background session finished, so the block has no
   finish duration without authoritative lifecycle evidence.
 - **Consumed calls still establish activity.** A nested invocation can become
-  a child block while its recorded interval still contributes to overlap for
-  the session that recorded it. Message timestamps in a grandchild do not
-  establish activity in its parent.
+  a child block while its recorded interval or running start point still
+  contributes to overlap for the session that recorded it. A running start
+  point proves overlap only inside another recorded half-open interval.
+  Message timestamps in a grandchild do not establish activity in its parent.
 - **A session cut out of the tree is named, not reported.** An archived
   session is not attached to the session you exported, so the export does not
   carry it. The document says that once, as a fact under the header: the
@@ -547,3 +566,15 @@ field that was not there, only to throw it away. Building those errors was
 most of what the projection spent: at 3000 tool calls the projection took
 about 200 ms, and the errors for the fields that were not there were the bulk
 of it.
+
+### Why complete history resolves shelled tool results
+
+The runtime shells completed tool results out of message pages because a
+collapsed transcript row does not use those bytes. A detailed export does use
+them. The complete-history reader follows each shell marker through the
+OpenCode message adapter's single-message read, preserving normal page loading
+and transport behavior while making the export complete. The existing session
+page network lane caps the per-record reads at two concurrent requests, so a
+long transcript cannot occupy the browser connection pool with an unbounded
+fan-out. The rejected alternative was disabling shells for every transcript
+read, which would send large hidden results on ordinary navigation.

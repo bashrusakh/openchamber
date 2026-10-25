@@ -233,9 +233,10 @@ const renderEntry = (
           details.push(`**${exportText('export.section.output')}**\n\n${asQuote(entry.tool.output)}`);
           if (truncationLine) details.push(truncationLine);
         }
-        const { input, metadata } = entry.tool;
-        if (Object.keys(input).length > 0) {
-          details.push(`**${exportText('export.section.input')}**\n\n${asQuote(JSON.stringify(input, null, 2))}`);
+        const { input, raw, metadata } = entry.tool;
+        if (Object.keys(input).length > 0 || raw) {
+          const recordedInput = Object.keys(input).length > 0 ? JSON.stringify(input, null, 2) : raw;
+          details.push(`**${exportText('export.section.input')}**\n\n${asQuote(recordedInput ?? '')}`);
         }
         if (metadata && Object.keys(metadata).length > 0) {
           details.push(`**${exportText('export.section.metadata')}**\n\n${asQuote(JSON.stringify(metadata, null, 2))}`);
@@ -298,8 +299,9 @@ const renderDispatchCall = (dispatched: NonNullable<ProjectedSubagent['dispatche
   const call = dispatched.call;
   if (!call) return [];
   const details: string[] = [];
-  if (Object.keys(call.input).length > 0) {
-    details.push(`**${exportText('export.section.input')}**\n\n${asQuote(JSON.stringify(call.input, null, 2))}`);
+  if (Object.keys(call.input).length > 0 || call.raw) {
+    const recordedInput = Object.keys(call.input).length > 0 ? JSON.stringify(call.input, null, 2) : call.raw;
+    details.push(`**${exportText('export.section.input')}**\n\n${asQuote(recordedInput ?? '')}`);
   }
   if (call.metadata && Object.keys(call.metadata).length > 0) {
     details.push(`**${exportText('export.section.metadata')}**\n\n${asQuote(JSON.stringify(call.metadata, null, 2))}`);
