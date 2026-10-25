@@ -141,6 +141,12 @@ const chooseFilter = (dom: Window, id: string, value: string): void => {
   select.dispatchEvent(new dom.Event('change'));
 };
 
+const filterOptions = (dom: Window, id: string): string[] => {
+  const select = dom.document.getElementById(id);
+  if (!(select instanceof dom.HTMLSelectElement)) throw new Error(`The page has no ${id} filter`);
+  return [...select.options].map((option) => option.value);
+};
+
 /** The entry whose text holds a word, as the page carries it. */
 const entryWith = (dom: Window, word: string): Element | null => (
   [...dom.document.querySelectorAll('.entry')].find((entry) => (entry.textContent ?? '').includes(word)) ?? null
@@ -657,5 +663,64 @@ describe('the HTML page searches what it shows of the reasoning', () => {
     const onPage = dom.document.querySelector('.entry.reasoning');
     expect(onPage).toBeTruthy();
     expect(isOnPage(onPage)).toBe(true);
+  });
+});
+
+describe('the detailed HTML page filters a delegated invocation', () => {
+  test('the completed call is offered by its filters and stays visible with its block', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: root.id, agent: 'reviewer' });
+    const result = buildExportFromRecords({
+      root,
+      sessions: [root, child],
+      records: new Map([
+        [root.id, [
+          {
+            info: {
+              id: 'a1', sessionID: root.id, role: 'assistant', agent: 'build',
+              providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 2000 },
+            },
+            parts: [subagentCall('a1', {
+              sessionID: root.id, childSessionID: child.id, agent: 'reviewer', status: 'completed',
+              startedAt: 2000, endedAt: 3000,
+            })],
+          },
+          {
+            info: {
+              id: 'a2', sessionID: root.id, role: 'assistant', agent: 'build',
+              providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 4000 },
+            },
+            parts: [shellCall('a2', 'bun test', 4000, 4500)],
+          },
+        ]],
+        [child.id, [assistantMessage(child.id, 'ca1', 2500, 'Child invocation context')]],
+      ]),
+    }, 'detailed');
+    const html = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'detailed', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    const dom = new Window({ url: 'https://localhost/' });
+    dom.document.write(html);
+    const script = html.match(/<script>([\s\S]*?)<\/script>/);
+    if (!script) throw new Error('The export wrote no page script');
+    new Function('document', script[1])(dom.document);
+
+    const call = dom.document.querySelector('.entry.call[data-id="ses_child:call"]');
+    expect(call).toBeTruthy();
+    expect(call?.getAttribute('data-tool')).toBe('subagent');
+    expect(call?.getAttribute('data-status')).toBe('completed');
+    const toolOptions = filterOptions(dom, 'filter-tool');
+    const statusOptions = filterOptions(dom, 'filter-status');
+    expect(toolOptions).toContain('subagent');
+    expect(statusOptions).toContain('completed');
+
+    closeSubagentBlocks(dom);
+    chooseFilter(dom, 'filter-tool', 'subagent');
+    expect(isOnPage(call ?? null)).toBe(true);
+    expect(isOpen(subagentFolds(dom)[0])).toBe(true);
+
+    chooseFilter(dom, 'filter-tool', 'shell');
+    expect(isOnPage(call ?? null)).toBe(false);
   });
 });

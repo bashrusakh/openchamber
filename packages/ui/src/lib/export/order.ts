@@ -459,8 +459,8 @@ const workPoints = (block: SubagentBlock): number[] => {
       }
       continue;
     }
-    const timestamp = readTimestamp(child.event.timestamp);
-    if (timestamp !== undefined) points.push(timestamp);
+    // Message and report timestamps place records in the transcript. They do
+    // not establish when delegated work was executing.
   }
   return points;
 };

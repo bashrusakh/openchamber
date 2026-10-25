@@ -305,6 +305,9 @@ const renderDispatchCall = (dispatched: NonNullable<ProjectedSubagent['dispatche
   if (call.callID) {
     details.push(`**${exportText('export.section.callId')}**\n\n${asQuote(call.callID)}`);
   }
+  if (call.attachments?.length) {
+    details.push(call.attachments.map((file) => `- ${file.filename ?? file.mime} (${file.mime}) ${file.url}`).join('\n'));
+  }
   return details;
 };
 
@@ -350,8 +353,9 @@ const renderSubagent = (subagent: ProjectedSubagent, mode: ProjectionMode): stri
   } else if (dispatched?.status) {
     parts.push(`*${exportText('export.dispatch.status', { status: statusLabel(dispatched.status) })}*`);
   }
-  if (mode === 'detailed' && dispatched?.output) {
-    parts.push(`**${exportText('export.dispatch.result')}**\n\n${asQuote(dispatched.output)}`);
+  if (mode === 'detailed' && (dispatched?.output || dispatched?.call?.output)) {
+    const output = dispatched.output ?? dispatched.call?.output;
+    if (output) parts.push(`**${exportText('export.dispatch.result')}**\n\n${asQuote(output)}`);
   }
   // The runtime cut the call's result short. The same fact an ordinary tool
   // call carries, on the call that started this sub-agent.

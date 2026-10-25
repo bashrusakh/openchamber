@@ -327,6 +327,36 @@ describe('export pipeline', () => {
     expect(output).toContain('Second result');
   });
 
+  test('a completion report timestamp does not make separate work overlap', () => {
+    const input = fixture({
+      root: session('ses_root', { title: 'Root' }),
+      sessions: [
+        session('ses_root', { title: 'Root' }),
+        session('ses_reported', { title: 'Reported', parentID: 'ses_root', agent: 'reviewer' }),
+        session('ses_timed', { title: 'Timed', parentID: 'ses_root', agent: 'tester' }),
+      ],
+      records: {
+        ses_root: [
+          subagentReport('ses_root', 'report', 4000, {
+            childSessionID: 'ses_reported', agent: 'reviewer', output: 'Reported result',
+          }),
+          {
+            info: assistantMessage('ses_root', 'a1', 3000, '').info,
+            parts: [subagentCall('a1', { childSessionID: 'ses_timed', startedAt: 3000, endedAt: 5000, agent: 'tester' })],
+          },
+        ],
+        ses_reported: [assistantMessage('ses_reported', 'ra', 1000, 'Reported work')],
+        ses_timed: [assistantMessage('ses_timed', 'ta', 3500, 'Timed work')],
+      },
+    });
+
+    const output = markdown(input);
+
+    expect(output).not.toContain('Ran at the same time as');
+    expect(output).toContain('Reported work');
+    expect(output).toContain('Timed work');
+  });
+
   test('a background dispatch and its later completion both reach the export', () => {
     const input = fixture({
       root: session('ses_root', { title: 'Root' }),
@@ -1297,6 +1327,46 @@ describe('export pipeline', () => {
     expect(document).toContain('Child');
   });
 
+  test('a failed child history load keeps the parent call output and reports the gap once at the end', async () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: 'ses_root', agent: 'reviewer' });
+    const result = await buildExport({
+      root,
+      sessions: [root, child],
+      load: async (sessionID) => {
+        if (sessionID === root.id) return [{
+          info: assistantMessage(root.id, 'a1', 1000, '').info,
+          parts: [subagentCall('a1', {
+            sessionID: root.id, childSessionID: child.id, output: 'PARENT_CALL_OUTPUT_SENTINEL',
+          })],
+        }];
+        return null;
+      },
+    }, 'detailed');
+
+    expect(result.timeline.findings.filter((finding) => finding.kind === 'missing-session')).toHaveLength(1);
+    for (const [document, format] of [
+      [renderExportMarkdown(result.projection, {
+        title: 'Root', mode: 'detailed', findings: result.timeline.findings,
+        excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      }), 'markdown'],
+      [renderExportHtml(result.projection, {
+        title: 'Root', mode: 'detailed', findings: result.timeline.findings,
+        excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      }), 'html'],
+    ] as const) {
+      expect(document).toContain('PARENT_CALL_OUTPUT_SENTINEL');
+      expect(document.split('PARENT_CALL_OUTPUT_SENTINEL')).toHaveLength(2);
+      const findingIndex = document.indexOf('Incomplete export');
+      expect(findingIndex).toBeGreaterThan(document.indexOf('PARENT_CALL_OUTPUT_SENTINEL'));
+      expect(document.split('Incomplete export')).toHaveLength(2);
+      if (format === 'html') {
+        expect(document).toContain('data-kind="call"');
+        expect(document).not.toContain('class="entry message"');
+      }
+    }
+  });
+
   test('a child the session list does not name is reported as missing', async () => {
     const root = session('ses_root', { title: 'Root' });
 
@@ -1625,6 +1695,51 @@ describe('export pipeline', () => {
         )))).toBe(true);
       }
     }
+  });
+
+  test('a completed delegation call keeps its attachments in detailed exports', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: 'ses_root', agent: 'reviewer' });
+    const attachment = {
+      id: 'a1-file', sessionID: root.id, messageID: 'a1', type: 'file' as const,
+      filename: 'DELEGATION_IMAGE_SENTINEL.png', mime: 'image/png', url: 'data:image/png;base64,AA==',
+    };
+    const input = fixture({
+      root,
+      sessions: [root, child],
+      records: {
+        ses_root: [{
+          info: assistantMessage(root.id, 'a1', 1000, '').info,
+          parts: [{
+            id: 'a1-subagent', sessionID: root.id, messageID: 'a1', type: 'tool',
+            callID: 'a1-call', tool: 'subagent',
+            state: {
+              status: 'completed',
+              input: { description: 'Review the change', prompt: 'Review the whole change', agent: 'reviewer' },
+              output: 'Delegation result', time: { start: 1000, end: 2000 }, attachments: [attachment],
+              metadata: { sessionID: child.id },
+            },
+          }],
+        }],
+        ses_child: [assistantMessage(child.id, 'ca1', 1500, 'Child transcript')],
+      },
+    });
+
+    const detailed = markdown(input, 'detailed');
+    const { projection, timeline } = build(input, 'detailed');
+    const html = renderExportHtml(projection, {
+      title: 'Root', mode: 'detailed', findings: timeline.findings,
+      excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+    });
+    const parsed = JSON.parse(renderExportJson(timeline));
+
+    for (const output of [detailed, html]) {
+      expect(output).toContain('DELEGATION_IMAGE_SENTINEL.png');
+      expect(output).toContain('image/png');
+      expect(output).toContain('data:image/png;base64,AA==');
+      expect(output).toContain('Child transcript');
+    }
+    expect(parsed.source.ses_root.records[0].parts[0].state?.attachments?.[0]?.url).toBe('data:image/png;base64,AA==');
   });
 });
 

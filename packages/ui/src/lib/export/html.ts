@@ -222,6 +222,8 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
       // view does not promise them.
       const call = node.dispatchedBy?.call;
       if (call && mode === 'detailed') {
+        tools.add(call.name);
+        statuses.add(call.status);
         entries.push({
           id: `${node.childSessionID}:call`,
           kind: 'call',
@@ -504,8 +506,9 @@ const renderSubagentHtml = (subagent: ProjectedSubagent, mode: ProjectionMode, d
     : dispatched?.status
       ? `<p class="note">${escapeHtml(exportText('export.dispatch.status', { status: statusLabel(dispatched.status) }))}</p>`
       : '';
-  const dispatchResult = mode === 'detailed' && dispatched?.output
-    ? `<details><summary>${escapeHtml(exportText('export.dispatch.result'))}</summary><pre>${escapeHtml(dispatched.output)}</pre></details>`
+  const dispatchOutput = dispatched?.output ?? dispatched?.call?.output;
+  const dispatchResult = mode === 'detailed' && dispatchOutput
+    ? `<details><summary>${escapeHtml(exportText('export.dispatch.result'))}</summary><pre>${escapeHtml(dispatchOutput)}</pre></details>`
     : '';
   // The runtime cut the call's result short. The same fact an ordinary tool
   // call carries, on the call that started this sub-agent.
@@ -601,6 +604,9 @@ const renderDispatchCallDetails = (
   }
   if (call.callID) {
     details.push(`<details><summary>${escapeHtml(exportText('export.section.callId'))}</summary><pre>${escapeHtml(call.callID)}</pre></details>`);
+  }
+  if (call.attachments?.length) {
+    details.push(`<ul class="files">${call.attachments.map((file) => `<li><span>${escapeHtml(file.filename ?? file.mime)} (${escapeHtml(file.mime)})</span><br><code>${escapeHtml(file.url)}</code></li>`).join('')}</ul>`);
   }
   if (details.length === 0) return '';
   return `<article class="entry call" data-id="${escapeHtml(`${subagent.childSessionID}:call`)}" data-kind="call" data-tool="${escapeHtml(call.name)}" data-status="${escapeHtml(call.status)}" data-agent="${escapeHtml(subagent.agent ?? '')}">
