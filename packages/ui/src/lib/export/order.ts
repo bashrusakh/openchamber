@@ -239,9 +239,9 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
       if (block) childBlocks.push(block);
     }
 
-    const ownNodes: ExportNode[] = orderedEvents(
-      own.filter((event) => !consumedDispatchEvents.has(event.id)),
-    ).map((event): ExportNode => ({ kind: 'event', event }));
+    const ownNodes: ExportNode[] = orderedEvents(own)
+      .filter((event) => !consumedDispatchEvents.has(event.id))
+      .map((event): ExportNode => ({ kind: 'event', event }));
 
     // A nested block takes the place of the call that started it, so the
     // sequence stays one list: the parent's own records and the work it
@@ -308,7 +308,7 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
     return {
       timestamp: dispatched?.timestamp ?? node.startedAt,
       sourceOrder: dispatched?.sourceOrder ?? Number.MAX_SAFE_INTEGER,
-      sessionID: node.session.id,
+      sessionID: dispatched?.sessionID ?? node.session.id,
     };
   };
 
@@ -347,10 +347,9 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
   // The root session's own events, with the calls that started a block
   // removed: the block's header carries that call. A result the parent
   // recorded for a child stays here, in the parent's own flow.
-  const rootEvents = orderedEvents(
-    (eventsBySession.get(timeline.rootSessionID) ?? [])
-      .filter((event) => !consumedDispatchEvents.has(event.id)),
-  ).map((event): ExportNode => ({ kind: 'event', event }));
+  const rootEvents = orderedEvents(eventsBySession.get(timeline.rootSessionID) ?? [])
+    .filter((event) => !consumedDispatchEvents.has(event.id))
+    .map((event): ExportNode => ({ kind: 'event', event }));
 
   // The spine is the root's own events and the blocks of the sub-agents it
   // started, in one order. An event without a recorded time keeps the place

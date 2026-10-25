@@ -663,7 +663,9 @@ export const normalizeExportTimeline = (options: {
         // the parts between them are the message the record said in that
         // stretch. The stretch sits at its first part, so the text the
         // source wrote before a tool call stays before it.
-        for (const segment of messageSegments(record.parts)) {
+        const segments = messageSegments(record.parts);
+        const hasOrderedPartBoundaries = record.parts.some((part) => part.type === 'tool' || part.type === 'reasoning');
+        for (const segment of segments) {
           const text = messageText(message, segment.parts);
           const attachments = segment.parts
             .filter((part): part is Extract<Part, { type: 'file' }> => part.type === 'file')
@@ -681,7 +683,7 @@ export const normalizeExportTimeline = (options: {
             text,
             attachments: attachments.length > 0 ? attachments : undefined,
             parts: exportParts(segment.parts),
-            timestamp: segment.timestamp ?? base.timestamp,
+            timestamp: segment.timestamp ?? (hasOrderedPartBoundaries ? undefined : base.timestamp),
           });
         }
 

@@ -71,6 +71,16 @@ cannot name them differently.
   events of their own, and the parts between them are the message the record
   said in that stretch, glued the way the readable view shows a message. The
   text the source wrote before a tool call stays before it.
+- **A sub-agent block shares the invocation's place in the parent's order.**
+  The call remains an ordering anchor even though the block replaces the call
+  in the readable tree. Untimed neighboring events are placed against that
+  call before it is removed from the rendered event list.
+- **A split message does not borrow its record's creation time.** When a
+  record's text is split around a tool call or reasoning part, each stretch
+  keeps its own recorded part time when present. An untimed stretch keeps its
+  place among the record's parts; the message's creation time remains in the
+  source record and is not copied onto both sides of an inline event. A
+  message without such an inline boundary can still use its record time.
 - **No invented relationships.** A call is joined to a child session through a
   recorded identity — the call's metadata, its output envelope, the report the
   runtime appended, the session's own parent link. A report is a line of
@@ -183,6 +193,11 @@ blocks at the end: the parent's final answer would then stand before the
 work it depends on, which is the mistake the old export made at the top
 level.
 
+The block is ordered in the parent session's sequence, because that is where
+the invocation was recorded. Its child session identity remains on the block
+for rendering and lineage; using that identity as the ordering scope would
+stop the call from anchoring untimed events beside it.
+
 ### Why an event without a timestamp keeps the place the source gave it
 
 The source recorded a record without a time. The export cannot say when it
@@ -209,6 +224,12 @@ it, and the text the source wrote before the call would move behind it. The
 rejected alternative on the other side — one event per text part — would
 break a message that was written in one go into pieces the reader has to put
 back together. A stretch of parts is the unit that satisfies both.
+
+When a record has an inline tool or reasoning event, a stretch without its
+own time keeps its source position. Reusing the record's creation time for
+each stretch would place text on both sides of a later call at the same
+earlier time, moving the text after the call in front of it. The creation time
+still places a record whose message is not split by an inline event.
 
 ### Why a record's place is as wide as the record needs
 

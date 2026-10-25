@@ -23,6 +23,7 @@ import {
   subagentCall,
   subagentReport,
   textPart,
+  timedTextPart,
   userMessage,
   type Record_,
 } from './fixtures';
@@ -116,10 +117,10 @@ describe('export pipeline', () => {
     expect(output).toContain('↳ reviewer');
     expect(output).toContain('↳ explore');
     // The grandchild's work is inside the child's block, not beside it, and
-    // it sits at the call that started it — before the text the child wrote
-    // after that call.
-    expect(output.indexOf('Grandchild work')).toBeLessThan(output.indexOf('Child work'));
-    expect(output.indexOf('Grandchild work')).toBeLessThan(output.indexOf('Starting') + 1);
+    // it sits at the call that started it. Text before the call stays before
+    // the block; text after the call stays after it.
+    expect(output.indexOf('Child work')).toBeLessThan(output.indexOf('Grandchild work'));
+    expect(output.indexOf('Starting')).toBeLessThan(output.indexOf('Grandchild work'));
   });
 
   test('several sequential subagents appear at their own points in the conversation', () => {
@@ -372,6 +373,70 @@ describe('export pipeline', () => {
     const output = markdown(input);
 
     expect(output.indexOf('First')).toBeLessThan(output.indexOf('Second'));
+  });
+
+  test('text parts without their own time stay around a timed tool in source order', () => {
+    const input = fixture({
+      root: session('ses_root', { title: 'Root' }),
+      records: {
+        ses_root: [{
+          info: {
+            id: 'a1', sessionID: 'ses_root', role: 'assistant', agent: 'build',
+            providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 2000 },
+          },
+          parts: [
+            textPart('a1', 'Начинаю проверку'),
+            shellCall('a1', 'bun test', 2500, 2600),
+            textPart('a1', 'Тесты прошли', 'a1-text-after'),
+          ],
+        }],
+      },
+    });
+
+    const readable = markdown(input);
+    const parsed: { events: Array<{ kind: string; text?: string; timestamp?: number }> } = JSON.parse(renderExportJson(timelineOf(input)));
+    const events = parsed.events;
+    const tool = events.findIndex((event) => event.kind === 'tool');
+    const before = events.findIndex((event) => event.text === 'Начинаю проверку');
+    const after = events.findIndex((event) => event.text === 'Тесты прошли');
+
+    expect(readable.indexOf('Начинаю проверку')).toBeLessThan(readable.indexOf('`shell`'));
+    expect(readable.indexOf('`shell`')).toBeLessThan(readable.indexOf('Тесты прошли'));
+    expect(before).toBeLessThan(tool);
+    expect(tool).toBeLessThan(after);
+    expect(events[before].timestamp).toBeUndefined();
+    expect(events[tool].timestamp).toBe(2500);
+    expect(events[after].timestamp).toBeUndefined();
+  });
+
+  test('text parts keep their recorded times and adjacent records keep their creation times', () => {
+    const input = fixture({
+      root: session('ses_root', { title: 'Root' }),
+      records: {
+        ses_root: [
+          userMessage('ses_root', 'u1', 1000, 'Before'),
+          {
+            info: {
+              id: 'a1', sessionID: 'ses_root', role: 'assistant', agent: 'build',
+              providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 2000 },
+            },
+            parts: [
+              timedTextPart('a1', 'Before tool', 2400),
+              shellCall('a1', 'bun test', 2500, 2600),
+              timedTextPart('a1', 'After tool', 2700, 'a1-text-after'),
+            ],
+          },
+          userMessage('ses_root', 'u2', 3000, 'After'),
+        ],
+      },
+    });
+
+    const parsed: { events: Array<{ kind: string; text?: string; timestamp?: number }> } = JSON.parse(renderExportJson(timelineOf(input)));
+    const events = parsed.events;
+    const ordered = events.map((event) => event.kind === 'tool' ? 'tool' : event.text);
+
+    expect(ordered).toEqual(['Before', 'Before tool', 'tool', 'After tool', 'After']);
+    expect(events.map((event) => event.timestamp)).toEqual([1000, 2400, 2500, 2700, 3000]);
   });
 
   test('every tool state reaches the export with its status', () => {
