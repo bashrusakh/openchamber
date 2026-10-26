@@ -152,6 +152,8 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
   // the block names the call that resumed it.
   const dispatchByChildID = new Map<string, { event: ExportEvent; sessionID: string; partID: string }>();
   const resumedByChildID = new Map<string, Array<{ sessionID: string; partID: string; timestamp?: number }>>();
+  /** Every later call that resumed a child, kept as work evidence. */
+  const resumedCallsByChildID = new Map<string, ExportToolCall[]>();
   for (const event of events) {
     if (event.kind !== 'tool') continue;
     const childSessionID = event.call.childSessionID;
@@ -167,6 +169,9 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
         timestamp: event.timestamp,
       });
       resumedByChildID.set(childSessionID, resumed);
+      const resumedCalls = resumedCallsByChildID.get(childSessionID) ?? [];
+      resumedCalls.push(event.call);
+      resumedCallsByChildID.set(childSessionID, resumedCalls);
       continue;
     }
     dispatchByChildID.set(childSessionID, { event, sessionID: event.sessionID, partID: event.origin.partID });
@@ -192,6 +197,12 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
 
   const consumedDispatchEvents = new Set<string>();
   const activityCalls = new WeakMap<SubagentBlock, ExportToolCall[]>();
+  /**
+   * Every foreground call that named this block's child: the first dispatch
+   * and each later invocation that resumed it. The transcript is rendered
+   * once, but each recorded interval is still work evidence for overlap.
+   */
+  const invocationCalls = new WeakMap<SubagentBlock, ExportToolCall[]>();
 
   /**
    * The block for one child session: its own events in order, with its own
@@ -292,6 +303,10 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
     activityCalls.set(block, own
       .filter((event): event is Extract<ExportEvent, { kind: 'tool' }> => event.kind === 'tool')
       .map((event) => event.call));
+    const calls: ExportToolCall[] = [];
+    if (dispatch?.event.kind === 'tool') calls.push(dispatch.event.call);
+    calls.push(...(resumedCallsByChildID.get(childSessionID) ?? []));
+    invocationCalls.set(block, calls);
     return block;
   };
 
@@ -373,7 +388,7 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
 
   return {
     rootSessionID: timeline.rootSessionID,
-    nodes: markConcurrency([...spine, ...anchorless], activityCalls),
+    nodes: markConcurrency([...spine, ...anchorless], activityCalls, invocationCalls),
     sessions: timeline.sessions,
   };
 };
@@ -389,12 +404,13 @@ export const buildExportTree = (timeline: ExportTimeline): ExportTree => {
 const markConcurrency = (
   nodes: ExportNode[],
   activityCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
+  invocationCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
 ): ExportNode[] => {
   const blocks = nodes.filter((node): node is Extract<ExportNode, { kind: 'subagent' }> => node.kind === 'subagent');
   for (const block of blocks) {
     const overlapping = blocks.filter((other) => {
       if (other === block) return false;
-      return observedWorkOverlaps(block, other, activityCalls);
+      return observedWorkOverlaps(block, other, activityCalls, invocationCalls);
     });
     if (overlapping.length > 0) {
       block.concurrentWith = overlapping.map((other) => ({
@@ -402,7 +418,7 @@ const markConcurrency = (
         title: other.session.title || other.childSessionID,
       }));
     }
-    block.children = markConcurrency(block.children, activityCalls);
+    block.children = markConcurrency(block.children, activityCalls, invocationCalls);
   }
   return nodes;
 };
@@ -419,11 +435,12 @@ const observedWorkOverlaps = (
   left: SubagentBlock,
   right: SubagentBlock,
   activityCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
+  invocationCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
 ): boolean => {
-  const leftIntervals = workIntervals(left, activityCalls);
-  const rightIntervals = workIntervals(right, activityCalls);
-  const leftPoints = workPoints(left, activityCalls);
-  const rightPoints = workPoints(right, activityCalls);
+  const leftIntervals = workIntervals(left, activityCalls, invocationCalls);
+  const rightIntervals = workIntervals(right, activityCalls, invocationCalls);
+  const leftPoints = workPoints(left, activityCalls, invocationCalls);
+  const rightPoints = workPoints(right, activityCalls, invocationCalls);
 
   const intersects = (a: readonly [number, number], b: readonly [number, number]): boolean => (
     a[0] < b[1] && b[0] < a[1]
@@ -437,15 +454,22 @@ const observedWorkOverlaps = (
       || rightIntervals.some((interval) => leftPoints.some((point) => contains(interval, point)));
 };
 
-/** The completed tool intervals directly recorded in this subagent's work. */
+/** The foreground calls that named this block's child, first dispatch included. */
+const foregroundInvocations = (
+  block: SubagentBlock,
+  invocationCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
+): ExportToolCall[] => (invocationCalls.get(block) ?? []).filter((call) => !call.background);
+
+/** The completed tool intervals recorded in this subagent's work. */
 const workIntervals = (
   block: SubagentBlock,
   activityCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
+  invocationCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
 ): Array<readonly [number, number]> => {
-  const calls: ExportToolCall[] = [...(activityCalls.get(block) ?? [])];
-  if (block.dispatchedBy?.call && !block.dispatchedBy.call.call.background) {
-    calls.push(block.dispatchedBy.call.call);
-  }
+  const calls: ExportToolCall[] = [
+    ...(activityCalls.get(block) ?? []),
+    ...foregroundInvocations(block, invocationCalls),
+  ];
   return calls.flatMap((call) => (
     call.startedAt !== undefined && call.endedAt !== undefined
       ? [[call.startedAt, call.endedAt] as const]
@@ -457,7 +481,10 @@ const workIntervals = (
 const workPoints = (
   block: SubagentBlock,
   activityCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
-): number[] => (activityCalls.get(block) ?? [])
-  .flatMap((call) => call.status === 'running' && call.startedAt !== undefined
-    ? [call.startedAt]
-    : []);
+  invocationCalls: WeakMap<SubagentBlock, ExportToolCall[]>,
+): number[] => [
+  ...(activityCalls.get(block) ?? []),
+  ...foregroundInvocations(block, invocationCalls),
+].flatMap((call) => call.status === 'running' && call.startedAt !== undefined
+  ? [call.startedAt]
+  : []);

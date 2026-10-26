@@ -611,7 +611,10 @@ export const normalizeExportTimeline = (options: {
     for (const record of collected.records) {
       const message = record.info;
       const place = recordPlace;
-      recordPlace += sourceOrderWidth(record.parts.length);
+      // The record's own failure is one more event of the record, so the
+      // place the next record takes leaves room for it.
+      const outcomePlace = message.role === 'assistant' && message.error ? 1 : 0;
+      recordPlace += sourceOrderWidth(record.parts.length + outcomePlace);
       const role = roleOf(message);
       const { model, variant } = modelOf(message);
       const base = {
@@ -747,18 +750,25 @@ export const normalizeExportTimeline = (options: {
               origin: { ...base.origin, partID: part.id, sourceOrder: sourceOrderOf(place, partOrder) },
               kind: 'tool',
               call,
-              timestamp: call.startedAt ?? base.timestamp,
+              // A pending call has no recorded time. It keeps its place among
+              // the record's parts instead of borrowing the record's creation
+              // time, which belongs to the record and not to the call.
+              timestamp: call.startedAt,
             });
             continue;
           }
           if (part.type === 'reasoning') {
+            const time = part.time;
             events.push({
               ...base,
               id: `${collected.sessionID}:${part.id}:reasoning`,
               origin: { ...base.origin, partID: part.id, sourceOrder: sourceOrderOf(place, partOrder) },
               kind: 'reasoning',
               text: part.text,
-              timestamp: part.time?.start ?? base.timestamp,
+              // The adapter marks a start it copied from the message. That is
+              // the message's time, not the reasoning's, so the export keeps
+              // the part at its source position.
+              timestamp: time.fromMessage ? undefined : time.start,
             });
             continue;
           }
@@ -767,6 +777,24 @@ export const normalizeExportTimeline = (options: {
             // above already carries its readable form.
             continue;
           }
+        }
+
+        // A failed assistant step is an outcome of the record, not of a text
+        // stretch. It gets its own event after the parts so an error with no
+        // content is still in the document, and a partial answer keeps the
+        // failure after the text it produced.
+        if (message.role === 'assistant' && message.error) {
+          events.push({
+            ...base,
+            id: `${collected.sessionID}:${message.id}:error`,
+            origin: { ...base.origin, sourceOrder: sourceOrderOf(place, record.parts.length + 1) },
+            kind: 'message',
+            role,
+            text: '',
+            parts: [],
+            error: message.error,
+            timestamp: readTimestamp(message.time.completed),
+          });
         }
         continue;
       }

@@ -19,7 +19,7 @@ import { readTimestamp } from './values';
 import type { ExportExcludedSession, ExportFinding } from './events';
 import { orderingStatement } from './order';
 import { exportText, findingText } from './i18n';
-import { agentLabel, concurrentLabel, excludedArchivedNote, messageAgent, readablePrompt, roleLabel, runtimeTruncationNote, statusLabel } from './labels';
+import { agentLabel, compactionOutcome, concurrentLabel, excludedArchivedNote, messageAgent, readablePrompt, recordedError, roleLabel, runtimeTruncationNote, statusLabel } from './labels';
 import type { ProjectedEntry, ProjectedNode, ProjectedSubagent, ProjectionMode } from './project';
 
 /** The clock time of a timestamp, in the reader's locale. */
@@ -194,13 +194,13 @@ const renderEntry = (
     case 'message': {
       const heading = messageHeading(entry, model, rootAgent);
       const body = entry.text.trim();
-      const compaction = entry.compaction?.status === 'failed'
-        ? [entry.compaction.status, entry.compaction.error?.message].filter(Boolean).join(': ')
-        : '';
+      const failure = entry.error ? recordedError(entry.error) : '';
+      const compaction = entry.compaction ? compactionOutcome(entry.compaction) : '';
       const attachments = attachmentList(entry, mode);
-      if (!body && !compaction && !attachments) return '';
+      if (!body && !failure && !compaction && !attachments) return '';
       const sections = [heading];
       if (body) sections.push(body);
+      if (failure) sections.push(`**${exportText('export.section.error')}**\n\n${asQuote(failure)}`);
       if (compaction) sections.push(compaction);
       if (attachments) sections.push(attachments);
       if (entry.shell) {
@@ -268,7 +268,11 @@ const renderEntry = (
     }
     case 'reasoning': {
       if (mode !== 'detailed') return '';
-      return `**${exportText('export.section.reasoning')}**\n\n${asQuote(entry.text)}`;
+      const agent = messageAgent(entry.agent, rootAgent);
+      const heading = agent
+        ? `${exportText('export.section.reasoning')} — ${agent}`
+        : exportText('export.section.reasoning');
+      return `**${heading}**\n\n${asQuote(entry.text)}`;
     }
     case 'subagent-result': {
       const label = entry.state === 'completed'
@@ -409,11 +413,10 @@ const renderSubagent = (subagent: ProjectedSubagent, mode: ProjectionMode): stri
       // name as the fallback.
       const heading = subagentMessageLine(entry, subagentMessageLabel(subagent, entry.agent), model);
       const body = entry.text.trim();
-      const compaction = entry.compaction?.status === 'failed'
-        ? [entry.compaction.status, entry.compaction.error?.message].filter(Boolean).join(': ')
-        : '';
+      const failure = entry.error ? recordedError(entry.error) : '';
+      const compaction = entry.compaction ? compactionOutcome(entry.compaction) : '';
       const attachments = attachmentList(entry, mode);
-      if (!body && !compaction && !attachments) continue;
+      if (!body && !failure && !compaction && !attachments) continue;
       const shell = entry.shell
         ? [
             entry.shell.output ? asQuote(entry.shell.output) : '',
@@ -422,10 +425,11 @@ const renderSubagent = (subagent: ProjectedSubagent, mode: ProjectionMode): stri
           ].filter(Boolean).join('\n\n')
         : '';
       const result = shell ? `**${exportText('export.section.result')}**\n\n${shell}` : '';
-      parts.push([heading, body, compaction, attachments, result].filter(Boolean).join('\n\n'));
+      const error = failure ? `**${exportText('export.section.error')}**\n\n${asQuote(failure)}` : '';
+      parts.push([heading, body, error, compaction, attachments, result].filter(Boolean).join('\n\n'));
       continue;
     }
-    const rendered = renderEntry(entry, mode);
+    const rendered = renderEntry(entry, mode, undefined, subagent.agent);
     if (rendered) parts.push(rendered);
   }
 

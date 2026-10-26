@@ -234,7 +234,13 @@ export function projectAssistantContent(
           messageID: owner.messageID,
           type: "reasoning",
           text: item.text,
-          time: compact({ start: item.time?.created ?? owner.created, end: item.time?.completed }),
+          // The wire records no time for a reasoning part the model is still
+          // producing. The step's creation time keeps the live chat's timing
+          // honest; `fromMessage` lets the export keep the part's source place
+          // instead of treating the fallback as a recorded time.
+          time: item.time?.created !== undefined
+            ? compact({ start: item.time.created, end: item.time.completed })
+            : { start: owner.created, end: item.time?.completed, fromMessage: true },
         })
         break
       }

@@ -81,6 +81,17 @@ cannot name them differently.
   place among the record's parts; the message's creation time remains in the
   source record and is not copied onto both sides of an inline event. A
   message without such an inline boundary can still use its record time.
+- **A part without its own recorded time keeps its source place.** A pending
+  call has no start time, and an adapter may fill an untimed reasoning part's
+  start from the message's creation time for the live chat. The adapter marks
+  that fallback, and the export does not place either part by it: the part's
+  position among the record's parts decides. A part that recorded its own time
+  keeps it.
+- **A recorded failure is an outcome, not a finding.** An assistant step that
+  failed reaches both views where it happened, with its text or without any
+  text. A compaction shows its recorded status even when its summary is empty,
+  and a successful compaction keeps its summary. Neither becomes an
+  `Incomplete export` finding.
 - **No invented relationships.** A call is joined to a child session through a
   recorded identity — the call's metadata, its output envelope, the report the
   runtime appended, the session's own parent link. A report is a line of
@@ -122,7 +133,12 @@ cannot name them differently.
   and attachment filenames, and visible sub-agent result attribution is
   available through the agent filter. Visible delegation failures and
   readable fallback results are indexed in the selected mode; readable search
-  does not include detailed payload hidden from that view.
+  does not include detailed payload hidden from that view. The index and the
+  filters read the fields the page draws: a detailed reasoning entry carries
+  the agent its header names, a completion report carries its status, and a
+  tool's call identifier is indexed only on the delegation entry whose detailed
+  view shows it. An ordinary tool row never draws its call identifier, so a
+  search cannot find one there.
 - **Compact never means lost.** The readable view cuts a long tool result
   down and marks the cut. The mark says where the whole result is: the
   export of this session with full details, which carries the recorded
@@ -182,6 +198,12 @@ cannot name them differently.
   contributes to overlap for the session that recorded it. A running start
   point proves overlap only inside another recorded half-open interval.
   Message timestamps in a grandchild do not establish activity in its parent.
+- **A resumed child keeps all its invocation evidence.** A later foreground
+  call that names the same child renders no second transcript, but its
+  recorded interval, or its running start point, still contributes to the
+  child's observed overlap. A background call settles at once and still says
+  nothing about the work it started. The intervals stay half-open, and an open
+  start never becomes a completion.
 - **A session cut out of the tree is named, not reported.** An archived
   session is not attached to the session you exported, so the export does not
   carry it. The document says that once, as a fact under the header: the
@@ -272,6 +294,24 @@ own time keeps its source position. Reusing the record's creation time for
 each stretch would place text on both sides of a later call at the same
 earlier time, moving the text after the call in front of it. The creation time
 still places a record whose message is not split by an inline event.
+
+### Why an untimed part keeps its source place instead of the message's time
+
+A pending call has no recorded time, and the adapter gives an untimed reasoning
+part the message's creation time so the live chat can sort and settle it. That
+fallback is marked where it is created. The export ignores it for placement:
+placing a pending call by the record's creation time moved it, and the untimed
+text that followed it, in front of a completed call that the record wrote
+earlier. The part's position among its record's parts is evidence the source
+recorded; the creation time is not the part's time.
+
+The rejected alternative was to drop the fallback from the adapter. The live
+chat needs a start for an open reasoning part, and changing it to satisfy the
+export would make ordinary chat read less truthfully. The rejected alternative
+on the other side was to infer a recorded start by comparing it with the
+message's creation time: a part that really started at that moment would then
+be treated as untimed, and the export would have to guess which equal values
+were recorded.
 
 ### Why a record's place is as wide as the record needs
 
@@ -429,6 +469,16 @@ other side was to open every `<details>` that holds a match: a tool's output
 section would spring open too, and the reader who closed it to scan the page
 would lose that choice to a search.
 
+### Why the index and the filters read the drawn fields
+
+An entry's search text and filter values are built from the same fields the
+entry draws: the agent in a reasoning header, the status in a completion
+report's header, the prompt cut the page shows. A reader who finds or filters
+an entry can see why it matched. The rejected alternative was a broader index
+that also held the call identifier of an ordinary tool row: a search for it
+kept a row with nothing to show for the word, and the reader had no way to
+check the match.
+
 ### Why a finding carries a key and not a sentence
 
 A finding is read by a person in the exported document, and the document
@@ -465,6 +515,14 @@ nested block. The rejected alternative was deriving activity only from the
 remaining displayed entries: consuming the call would erase the interval that
 proves the parent session overlapped another one. A tool interval still says
 nothing about when a background session itself finished.
+
+Every foreground call that named the child contributes its interval, including
+a later call that resumed the child. The transcript still appears once. The
+rejected alternative was to read only the first call: a child resumed while
+another sub-agent ran would then look sequential even though the parent
+recorded the overlap. The rejected alternative on the other side was to read
+the resumed call as when the child finished: the call says when that invocation
+ran, and completion belongs to the child's own records.
 
 ### Why the document names the agent instead of a role
 

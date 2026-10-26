@@ -115,6 +115,56 @@ describe("SessionMessageLoader", () => {
     childStores.disposeAll()
   })
 
+  test("a queued navigation does not reach the new runtime SDK after a runtime change", async () => {
+    const heldA = deferred<void>()
+    const heldB = deferred<void>()
+    const callsA: PageRequest[] = []
+    const callsB: PageRequest[] = []
+    const page = (input: PageRequest, calls: PageRequest[]) => {
+      calls.push(input)
+      return response([createRecord(input.sessionID)])
+    }
+    const childStores = new ChildStoreManager()
+    const sdkA: SessionMessagePageSource = {
+      getSessionMessages: async (sessionID, _options, directory) => page({ sessionID, directory: directory ?? undefined }, callsA),
+    }
+    const sdkB: SessionMessagePageSource = {
+      getSessionMessages: async (sessionID, _options, directory) => page({ sessionID, directory: directory ?? undefined }, callsB),
+    }
+    const loader = new SessionMessageLoader(childStores, { sdk: sdkA, runtimeKey: "runtime-a" })
+    const oldTarget = { directory: "/old-runtime", sessionID: "old-session" }
+    const newTarget = { directory: "/new-runtime", sessionID: "new-session" }
+
+    // Both session-list slots are held, so the navigation is queued without
+    // having touched the SDK yet.
+    const occupiedA = runSessionListNetworkTask(() => heldA.promise)
+    const occupiedB = runSessionListNetworkTask(() => heldB.promise)
+    expect(getBackgroundNetworkState().active + getBackgroundNetworkState().sessionLists.active).toBe(2)
+    const navigating = loader.ensure(oldTarget, { reason: "navigation" })
+    expect(getBackgroundNetworkState().sessionLists.waiting).toBe(1)
+
+    // The runtime switches while the request waits, then a slot opens.
+    loader.configure({ sdk: sdkB, runtimeKey: "runtime-b" })
+    heldA.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    heldB.resolve()
+    await navigating
+
+    // The old session and directory must not reach the new runtime's SDK,
+    // and the old SDK must not be read after the loader moved on.
+    expect(callsA).toEqual([])
+    expect(callsB).toEqual([])
+
+    // The loader still reads for the new runtime after the stale request.
+    await loader.ensure(newTarget, { reason: "navigation" })
+    expect(callsB).toEqual([{ sessionID: "new-session", directory: "/new-runtime" }])
+
+    await Promise.all([occupiedA, occupiedB])
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
   test("reads export pages and pending inbox into a private snapshot while live messages change", async () => {
     const childStores = new ChildStoreManager()
     const target = { directory: "/repo", sessionID: "session-a" }

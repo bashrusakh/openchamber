@@ -79,6 +79,8 @@ export type ProjectedEntry =
       role: string;
       text: string;
       compaction?: NonNullable<Extract<ExportEvent, { kind: 'message' }>['compaction']>;
+      /** The assistant step's recorded failure, when it has one. */
+      error?: NonNullable<Extract<ExportEvent, { kind: 'message' }>['error']>;
       attachments?: Array<{ filename?: string; mime: string; url: string }>;
       agent?: string;
       model?: string;
@@ -99,6 +101,7 @@ export type ProjectedEntry =
       kind: 'reasoning';
       event: ExportEvent;
       text: string;
+      agent?: string;
       depth: number;
       timestamp?: number;
     }
@@ -324,6 +327,7 @@ const projectEvent = (event: ExportEvent, mode: ProjectionMode): ProjectedEntry 
         role: event.role,
         text: event.text,
         compaction: event.compaction,
+        error: event.error,
         attachments: event.attachments,
         agent: event.agent,
         model: event.model,
@@ -345,6 +349,7 @@ const projectEvent = (event: ExportEvent, mode: ProjectionMode): ProjectedEntry 
         kind: 'reasoning',
         event,
         text: event.text,
+        agent: event.agent,
         depth: event.depth,
         timestamp: event.timestamp,
       };

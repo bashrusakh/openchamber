@@ -8,7 +8,9 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import type { SessionMessageInfo } from '@opencode/client';
 import type { Part, Session } from '@/lib/opencode/model';
+import { projectMessage } from '@/lib/opencode/projection';
 import { useI18nStore } from '@/lib/i18n';
 import { dict as deDict } from '@/lib/i18n/messages/de';
 import { buildExport, buildExportFromRecords } from './pipeline';
@@ -65,6 +67,12 @@ const build = (input: Fixture, mode: 'readable' | 'detailed' = 'readable') => (
     records: input.records,
   }, mode)
 );
+
+/** A record as the real adapter projects it from the wire. */
+const adapterRecord = (wire: SessionMessageInfo, sessionID: string): Record_ => {
+  const projected = projectMessage(wire, sessionID);
+  return { info: projected.message, parts: projected.parts };
+};
 
 const markdown = (input: Fixture, mode: 'readable' | 'detailed' = 'readable'): string => {
   const { projection, timeline } = build(input, mode);
@@ -567,6 +575,134 @@ describe('export pipeline', () => {
 
     expect(ordered).toEqual(['Before', 'Before tool', 'tool', 'After tool', 'After']);
     expect(events.map((event) => event.timestamp)).toEqual([1000, 2400, 2500, 2700, 3000]);
+  });
+
+  test('an adapter-projected unfinished record keeps text around a pending call', () => {
+    // The exact shape the runtime serves while the model is still streaming:
+    // a completed call sits between two text stretches, then a pending call
+    // that recorded no time at all.
+    const root = session('ses_root', { title: 'Root' });
+    const wire: SessionMessageInfo = {
+      id: 'a1', type: 'assistant', agent: 'build',
+      model: { providerID: 'anthropic', id: 'claude-opus-4-1' },
+      time: { created: 1000 },
+      content: [
+        { type: 'text', text: 'BEFORE_TEXT' },
+        {
+          type: 'tool', id: 'completed-call', name: 'completed-tool',
+          time: { created: 1100, ran: 1200, completed: 1300 },
+          state: { status: 'completed', input: { command: 'done' }, content: [{ type: 'text', text: 'ok' }] },
+        },
+        { type: 'text', text: 'BETWEEN_TEXT' },
+        {
+          type: 'tool', id: 'pending-call', name: 'pending-tool',
+          time: { created: 1400 },
+          state: { status: 'streaming', input: '{"command":"later"' },
+        },
+      ],
+    };
+    const record = adapterRecord(wire, root.id);
+    const input = fixture({ root, records: { ses_root: [record] } });
+    const { timeline } = build(input);
+    // SAFETY: `renderExportJson` writes the export's own event schema, so
+    // every parsed event has the kind, text, call and origin fields read here.
+    const parsed = JSON.parse(renderExportJson(timeline)) as {
+      events: Array<{ kind: string; text?: string; call?: { name?: string }; timestamp?: number; origin: { messageID: string } }>;
+    };
+    const events = parsed.events.filter((event) => event.origin.messageID === wire.id);
+    expect(events.map((event) => (
+      event.kind === 'tool' ? event.call?.name : event.text
+    ))).toEqual(['BEFORE_TEXT', 'completed-tool', 'BETWEEN_TEXT', 'pending-tool']);
+    expect(events.find((event) => event.call?.name === 'pending-tool')?.timestamp).toBeUndefined();
+    expect(events.find((event) => event.call?.name === 'completed-tool')?.timestamp).toBe(1200);
+  });
+
+  test('an adapter-projected unfinished record keeps its text around a pending call and untimed reasoning', () => {
+    // The runtime projects an open assistant step as text and reasoning parts
+    // without their own start times, and a call that is still streaming has
+    // no time at all. The export must keep the order the record wrote them
+    // in, not place them by the step's creation time.
+    const root = session('ses_root', { title: 'Root' });
+    const wire: SessionMessageInfo = {
+      id: 'a1', type: 'assistant', agent: 'build',
+      model: { providerID: 'anthropic', id: 'claude-opus-4-1' },
+      time: { created: 1000 },
+      content: [
+        { type: 'text', text: 'BEFORE_TEXT' },
+        {
+          type: 'tool', id: 'completed-call', name: 'completed-tool',
+          time: { created: 1100, ran: 1200, completed: 1300 },
+          state: { status: 'completed', input: { command: 'done' }, content: [{ type: 'text', text: 'ok' }] },
+        },
+        { type: 'text', text: 'BETWEEN_TEXT' },
+        { type: 'reasoning', text: 'REASONING_TEXT' },
+        { type: 'text', text: 'AFTER_TEXT' },
+        {
+          type: 'tool', id: 'pending-call', name: 'pending-tool',
+          time: { created: 1400 },
+          state: { status: 'streaming', input: '{"command":"later"' },
+        },
+      ],
+    };
+    const record = adapterRecord(wire, root.id);
+    const input = fixture({ root, records: { ses_root: [record] } });
+    const { timeline } = build(input);
+    // SAFETY: `renderExportJson` writes the export's own event schema, so
+    // every parsed event has the kind, text, call and origin fields read here.
+    const parsed = JSON.parse(renderExportJson(timeline)) as {
+      events: Array<{ kind: string; text?: string; call?: { name?: string }; timestamp?: number; origin: { messageID: string } }>;
+    };
+    const events = parsed.events.filter((event) => event.origin.messageID === wire.id);
+    const ordered = events.map((event) => {
+      if (event.kind === 'message' || event.kind === 'reasoning') return event.text;
+      if (event.kind === 'tool') return event.call?.name;
+      return event.kind;
+    });
+
+    expect(ordered).toEqual([
+      'BEFORE_TEXT', 'completed-tool', 'BETWEEN_TEXT', 'REASONING_TEXT', 'AFTER_TEXT', 'pending-tool',
+    ]);
+    const completed = events.find((event) => event.kind === 'tool' && event.call?.name === 'completed-tool');
+    const pending = events.find((event) => event.kind === 'tool' && event.call?.name === 'pending-tool');
+    const reasoning = events.find((event) => event.kind === 'reasoning');
+    expect(completed?.timestamp).toBe(1200);
+    expect(pending?.timestamp).toBeUndefined();
+    expect(reasoning?.timestamp).toBeUndefined();
+    for (const message of events.filter((event) => event.kind === 'message')) {
+      expect(message.timestamp).toBeUndefined();
+    }
+
+    // The adapter keeps the reasoning's derived start for ordinary chat, and
+    // marks it as the message's time rather than a recorded part time.
+    const projectedReasoning = record.parts.find((part) => part.type === 'reasoning');
+    expect(projectedReasoning?.type === 'reasoning' && projectedReasoning.time.start).toBe(1000);
+    expect(projectedReasoning?.type === 'reasoning' && projectedReasoning.time.fromMessage).toBe(true);
+
+    const document = markdown(input, 'detailed');
+    expect(document.indexOf('BEFORE_TEXT')).toBeLessThan(document.indexOf('`completed-tool`'));
+    expect(document.indexOf('`completed-tool`')).toBeLessThan(document.indexOf('BETWEEN_TEXT'));
+    expect(document.indexOf('BETWEEN_TEXT')).toBeLessThan(document.indexOf('REASONING_TEXT'));
+    expect(document.indexOf('REASONING_TEXT')).toBeLessThan(document.indexOf('AFTER_TEXT'));
+    expect(document.indexOf('AFTER_TEXT')).toBeLessThan(document.indexOf('`pending-tool`'));
+  });
+
+  test('a reasoning part that recorded its own time keeps it through the adapter and export', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const wire: SessionMessageInfo = {
+      id: 'a1', type: 'assistant', agent: 'build',
+      model: { providerID: 'anthropic', id: 'claude-opus-4-1' },
+      time: { created: 1000, completed: 1400 },
+      content: [
+        { type: 'text', text: 'BEFORE_TIMED_REASONING' },
+        { type: 'reasoning', text: 'TIMED_REASONING', time: { created: 1250, completed: 1300 } },
+      ],
+    };
+    const record = adapterRecord(wire, root.id);
+    const { timeline } = build(fixture({ root, records: { ses_root: [record] } }));
+    const reasoning = timeline.events.find((event) => event.kind === 'reasoning');
+    expect(reasoning?.kind === 'reasoning' && reasoning.timestamp).toBe(1250);
+    const projectedReasoning = record.parts.find((part) => part.type === 'reasoning');
+    expect(projectedReasoning?.type === 'reasoning' && projectedReasoning.time).toEqual({ start: 1250, end: 1300 });
   });
 
   test('every tool state reaches the export with its status', () => {
@@ -1651,6 +1787,79 @@ describe('export pipeline', () => {
       expect(html).toContain('ROOT_CONTEXT_REDUCTION_FAILURE');
       expect(html).toContain('NESTED_CONTEXT_REDUCTION_FAILURE');
     }
+  });
+
+  test('an assistant failure and an empty running compaction reach both views without text', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: root.id, agent: 'reviewer' });
+    const failedAssistant = (sessionID: string, id: string, message: string): Record_ => adapterRecord({
+      id, type: 'assistant', agent: 'build',
+      model: { providerID: 'anthropic', id: 'claude-opus-4-1' },
+      time: { created: 1000, completed: 1100 },
+      content: [],
+      error: { type: 'ProviderError', message },
+    }, sessionID);
+    const compaction = (
+      sessionID: string,
+      id: string,
+      created: number,
+      status: 'running' | 'completed',
+      summary: string,
+    ): Record_ => adapterRecord({
+      id, type: 'compaction', time: { created }, status, reason: 'auto', summary,
+    }, sessionID);
+
+    const input = fixture({
+      root,
+      sessions: [root, child],
+      records: {
+        ses_root: [
+          {
+            info: assistantMessage(root.id, 'delegate', 500, '').info,
+            parts: [subagentCall('delegate', { childSessionID: child.id, startedAt: 500, endedAt: 600 })],
+          },
+          failedAssistant(root.id, 'root-assistant-error', 'ROOT_ASSISTANT_FAILURE'),
+          compaction(root.id, 'root-running-compaction', 1200, 'running', ''),
+          compaction(root.id, 'root-completed-compaction', 1300, 'completed', 'ROOT_COMPACTION_SUMMARY'),
+        ],
+        ses_child: [
+          failedAssistant(child.id, 'child-assistant-error', 'CHILD_ASSISTANT_FAILURE'),
+          compaction(child.id, 'child-running-compaction', 1400, 'running', ''),
+        ],
+      },
+    });
+
+    for (const mode of ['readable', 'detailed'] as const) {
+      const { projection, timeline } = build(input, mode);
+      const options = {
+        title: 'Root', mode, findings: timeline.findings,
+        excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+      };
+      const document = renderExportMarkdown(projection, options);
+      const html = renderExportHtml(projection, options);
+      for (const output of [document, html]) {
+        expect(output).toContain('ROOT_ASSISTANT_FAILURE');
+        expect(output).toContain('CHILD_ASSISTANT_FAILURE');
+        expect(output).toContain('ROOT_COMPACTION_SUMMARY');
+        expect(output).not.toContain('Incomplete export');
+      }
+      // The running compaction's status is the outcome, and an empty summary
+      // must not hide it from either view.
+      expect(document.match(/running/g)).toHaveLength(2);
+      expect(html.match(/>running</g)).toHaveLength(2);
+    }
+
+    const { timeline } = build(input);
+    expect(timeline.findings).toHaveLength(0);
+    const failures = timeline.events.filter((event) => (
+      event.kind === 'message' && event.role === 'assistant' && event.error !== undefined
+    ));
+    expect(failures).toHaveLength(2);
+    expect(failures.map((event) => event.kind === 'message' ? event.error?.message : undefined).sort())
+      .toEqual(['CHILD_ASSISTANT_FAILURE', 'ROOT_ASSISTANT_FAILURE']);
+    expect(timeline.events.filter((event) => (
+      event.kind === 'message' && event.role === 'compaction' && event.compaction?.status === 'running'
+    ))).toHaveLength(2);
   });
 
   test('a record without a usable timestamp is reported once', () => {

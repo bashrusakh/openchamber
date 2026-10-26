@@ -17,7 +17,7 @@
  * read only the projection fields.
  */
 
-import type { CompactionMessage, JsonValue, Message, Part } from '@/lib/opencode/model';
+import type { AssistantMessage, CompactionMessage, JsonValue, Message, Part } from '@/lib/opencode/model';
 import type { I18nKey, I18nParams } from '@/lib/i18n';
 
 /** A session's identity and the labels a reader needs to recognize it. */
@@ -182,6 +182,14 @@ type ExportMessageEvent = ExportEventBase & {
     status: 'running' | 'completed' | 'failed';
     error?: CompactionMessage['error'];
   };
+  /**
+   * The assistant step's recorded failure, when it has one.
+   *
+   * The failure is separate from the text the step produced: a step that
+   * failed before saying anything still has an outcome, and one that said
+   * part of an answer keeps the failure after that text.
+   */
+  error?: AssistantMessage['error'];
   /** The files the message carried, when it carried any. */
   attachments?: Array<{ filename?: string; mime: string; url: string }>;
   /**

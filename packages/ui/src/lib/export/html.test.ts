@@ -246,6 +246,133 @@ describe('the HTML page keeps the match on the page', () => {
     expect(detailed.document.querySelector('section.subagent')?.classList.contains('hidden')).toBe(false);
   });
 
+  test('detailed reasoning carries the agent its filter and search use', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const result = buildExportFromRecords({
+      root,
+      sessions: [root],
+      records: new Map([[root.id, [
+        {
+          info: {
+            id: 'a1', sessionID: root.id, role: 'assistant', agent: 'build',
+            providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 1000 },
+          },
+          parts: [reasoningPart('a1', 'REASONING_OWNER_NEEDLE')],
+        },
+        assistantMessage(root.id, 'a2', 2000, 'REVIEWER_MESSAGE', { agent: 'reviewer' }),
+      ]]]),
+    }, 'detailed');
+    const html = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'detailed', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    const dom = new Window({ url: 'https://localhost/' });
+    dom.document.write(html);
+    const script = html.match(/<script>([\s\S]*?)<\/script>/);
+    if (!script) throw new Error('The export wrote no page script');
+    new Function('document', script[1])(dom.document);
+
+    const reasoning = dom.document.querySelector('.entry.reasoning');
+    expect(reasoning).toBeTruthy();
+    expect(reasoning?.getAttribute('data-agent')).toBe('build');
+    expect(reasoning?.textContent ?? '').toContain('build');
+    expect(filterOptions(dom, 'filter-agent')).toContain('build');
+    expect(filterOptions(dom, 'filter-agent')).toContain('reviewer');
+
+    search(dom, 'REASONING_OWNER_NEEDLE');
+    chooseFilter(dom, 'filter-agent', 'build');
+    expect(isOnPage(reasoning)).toBe(true);
+
+    chooseFilter(dom, 'filter-agent', 'reviewer');
+    expect(isOnPage(reasoning)).toBe(false);
+  });
+
+  test('completion reports carry the status that filters and searches them', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const result = buildExportFromRecords({
+      root,
+      sessions: [root],
+      records: new Map([[root.id, [
+        subagentReport(root.id, 'r1', 1000, {
+          childSessionID: 'ses_completed', state: 'completed', agent: 'reviewer',
+          description: 'Completed report', output: 'COMPLETED_REPORT_NEEDLE',
+        }),
+        subagentReport(root.id, 'r2', 2000, {
+          childSessionID: 'ses_error', state: 'error', agent: 'worker',
+          description: 'Error report', output: 'ERROR_REPORT_NEEDLE',
+        }),
+      ]]]),
+    }, 'readable');
+    const html = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    const dom = new Window({ url: 'https://localhost/' });
+    dom.document.write(html);
+    const script = html.match(/<script>([\s\S]*?)<\/script>/);
+    if (!script) throw new Error('The export wrote no page script');
+    new Function('document', script[1])(dom.document);
+
+    const completed = [...dom.document.querySelectorAll('.entry.result')]
+      .find((entry) => (entry.textContent ?? '').includes('COMPLETED_REPORT_NEEDLE'));
+    const failed = [...dom.document.querySelectorAll('.entry.result')]
+      .find((entry) => (entry.textContent ?? '').includes('ERROR_REPORT_NEEDLE'));
+    expect(completed).toBeTruthy();
+    expect(failed).toBeTruthy();
+    expect(completed?.getAttribute('data-status')).toBe('completed');
+    expect(failed?.getAttribute('data-status')).toBe('error');
+    expect(completed?.textContent ?? '').toContain('done');
+    expect(failed?.textContent ?? '').toContain('failed');
+    expect(filterOptions(dom, 'filter-status')).toContain('completed');
+    expect(filterOptions(dom, 'filter-status')).toContain('error');
+
+    search(dom, 'REPORT_NEEDLE');
+    chooseFilter(dom, 'filter-status', 'completed');
+    expect(isOnPage(completed ?? null)).toBe(true);
+    expect(isOnPage(failed ?? null)).toBe(false);
+
+    // The visible localized status is searchable, and the filter keeps the
+    // entry it labels.
+    search(dom, 'done');
+    expect(isOnPage(completed ?? null)).toBe(true);
+    expect(isOnPage(failed ?? null)).toBe(false);
+
+    search(dom, 'COMPLETED_REPORT_NEEDLE');
+    chooseFilter(dom, 'filter-status', 'error');
+    expect(visibleEntries(dom)).toHaveLength(0);
+  });
+
+  test('an ordinary tool row does not index the call id it does not draw', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const result = buildExportFromRecords({
+      root,
+      sessions: [root],
+      records: new Map([[root.id, [{
+        info: assistantMessage(root.id, 'a1', 1000, '').info,
+        parts: [shellCall('a1', 'echo visible-command', 1000, 1500)],
+      }]]]),
+    }, 'detailed');
+    const html = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'detailed', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    const dom = new Window({ url: 'https://localhost/' });
+    dom.document.write(html);
+    const script = html.match(/<script>([\s\S]*?)<\/script>/);
+    if (!script) throw new Error('The export wrote no page script');
+    new Function('document', script[1])(dom.document);
+
+    const tool = dom.document.querySelector('.entry.tool');
+    expect(tool).toBeTruthy();
+    expect(tool?.textContent ?? '').not.toContain('a1-shell-call');
+
+    search(dom, 'a1-shell-call');
+    expect(visibleEntries(dom)).toHaveLength(0);
+
+    search(dom, 'visible-command');
+    expect(isOnPage(tool)).toBe(true);
+  });
+
   test('pending raw arguments and agent-only mentions remain readable in HTML', () => {
     const root = session('ses_root', { title: 'Root' });
     const record: Record_ = {

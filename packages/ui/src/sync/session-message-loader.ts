@@ -602,7 +602,7 @@ export class SessionMessageLoader {
     const store = this.childStores.ensureChild(normalized.directory, { bootstrap: false })
     const cursor = entry.snapshot.cursor
     return this.startLoad(normalized, entry, store, "older", async (isCurrent, performance) => {
-      let page = await this.fetchPage(normalized, HISTORY_MESSAGE_PAGE_SIZE, cursor, "older", performance)
+      let page = await this.fetchPage(normalized, HISTORY_MESSAGE_PAGE_SIZE, cursor, "older", performance, isCurrent)
       if (!isCurrent()) return
       const visited = new Set([cursor])
       // An interactive batch tries to start on a user prompt so the oldest
@@ -615,7 +615,7 @@ export class SessionMessageLoader {
         if (extra >= HISTORY_TURN_ALIGNMENT_EXTRA_PAGES && hasUserMessage(page.session)) break
         if (!page.cursor || visited.has(page.cursor)) throw new Error("Session history pagination made no progress")
         visited.add(page.cursor)
-        const older = await this.fetchPage(normalized, HISTORY_MESSAGE_PAGE_SIZE, page.cursor, "older", performance)
+        const older = await this.fetchPage(normalized, HISTORY_MESSAGE_PAGE_SIZE, page.cursor, "older", performance, isCurrent)
         if (!isCurrent()) return
         if (older.session.length === 0 && !older.complete) throw new Error("Session history pagination made no progress")
         page = {
@@ -774,7 +774,7 @@ export class SessionMessageLoader {
         : new Set((store.getState().message[normalized.sessionID] ?? [])
           .filter((message) => !entry.optimistic.has(message.id))
           .map((message) => message.id))
-      let page = await this.fetchPage(normalized, Math.max(1, limit), undefined, "refresh", performance)
+      let page = await this.fetchPage(normalized, Math.max(1, limit), undefined, "refresh", performance, isCurrent)
       if (!isCurrent()) return
       let replacesCache = false
       if (previousCoverage) {
@@ -1042,7 +1042,7 @@ export class SessionMessageLoader {
     // sessions that already hold messages only need one user boundary.
     const coldNavigation = (storeMessageCount === 0 || entry.evicted) && !this.historyReaders.get(this.keyFor(target))
     const firstLimit = Math.max(entry.snapshot.limit, storeMessageCount, getInitialPageSize())
-    const firstPage = await this.fetchPage(target, firstLimit, undefined, "initial-page", performance)
+    const firstPage = await this.fetchPage(target, firstLimit, undefined, "initial-page", performance, isCurrent)
     if (!isCurrent()) return
     const acceptedPage = await this.extendWindow(target, firstPage, coldNavigation
       ? { isSatisfied: (window) => hasInitialTurns(window.session), targetTurns: INITIAL_USER_TURNS }
@@ -1097,7 +1097,7 @@ export class SessionMessageLoader {
         ? Math.ceil((held * goal.targetTurns * EXTENSION_ESTIMATE_HEADROOM) / turns) - held
         : MAX_MESSAGE_PAGE_SIZE
       const limit = turns > 0 ? Math.max(1, Math.min(estimate, remaining)) : estimate
-      const older = await this.fetchPage(target, limit, cursor, "initial-page", performance)
+      const older = await this.fetchPage(target, limit, cursor, "initial-page", performance, isCurrent)
       if (!isCurrent()) return null
       if (older.session.length === 0 && !older.complete) break
       window = {
@@ -1171,9 +1171,10 @@ export class SessionMessageLoader {
   private async fetchPage(
     target: SessionMessageTarget,
     requestedLimit: number,
-    cursor?: string,
-    caller: "initial-page" | "older" | "refresh" = "initial-page",
-    performance?: LoadPerformanceDetails,
+    cursor: string | undefined,
+    caller: "initial-page" | "older" | "refresh",
+    performance: LoadPerformanceDetails | undefined,
+    isCurrent: () => boolean,
   ): Promise<FetchedPage> {
     const limit = Math.min(Math.max(1, requestedLimit), MAX_MESSAGE_PAGE_SIZE)
     const finishPagePerformance = startSessionLoadPerformanceEvent({
@@ -1186,6 +1187,11 @@ export class SessionMessageLoader {
     let recordCount = 0
     try {
       const page = await retry(() => runSessionListNetworkTask(async () => {
+        // A queued page may wait behind other network work while the loader
+        // is reconfigured for another runtime. The check belongs here, right
+        // before the SDK call: a post-hoc rejection cannot undo a request
+        // that already sent an old session id and directory to the new SDK.
+        if (!isCurrent()) throw new Error("Session message read is no longer current")
         attempts += 1
         // Finished tool results arrive as shells; a row that shows one
         // completes its message (`tool-content-completion.ts`).
@@ -1203,7 +1209,7 @@ export class SessionMessageLoader {
       finishPagePerformance("complete", { retryCount: Math.max(0, attempts - 1), recordCount })
       return { session, partsByMessageID, cursor: nextCursor, complete: !nextCursor }
     } catch (error) {
-      finishPagePerformance("error", { retryCount: Math.max(0, attempts - 1), recordCount })
+      finishPagePerformance(isCurrent() ? "error" : "stale", { retryCount: Math.max(0, attempts - 1), recordCount })
       throw error
     } finally {
       if (performance) performance.retryCount += Math.max(0, attempts - 1)

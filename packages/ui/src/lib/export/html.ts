@@ -17,7 +17,7 @@ import { readTimestamp } from './values';
 import type { ExportExcludedSession, ExportFinding } from './events';
 import { orderingStatement, type ConcurrentWork } from './order';
 import { exportText, findingText } from './i18n';
-import { agentLabel, concurrentLabel, excludedArchivedNote, messageAgent, readablePrompt, roleLabel, runtimeTruncationNote, statusLabel } from './labels';
+import { agentLabel, compactionOutcome, concurrentLabel, excludedArchivedNote, messageAgent, readablePrompt, recordedError, roleLabel, runtimeTruncationNote, statusLabel } from './labels';
 import type { ProjectedEntry, ProjectedNode, ProjectedSubagent, ProjectedTool, ProjectionMode } from './project';
 
 /** Escapes text for an HTML text node or attribute. */
@@ -122,14 +122,18 @@ type HtmlExportData = {
  * on the page in the detailed view, so a search for a word that only appears
  * there has to find the entry. The readable view cuts a long prompt down, so
  * the index holds that cut: a word the page does not show must not be found.
+ *
+ * `includeCallID` is for the delegation call, whose detailed view draws its
+ * identifier. An ordinary tool row never draws it, so its identifier is not
+ * in the index.
  */
-const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode): string => {
+const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode, includeCallID = false): string => {
   const description = tool.description ?? tool.target ?? tool.command ?? '';
   const agent = tool.agent && tool.agent !== description ? tool.agent : '';
   const parts = [
     tool.name,
     statusLabel(tool.status),
-    mode === 'detailed' ? tool.callID ?? '' : '',
+    mode === 'detailed' && includeCallID ? tool.callID ?? '' : '',
     description,
     agent,
     tool.output ?? '',
@@ -156,8 +160,11 @@ const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode): string => {
  */
 const searchTextOf = (entry: ProjectedEntry, mode: ProjectionMode): string => {
   switch (entry.kind) {
-    case 'message':
-      return `${entry.role} ${entry.text} ${entry.compaction?.status === 'failed' ? entry.compaction.status : ''} ${entry.compaction?.status === 'failed' ? entry.compaction.error?.message ?? '' : ''} ${entry.shell?.output ?? ''} ${entry.shell?.status ?? ''} ${entry.shell?.exit ?? ''} ${(entry.attachments ?? []).flatMap((file) => mode === 'detailed' ? [file.filename ?? '', file.mime, file.url] : [file.filename ?? file.mime]).join(' ')}`;
+    case 'message': {
+      const compaction = entry.compaction ? compactionOutcome(entry.compaction) : '';
+      const failure = entry.error ? recordedError(entry.error) : '';
+      return `${entry.role} ${entry.text} ${compaction} ${failure} ${entry.shell?.output ?? ''} ${entry.shell?.status ?? ''} ${entry.shell?.exit ?? ''} ${(entry.attachments ?? []).flatMap((file) => mode === 'detailed' ? [file.filename ?? '', file.mime, file.url] : [file.filename ?? file.mime]).join(' ')}`;
+    }
     case 'tool':
       return toolSearchText(entry.tool, mode);
     case 'reasoning':
@@ -166,7 +173,7 @@ const searchTextOf = (entry: ProjectedEntry, mode: ProjectionMode): string => {
       // cannot read. The detailed view draws it, and the index holds it.
       return mode === 'detailed' ? entry.text : '';
     case 'subagent-result':
-      return `${entry.state} ${entry.agent ?? ''} ${entry.description ?? ''} ${entry.output}`;
+      return `${entry.state} ${statusLabel(entry.state)} ${entry.agent ?? ''} ${entry.description ?? ''} ${entry.output}`;
     case 'gap':
       return entry.detail;
   }
@@ -248,7 +255,7 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
             node.invokedAs ?? '',
             node.invokedDescription ?? '',
             node.resumedBy?.length ? exportText('export.dispatch.resumed', { count: node.resumedBy.length }) : '',
-            mode === 'detailed' ? toolSearchText(call, mode) : '',
+            mode === 'detailed' ? toolSearchText(call, mode, true) : '',
             mode === 'detailed' ? call.output ?? '' : readableFallback ? call.output ?? dispatch?.output ?? '' : '',
             mode === 'detailed' ? (call.attachments ?? []).flatMap((file) => [file.filename ?? '', file.mime, file.url]).join(' ') : readableFallback ? (call.attachments ?? []).map((file) => file.filename ?? file.mime).join(' ') : '',
           ].join(' ').toLowerCase(),
@@ -328,7 +335,11 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
         entries.push({
           id,
           kind: 'reasoning',
-          search: searchTextOf(entry, mode).toLowerCase(),
+          agent: messageAgent(entry.agent, owner.name),
+          search: [
+            searchTextOf(entry, mode),
+            messageAgent(entry.agent, owner.name) ?? '',
+          ].join(' ').toLowerCase(),
           depth: entry.depth,
           timestamp: entry.timestamp,
         });
@@ -336,11 +347,13 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
       }
       case 'subagent-result': {
         roles.add('subagent-result');
+        statuses.add(entry.state);
         entries.push({
           id,
           kind: 'subagent-result',
           role: 'subagent-result',
           agent: entry.agent,
+          status: entry.state,
           search: searchTextOf(entry, mode).toLowerCase(),
           depth: entry.depth,
           timestamp: entry.timestamp,
@@ -423,8 +436,11 @@ const renderEntryHtml = (
       const body = entry.text
         ? `<div class="body">${escapeHtml(entry.text)}</div>`
         : '';
-      const compaction = entry.compaction?.status === 'failed'
-        ? `<div class="body">${escapeHtml([entry.compaction.status, entry.compaction.error?.message].filter(Boolean).join(': '))}</div>`
+      const failure = entry.error
+        ? `<div class="body">${escapeHtml(exportText('export.section.error'))}: ${escapeHtml(recordedError(entry.error))}</div>`
+        : '';
+      const compaction = entry.compaction
+        ? `<div class="body">${escapeHtml(compactionOutcome(entry.compaction))}</div>`
         : '';
       const shell = entry.shell
         ? `<details><summary>${escapeHtml(exportText('export.section.result'))}</summary><pre>${escapeHtml([
@@ -435,7 +451,7 @@ const renderEntryHtml = (
         : '';
       return `<article class="entry message" data-id="${escapeHtml(entry.event.id)}" data-kind="message" data-role="${escapeHtml(entry.role)}" data-agent="${escapeHtml(agent)}" data-model="${escapeHtml(entry.model ?? '')}">
   <header><span class="role">${escapeHtml(label)}</span>${meta ? `<span class="meta">${meta}</span>` : ''}</header>
-  ${body}${compaction}${attachments}${shell}
+  ${body}${failure}${compaction}${attachments}${shell}
 </article>`;
     }
     case 'tool': {
@@ -496,7 +512,9 @@ const renderEntryHtml = (
     }
     case 'reasoning': {
       if (mode !== 'detailed') return '';
-      return `<article class="entry reasoning" data-id="${escapeHtml(entry.event.id)}" data-kind="reasoning">
+      const agent = messageAgent(entry.agent, owner.name) ?? '';
+      return `<article class="entry reasoning" data-id="${escapeHtml(entry.event.id)}" data-kind="reasoning" data-agent="${escapeHtml(agent)}">
+  <header><span class="role">${escapeHtml(ownerLabel(owner, entry.agent))}</span></header>
   <details><summary>${escapeHtml(exportText('export.section.reasoning'))}</summary><pre>${escapeHtml(entry.text)}</pre></details>
 </article>`;
     }
@@ -511,8 +529,9 @@ const renderEntryHtml = (
       const note = entry.outputTruncated
         ? `<p class="note">${escapeHtml(exportText('export.html.shownInPart'))}</p>`
         : '';
-      return `<article class="entry result" data-id="${escapeHtml(entry.event.id)}" data-kind="subagent-result" data-role="subagent-result" data-agent="${escapeHtml(entry.agent ?? '')}">
-  <header><span class="role">${escapeHtml(label)}</span><span class="meta"><span>${escapeHtml([entry.agent, entry.description].filter(Boolean).join(' · '))}</span></span></header>
+      const meta = [statusLabel(entry.state), entry.agent, entry.description].filter(Boolean).join(' · ');
+      return `<article class="entry result" data-id="${escapeHtml(entry.event.id)}" data-kind="subagent-result" data-role="subagent-result" data-status="${escapeHtml(entry.state)}" data-agent="${escapeHtml(entry.agent ?? '')}">
+  <header><span class="role">${escapeHtml(label)}</span><span class="meta"><span>${escapeHtml(meta)}</span></span></header>
   <div class="body">${escapeHtml(entry.output)}</div>
   ${note}
 </article>`;

@@ -12,6 +12,7 @@
  */
 
 import type { I18nKey } from '@/lib/i18n';
+import type { StructuredError } from '@/lib/opencode/model';
 import { exportText } from './i18n';
 import type { ConcurrentWork } from './order';
 import type { ProjectedTool } from './project';
@@ -56,6 +57,25 @@ export const statusLabel = (status: string): string => {
   const key = STATUS_LABEL_KEYS.get(status);
   return key ? exportText(key) : status;
 };
+
+/** The text of a recorded error, or its type when it carries no message. */
+export const recordedError = (error: StructuredError): string => (
+  error.message.trim() || error.type
+);
+
+/**
+ * A compaction's recorded outcome, in the words both formats show.
+ *
+ * The status is the outcome even when the summary is empty: a running
+ * compaction has nothing to summarize yet, and a failed one has an error.
+ */
+export const compactionOutcome = (compaction: {
+  status: string;
+  error?: StructuredError;
+}): string => [
+  compaction.status,
+  compaction.error ? recordedError(compaction.error) : '',
+].filter(Boolean).join(': ');
 
 /**
  * The agent a message is signed with.

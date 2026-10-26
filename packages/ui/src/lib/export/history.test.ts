@@ -794,6 +794,69 @@ describe('the coverage of the sub-agent transcripts', () => {
     }
   });
 
+  test('a resumed foreground invocation contributes its interval to observed overlap', () => {
+    const buildFor = (resume: { status: 'running' | 'completed'; startedAt: number; endedAt?: number }) => {
+      const root = session('ses_root', { title: 'Root' });
+      const first = session('ses_first', { title: 'First', parentID: root.id, agent: 'worker' });
+      const second = session('ses_second', { title: 'Second', parentID: root.id, agent: 'reviewer' });
+      return build(fixture({
+        root,
+        sessions: [root, first, second],
+        records: {
+          ses_root: [
+            {
+              info: assistantMessage(root.id, 'first-call', 100, '').info,
+              parts: [subagentCall('first-call', { childSessionID: first.id, startedAt: 100, endedAt: 200, agent: 'worker' })],
+            },
+            {
+              info: assistantMessage(root.id, 'second-call', 500, '').info,
+              parts: [subagentCall('second-call', { childSessionID: second.id, startedAt: 500, endedAt: 700, agent: 'reviewer' })],
+            },
+            {
+              info: assistantMessage(root.id, 'first-resumed', 550, '').info,
+              parts: [subagentCall('first-resumed', {
+                childSessionID: first.id, agent: 'worker',
+                status: resume.status, startedAt: resume.startedAt, endedAt: resume.endedAt,
+              })],
+            },
+          ],
+          ses_first: [assistantMessage(first.id, 'first-work', 150, 'First work', { agent: 'worker' })],
+          ses_second: [assistantMessage(second.id, 'second-work', 600, 'Second work', { agent: 'reviewer' })],
+        },
+      }));
+    };
+
+    const firstBlock = (tree: ReturnType<typeof buildFor>['tree']) => (
+      tree.nodes.find((node) => node.kind === 'subagent' && node.childSessionID === 'ses_first')
+    );
+    const secondBlock = (tree: ReturnType<typeof buildFor>['tree']) => (
+      tree.nodes.find((node) => node.kind === 'subagent' && node.childSessionID === 'ses_second')
+    );
+
+    const overlapping = buildFor({ status: 'completed', startedAt: 550, endedAt: 650 });
+    const first = firstBlock(overlapping.tree);
+    const second = secondBlock(overlapping.tree);
+    expect(overlapping.tree.nodes.filter((node) => node.kind === 'subagent' && node.childSessionID === 'ses_first')).toHaveLength(1);
+    expect(first?.kind === 'subagent' && first.resumedBy).toHaveLength(1);
+    expect(first?.kind === 'subagent' && first.concurrentWith).toEqual([{ agent: 'reviewer', title: 'Second' }]);
+    expect(second?.kind === 'subagent' && second.concurrentWith).toEqual([{ agent: 'worker', title: 'First' }]);
+
+    // Half-open: a resumed call that starts when the other one ends ran
+    // after it, and the export does not invent an overlap.
+    const touching = buildFor({ status: 'completed', startedAt: 700, endedAt: 800 });
+    const touchingFirst = firstBlock(touching.tree);
+    const touchingSecond = secondBlock(touching.tree);
+    expect(touchingFirst?.kind === 'subagent' && touchingFirst.concurrentWith).toBeUndefined();
+    expect(touchingSecond?.kind === 'subagent' && touchingSecond.concurrentWith).toBeUndefined();
+
+    // An open resumed start proves only a point inside another interval, and
+    // it never settles the block's own completion.
+    const running = buildFor({ status: 'running', startedAt: 600 });
+    const runningFirst = firstBlock(running.tree);
+    expect(runningFirst?.kind === 'subagent' && runningFirst.concurrentWith).toEqual([{ agent: 'reviewer', title: 'Second' }]);
+    expect(runningFirst?.kind === 'subagent' && runningFirst.endedAt).toBe(200);
+  });
+
   test('a child the session list does not name is not loaded', async () => {
     // The session list names the root only. The root's own records name the
     // child, but the app does not attach that child to this session, so the

@@ -326,7 +326,13 @@ export type TextPart = PartBase & {
 export type ReasoningPart = PartBase & {
   type: "reasoning"
   text: string
-  time: { start: number; end?: number }
+  /**
+   * The recorded start, or the message's creation time when the part recorded
+   * none. `fromMessage` marks that fallback: the time still places the part in
+   * the live chat, while the export keeps the part at its source position
+   * instead of inventing a recorded time.
+   */
+  time: { start: number; end?: number; fromMessage?: true }
 }
 
 export type FilePart = PartBase & {
