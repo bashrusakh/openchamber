@@ -34,9 +34,11 @@ import {
   type TableWindow,
 } from './tableLayout';
 import {
-  projectNativeTableSelection,
-  resolveNativeSelectionEndpointOffset,
-  type NativeTableSelection,
+  navigateTableSelection,
+  selectionBounds,
+  serializeTableSelection,
+  type TablePoint,
+  type TableSelection,
 } from './tableSelection';
 import { useDelimitedTable } from './useDelimitedTable';
 
@@ -129,11 +131,6 @@ type TableLayout = {
   rowHeight: number;
   /** The direction the table is laid out in. */
   direction: TableDirection;
-};
-
-type NativeSelectionBuffer = {
-  bodyRows: { row: number; columns: number[] }[];
-  headerColumns: number[];
 };
 
 const INITIAL_LAYOUT: TableLayout = {
@@ -243,8 +240,8 @@ type TableCellWidths = {
 type TableSource = {
   /** The values of a row, cut out of the source the first time it is asked for. */
   values(row: number): string[];
-  /** Keep the viewport and native selection rows, and drop other cached rows. */
-  keepRows(ranges: readonly TableRange[]): void;
+  /** Keep the viewport rows and drop other cached rows. */
+  keepRows(range: TableRange): void;
 };
 
 /**
@@ -263,8 +260,8 @@ const createTableSource = (
   const cutRows = new Map<number, string[]>();
   /** The number of cells the cut rows hold. */
   let cutCells = 0;
-  /** The viewport and native selection rows. */
-  let heldRanges: readonly TableRange[] = [{ start: 0, end: 0 }];
+  /** The viewport rows. */
+  let heldRange: TableRange = { start: 0, end: 0 };
 
   const values = (row: number): string[] => {
     const held = cutRows.get(row);
@@ -285,7 +282,7 @@ const createTableSource = (
     while (cutCells > TABLE_ROW_CACHE_CELL_LIMIT) {
       let dropped = false;
       for (const row of cutRows.keys()) {
-        if (heldRanges.some((range) => row >= range.start && row < range.end)) continue;
+        if (row >= heldRange.start && row < heldRange.end) continue;
         const cut = cutRows.get(row);
         cutRows.delete(row);
         cutCells -= cut ? cut.length : 0;
@@ -301,8 +298,8 @@ const createTableSource = (
    * Keep the rows that are on screen and drop the ones that are not, as far
    * as the budget allows.
    */
-  const keepRows = (ranges: readonly TableRange[]): void => {
-    heldRanges = ranges;
+  const keepRows = (range: TableRange): void => {
+    heldRange = range;
     prune();
   };
 
@@ -319,11 +316,11 @@ const createTableSource = (
  * all of them froze the viewer for seconds, so only the rows and the columns
  * in view are in the document. The skipped ones are carried by spacer rows
  * and spacer cells, which keeps the table's own layout, its column widths
- * and its text selection intact.
+ * and its geometry intact. This experiment selects rectangular parsed data.
  *
  * A file whose grid is small enough is kept whole, so the document holds
- * every cell of it and the browser's find-in-page, a selection of the whole
- * file and a screen reader see the file and not the window.
+ * every cell of it and the browser's find-in-page and a screen reader see
+ * the file and not the window.
  */
 export const TableArtifact: React.FC<{
   path: string;
@@ -351,6 +348,7 @@ export const TableArtifact: React.FC<{
 
   return (
     <TableView
+      key={path}
       table={delimited.table}
       bodyCells={delimited.bodyCells}
       countBodyCells={delimited.countBodyCells}
@@ -394,6 +392,7 @@ const TableView: React.FC<{
     : t('filesView.artifact.table.rowsPlural', { rows: table.totalRows, columns: table.columnCount });
 
   const scrollerRef = React.useRef<HTMLDivElement | null>(null);
+  const tableRef = React.useRef<HTMLTableElement | null>(null);
   const probeRef = React.useRef<HTMLSpanElement | null>(null);
   const probeTextRef = React.useRef<HTMLSpanElement | null>(null);
   const probeRowRef = React.useRef<HTMLSpanElement | null>(null);
@@ -407,60 +406,35 @@ const TableView: React.FC<{
     rows: { start: 0, end: 1 },
     columns: { start: 0, end: 1 },
   });
-  const [nativeSelection, setNativeSelection] = React.useState<NativeTableSelection | null>(null);
-  const nativeSelectionRef = React.useRef<NativeTableSelection | null>(null);
+  const [selection, setSelection] = React.useState<TableSelection | null>(null);
+  const selectionRef = React.useRef<TableSelection | null>(null);
+  const dragRef = React.useRef<{ id: number; x: number; y: number } | null>(null);
+  const dragFrameRef = React.useRef<number | null>(null);
+
+  const select = React.useCallback((next: TableSelection | null) => {
+    selectionRef.current = next;
+    setSelection((current) => (
+      current && next
+      && current.anchor.row === next.anchor.row && current.anchor.column === next.anchor.column
+      && current.focus.row === next.focus.row && current.focus.column === next.focus.column
+        ? current : next
+    ));
+  }, []);
+
+  const stopDrag = React.useCallback(() => {
+    const scroller = scrollerRef.current;
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (dragFrameRef.current !== null) cancelAnimationFrame(dragFrameRef.current);
+    dragFrameRef.current = null;
+    if (drag && scroller?.hasPointerCapture(drag.id)) scroller.releasePointerCapture(drag.id);
+  }, []);
 
   React.useLayoutEffect(() => {
-    nativeSelectionRef.current = null;
-    setNativeSelection(null);
-  }, [table]);
-
-  const readSelection = React.useCallback(() => {
-    const scroller = scrollerRef.current;
-    if (!scroller) {
-      nativeSelectionRef.current = null;
-      setNativeSelection(null);
-      return;
-    }
-    const ownerDocument = scroller.ownerDocument;
-    const selection = ownerDocument.getSelection();
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
-      nativeSelectionRef.current = null;
-      setNativeSelection(null);
-      return;
-    }
-    const tableElement = scroller.querySelector('table');
-    if (!tableElement) {
-      nativeSelectionRef.current = null;
-      setNativeSelection(null);
-      return;
-    }
-    const next = projectNativeTableSelection(
-      tableElement,
-      selection.getRangeAt(0),
-      selection,
-      table.rows.length,
-      table.columnCount,
-    );
-    nativeSelectionRef.current = next;
-    setNativeSelection((current) => (
-      current
-      && next
-      && current.start === next.start
-      && current.end === next.end
-      && current.wholeTable === next.wholeTable
-        ? current
-        : next
-    ));
-  }, [table]);
-
-  React.useEffect(() => {
-    const scroller = scrollerRef.current;
-    if (!scroller) return;
-    const ownerDocument = scroller.ownerDocument;
-    ownerDocument.addEventListener('selectionchange', readSelection);
-    return () => ownerDocument.removeEventListener('selectionchange', readSelection);
-  }, [readSelection]);
+    select(null);
+    stopDrag();
+    return stopDrag;
+  }, [select, stopDrag, table]);
 
   // The width every column asks for comes from the data and the
   // measurements, so it is measured again when one of them changes and not
@@ -564,6 +538,156 @@ const TableView: React.FC<{
     offsetsRef.current = { top: scroller.scrollTop, left: scroller.scrollLeft };
     applyWindow();
   }, [applyWindow]);
+
+  const pointAt = React.useCallback((x: number, y: number): TablePoint | null => {
+    const scroller = scrollerRef.current;
+    const tableElement = tableRef.current;
+    if (!scroller || !tableElement) return null;
+    const box = scroller.getBoundingClientRect();
+    const tableBox = tableElement.getBoundingClientRect();
+    const left = Math.max(box.left + scroller.clientLeft, tableBox.left);
+    const top = Math.max(box.top + scroller.clientTop, tableBox.top);
+    const right = Math.min(box.left + scroller.clientLeft + scroller.clientWidth, tableBox.right);
+    const bottom = Math.min(box.top + scroller.clientTop + scroller.clientHeight, tableBox.bottom);
+    if (right <= left || bottom <= top) return null;
+    // Pointer capture retargets events to the scroller. Hit-test the rendered
+    // table instead: fractional column layout can drift from the window plan.
+    // Outside drags use the visible edge while autoscroll mounts the next cells.
+    const cell = document.elementFromPoint(
+      x < right ? Math.max(left, x) : right - 1,
+      y < bottom ? Math.max(top, y) : bottom - 1,
+    )?.closest('[aria-colindex]');
+    const row = cell?.parentElement?.getAttribute('aria-rowindex');
+    const column = cell?.getAttribute('aria-colindex');
+    if (!cell || !tableElement.contains(cell) || !row || !column) return null;
+    return { row: Number(row) - 1, column: Number(column) - 1 };
+  }, []);
+
+  const extendDrag = React.useCallback(() => {
+    const drag = dragRef.current;
+    const current = selectionRef.current;
+    if (!drag || !current) return;
+    const focus = pointAt(drag.x, drag.y);
+    if (focus) select({ anchor: current.anchor, focus });
+  }, [pointAt, select]);
+
+  const handleViewportScroll = () => {
+    handleScroll();
+    extendDrag();
+  };
+
+  const startDragScroll = React.useCallback(() => {
+    if (dragFrameRef.current !== null) return;
+    const tick = () => {
+      const drag = dragRef.current;
+      const scroller = scrollerRef.current;
+      if (!drag || !scroller) { dragFrameRef.current = null; return; }
+      const box = scroller.getBoundingClientRect();
+      const edge = 24;
+      const speed = (position: number, start: number, end: number): number => {
+        if (position < start + edge) return -Math.min(24, start + edge - position);
+        if (position > end - edge) return Math.min(24, position - end + edge);
+        return 0;
+      };
+      const vertical = speed(drag.y, box.top + modelRef.current.layout.rowHeight, box.bottom);
+      const horizontal = speed(drag.x, box.left, box.right);
+      if (vertical === 0 && horizontal === 0) { dragFrameRef.current = null; return; }
+      const previousTop = scroller.scrollTop;
+      const previousLeft = scroller.scrollLeft;
+      scroller.scrollTop += vertical;
+      // scrollLeft deltas describe physical movement in both browser directions.
+      scroller.scrollLeft += horizontal;
+      handleScroll();
+      extendDrag();
+      if (scroller.scrollTop === previousTop && scroller.scrollLeft === previousLeft) {
+        dragFrameRef.current = null;
+        return;
+      }
+      dragFrameRef.current = requestAnimationFrame(tick);
+    };
+    dragFrameRef.current = requestAnimationFrame(tick);
+  }, [extendDrag, handleScroll]);
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    // Touch retains native scrolling. Mouse and pen operate on parsed cells.
+    if (event.button !== 0 || event.pointerType === 'touch') return;
+    const cell = event.target instanceof Element ? event.target.closest('[aria-colindex]') : null;
+    const row = cell?.parentElement?.getAttribute('aria-rowindex');
+    const column = cell?.getAttribute('aria-colindex');
+    if (!row || !column) return;
+    event.preventDefault();
+    tableRef.current?.focus({ preventScroll: true });
+    const focus = { row: Number(row) - 1, column: Number(column) - 1 };
+    select({ anchor: event.shiftKey ? (selectionRef.current?.anchor ?? focus) : focus, focus });
+    dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.id !== event.pointerId) return;
+    dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    extendDrag();
+    startDragScroll();
+  };
+
+  const revealPoint = (point: TablePoint) => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const model = modelRef.current;
+    const height = model.layout.rowHeight;
+    if (point.row === 0) scroller.scrollTop = 0;
+    else if (point.row * height < scroller.scrollTop + height) scroller.scrollTop = (point.row - 1) * height;
+    else if ((point.row + 1) * height > scroller.scrollTop + scroller.clientHeight) {
+      scroller.scrollTop = (point.row + 1) * height - scroller.clientHeight;
+    }
+    const start = model.plan.boundaries[point.column]!;
+    const end = model.plan.boundaries[point.column + 1]!;
+    const current = Math.abs(scroller.scrollLeft);
+    let next = current;
+    if (start < current) next = start;
+    else if (end > current + scroller.clientWidth) next = end - scroller.clientWidth;
+    scroller.scrollLeft = model.layout.direction === 'rtl' ? -next : next;
+    handleScroll();
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTableElement>) => {
+    if (event.altKey || event.nativeEvent.isComposing) return;
+    const edge = event.ctrlKey || event.metaKey;
+    if (edge && event.key.toLowerCase() === 'a') {
+      event.preventDefault();
+      event.stopPropagation();
+      stopDrag();
+      select({ anchor: { row: 0, column: 0 }, focus: { row: table.rows.length, column: table.columnCount - 1 } });
+      return;
+    }
+    if (event.key === 'Escape' && selectionRef.current) {
+      event.preventDefault();
+      event.stopPropagation();
+      stopDrag();
+      select(null);
+      return;
+    }
+    const next = navigateTableSelection(
+      selectionRef.current, event.key, event.shiftKey, edge,
+      table.rows.length, table.columnCount, layout.direction === 'rtl',
+    );
+    if (!next) return;
+    event.preventDefault();
+    event.stopPropagation();
+    stopDrag();
+    select(next);
+    revealPoint(next.focus);
+  };
+
+  const handleCopy = (event: React.ClipboardEvent<HTMLTableElement>) => {
+    const current = selectionRef.current;
+    if (!current) return;
+    const payload = serializeTableSelection(content, delimiter, table, current);
+    event.clipboardData.setData('text/plain', payload.text);
+    event.clipboardData.setData('text/html', payload.html);
+    event.preventDefault();
+    event.stopPropagation();
+  };
 
   // The font, the cell's own padding, the row height and the scroll box are
   // all read back from the document, because the interface size, the theme
@@ -680,157 +804,22 @@ const TableView: React.FC<{
   // the new file's own rows and columns.
   //
   // A file whose grid is small enough is kept whole: every row and every
-  // column of it is in the document, so the browser's find-in-page, a
-  // selection of the whole file and a screen reader see the file and not the
-  // window. The decision is a property of the file, so it does not change
-  // with the size of the panel.
+  // column of it is in the document, so the browser's find-in-page and a
+  // screen reader see the file and not the window. The decision is a property
+  // of the file, so it does not change with the size of the panel.
   const mountedWindow: TableWindow = holdsWholeGrid
     ? { rows: { start: 0, end: table.rows.length }, columns: { start: 0, end: table.columnCount } }
     : clampTableWindow(visible, table.columnCount, table.rows.length);
-  const selectionRows = React.useMemo<TableRange | null>(
-    () => {
-      if (!nativeSelection || nativeSelection.end <= nativeSelection.start || table.columnCount === 0) {
-        return null;
-      }
-      const firstTableRow = Math.floor(nativeSelection.start / table.columnCount);
-      const endTableRow = Math.ceil(nativeSelection.end / table.columnCount);
-      return {
-        start: Math.max(0, Math.max(1, firstTableRow) - 1),
-        end: Math.max(0, Math.min(table.rows.length + 1, endTableRow) - 1),
-      };
-    },
-    [nativeSelection, table.columnCount, table.rows.length],
-  );
-  const selectionBuffer = React.useMemo<NativeSelectionBuffer>(() => {
-    if (!nativeSelection || nativeSelection.wholeTable || table.columnCount === 0) {
-      return { bodyRows: [], headerColumns: [] };
-    }
-
-    const bodyColumns = new Map<number, Set<number>>();
-    const headerColumns = new Set<number>();
-    const totalCells = (table.rows.length + 1) * table.columnCount;
-    const endpointSlots = [...new Set([
-      Math.min(nativeSelection.start, totalCells - 1),
-      Math.max(0, Math.min(nativeSelection.end - 1, totalCells - 1)),
-    ])];
-    const firstSelectedRow = Math.floor(nativeSelection.start / table.columnCount);
-    const lastSelectedRow = Math.floor(Math.max(nativeSelection.start, nativeSelection.end - 1) / table.columnCount);
-    const endpointColumns = (column: number): number[] => [...new Set([
-      0,
-      table.columnCount - 1,
-      column - 1,
-      column,
-      column + 1,
-    ].filter((candidate) => candidate >= 0 && candidate < table.columnCount))];
-
-    for (const slot of endpointSlots) {
-      const endpoint = {
-        row: Math.floor(slot / table.columnCount),
-        column: slot % table.columnCount,
-      };
-      // Keep text in source order beside each endpoint. A native keypress can
-      // move from the end of one cell into the next cell in the same row.
-      // The row's viewport may be far away, so that next cell must already be
-      // connected before the browser handles the key.
-      for (const adjacentRow of [endpoint.row - 1, endpoint.row, endpoint.row + 1]) {
-        if (
-          adjacentRow !== endpoint.row
-          && adjacentRow >= firstSelectedRow
-          && adjacentRow <= lastSelectedRow
-        ) continue;
-        const columns = endpointColumns(endpoint.column);
-        if (adjacentRow === 0) {
-          for (const column of columns) headerColumns.add(column);
-        } else if (adjacentRow > 0 && adjacentRow <= table.rows.length) {
-          const row = adjacentRow - 1;
-          const held = bodyColumns.get(row) ?? new Set<number>();
-          for (const column of columns) held.add(column);
-          bodyColumns.set(row, held);
-        }
-      }
-    }
-
-    return {
-      bodyRows: Array.from(bodyColumns, ([row, columns]) => ({ row, columns: [...columns] })),
-      headerColumns: [...headerColumns],
-    };
-  }, [nativeSelection, table.columnCount, table.rows.length]);
-
-  React.useLayoutEffect(() => {
-    const snapshot = nativeSelectionRef.current;
-    if (!snapshot || (!snapshot.anchor.structural && !snapshot.focus.structural)) return;
-    const scroller = scrollerRef.current;
-    const tableElement = scroller?.querySelector('table');
-    const selection = scroller?.ownerDocument.getSelection();
-    if (
-      !tableElement
-      || !selection
-      || selection.isCollapsed
-      || selection.rangeCount === 0
-    ) return;
-
-    const structureChanged = (endpoint: NativeTableSelection['anchor']): boolean => (
-      endpoint.structural
-      && endpoint.sourceOffset !== endpoint.sourceStart
-      && (
-        endpoint.node.childNodes.length !== endpoint.childNodes.length
-        || endpoint.childNodes.some((child, index) => endpoint.node.childNodes.item(index) !== child)
-      )
-    );
-    const rebaseEndpoint = (
-      endpoint: NativeTableSelection['anchor'],
-      node: Node | null,
-      offset: number,
-    ) => {
-      if (
-        !structureChanged(endpoint)
-        || !node
-        || (node !== endpoint.node && !endpoint.node.contains(node))
-      ) return { node, offset, refresh: false };
-      const nextOffset = resolveNativeSelectionEndpointOffset(
-        tableElement,
-        endpoint,
-        table.rows.length,
-        table.columnCount,
-      );
-      if (nextOffset === null) return { node, offset, refresh: false };
-      return {
-        node: endpoint.node,
-        offset: nextOffset,
-        refresh: true,
-      };
-    };
-    const anchor = rebaseEndpoint(snapshot.anchor, selection.anchorNode, selection.anchorOffset);
-    const focus = rebaseEndpoint(snapshot.focus, selection.focusNode, selection.focusOffset);
-    if (anchor.refresh || focus.refresh) {
-      if (!anchor.node || !focus.node) return;
-      // Reapply the native points after structural children change. A live
-      // Range can keep its numeric offset while its selected source cut drifts.
-      selection.collapse(anchor.node, anchor.offset);
-      selection.extend(focus.node, focus.offset);
-    }
-
-    const refreshChildren = (endpoint: NativeTableSelection['anchor']) => (
-      endpoint.structural ? { ...endpoint, childNodes: Array.from(endpoint.node.childNodes) } : endpoint
-    );
-    nativeSelectionRef.current = {
-      ...snapshot,
-      anchor: refreshChildren(snapshot.anchor),
-      focus: refreshChildren(snapshot.focus),
-    };
-  }, [nativeSelection, table, visible]);
-
+  // Scroll events can run before React mounts the new viewport. Resolve a
+  // captured pointer again against the cells of the committed window.
+  React.useLayoutEffect(extendDrag, [extendDrag, layout, mountedWindow]);
   // The cache holds the rows that are on screen and drops the rows that
   // leave the screen, so a scroll or a render does not cut a row that was
   // cut already. It runs after the commit, because the rows of the window
   // are cut during the render.
   React.useLayoutEffect(() => {
-    source.keepRows([
-      mountedWindow.rows,
-      ...(selectionRows ? [selectionRows] : []),
-      ...selectionBuffer.bodyRows.map(({ row }) => ({ start: row, end: row + 1 })),
-    ]);
-  }, [mountedWindow.rows, selectionBuffer.bodyRows, selectionRows, source]);
+    source.keepRows(mountedWindow.rows);
+  }, [mountedWindow.rows, source]);
 
   const visibleColumns: number[] = [];
   for (let column = mountedWindow.columns.start; column < mountedWindow.columns.end; column += 1) {
@@ -840,44 +829,17 @@ const TableView: React.FC<{
   for (let row = mountedWindow.rows.start; row < mountedWindow.rows.end; row += 1) {
     visibleRows.push(row);
   }
-  const retainedRows = selectionRows && selectionRows.start < selectionRows.end
-    ? Array.from({ length: selectionRows.end - selectionRows.start }, (_, index) => selectionRows.start + index)
-    : [];
-  const bufferedRows = selectionBuffer.bodyRows.map(({ row }) => row);
-  const mountedRows = [...new Set([...visibleRows, ...retainedRows, ...bufferedRows])].sort((a, b) => a - b);
-  const columnsForRow = (row: number): number[] => {
-    const inViewport = row >= mountedWindow.rows.start && row < mountedWindow.rows.end
-      ? visibleColumns
-      : [];
-    const retained: number[] = [];
-    const sourceRow = row + 1;
-    const rowStart = sourceRow * table.columnCount;
-    if (nativeSelection) {
-      const start = Math.max(nativeSelection.start, rowStart) - rowStart;
-      const end = Math.min(nativeSelection.end, rowStart + table.columnCount) - rowStart;
-      for (let column = Math.max(0, start); column < Math.min(table.columnCount, end); column += 1) {
-        retained.push(column);
-      }
-    }
-    retained.push(...(selectionBuffer.bodyRows.find((buffer) => buffer.row === row)?.columns ?? []));
-    return [...new Set([...inViewport, ...retained])].sort((a, b) => a - b);
-  };
-  const headerStart = nativeSelection ? Math.max(0, nativeSelection.start) : 0;
-  const headerEnd = nativeSelection ? Math.min(table.columnCount, nativeSelection.end) : 0;
-  const retainedHeaderColumns = nativeSelection && headerStart < headerEnd
-    ? Array.from({ length: headerEnd - headerStart }, (_, index) => headerStart + index)
-    : [];
-  const columnsForHeader = [...new Set([
-    ...visibleColumns,
-    ...retainedHeaderColumns,
-    ...selectionBuffer.headerColumns,
-  ])].sort((a, b) => a - b);
+  const bounds = selection ? selectionBounds(selection) : null;
+  const isSelected = (row: number, column: number): boolean => Boolean(bounds
+    && row >= bounds.firstRow && row <= bounds.lastRow
+    && column >= bounds.firstColumn && column <= bounds.lastColumn);
+  const selectedClassName = 'bg-interactive-selection text-interactive-selection-foreground';
   // The cells that carry the columns beside the window. A range of columns
   // that is wider than a cell may span is carried by more than one cell, so
   // that the browser lays the cells of the window out over the columns the
   // model names.
-  const headerLeadingSpans = tableSpacerSpans(columnsForHeader[0] ?? table.columnCount);
-  const headerTrailingSpans = tableSpacerSpans(table.columnCount - (columnsForHeader.at(-1) ?? -1) - 1);
+  const headerLeadingSpans = tableSpacerSpans(mountedWindow.columns.start);
+  const headerTrailingSpans = tableSpacerSpans(table.columnCount - mountedWindow.columns.end);
   // The cells that carry the rows outside the window. They hold no text, no
   // padding and no border, so they add nothing to the height of their row,
   // which is written on the row itself. A range of columns that is wider
@@ -896,33 +858,18 @@ const TableView: React.FC<{
   const rowClassName = (row: number): string => (
     row % 2 === 0 ? 'bg-[var(--surface-background)]' : 'bg-[var(--surface-subtle)]/40'
   );
-  const headerCells: React.ReactNode[] = [];
-  let previousHeaderColumn = -1;
-  for (const column of columnsForHeader) {
-    if (previousHeaderColumn >= 0 && previousHeaderColumn + 1 < column) {
-      tableSpacerSpans(column - previousHeaderColumn - 1).forEach((span, index) => {
-        headerCells.push(
-          <th
-            key={`gap-${column}-${index}`}
-            colSpan={span}
-            aria-hidden="true"
-            className={spacerClassName('border-border/40')}
-          />,
-        );
-      });
-    }
-    headerCells.push(
-      <th
-        key={column}
-        scope="col"
-        aria-colindex={column + 1}
-        className={headerClassName(column)}
-      >
-        {table.header[column] ?? ''}
-      </th>,
-    );
-    previousHeaderColumn = column;
-  }
+  const headerCells = visibleColumns.map((column) => (
+    <th
+      key={column}
+      scope="col"
+      aria-colindex={column + 1}
+      data-selected={isSelected(0, column) || undefined}
+      data-selection-focus={(selection?.focus.row === 0 && selection.focus.column === column) || undefined}
+      className={cn(headerClassName(column), isSelected(0, column) && selectedClassName)}
+    >
+      {table.header[column] ?? ''}
+    </th>
+  ));
 
   // The probe that holds the characters outside latin, one in a box of its
   // own, so the browser reports the width each of them takes in the font it
@@ -975,14 +922,28 @@ const TableView: React.FC<{
             </span>
           </span>
           {characterProbe}
-          <div ref={scrollerRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-auto">
+          <div
+            ref={scrollerRef}
+            onScroll={handleViewportScroll}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={stopDrag}
+            onPointerCancel={stopDrag}
+            onLostPointerCapture={stopDrag}
+            className="min-h-0 flex-1 overflow-auto"
+          >
             <table
+              ref={tableRef}
+              tabIndex={0}
+              aria-label={summary}
+              onKeyDown={handleKeyDown}
+              onCopy={handleCopy}
               // The rows and the columns outside the window are not in the
               // document, so the table states how many of them it has, the
               // header row counted with the rows.
               aria-colcount={table.columnCount}
               aria-rowcount={table.rows.length + 1}
-              className="min-w-full border-separate border-spacing-0 font-mono typography-meta"
+              className="min-w-full select-none border-separate border-spacing-0 font-mono typography-meta"
               style={{
                 tableLayout: 'fixed',
                 width: tableWidthCss(plan.totalCells, table.columnCount, layout.metrics),
@@ -1018,7 +979,7 @@ const TableView: React.FC<{
                 </tr>
               </thead>
               <tbody>
-                {mountedRows.length > 0 && mountedRows[0]! > 0 && (
+                {visibleRows.length > 0 && visibleRows[0]! > 0 && (
                   // The height of a spacer row is written on the row: a
                   // cell's own padding would make the cell taller than the
                   // height it asks for, and the rows would sit lower than
@@ -1026,102 +987,65 @@ const TableView: React.FC<{
                   // nothing to that height.
                   <tr
                     aria-hidden="true"
-                    data-source-row-start={1}
-                    data-source-row-end={mountedRows[0]! + 1}
-                    style={{ height: mountedRows[0]! * layout.rowHeight }}
+                    style={{ height: visibleRows[0]! * layout.rowHeight }}
                   >
                     {rowSpans.map((span, index) => (
                       <td key={`rows-above-${index}`} colSpan={span} />
                     ))}
                   </tr>
                 )}
-                {mountedRows.map((row, index) => {
-                  const previousRow = mountedRows[index - 1];
-                  const rowColumns = columnsForRow(row);
-                  const leading = tableSpacerSpans(rowColumns[0] ?? table.columnCount);
-                  const trailing = tableSpacerSpans(table.columnCount - (rowColumns.at(-1) ?? -1) - 1);
-                  // The values of a row are cut out of the source when the
-                  // row is mounted, and a row that was cut is not cut again.
+                {visibleRows.map((row) => {
                   const values = source.values(row);
-                  // Every row is the height the document reports, so a row
-                  // without text is as tall as a row with text and the
-                  // mapping from a scroll offset to a row stays exact.
-                  const rowCells: React.ReactNode[] = [];
-                  let previousColumn = -1;
-                  for (const column of rowColumns) {
-                    if (previousColumn >= 0 && previousColumn + 1 < column) {
-                      tableSpacerSpans(column - previousColumn - 1).forEach((span, spacerIndex) => {
-                        rowCells.push(
-                          <td
-                            key={`gap-${column}-${spacerIndex}`}
-                            colSpan={span}
-                            aria-hidden="true"
-                            className={spacerClassName('border-border/30')}
-                          />,
-                        );
-                      });
-                    }
+                  const rowCells = visibleColumns.map((column) => {
                     const value = values[column] ?? '';
-                    rowCells.push(
+                    return (
                       <td
                         key={column}
                         aria-colindex={column + 1}
-                        className={cellClassName(column)}
+                        data-selected={isSelected(row + 1, column) || undefined}
+                        data-selection-focus={(selection?.focus.row === row + 1 && selection.focus.column === column) || undefined}
+                        className={cn(cellClassName(column), isSelected(row + 1, column) && selectedClassName)}
                         title={value}
                       >
                         {value}
-                      </td>,
+                      </td>
                     );
-                    previousColumn = column;
-                  }
+                  });
                   return (
-                    <React.Fragment key={row}>
-                      {previousRow !== undefined && row > previousRow + 1 && (
-                        <tr
+                    <tr
+                      key={row}
+                      // The row of the file, the header row counted with the
+                      // rows before it.
+                      aria-rowindex={row + 2}
+                      className={rowClassName(row)}
+                      style={{ height: layout.rowHeight }}
+                    >
+                      {headerLeadingSpans.map((span, index) => (
+                        <td
+                          key={`leading-${index}`}
+                          colSpan={span}
                           aria-hidden="true"
-                          data-source-row-start={previousRow + 2}
-                          data-source-row-end={row + 1}
-                          style={{ height: (row - previousRow - 1) * layout.rowHeight }}
-                        >
-                          {rowSpans.map((span, spacerIndex) => <td key={spacerIndex} colSpan={span} />)}
-                        </tr>
-                      )}
-                      <tr
-                        // The row of the file, the header row counted with the
-                        // rows before it.
-                        aria-rowindex={row + 2}
-                        className={rowClassName(row)}
-                        style={{ height: layout.rowHeight }}
-                      >
-                        {leading.map((span, index) => (
-                          <td
-                            key={`leading-${index}`}
-                            colSpan={span}
-                            aria-hidden="true"
-                            className={index === leading.length - 1
-                              ? leadingSpacerClassName('border-border/30')
-                              : spacerClassName('border-border/30')}
-                          />
-                        ))}
-                        {rowCells}
-                        {trailing.map((span, index) => (
-                          <td
-                            key={`trailing-${index}`}
-                            colSpan={span}
-                            aria-hidden="true"
-                            className={spacerClassName('border-border/30')}
-                          />
-                        ))}
-                      </tr>
-                    </React.Fragment>
+                          className={index === headerLeadingSpans.length - 1
+                            ? leadingSpacerClassName('border-border/30')
+                            : spacerClassName('border-border/30')}
+                        />
+                      ))}
+                      {rowCells}
+                      {headerTrailingSpans.map((span, index) => (
+                        <td
+                          key={`trailing-${index}`}
+                          colSpan={span}
+                          aria-hidden="true"
+                          className={spacerClassName('border-border/30')}
+                        />
+                      ))}
+                    </tr>
                   );
                 })}
-                {mountedRows.length > 0 && mountedRows[mountedRows.length - 1]! < table.rows.length - 1 && (
+                {visibleRows.length > 0 && visibleRows[visibleRows.length - 1]! < table.rows.length - 1 && (
                   <tr
                     aria-hidden="true"
-                    data-source-row-start={mountedRows[mountedRows.length - 1]! + 2}
-                    data-source-row-end={table.rows.length + 1}
-                    style={{ height: (table.rows.length - mountedRows[mountedRows.length - 1]! - 1) * layout.rowHeight }}
+                    style={{ height: (table.rows.length - visibleRows[visibleRows.length - 1]! - 1) * layout.rowHeight }}
                   >
                     {rowSpans.map((span, index) => (
                       <td key={`rows-below-${index}`} colSpan={span} />

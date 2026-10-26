@@ -185,27 +185,22 @@ more cells than a screen can show, and mounting all of them froze the viewer
 for seconds: 2,000 rows with 50 columns ask for 100,000 cells. The rows
 outside the window are carried by spacer rows that take their height, and
 the columns beside the window by spacer cells that span them, so the table
-keeps its own layout, its column widths and its text selection.
+keeps its own layout and its column widths.
 `tableLayout.ts` holds the model: the width of every column, the range of
 rows and columns a scroll position lands on, the size of the grid of a file
 and the cells that carry the columns beside the window. What has to stay
 true:
 
-- the preview is a real `<table>` with a sticky `<thead>`, because the table
-  semantics and the native text selection depend on it;
+- the preview is a real `<table>` with a sticky `<thead>` and absolute ARIA
+  row and column indexes;
 - the row cap of the parser and the notice about it in the meta line stay as
   they are;
 - a file whose grid is small enough is kept whole and a file whose grid is
   large enough is windowed. The decision is a property of the file, so the
   same file is kept whole in a narrow panel and in a wide one;
-- the mounted cells cover the viewport and the browser's current native text
-  range. The range's real text stays in connected cells, including all cells
-  between its endpoints; the viewport remains a separate region when it scrolls
-  away. A few cells beside the range endpoints remain mounted so the browser
-  can extend it natively. A range that covers the whole table mounts the whole
-  table. Selection cost can grow with the selected content, while an ordinary
-  open and unselected scroll stay bounded by the viewport. The files that are
-  kept whole are the other exception, and the limit bounds what they cost. Two things grow
+- the mounted cells cover the viewport. Experimental coordinate selection never
+  mounts extra cells, including select-all and offscreen endpoints. Files that
+  are kept whole retain their existing threshold. Two things grow
   with the file anyway: the `<col>` the table holds for every column of the
   file, because the parser does not bound the number of columns, and the rows
   the cache of the cut rows holds, because a row of a file with many columns
@@ -218,9 +213,8 @@ true:
 - the column widths stay the same while scrolling, and a column is as wide as
   the text the browser lays out for its longest value, so nothing that fits
   today is cut short;
-- only the rows and columns in view and the text cells inside the browser's
-  active native range are in the document. Find-in-page and a screen reader
-  see the window and retained selection, while a file that is kept whole holds
+- only the rows and columns in view are in the document. Find-in-page and a
+  screen reader see the window, while a file that is kept whole holds
   every row and every column;
 - the table states how many rows and how many columns it has, and every
   mounted row and cell states where it sits in the file, so a screen reader
@@ -249,16 +243,57 @@ true:
   without columns has no table to measure, so the next file is measured from
   scratch.
 
-### Why boundary points follow source intervals and not mounted cells
+### Why experiment B stores parsed coordinates instead of native ranges
 
-A row or section offset counts DOM children, while a spacer can cover many
-parsed columns or rows. The preview projects structural points through those
-represented intervals and keeps the resulting parsed-cell cut stable when the
-window changes. A React commit can replace a spacer and move a live element-
-boundary Range, so the preview restores that structural endpoint to the same
-source cut. Text and cell endpoints keep their original nodes and offsets, and
-the browser's Selection keeps its anchor and focus order. Mapping a boundary to
-the nearest mounted cell omitted source cells from the native range.
+This isolated experiment replaces native range retention with a logical anchor
+and focus. Both name a parsed row and column, with row 0 naming the existing
+header. Selection highlights only mounted cells. It evaluates a different
+data-selection contract and does not establish production adoption, native
+text equivalence, or a measured performance improvement. The native experiment
+A remains in its separate unchanged worktree for independent A/B testing.
+
+Mouse or pen press selects a cell; dragging selects an inclusive rectangle in
+either direction. Drag endpoints use browser hit-testing of the rendered cells
+and their absolute ARIA indexes. Fractional font layout can accumulate differences
+from the geometry used to plan the viewport, so that plan cannot identify the
+copied cell. Near a viewport edge, a captured drag scrolls and hit-tests at the
+visible table edge again after the viewport cells mount. Shift+click retains the
+anchor and moves the focus, including after scrolling to another region.
+Touch retains scrolling and has no data-selection gesture in this experiment.
+
+The table is one tab stop. Arrow keys move by cell; Shift extends from the
+anchor. Ctrl/Cmd+arrows jump to the corresponding parsed edge, with Shift
+extending the rectangle. Horizontal arrows follow the physical direction of
+the table. Home/End move to the first/last source column; Ctrl/Cmd+Home/End
+move to the first/last parsed cell. Focused keyboard movement reveals its
+destination through the same scroller. Escape clears the selection.
+
+Ctrl/Cmd+A is scoped to the focused table and includes the displayed header
+and all retained parsed rows, respecting the existing parser cap. Repeats
+select the same rectangle. It does not expand to the page. A rectangle that
+starts below the header does not copy a header automatically. The existing
+header fallback values are used exactly as displayed.
+
+The real copy event writes TSV to `text/plain` and an escaped table to
+`text/html`. Tabs, line breaks and quotes inside TSV fields are quoted. Ragged
+missing cells become empty fields. Copy reads original parsed source spans
+one row at a time, independently of the viewport cache. It creates no full-table
+DOM and retains no decoded rows in that cache. Decoding scans every field in
+each selected source row, including columns outside the rectangle. Formatting
+and clipboard output then cost time and memory proportional to the selected
+values. A narrow selection in a wide file still pays for full-row decoding;
+large-copy latency and clipboard limits need separate measurement.
+
+Changing the path, content, delimiter, or parsed table clears selection. Leaving
+preview unmounts it. Resizing or fullscreen retains coordinates while the
+component remains mounted. A selection can remain visible after focus leaves,
+but only copy events inside the table use it.
+
+Native character selection within a cell, word/paragraph selection, native
+Ctrl+Shift+arrow word semantics, and page-wide range selection are unsupported.
+No text mode is added. The table keeps native table semantics and absolute
+indexes; the logical selection is not an ARIA grid selection model and screen
+reader selection announcements remain an evidence gap.
 
 How much each of them costs was measured on one machine, so the figures below
 describe that machine and say nothing about the code itself. The parse counts
@@ -313,19 +348,16 @@ pause of a tenth of a second is where the viewer starts to notice one, so
 holds about 800 cells and costs 15 to 25 ms, so holding a file of that size
 whole costs little more than opening any windowed file.
 
-### Why the file is read in one place
+### Why parsed spans drive display and copy
 
-The preview reads the file in one place, and everything else reads the table
-from there: the parse, the rows that are cut out of the source and the widths
-of the columns. The preview held the cells of the file before, and a file
-with millions of cells put millions of strings in the memory of the tab, and
-the walk over them to measure the columns cost more than the parse of the
-file itself.
+The viewport and clipboard serializer use row spans from the same parsed table.
+The viewport keeps a bounded cache of decoded rows. Copy decodes selected spans
+without populating that cache. Holding every decoded cell would put millions of
+strings in the tab for a wide export.
 
-One place also means that the parse can be moved off the main thread without
-the rest of the preview knowing: the preview asks for the table and gets one,
-and where the parse ran is not its business. The parse of a file that is large
-enough runs in a worker for the reason below.
+Parsing and width counting stay behind `useDelimitedTable`, including the
+existing worker choice. Selection neither reparses the file nor asks for a
+second table.
 
 ### Why a large file is parsed in a worker
 
@@ -751,16 +783,6 @@ The spacer rows carry no background of their own, so the region they cover is
 one flat colour where the preview stripes every row. They stand at least
 five rows beyond the edges of the viewport, so the region they cover is never
 on screen and the stripes of the mounted rows carry on unbroken.
-
-### Why native selection uses arbitrary range boundaries
-
-The browser may place range endpoints at cells, row boundaries or a container
-that encloses the table. The preview maps row boundaries to adjacent cells and
-detects when an enclosing range covers the table. It keeps a small set of real
-cells beside ordinary range endpoints, including source-adjacent cells in the
-same row, so native keyboard extension can land on connected text instead of
-entering a virtual spacer. A range enclosing the table retains every cell it
-selects; the viewport remains a separate region.
 
 ### Why a range of columns wider than a cell may span is carried by more than one cell
 

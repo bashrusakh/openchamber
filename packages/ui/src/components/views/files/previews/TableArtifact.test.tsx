@@ -602,6 +602,8 @@ describe('TableArtifact', () => {
       MutationObserver: windowInstance.MutationObserver,
       ResizeObserver: FakeResizeObserver,
       getComputedStyle: computedStyle,
+      requestAnimationFrame: windowInstance.requestAnimationFrame.bind(windowInstance),
+      cancelAnimationFrame: windowInstance.cancelAnimationFrame.bind(windowInstance),
       IS_REACT_ACT_ENVIRONMENT: true,
     });
     // The runtime of this test has no worker, so the preview parses the file
@@ -713,32 +715,6 @@ describe('TableArtifact', () => {
         element: row,
       }))
   );
-
-  /** A fully expanded parsed table for comparing equivalent source cuts. */
-  const fullTableOracle = (
-    content: string,
-    delimiter: ',' | '\t' = ',',
-  ) => {
-    const parsed = parseDelimitedText(content, delimiter);
-    const table = windowInstance.document.createElement('table');
-    const header = table.createTHead().insertRow();
-    for (let column = 0; column < parsed.columnCount; column += 1) {
-      const cell = windowInstance.document.createElement('th');
-      cell.textContent = parsed.header[column] ?? '';
-      header.append(cell);
-    }
-    const body = table.createTBody();
-    for (const span of parsed.rows) {
-      const values = cutDelimitedRow(content, span, delimiter);
-      const tr = body.insertRow();
-      for (let column = 0; column < parsed.columnCount; column += 1) {
-        const cell = tr.insertCell();
-        cell.textContent = values[column] ?? '';
-      }
-    }
-    windowInstance.document.body.append(table);
-    return table;
-  };
 
   /** The stripe a row carries. */
   const stripeOf = (row: Element): string => (
@@ -896,570 +872,132 @@ describe('TableArtifact', () => {
     expect(host.querySelectorAll('td').length).toBeLessThan(2_000);
   });
 
-  test('keeps a native character range mounted while scrolling into a separate region', async () => {
-    windowInstance.document.documentElement.setAttribute('dir', 'rtl');
-    await render(buildCsv(300, 50));
-    const selectedCell = windowInstance.document.querySelector('td[title="r1c0"]');
-    const bufferedCell = windowInstance.document.querySelector('td[title="r2c0"]');
-    const nextCell = windowInstance.document.querySelector('td[title="r1c1"]');
-    if (!selectedCell?.firstChild) throw new Error('The initial cell was not mounted');
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.selectNodeContents(selectedCell);
-    const text = range.startContainer.firstChild;
-    if (!text) throw new Error('The selected cell has no text node');
-    range.setStart(text, 1);
-    range.setEnd(text, 3);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    await scrollTo(ROW_HEIGHT * 200, -1200);
-
-    expect(selectedCell.isConnected).toBe(true);
-    expect(bufferedCell?.isConnected).toBe(true);
-    expect(nextCell?.isConnected).toBe(true);
-    expect(selection.toString()).toBe('1c');
-    expect(dataCells().length).toBeLessThan(2_000);
-    expect(mountedRowNames()).toContain('r201');
-
-    await act(async () => {
-      selection.removeAllRanges();
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-    expect(selectedCell.isConnected).toBe(false);
-    expect(bufferedCell?.isConnected).toBe(false);
-    expect(dataCells().length).toBeLessThan(2_000);
-
-    await render('new-a,new-b');
-    expect(host.querySelectorAll('th[scope="col"]')).toHaveLength(2);
-    expect(dataCells()).toHaveLength(0);
-  });
-
-  test('keeps the next source cell mounted at a native text boundary', async () => {
-    await render(buildCsv(300, 50));
-    const selectedCell = windowInstance.document.querySelector('td[title="r1c0"]');
-    const nextCell = windowInstance.document.querySelector('td[title="r1c1"]');
-    if (!selectedCell?.firstChild || !nextCell) throw new Error('The range cells were not mounted');
-    const text = selectedCell.firstChild;
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.setStart(text, 1);
-    range.setEnd(text, text.textContent?.length ?? 0);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    await scrollTo(ROW_HEIGHT * 200, -1200);
-
-    expect(selectedCell.isConnected).toBe(true);
-    expect(nextCell.isConnected).toBe(true);
-    expect(selection.toString()).toBe('1c0');
-    expect(dataCells().length).toBeLessThan(2_000);
-    expect(mountedRowNames()).toContain('r201');
-  });
-
-  test('retains the complete table text for a native range on its scroll-container boundaries', async () => {
-    await render(buildCsv(100, 50));
-    const scroller = windowInstance.document.querySelector('.overflow-auto');
-    if (!scroller) throw new Error('The table scroller is missing');
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.selectNodeContents(scroller);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    expect(dataCells()).toHaveLength(99 * 50);
-    expect(host.querySelectorAll('tbody tr[aria-rowindex]')).toHaveLength(99);
-  });
-
-  test('keeps a native range whose endpoint is a table-row boundary', async () => {
-    await render(buildCsv(100, 50));
-    const startCell = windowInstance.document.querySelector('td[title="r1c0"]');
-    const endRow = windowInstance.document.querySelector('tr[aria-rowindex="22"]');
-    if (!startCell?.firstChild || !endRow) throw new Error('The native range endpoints are missing');
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const oracleTable = windowInstance.document.createElement('table');
-    const oracleBody = oracleTable.createTBody();
-    for (let row = 0; row < 21; row += 1) {
-      const tr = oracleBody.insertRow();
-      for (let column = 0; column < 50; column += 1) {
-        tr.insertCell().textContent = `r${row + 1}c${column}`;
-      }
-    }
-    windowInstance.document.body.append(oracleTable);
-    const oracleRange = windowInstance.document.createRange();
-    const oracleRows = oracleBody.querySelectorAll('tr');
-    const firstOracleText = oracleRows.item(0)?.querySelector('td')?.firstChild;
-    const lastOracleRow = oracleRows.item(20);
-    if (!firstOracleText || !lastOracleRow) throw new Error('The full native range oracle is incomplete');
-    oracleRange.setStart(
-      firstOracleText,
-      1,
-    );
-    oracleRange.setEnd(lastOracleRow, 0);
-    selection.addRange(oracleRange);
-    const expectedText = selection.toString();
-    selection.removeAllRanges();
-    oracleTable.remove();
-
-    const range = windowInstance.document.createRange();
-    range.setStart(startCell.firstChild, 1);
-    range.setEnd(endRow, 0);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    expect(host.querySelector('td[title="r20c0"]')?.isConnected).toBe(true);
-    await scrollTo(ROW_HEIGHT * 70, -1200);
-    expect(selection.toString()).toBe(expectedText);
-    expect(startCell.isConnected).toBe(true);
-    expect(host.querySelector('td[title="r20c0"]')?.isConnected).toBe(true);
-  });
-
-  test('projects a row-start boundary through a leading horizontal spacer', async () => {
-    // This uses the browser Selection/Range API boundary. It does not simulate
-    // a physical text-selection gesture.
-    const content = buildCsv(80, 50);
-    await render(content);
-    await scrollTo(ROW_HEIGHT * 50, 1_200);
-
-    const row = windowInstance.document.querySelector('tr[aria-rowindex="51"]');
-    const endCell = windowInstance.document.querySelector('td[title="r50c30"]');
-    const endText = endCell?.firstChild;
-    if (!row || !endText) throw new Error('The sparse row boundary and range endpoint are missing');
-
-    const oracleTable = fullTableOracle(content);
-    const oracleRow = oracleTable.querySelectorAll('tbody tr').item(49);
-    const oracleText = oracleRow?.children.item(30)?.firstChild;
-    if (!oracleRow || !oracleText) throw new Error('The full-table source oracle is incomplete');
-    const oracleRange = windowInstance.document.createRange();
-    oracleRange.setStart(oracleRow, 0);
-    oracleRange.setEnd(oracleText, 2);
-    const expectedText = oracleRange.toString();
-    oracleTable.remove();
-
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.setStart(row, 0);
-    range.setEnd(endText, 2);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    for (let column = 0; column <= 30; column += 1) {
-      expect(host.querySelector(`td[title="r50c${column}"]`)?.isConnected).toBe(true);
-    }
-    await scrollTo(ROW_HEIGHT * 70, 4_000);
-    expect(selection.toString()).toBe(expectedText);
-    expect(selection.getRangeAt(0).startContainer).toBe(row);
-    expect(selection.getRangeAt(0).startOffset).toBe(0);
-    expect(host.querySelector('td[title="r50c30"]')?.isConnected).toBe(true);
-    expect(dataCells().length).toBeLessThan(800);
-
-    await act(async () => {
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-    expect(selection.toString()).toBe(expectedText);
-    await scrollTo(0, 0);
-    await scrollTo(ROW_HEIGHT * 70, 4_000);
-    expect(selection.toString()).toBe(expectedText);
-
-    await act(async () => {
-      selection.collapseToStart();
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-    expect(selection.isCollapsed).toBe(true);
-    expect(selection.rangeCount).toBe(1);
-    expect(host.querySelector('td[title="r50c30"]')?.isConnected ?? false).toBe(false);
-  });
-
-  test('projects row boundaries in source order in a right-to-left table', async () => {
-    const content = buildCsv(80, 50);
-    await render(content);
-    await act(async () => {
-      windowInstance.document.documentElement.setAttribute('dir', 'rtl');
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    await scrollTo(ROW_HEIGHT * 50, -1_200);
-
-    const row = windowInstance.document.querySelector('tr[aria-rowindex="51"]');
-    const mountedCells = Array.from(row?.querySelectorAll('td[aria-colindex]') ?? []);
-    const firstColumn = Number(mountedCells[0]?.getAttribute('aria-colindex')) - 1;
-    const lastCell = mountedCells.at(-1);
-    const lastColumn = Number(lastCell?.getAttribute('aria-colindex')) - 1;
-    const endText = lastCell?.firstChild;
-    if (!row || !endText) throw new Error('The right-to-left row endpoints are missing');
-    expect(firstColumn).toBeGreaterThan(0);
-
-    const oracleTable = fullTableOracle(content);
-    const oracleRow = oracleTable.querySelectorAll('tbody tr').item(49);
-    const oracleText = oracleRow?.children.item(lastColumn)?.firstChild;
-    if (!oracleRow || !oracleText) throw new Error('The full-table source oracle is incomplete');
-    const oracleRange = windowInstance.document.createRange();
-    oracleRange.setStart(oracleRow, 0);
-    oracleRange.setEnd(oracleText, 2);
-    const expectedText = oracleRange.toString();
-    oracleTable.remove();
-
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.setStart(row, 0);
-    range.setEnd(endText, 2);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    for (let column = 0; column <= lastColumn; column += 1) {
-      expect(host.querySelector(`td[title="r50c${column}"]`)?.isConnected).toBe(true);
-    }
-    await scrollTo(ROW_HEIGHT * 70, -1_200);
-    expect(selection.toString()).toBe(expectedText);
-    expect(selection.getRangeAt(0).startContainer).toBe(row);
-    expect(selection.getRangeAt(0).startOffset).toBe(0);
-    expect(dataCells().length).toBeLessThan(800);
-  });
-
-  test('projects a row cut after an internal viewport spacer', async () => {
-    const content = buildCsv(80, 50);
-    await render(content);
-    await scrollTo(ROW_HEIGHT * 50, 1_200);
-
-    const initialStart = windowInstance.document.querySelector('td[title="r50c30"]')?.firstChild;
-    const initialEnd = windowInstance.document.querySelector('td[title="r50c35"]')?.firstChild;
-    if (!initialStart || !initialEnd) throw new Error('The initial selection cells are missing');
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const initialRange = windowInstance.document.createRange();
-    initialRange.setStart(initialStart, 0);
-    initialRange.setEnd(initialEnd, 2);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(initialRange);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    await scrollTo(ROW_HEIGHT * 50, 0);
-    const row = windowInstance.document.querySelector('tr[aria-rowindex="51"]');
-    const startCell = windowInstance.document.querySelector('td[title="r50c30"]');
-    const endText = windowInstance.document.querySelector('td[title="r50c35"]')?.firstChild;
-    if (!row || !startCell || !endText) throw new Error('The retained row boundary is missing');
-    const childOffset = Array.from(row.childNodes).indexOf(startCell);
-    const childrenBeforeCut = Array.from(row.childNodes).slice(0, childOffset);
-    expect(childrenBeforeCut.some((child) => (
-      child.nodeType === 1
-      && child instanceof windowInstance.Element
-      && child.getAttribute('aria-hidden') === 'true'
-      && Number(child.getAttribute('colspan') ?? '1') > 1
-    ))).toBe(true);
-
-    const oracleTable = fullTableOracle(content);
-    const oracleRow = oracleTable.querySelectorAll('tbody tr').item(49);
-    const oracleText = oracleRow?.children.item(35)?.firstChild;
-    if (!oracleRow || !oracleText) throw new Error('The full-table source oracle is incomplete');
-    const oracleRange = windowInstance.document.createRange();
-    oracleRange.setStart(oracleRow, 30);
-    oracleRange.setEnd(oracleText, 2);
-    const expectedText = oracleRange.toString();
-    oracleTable.remove();
-
-    const range = windowInstance.document.createRange();
-    range.setStart(row, childOffset);
-    range.setEnd(endText, 2);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-    expect(selection.toString()).toBe(expectedText);
-    expect(selection.getRangeAt(0).startContainer).toBe(row);
-    expect(selection.getRangeAt(0).startOffset).toBe(childOffset);
-  });
-
-  test('projects a row-end boundary through a trailing horizontal spacer', async () => {
-    const content = buildCsv(80, 50);
-    await render(content);
-    await scrollTo(ROW_HEIGHT * 50, 1_200);
-
-    const row = windowInstance.document.querySelector('tr[aria-rowindex="51"]');
-    const startText = windowInstance.document.querySelector('td[title="r50c30"]')?.firstChild;
-    if (!row || !startText) throw new Error('The sparse row and text endpoint are missing');
-
-    const oracleTable = fullTableOracle(content);
-    const oracleRow = oracleTable.querySelectorAll('tbody tr').item(49);
-    const oracleText = oracleRow?.children.item(30)?.firstChild;
-    if (!oracleRow || !oracleText) throw new Error('The full-table source oracle is incomplete');
-    const oracleRange = windowInstance.document.createRange();
-    oracleRange.setStart(oracleText, 2);
-    oracleRange.setEnd(oracleRow, oracleRow.childNodes.length);
-    const expectedText = oracleRange.toString();
-    oracleTable.remove();
-
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.setStart(startText, 2);
-    range.setEnd(row, row.childNodes.length);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    expect(selection.getRangeAt(0).endContainer).toBe(row);
-    expect(selection.getRangeAt(0).endOffset).toBe(row.childNodes.length);
-    for (let column = 30; column < 50; column += 1) {
-      expect(host.querySelector(`td[title="r50c${column}"]`)?.isConnected).toBe(true);
-    }
-    await scrollTo(0, 0);
-    expect(selection.toString()).toBe(expectedText);
-    expect(selection.getRangeAt(0).endContainer).toBe(row);
-    expect(selection.getRangeAt(0).endOffset).toBe(row.childNodes.length);
-  });
-
-  test('projects a body-section boundary across omitted rows', async () => {
-    const content = buildCsv(600, 4);
-    await render(content);
-    await scrollTo(ROW_HEIGHT * 20);
-
-    const body = windowInstance.document.querySelector('tbody');
-    const endText = windowInstance.document.querySelector('td[title="r20c2"]')?.firstChild;
-    if (!body || !endText) throw new Error('The body boundary and range endpoint are missing');
-
-    const oracleTable = fullTableOracle(content);
-    const oracleBody = oracleTable.querySelector('tbody');
-    const oracleRow = oracleBody?.querySelectorAll('tr').item(19);
-    const oracleText = oracleRow?.children.item(2)?.firstChild;
-    if (!oracleBody || !oracleText) throw new Error('The full-table source oracle is incomplete');
-    const oracleRange = windowInstance.document.createRange();
-    oracleRange.setStart(oracleBody, 0);
-    oracleRange.setEnd(oracleText, 2);
-    const expectedText = oracleRange.toString();
-    oracleTable.remove();
-
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.setStart(body, 0);
-    range.setEnd(endText, 2);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    expect(selection.getRangeAt(0).startContainer).toBe(body);
-    expect(selection.getRangeAt(0).startOffset).toBe(0);
-    expect(host.querySelector('td[title="r1c0"]')?.isConnected).toBe(true);
-    expect(host.querySelector('td[title="r20c2"]')?.isConnected).toBe(true);
-    expect(selection.toString()).toBe(expectedText);
-    await scrollTo(ROW_HEIGHT * 400);
-    expect(selection.toString()).toBe(expectedText);
-    expect(selection.getRangeAt(0).startContainer).toBe(body);
-    expect(selection.getRangeAt(0).startOffset).toBe(0);
-    expect(dataCells().length).toBeLessThan(250);
-  });
-
-  test('projects a partial header section boundary between table sections', async () => {
-    const content = buildCsv(600, 4);
-    await render(content);
+  const key = async (name: string, modifiers: { ctrlKey?: boolean; shiftKey?: boolean } = {}) => {
     const table = windowInstance.document.querySelector('table');
-    const body = windowInstance.document.querySelector('tbody');
-    if (!table || !body) throw new Error('The sparse table sections are missing');
-
-    const oracleTable = windowInstance.document.createElement('table');
-    oracleTable.append(windowInstance.document.createElement('colgroup'));
-    const oracleHeader = oracleTable.createTHead().insertRow();
-    for (const value of parseDelimitedText(content, ',').header) {
-      const cell = windowInstance.document.createElement('th');
-      cell.textContent = value;
-      oracleHeader.append(cell);
-    }
-    const oracleBody = oracleTable.createTBody();
-    windowInstance.document.body.append(oracleTable);
-    const oracleRange = windowInstance.document.createRange();
-    oracleRange.setStart(oracleTable, 1);
-    oracleRange.setEnd(oracleBody, 0);
-    const expectedText = oracleRange.toString();
-    oracleTable.remove();
-
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.setStart(table, 1);
-    range.setEnd(body, 0);
+    if (!table) throw new Error('The table is missing');
     await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
+      table.dispatchEvent(new windowInstance.KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true, ...modifiers }));
     });
+  };
 
-    expect(host.querySelectorAll('th[scope="col"]')).toHaveLength(4);
-    expect(selection.toString()).toBe(expectedText);
+  const copy = () => {
+    const data = new Map<string, string>();
+    const event = new windowInstance.Event('copy', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: {
+      setData: (type: string, value: string) => data.set(type, value),
+    } });
+    windowInstance.document.querySelector('table')?.dispatchEvent(event);
+    return { text: data.get('text/plain') ?? '', html: data.get('text/html') ?? '', prevented: event.defaultPrevented };
+  };
+
+  test('drag endpoints follow rendered cells when their boxes differ from the window estimates', async () => {
+    await render(buildCsv(20, 10));
+    const table = windowInstance.document.querySelector('table');
+    const scroller = table?.parentElement;
+    const anchor = windowInstance.document.querySelector('td[title="r1c2"]');
+    const adjacent = windowInstance.document.querySelector('td[title="r1c3"]');
+    const header = windowInstance.document.querySelector('th[aria-colindex="4"]');
+    if (!table || !scroller || !anchor || !adjacent || !header) throw new Error('The table cells are missing');
+    // happy-dom has no layout or hit-testing. These rendered cells deliberately
+    // disagree with the estimated column at x=100. Browser probes cover real
+    // fractional-font layout and trusted input separately.
+    const box = new windowInstance.DOMRect(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);
+    Object.defineProperty(scroller, 'getBoundingClientRect', { value: () => box });
+    Object.defineProperty(table, 'getBoundingClientRect', { value: () => box });
+    Object.defineProperties(scroller, {
+      setPointerCapture: { value: () => {} },
+      hasPointerCapture: { value: () => false },
+    });
+    let hit = anchor;
+    Object.defineProperty(windowInstance.document, 'elementFromPoint', { value: () => hit });
+    const pointer = (target: NonNullable<typeof anchor>, type: string, x: number) => target.dispatchEvent(
+      new windowInstance.PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, clientX: x, clientY: 100 }),
+    );
+    await act(async () => {
+      pointer(anchor, 'pointerdown', 100);
+      pointer(scroller, 'pointermove', 100.2);
+      pointer(scroller, 'pointerup', 100.2);
+    });
+    expect(copy().text).toBe('r1c2');
+    hit = adjacent;
+    await act(async () => {
+      pointer(anchor, 'pointerdown', 100);
+      pointer(scroller, 'pointermove', 102);
+      pointer(scroller, 'pointerup', 102);
+    });
+    expect(copy().text).toBe('r1c2\tr1c3');
+    hit = header;
+    await act(async () => {
+      pointer(anchor, 'pointerdown', 100);
+      pointer(scroller, 'pointermove', 102);
+      pointer(scroller, 'pointerup', 102);
+    });
+    expect(copy().text).toBe('r0c2\tr0c3\nr1c2\tr1c3');
   });
 
-  test('projects a row-start cut through split spans and ragged empty cells', async () => {
-    const header = Array.from({ length: 1_205 }, (_, column) => `h${column}`).join(',');
-    const content = `${header}\nleft,,right`;
+  test('scoped select-all and repeat keep the viewport DOM bounded and copy all retained parsed data', async () => {
+    const content = buildCsv(300, 50);
     await render(content);
-    await scrollTo(0, 70_000);
+    const count = dataCells().length;
+    const cuts = rowCuts;
+    await key('a', { ctrlKey: true });
+    await key('a', { ctrlKey: true });
+    expect(dataCells()).toHaveLength(count);
+    expect(rowCuts).toBe(cuts);
+    expect(host.querySelectorAll('[data-selected]')).toHaveLength(count + host.querySelectorAll('th[aria-colindex]').length);
+    const payload = copy();
+    expect(payload.prevented).toBe(true);
+    expect(payload.text).toBe(content.replaceAll(',', '\t'));
+    expect(payload.html.startsWith('<table><thead>')).toBe(true);
+    expect(payload.html.endsWith('<td>r299c49</td></tr></tbody></table>')).toBe(true);
+    expect(dataCells()).toHaveLength(count);
+    // Copy decodes source spans outside the viewport cache. Returning to a
+    // copied, unvisited region must still decode its rows for the viewport.
+    const afterCopy = rowCuts;
+    await scrollTo(ROW_HEIGHT * 200);
+    expect(rowCuts).toBeGreaterThan(afterCopy);
+    expect(host.querySelector('td[title="r1c0"]')).toBe(null);
+    expect(host.querySelector('td[title="r201c0"]')?.getAttribute('data-selected')).toBe('true');
+  });
 
-    const row = windowInstance.document.querySelector('tr[aria-rowindex="2"]');
-    const firstCell = row?.querySelector('td[aria-colindex]');
-    if (!row || !firstCell) throw new Error('The sparse data row is missing');
-    const firstColumn = Number(firstCell.getAttribute('aria-colindex')) - 1;
-    expect(firstColumn).toBeGreaterThan(1_000);
-    const endColumn = Math.min(1_204, firstColumn + 3);
-    const endCell = row.querySelector(`td[aria-colindex="${endColumn + 1}"]`);
-    if (!endCell) throw new Error('The empty endpoint cell is not in the viewport');
-    expect(endCell.textContent).toBe('');
-    const rowChildren = Array.from(row.children);
-    const firstRealColumn = rowChildren.findIndex((cell) => cell.hasAttribute('aria-colindex'));
-    const leading = rowChildren.slice(0, firstRealColumn);
-    expect(leading.length).toBeGreaterThan(1);
-    expect(leading.reduce((sum, spacer) => sum + Number(spacer.getAttribute('colspan') ?? '1'), 0))
-      .toBe(firstColumn);
-    for (const spacer of leading) {
-      expect(Number(spacer.getAttribute('colspan') ?? '1')).toBeLessThanOrEqual(1_000);
-    }
-
-    const oracleTable = fullTableOracle(content);
-    const oracleRow = oracleTable.querySelector('tbody tr');
-    const oracleEndCell = oracleRow?.children.item(endColumn);
-    if (!oracleRow || !oracleEndCell) throw new Error('The parsed source oracle is incomplete');
-    const oracleRange = windowInstance.document.createRange();
-    oracleRange.setStart(oracleRow, 0);
-    oracleRange.setEnd(oracleEndCell, 0);
-    const expectedText = oracleRange.toString();
-    oracleTable.remove();
-
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.setStart(row, 0);
-    range.setEnd(endCell, 0);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    const retained = new Set(Array.from(row.querySelectorAll('td[aria-colindex]'))
-      .map((cell) => Number(cell.getAttribute('aria-colindex')) - 1));
-    const missing = Array.from({ length: endColumn + 1 }, (_, column) => column)
-      .filter((column) => !retained.has(column));
-    expect(missing).toEqual([]);
-    await scrollTo(0, 70_000);
-    expect(selection.toString()).toBe(expectedText);
-    expect(selection.getRangeAt(0).endContainer).toBe(endCell);
-    expect(selection.getRangeAt(0).endOffset).toBe(0);
+  test('extends a reverse multi-screen rectangle to the first row and column through data keys', async () => {
+    await render(buildCsv(300, 50));
+    await key('End', { ctrlKey: true });
+    expect(host.querySelector('[data-selection-focus]')?.getAttribute('title')).toBe('r299c49');
+    await key('ArrowUp', { ctrlKey: true, shiftKey: true });
+    await key('ArrowLeft', { ctrlKey: true, shiftKey: true });
+    expect(host.querySelector('[data-selection-focus]')?.textContent).toBe('r0c0');
+    expect(copy().text.split('\n')).toHaveLength(300);
     expect(dataCells().length).toBeLessThan(2_000);
+    await key('Escape');
+    expect(host.querySelectorAll('[data-selected]')).toHaveLength(0);
+    expect(copy().prevented).toBe(false);
   });
 
-  test('projects a partial wrapper overlap through the table start', async () => {
-    const content = buildCsv(600, 4);
-    await render(content);
-    await scrollTo(ROW_HEIGHT * 20);
-
-    const scroller = windowInstance.document.querySelector('.overflow-auto');
-    const endText = windowInstance.document.querySelector('td[title="r20c2"]')?.firstChild;
-    if (!scroller || !endText) throw new Error('The wrapper boundary and range endpoint are missing');
-    const oracleTable = fullTableOracle(content);
-    const oracleRow = oracleTable.querySelectorAll('tbody tr').item(19);
-    const oracleText = oracleRow?.children.item(2)?.firstChild;
-    if (!oracleText) throw new Error('The full-table source oracle is incomplete');
-    const oracleRange = windowInstance.document.createRange();
-    oracleRange.setStart(oracleTable, 0);
-    oracleRange.setEnd(oracleText, 2);
-    const expectedText = oracleRange.toString();
-    oracleTable.remove();
-
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.setStart(scroller, 0);
-    range.setEnd(endText, 2);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    expect(host.querySelectorAll('th[scope="col"]')).toHaveLength(4);
-    expect(host.querySelector('td[title="r1c0"]')?.isConnected).toBe(true);
-    expect(selection.toString()).toBe(expectedText);
+  test('preserves coordinates on resize and clears them when file content or path changes', async () => {
+    await render('a,b\nc,d\ne,f');
+    await key('Home', { ctrlKey: true });
+    await key('ArrowDown');
+    await key('ArrowRight', { shiftKey: true });
+    expect(copy().text).toBe('c\td');
+    await resize(320);
+    expect(copy().text).toBe('c\td');
+    await render('a,b\nnew,data');
+    expect(host.querySelectorAll('[data-selected]')).toHaveLength(0);
+    await key('a', { ctrlKey: true });
+    await act(async () => root.render(<I18nProvider><TableArtifact path="/repo/other.csv" content={'a,b\nnew,data'} sizeBytes={null} /></I18nProvider>));
+    expect(host.querySelectorAll('[data-selected]')).toHaveLength(0);
   });
 
-  test('does not retain table cells for a disjoint native selection', async () => {
-    await render(buildCsv(600, 4));
-    await scrollTo(ROW_HEIGHT * 20);
-    const visibleCellCount = dataCells().length;
-    const outside = windowInstance.document.createElement('p');
-    outside.textContent = 'outside table';
+  test('does not intercept selection shortcuts or copy outside the table', async () => {
+    await render('a,b\nc,d');
+    const outside = windowInstance.document.createElement('input');
     windowInstance.document.body.append(outside);
-    const text = outside.firstChild;
-    if (!text) throw new Error('The outside selection text is missing');
-
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.selectNodeContents(outside);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-
-    expect(dataCells()).toHaveLength(visibleCellCount);
-    expect(host.querySelector('td[title="r1c0"]')).toBeNull();
-  });
-
-  test('releases retained rows when the parsed table is replaced', async () => {
-    const content = buildCsv(600, 4);
-    await render(content);
-    await scrollTo(ROW_HEIGHT * 20);
-    const row = windowInstance.document.querySelector('tr[aria-rowindex="21"]');
-    const startText = row?.querySelector('td[aria-colindex="1"]')?.firstChild;
-    const endText = row?.querySelector('td[aria-colindex="3"]')?.firstChild;
-    if (!row || !startText || !endText) throw new Error('The native selection row is missing');
-
-    const selection = windowInstance.getSelection();
-    if (!selection) throw new Error('The DOM has no Selection API');
-    const range = windowInstance.document.createRange();
-    range.setStart(startText, 1);
-    range.setEnd(endText, 3);
-    await act(async () => {
-      selection.removeAllRanges();
-      selection.addRange(range);
-      windowInstance.document.dispatchEvent(new windowInstance.Event('selectionchange'));
-    });
-    await scrollTo(ROW_HEIGHT * 400);
-    expect(row.isConnected).toBe(true);
-
-    await render(content.replaceAll('r', 'n'));
-
-    expect(row.isConnected).toBe(false);
-    expect(host.querySelector('td[title="n20c0"]')).toBeNull();
-    expect(dataCells().length).toBeLessThan(200);
+    const event = new windowInstance.KeyboardEvent('keydown', { key: 'a', ctrlKey: true, bubbles: true, cancelable: true });
+    outside.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(host.querySelectorAll('[data-selected]')).toHaveLength(0);
+    expect(copy().prevented).toBe(false);
   });
 
   test('keeps the header, its scope and the title on every cell', async () => {
