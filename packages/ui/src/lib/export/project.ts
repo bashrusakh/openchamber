@@ -78,6 +78,7 @@ export type ProjectedEntry =
       event: ExportEvent;
       role: string;
       text: string;
+      compaction?: NonNullable<Extract<ExportEvent, { kind: 'message' }>['compaction']>;
       attachments?: Array<{ filename?: string; mime: string; url: string }>;
       agent?: string;
       model?: string;
@@ -322,6 +323,7 @@ const projectEvent = (event: ExportEvent, mode: ProjectionMode): ProjectedEntry 
         event,
         role: event.role,
         text: event.text,
+        compaction: event.compaction,
         attachments: event.attachments,
         agent: event.agent,
         model: event.model,

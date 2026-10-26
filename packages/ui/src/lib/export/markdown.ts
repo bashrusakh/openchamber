@@ -194,10 +194,14 @@ const renderEntry = (
     case 'message': {
       const heading = messageHeading(entry, model, rootAgent);
       const body = entry.text.trim();
+      const compaction = entry.compaction?.status === 'failed'
+        ? [entry.compaction.status, entry.compaction.error?.message].filter(Boolean).join(': ')
+        : '';
       const attachments = attachmentList(entry, mode);
-      if (!body && !attachments) return '';
+      if (!body && !compaction && !attachments) return '';
       const sections = [heading];
       if (body) sections.push(body);
+      if (compaction) sections.push(compaction);
       if (attachments) sections.push(attachments);
       if (entry.shell) {
         const shell = entry.shell;
@@ -405,17 +409,20 @@ const renderSubagent = (subagent: ProjectedSubagent, mode: ProjectionMode): stri
       // name as the fallback.
       const heading = subagentMessageLine(entry, subagentMessageLabel(subagent, entry.agent), model);
       const body = entry.text.trim();
-        const attachments = attachmentList(entry, mode);
-      if (!body && !attachments) continue;
-       const shell = entry.shell
-         ? [
-             entry.shell.output ? asQuote(entry.shell.output) : '',
-             entry.shell.status ? exportText('export.shell.status', { status: entry.shell.status }) : '',
-             entry.shell.exit !== undefined ? exportText('export.shell.exit', { code: entry.shell.exit }) : '',
-           ].filter(Boolean).join('\n\n')
-         : '';
-       const result = shell ? `**${exportText('export.section.result')}**\n\n${shell}` : '';
-       parts.push([heading, body, attachments, result].filter(Boolean).join('\n\n'));
+      const compaction = entry.compaction?.status === 'failed'
+        ? [entry.compaction.status, entry.compaction.error?.message].filter(Boolean).join(': ')
+        : '';
+      const attachments = attachmentList(entry, mode);
+      if (!body && !compaction && !attachments) continue;
+      const shell = entry.shell
+        ? [
+            entry.shell.output ? asQuote(entry.shell.output) : '',
+            entry.shell.status ? exportText('export.shell.status', { status: entry.shell.status }) : '',
+            entry.shell.exit !== undefined ? exportText('export.shell.exit', { code: entry.shell.exit }) : '',
+          ].filter(Boolean).join('\n\n')
+        : '';
+      const result = shell ? `**${exportText('export.section.result')}**\n\n${shell}` : '';
+      parts.push([heading, body, compaction, attachments, result].filter(Boolean).join('\n\n'));
       continue;
     }
     const rendered = renderEntry(entry, mode);

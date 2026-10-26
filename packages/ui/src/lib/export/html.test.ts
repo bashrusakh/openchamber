@@ -170,6 +170,39 @@ const pageData = (dom: Window): {
 };
 
 describe('the HTML page keeps the match on the page', () => {
+  test('tool-row search finds its visible localized status and requested agent', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const result = buildExportFromRecords({
+      root,
+      sessions: [root],
+      records: new Map([[root.id, [{
+        info: assistantMessage(root.id, 'a1', 1000, '').info,
+        parts: [subagentCall('a1', {
+          description: 'Inspect this change', agent: 'reviewer', status: 'error', error: 'Recorded failure',
+        })],
+      }]]]),
+    }, 'readable');
+    const html = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    const dom = new Window({ url: 'https://localhost/' });
+    dom.document.write(html);
+    const script = html.match(/<script>([\s\S]*?)<\/script>/);
+    if (!script) throw new Error('The export wrote no page script');
+    new Function('document', script[1])(dom.document);
+    const row = dom.document.querySelector('.entry.tool');
+    if (!row) throw new Error('The export has no tool row');
+    const visibleStatus = row.querySelector('.meta span')?.textContent?.trim();
+    expect(row.textContent).toContain('reviewer');
+    if (!visibleStatus) throw new Error('The tool row has no visible status');
+
+    search(dom, visibleStatus.toLowerCase());
+    expect(isOnPage(row)).toBe(true);
+    search(dom, 'reviewer');
+    expect(isOnPage(row)).toBe(true);
+  });
+
   test('delegation call ownership stays searchable and filterable in both modes', async () => {
     const root = session('ses_root', { title: 'Root' });
     const child = session('ses_child', { title: 'Child', parentID: root.id, agent: 'reviewer' });

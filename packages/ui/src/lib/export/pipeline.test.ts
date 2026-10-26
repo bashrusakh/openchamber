@@ -1593,6 +1593,66 @@ describe('export pipeline', () => {
     expect(output).toContain('reviewer');
   });
 
+  test('root and nested failed compactions keep their status and error without a summary', () => {
+    const root = session('ses_root', { title: 'Root' });
+    const child = session('ses_child', { title: 'Child', parentID: root.id, agent: 'reviewer' });
+    const input = fixture({
+      root,
+      sessions: [root, child],
+      records: {
+        ses_root: [
+          {
+            info: {
+              id: 'failed-compaction', sessionID: root.id, role: 'compaction', time: { created: 1000 },
+              status: 'failed', reason: 'auto', summary: '',
+              error: { type: 'CompactionError', message: 'ROOT_CONTEXT_REDUCTION_FAILURE' },
+            },
+            parts: [],
+          },
+          {
+            info: assistantMessage(root.id, 'delegate', 2000, '').info,
+            parts: [subagentCall('delegate', { childSessionID: child.id, sessionID: root.id })],
+          },
+        ],
+        ses_child: [{
+          info: {
+            id: 'nested-failed-compaction', sessionID: child.id, role: 'compaction', time: { created: 3000 },
+            status: 'failed', reason: 'manual', summary: '',
+            error: { type: 'CompactionError', message: 'NESTED_CONTEXT_REDUCTION_FAILURE' },
+          },
+          parts: [],
+        }],
+      },
+    });
+    const { timeline } = build(input, 'readable');
+    const compactions = timeline.events.filter((event) => event.kind === 'message' && event.role === 'compaction');
+    expect(compactions).toHaveLength(2);
+    expect(compactions.map((event) => event.sessionID).sort()).toEqual([root.id, child.id].sort());
+    for (const event of compactions) {
+      if (event.kind !== 'message') continue;
+      expect(event.compaction?.status).toBe('failed');
+    }
+    const json = renderExportJson(timeline);
+    expect(json).toContain('ROOT_CONTEXT_REDUCTION_FAILURE');
+    expect(json).toContain('NESTED_CONTEXT_REDUCTION_FAILURE');
+    const readableProjection = build(input, 'readable').projection;
+    expect(JSON.stringify(readableProjection)).toContain('NESTED_CONTEXT_REDUCTION_FAILURE');
+
+    for (const mode of ['readable', 'detailed'] as const) {
+      const { projection } = build(input, mode);
+      const options = {
+        title: 'Root', mode, findings: timeline.findings,
+        excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+      };
+      const markdown = renderExportMarkdown(projection, options);
+      const html = renderExportHtml(projection, options);
+      expect(markdown).toContain('ROOT_CONTEXT_REDUCTION_FAILURE');
+      expect(markdown).toContain('NESTED_CONTEXT_REDUCTION_FAILURE');
+      expect(html).toContain('ROOT_CONTEXT_REDUCTION_FAILURE');
+      expect(html).toContain('NESTED_CONTEXT_REDUCTION_FAILURE');
+    }
+  });
+
   test('a record without a usable timestamp is reported once', () => {
     const input = fixture({
       root: session('ses_root', { title: 'Root' }),

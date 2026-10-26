@@ -17,7 +17,7 @@
  * read only the projection fields.
  */
 
-import type { JsonValue, Message, Part } from '@/lib/opencode/model';
+import type { CompactionMessage, JsonValue, Message, Part } from '@/lib/opencode/model';
 import type { I18nKey, I18nParams } from '@/lib/i18n';
 
 /** A session's identity and the labels a reader needs to recognize it. */
@@ -177,6 +177,11 @@ type ExportMessageEvent = ExportEventBase & {
   role: ExportRole;
   /** The message's text, as the model and the user wrote it. */
   text: string;
+  /** The recorded compaction outcome, including its structured failure when present. */
+  compaction?: {
+    status: 'running' | 'completed' | 'failed';
+    error?: CompactionMessage['error'];
+  };
   /** The files the message carried, when it carried any. */
   attachments?: Array<{ filename?: string; mime: string; url: string }>;
   /**

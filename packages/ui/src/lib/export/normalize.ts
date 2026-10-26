@@ -780,8 +780,8 @@ export const normalizeExportTimeline = (options: {
         ? (readContextPart(message) ? formatContextMessage(message).trim() : '')
         : messageTextOf(message);
       const shell = shellResultOf(message);
-      if (plainText.trim() || shell) {
-        events.push({
+      if (plainText.trim() || shell || message.role === 'compaction') {
+        const event: Extract<ExportEvent, { kind: 'message' }> = {
           ...base,
           id: `${collected.sessionID}:${message.id}:message`,
           kind: 'message',
@@ -789,7 +789,11 @@ export const normalizeExportTimeline = (options: {
           text: plainText.trim(),
           shell,
           parts: [],
-        });
+        };
+        if (message.role === 'compaction') {
+          event.compaction = { status: message.status, error: message.error };
+        }
+        events.push(event);
       }
     }
   }

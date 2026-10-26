@@ -124,15 +124,17 @@ type HtmlExportData = {
  * the index holds that cut: a word the page does not show must not be found.
  */
 const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode): string => {
+  const description = tool.description ?? tool.target ?? tool.command ?? '';
+  const agent = tool.agent && tool.agent !== description ? tool.agent : '';
   const parts = [
     tool.name,
+    statusLabel(tool.status),
     mode === 'detailed' ? tool.callID ?? '' : '',
-    tool.description ?? '',
+    description,
+    agent,
     tool.output ?? '',
     tool.error ?? '',
     tool.prompt === undefined ? '' : promptOnPage(tool.prompt, mode),
-    tool.target ?? '',
-    tool.command ?? '',
     ...(tool.attachments ?? []).flatMap((file) => mode === 'detailed'
       ? [file.filename ?? '', file.mime, file.url]
       : [file.filename ?? file.mime]),
@@ -155,7 +157,7 @@ const toolSearchText = (tool: ProjectedTool, mode: ProjectionMode): string => {
 const searchTextOf = (entry: ProjectedEntry, mode: ProjectionMode): string => {
   switch (entry.kind) {
     case 'message':
-      return `${entry.role} ${entry.text} ${entry.shell?.output ?? ''} ${entry.shell?.status ?? ''} ${entry.shell?.exit ?? ''} ${(entry.attachments ?? []).flatMap((file) => mode === 'detailed' ? [file.filename ?? '', file.mime, file.url] : [file.filename ?? file.mime]).join(' ')}`;
+      return `${entry.role} ${entry.text} ${entry.compaction?.status === 'failed' ? entry.compaction.status : ''} ${entry.compaction?.status === 'failed' ? entry.compaction.error?.message ?? '' : ''} ${entry.shell?.output ?? ''} ${entry.shell?.status ?? ''} ${entry.shell?.exit ?? ''} ${(entry.attachments ?? []).flatMap((file) => mode === 'detailed' ? [file.filename ?? '', file.mime, file.url] : [file.filename ?? file.mime]).join(' ')}`;
     case 'tool':
       return toolSearchText(entry.tool, mode);
     case 'reasoning':
@@ -242,6 +244,7 @@ const buildData = (nodes: ProjectedNode[], mode: ProjectionMode, rootAgent?: str
             call.name,
             statusLabel(call.status),
             dispatch?.error ?? '',
+            node.agent ?? '',
             node.invokedAs ?? '',
             node.invokedDescription ?? '',
             node.resumedBy?.length ? exportText('export.dispatch.resumed', { count: node.resumedBy.length }) : '',
@@ -420,6 +423,9 @@ const renderEntryHtml = (
       const body = entry.text
         ? `<div class="body">${escapeHtml(entry.text)}</div>`
         : '';
+      const compaction = entry.compaction?.status === 'failed'
+        ? `<div class="body">${escapeHtml([entry.compaction.status, entry.compaction.error?.message].filter(Boolean).join(': '))}</div>`
+        : '';
       const shell = entry.shell
         ? `<details><summary>${escapeHtml(exportText('export.section.result'))}</summary><pre>${escapeHtml([
             entry.shell.output ?? '',
@@ -429,7 +435,7 @@ const renderEntryHtml = (
         : '';
       return `<article class="entry message" data-id="${escapeHtml(entry.event.id)}" data-kind="message" data-role="${escapeHtml(entry.role)}" data-agent="${escapeHtml(agent)}" data-model="${escapeHtml(entry.model ?? '')}">
   <header><span class="role">${escapeHtml(label)}</span>${meta ? `<span class="meta">${meta}</span>` : ''}</header>
-  ${body}${attachments}${shell}
+  ${body}${compaction}${attachments}${shell}
 </article>`;
     }
     case 'tool': {
