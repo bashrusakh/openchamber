@@ -4,6 +4,9 @@ import { opencodeClient } from "@/lib/opencode/client"
 import { Binary } from "./binary"
 import { upsertSessionRecord } from "./session-records"
 import { retry } from "./retry"
+import type { DirectoryStore } from "./child-store"
+import type { StoreApi } from "zustand"
+import type { SessionMessageLoader } from "./session-message-loader"
 import {
   useChildStoreManager,
   useDirectoryStore,
@@ -284,23 +287,48 @@ export type SessionExportRead = SessionExportRecords & {
   inboxUnavailable?: boolean
 }
 
+/**
+ * Reads one session for the export.
+ *
+ * The history comes from the runtime's own complete snapshot, and the
+ * session's own record comes from the runtime as well. The marker of a
+ * staged revert is a server-side fact, so the conversation is cut at the
+ * marker the server names and not at one a local store happens to hold: a
+ * directory the app never materialised holds no session record at all, and a
+ * marker read from it would be missing rather than absent.
+ */
+export const readSessionExportRecords = async (input: {
+  messageLoader: SessionMessageLoader
+  store: StoreApi<DirectoryStore>
+  directory: string
+  sessionID: string
+}): Promise<SessionExportRead> => {
+  const target = { directory: input.directory, sessionID: input.sessionID }
+  const snapshot = await input.messageLoader.readCompleteSnapshot(target)
+  const session = await input.messageLoader.readSessionRecord(target)
+  const current = input.store.getState()
+  const parts = { ...current.part }
+  for (const record of snapshot.records) parts[record.info.id] = record.parts
+  return {
+    ...buildSessionExportRecords(buildSessionMessageRecordsSnapshot({
+      ...current,
+      // The session's own record, as the runtime knows it.
+      session: [session],
+      message: { ...current.message, [input.sessionID]: snapshot.records.map((record) => record.info) },
+      part: parts,
+    }, input.sessionID), parts),
+    inboxUnavailable: snapshot.inboxUnavailable,
+  }
+}
+
 export function useSessionMessageRecordsForExport() {
   const { childStores, messageLoader, runtimeKey } = useSyncRuntime()
 
   return useCallback(async ({ directory, sessionID }: { directory: string; sessionID: string }): Promise<SessionExportRead | null> => {
     if (getRuntimeKey() !== runtimeKey) return null
     const store = childStores.ensureChild(directory, { bootstrap: false })
-    const target = { directory, sessionID }
-    const snapshot = await messageLoader.readCompleteSnapshot(target)
+    const read = await readSessionExportRecords({ messageLoader, store, directory, sessionID })
     if (getRuntimeKey() !== runtimeKey) return null
-    const current = store.getState()
-    const parts = { ...current.part }
-    for (const record of snapshot.records) parts[record.info.id] = record.parts
-    const records = buildSessionExportRecords(buildSessionMessageRecordsSnapshot({
-      ...current,
-      message: { ...current.message, [sessionID]: snapshot.records.map((record) => record.info) },
-      part: parts,
-    }, sessionID), parts)
-    return { ...records, inboxUnavailable: snapshot.inboxUnavailable }
+    return read
   }, [childStores, messageLoader, runtimeKey])
 }

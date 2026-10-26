@@ -1,8 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import type { Message, Part, Session } from '@/lib/opencode/model';
 import { collectExportSessions } from '@/lib/export/collect';
+import { getRuntimeKey } from '@/lib/runtime-switch';
 
 import { buildSessionExportRecords, buildSessionMessageRecordsSnapshot } from './sync-context';
+import { ChildStoreManager } from './child-store';
+import { SessionMessageLoader } from './session-message-loader';
+import { readSessionExportRecords } from './use-sync';
 import { INITIAL_STATE, type State } from './types';
 
 // v2 messages carry no `parentID`; the argument is kept only so the fixtures
@@ -270,5 +274,48 @@ describe('the export reads what the app read', () => {
     expect(collection.notes).toEqual([]);
     expect(collection.findings).toEqual([]);
     expect(collection.sessions[0]?.sourceRecords).toBeUndefined();
+  });
+
+  test('a session the local store never held is cut at the marker the server names', async () => {
+    // The app never materialised the directory, so its store holds no
+    // session record and cannot name the staged revert. The server's own
+    // record does.
+    const childStores = new ChildStoreManager();
+    const store = childStores.ensureChild('/repo', { bootstrap: false });
+    const loader = new SessionMessageLoader(childStores, {
+      sdk: {
+        getSessionMessages: async () => ({
+          items: [
+            { info: before, parts: part.msg_before },
+            { info: marker, parts: part.msg_marker },
+            { info: after, parts: part.msg_after },
+          ],
+          cursor: {},
+        }),
+        getSession: async () => session({ revert: { messageID: marker.id } }),
+      },
+      runtimeKey: getRuntimeKey(),
+    });
+    expect(store.getState().session).toEqual([]);
+
+    const read = await readSessionExportRecords({
+      messageLoader: loader,
+      store,
+      directory: '/repo',
+      sessionID: 'ses_1',
+    });
+    const collection = await collect(read);
+
+    expect(collection.notes.map((note) => note.kind)).toEqual(['staged-revert']);
+    expect(collection.notes[0]?.marker).toBe(marker.id);
+    expect(collection.findings).toEqual([]);
+    // The conversation is what the app shows, and the records the runtime
+    // wrote travel with it.
+    expect(collection.sessions[0]?.records.map((record) => record.info.id)).toEqual([before.id]);
+    expect(collection.sessions[0]?.sourceRecords?.map((record) => record.info.id))
+      .toEqual([before.id, marker.id, after.id]);
+
+    loader.dispose();
+    childStores.disposeAll();
   });
 });

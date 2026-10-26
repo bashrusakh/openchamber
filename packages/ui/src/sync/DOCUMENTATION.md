@@ -92,7 +92,7 @@ The VS Code queue gate and its live inputs are documented in
 | Layer / Store | Owns | Scope |
 |---|---|---|
 | `ChildStoreManager` and child directory stores | Priority-scheduled directory bootstrap plus `session`, `message`, `part`, `permission`, `form`, etc. | One runtime and one store per directory |
-| `SessionMessageLoader` | Initial message loading, pagination, prefetch, retries, load state, optimistic reconciliation, and private complete-history export snapshots | One runtime, directory, and session ID |
+| `SessionMessageLoader` | Initial message loading, pagination, prefetch, retries, load state, optimistic reconciliation, private complete-history export snapshots, and the session records an export reads | One runtime, directory, and session ID |
 | `global-session-status.ts` | Incremental non-idle session status index reconciled from events and authoritative directory snapshots, plus a reference-stable active-ID membership collection maintained from the same mutations | All known directories in the active runtime |
 | `session-ordering.ts` | Ephemeral lifecycle rank used by every user-visible session list | All known sessions in the active runtime |
 | `session-activity-timing.ts` | Elapsed time of the running turn and of the turn that just finished, plus the persisted starts that survive a reload | All known sessions in the active runtime |
@@ -269,6 +269,16 @@ carry and nothing to report. The JSON export keeps the records the runtime
 wrote; the readable formats show the conversation, and the document names the
 staged revert as a fact about the conversation, not as something the export
 could not read.
+
+The marker comes from the session's own record, read from the runtime. A
+staged revert is a server-side fact, and the server is the authority for it; a
+local directory store is not, because a directory the app never materialised
+holds no session record at all. A sidebar row exports exactly that case: the
+sync layer serves the session from the global list, and the directory is
+released minutes after the user navigates away. The export therefore does not
+take the marker from any local store, and a runtime that cannot read a
+session record cannot produce an export: that read fails rather than
+reporting a session without a staged revert.
 
 ## An interruption whose reason is `shutdown`
 

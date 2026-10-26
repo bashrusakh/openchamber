@@ -190,15 +190,22 @@ so the Markdown and the HTML cannot name them differently.
   message can keep the containing block visible.
 - **Export reads a private complete-history snapshot.** It requests unshelled
   message pages through the OpenCode adapter, follows the server cursor, and
-  includes the session's pending inbox records. The pages and parts stay in the
-  export snapshot; they never replace live chat records. Each page enters the
-  shared session-page lane separately, so interactive history can run between
-  export pages. A failed page fails that session's read and cannot produce an
-  empty or complete result. The pending inbox is read once, after the pages:
-  a read of it that fails leaves the confirmed history standing and the
-  pending items unconfirmed, and the export records an `unreadable-inbox`
-  finding that names the session. A stale runtime still fails the read, as a
-  failed page does.
+  includes the session's pending inbox records. It reads the session's own
+  record as well, because the staged revert it names is a server-side fact:
+  the server holds the revert, and the export learns the marker from the
+  server's record rather than from a local store, which holds no session
+  record at all for a directory the app never materialised. A runtime that
+  cannot read a session record cannot produce an export, so a failure of that
+  read fails the session's read instead of reporting a session without a
+  staged revert. The pages and parts stay in the export snapshot; they never
+  replace live chat records. Each page enters the shared session-page lane
+  separately, so interactive history can run between export pages. A failed
+  page fails that session's read and cannot produce an empty or complete
+  result. The pending inbox is read once, after the pages: a read of it that
+  fails leaves the confirmed history standing and the pending items
+  unconfirmed, and the export records an `unreadable-inbox` finding that
+  names the session. A stale runtime still fails the read, as a failed page
+  does.
 - **A partial export says so.** Everything the export could not establish —
   a child that would not load, a call that named no child, a session that was
   resumed, a part the model does not cover, a session list that was not the
@@ -643,7 +650,11 @@ exists for.
 The path that takes the records the caller already holds
 (`collectLoadedSessions`) carries no staged revert fact: it is not reachable
 from the app, and the export cannot learn a revert it was not told about. The
-app's path reads the session itself and hands the pipeline both sets.
+app's path reads the session itself and hands the pipeline both sets. It
+learns the marker from the session's own record, read from the runtime, so
+the split is the server's fact about the session and not a local store's: a
+directory the app never materialised holds no session record, and a marker
+read from it would be missing rather than absent.
 
 ### Why the JSON export keeps the source records next to the derived events
 

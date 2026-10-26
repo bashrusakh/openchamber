@@ -1,4 +1,4 @@
-import type { Message, Part } from "@/lib/opencode/model"
+import type { Message, Part, Session } from "@/lib/opencode/model"
 import type { MessagePage, PendingInboxMessage } from "@/lib/opencode/client"
 import { olderMessagesCursor } from "@/lib/opencode/messageCursor"
 import type { ChildStoreManager, DirectoryStore } from "./child-store"
@@ -126,9 +126,13 @@ type LoadPerformanceDetails = {
 }
 
 /**
- * The loader only needs one page call. Narrowing the dependency to that call
- * keeps the adapter (`opencodeClient`) the single place that knows how the
- * server encodes messages, and keeps tests free of a whole SDK double.
+ * The loader's dependency on the runtime.
+ *
+ * The loader only needs one page call for the history. Narrowing the
+ * dependency to that call keeps the adapter (`opencodeClient`) the single
+ * place that knows how the server encodes messages, and keeps tests free of
+ * a whole SDK double. The two optional reads are the facts beside the
+ * history: the pending items of a session, and the session's own record.
  */
 export type SessionMessagePageSource = {
   getSessionMessages(
@@ -142,6 +146,13 @@ export type SessionMessagePageSource = {
    * added while the client was open.
    */
   getSessionInbox?(id: string, directory?: string | null): Promise<readonly PendingInboxMessage[]>
+  /**
+   * The session's own record, when the runtime can read it.
+   *
+   * The export read needs it: the staged revert it names is a server-side
+   * fact, and a local directory store may never have held the session at all.
+   */
+  getSession?(id: string, directory?: string | null): Promise<Session>
 }
 
 type LoaderConfiguration = {
@@ -752,6 +763,35 @@ export class SessionMessageLoader {
       records: [...records.values()].sort((left, right) => compareMessagesChronologically(left.info, right.info)),
       inboxUnavailable,
     }
+  }
+
+  /**
+   * The session's own record, as the runtime knows it.
+   *
+   * The export read needs it: a staged revert is a server-side fact, and the
+   * server is the authority for it. A local directory store is not: a
+   * directory the app never materialised holds no session record at all, so a
+   * marker read from it would be missing rather than absent.
+   *
+   * A runtime that cannot read a session record cannot produce an export, so
+   * the read fails rather than reporting a session without a staged revert.
+   */
+  async readSessionRecord(target: SessionMessageTarget): Promise<Session> {
+    const normalized = this.normalizeTarget(target)
+    if (!normalized || this.disposed) throw new Error("Session message loader is unavailable")
+    const read = this.sdk.getSession?.bind(this.sdk)
+    if (!read) throw new Error("The session record could not be read")
+    const sdk = this.sdk
+    const sdkEpoch = this.sdkEpoch
+    const runtimeKey = this.runtimeKey
+    const isCurrent = () => !this.disposed && this.sdk === sdk && this.sdkEpoch === sdkEpoch
+      && this.runtimeKey === runtimeKey && getRuntimeKey() === runtimeKey
+    const session = await retry(() => runSessionListNetworkTask(() => {
+      if (!isCurrent()) throw new Error("Session record changed while export was loading")
+      return read(normalized.sessionID, normalized.directory)
+    }))
+    if (!isCurrent()) throw new Error("Session record changed while export was loading")
+    return session
   }
 
   refreshTail(target: SessionMessageTarget, limit: number): Promise<void> {
