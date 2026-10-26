@@ -160,11 +160,16 @@ show the previous and next image of the same folder, see below),
 element, duration and dimensions once metadata loads, a stated failure when
 the runtime cannot decode the codec), `FontArtifact` (a specimen under a
 throwaway `FontFace` family removed when the tab closes), `TableArtifact`
-(CSV/TSV through `delimitedText.ts`, parsed on the thread of the preview when
-the file is small enough and in a worker otherwise, with a loading state until
-the worker answers, capped rows stated in the meta line, the
-rows and columns in view mounted unless the grid of the file is small enough
-to be kept whole), and `BinaryArtifact` (name, type,
+(CSV/TSV through `delimitedText.ts`, parsed on the preview thread for small
+files and in a worker otherwise, with a loading state until the worker answers
+and the unchanged row cap stated in the meta line. Small grids are kept whole.
+Large grids start windowed with text selection disabled. This branch's local
+feasibility experiment lets an external harness request a full table render;
+the same parsed snapshot, row source, widths and scroller are reused. The
+experiment waits for connected, laid-out cells before enabling selection and
+keeps the cells mounted through scroll and selection clearing. `FilesView` does
+not pass the private harness control, so this prototype does not settle the
+production toolbar or copy), and `BinaryArtifact` (name, type,
 size, download; never a decode attempt).
 `FilesView.renderArtifactPreview` is the single switch for artifact views.
 SVG, Mermaid (`.mmd`) and delimited files are text
@@ -179,86 +184,44 @@ therefore does not start another parse, and the worker's single held parse is
 not competed for by a second table instance. Other preview kinds keep their
 existing fullscreen viewer.
 
-The table preview mounts only the rows and the columns in view, unless the
-grid of the file is small enough to be kept whole. A wide export holds far
-more cells than a screen can show, and mounting all of them froze the viewer
-for seconds: 2,000 rows with 50 columns ask for 100,000 cells. The rows
-outside the window are carried by spacer rows that take their height, and
-the columns beside the window by spacer cells that span them, so the table
-keeps its own layout, its column widths and its text selection.
-`tableLayout.ts` holds the model: the width of every column, the range of
-rows and columns a scroll position lands on, the size of the grid of a file
-and the cells that carry the columns beside the window. What has to stay
-true:
+The preview stays one real `<table>` with a sticky `<thead>`, fixed column
+geometry and a shared scroller. `tableLayout.ts` owns the width and window
+model. A 2,000-row file with 50 columns contains 100,000 body cells after the
+existing row cap.
 
-- the preview is a real `<table>` with a sticky `<thead>`, because the table
-  semantics and the native text selection depend on it;
-- the row cap of the parser and the notice about it in the meta line stay as
-  they are;
-- a file whose grid is small enough is kept whole and a file whose grid is
-  large enough is windowed. The decision is a property of the file, so the
-  same file is kept whole in a narrow panel and in a wide one;
-- the mounted cells cover the viewport and the browser's current native text
-  range. The range's real text stays in connected cells, including all cells
-  between its endpoints; the viewport remains a separate region when it scrolls
-  away. A few cells beside the range endpoints remain mounted so the browser
-  can extend it natively. A range that covers the whole table mounts the whole
-  table. Selection cost can grow with the selected content, while an ordinary
-  open and unselected scroll stay bounded by the viewport. The files that are
-  kept whole are the other exception, and the limit bounds what they cost. Two things grow
-  with the file anyway: the `<col>` the table holds for every column of the
-  file, because the parser does not bound the number of columns, and the rows
-  the cache of the cut rows holds, because a row of a file with many columns
-  holds many values. The parse of the file and the count of the widths again
-  with the measured characters, which only a file that holds a character
-  wider than the count pays for, run in a worker when the file is large
-  enough, so they cost the worker and not the thread the user is looking at;
-- the widths of the columns come from the data and from the font, and a resize
-  of the panel does not count them again;
-- the column widths stay the same while scrolling, and a column is as wide as
-  the text the browser lays out for its longest value, so nothing that fits
-  today is cut short;
-- only the rows and columns in view and the text cells inside the browser's
-  active native range are in the document. Find-in-page and a screen reader
-  see the window and retained selection, while a file that is kept whole holds
-  every row and every column;
-- the table states how many rows and how many columns it has, and every
-  mounted row and cell states where it sits in the file, so a screen reader
-  is told the size of the table and not the size of the window;
-- the cells of the window sit in the columns the model names, for a file of
-  any number of columns. HTML limits the `colspan` of a cell to 1000, and a
-  cell that claims more is laid out over fewer columns, so a range of
-  columns that is wider than the limit is carried by more than one cell. No
-  cell of the table claims a span above the limit, the cell of a row that
-  stands for the rows outside the window included;
-- a right-to-left table keeps its columns in the order the file has them,
-  with the first column on the right. Its scroll offset is read the way the
-  browser reports it: 0 at the right edge of the box, and negative from
-  there as the box is scrolled towards its left edge;
-- the columns in view are the ones the viewer can see, in the direction the
-  document is laid out in at the time;
-- a new file mounts its own rows and columns from the first commit, so the
-  window of the file before it is never in the document;
-- the rule under a row runs across the whole width of the table, and the
-  stripe of a row runs behind the columns beside the window, so the table
-  looks the way it did when every cell of the file was in the document;
-- the header row is as tall as a row of the body, so the header cells in view
-  cannot change its height and the content below the header does not jump
-  while the window moves over columns whose header is empty;
-- a file is measured when it opens, whatever file was open before it. A file
-  without columns has no table to measure, so the next file is measured from
-  scratch.
+The initial view mounts the rows and columns in view, plus spacer rows and
+cells for the rest. When the local experiment control receives an explicit
+request, `TableArtifact` renders every retained data row and column in that
+same table. Its `<th>` and `<td>` nodes contain decoded values directly. The
+preview does not parse again or replace the table or scroller. It enables
+selection after it has checked row and cell counts, read table geometry and
+waited another animation frame. The full render can block the UI and holds
+full-DOM-scale memory; no cell-count fallback is part of this experiment.
 
-### Why boundary points follow source intervals and not mounted cells
+What must stay true:
 
-A row or section offset counts DOM children, while a spacer can cover many
-parsed columns or rows. The preview projects structural points through those
-represented intervals and keeps the resulting parsed-cell cut stable when the
-window changes. A React commit can replace a spacer and move a live element-
-boundary Range, so the preview restores that structural endpoint to the same
-source cut. Text and cell endpoints keep their original nodes and offsets, and
-the browser's Selection keeps its anchor and focus order. Mapping a boundary to
-the nearest mounted cell omitted source cells from the native range.
+- the parser row cap and its truncation notice remain unchanged;
+- small grids stay whole and natively selectable without a request;
+- large grids start windowed with selection disabled; after preparation, every
+  retained data cell stays connected through scrolling and clearing selection;
+- the browser owns range direction, highlight and copy after the table is
+  ready. The component does not listen for `selectionchange`, rebase ranges or
+  synthesize clipboard data;
+- file path, content, delimiter changes and unmount clear preparation. A late
+  frame cannot enable selection for another source;
+- widths, measured row height, sticky header, striping, truncation, accessibility
+  row and column indices, and RTL ordering keep their existing model;
+- a window spacer never spans more than the HTML `colspan` limit of 1000;
+- a new source starts with its own window. The previous file's full DOM is not
+  retained across the change.
+
+### Why selection uses a complete connected table
+
+Before preparation the large preview disables text selection, so a sparse
+range projection has no user interaction to preserve. Once preparation ends,
+all retained cells are connected and the browser can own the real range and
+clipboard operations. The experiment therefore removes the sparse range
+adapter and uses the actual table nodes as the selection source.
 
 How much each of them costs was measured on one machine, so the figures below
 describe that machine and say nothing about the code itself. The parse counts
@@ -289,29 +252,17 @@ of a row is measured from the document as well, and every row is given that
 height, the header row included, so the mapping from a scroll offset to a row
 stays exact and the last row can be reached.
 
-### Why a small file is kept whole and a large one is windowed
+### Why small grids are whole and large grids start windowed
 
-The preview held every cell of the file before the windowing, and the
-browser's find-in-page, a selection of the whole file and a screen reader saw
-the file. The windowing took that away from every file, and it only had to
-take it away from the files that are large enough for the window to matter.
-So a file whose grid is small enough is held whole, and the size of the grid
-is the number of cells the table holds, the header row included. The limit is
-one number, `TABLE_WHOLE_GRID_CELL_LIMIT`, and the file decides: the same
-file is held whole in a narrow panel and in a wide one, because a decision
-that changed with the size of the panel would hold a file in one panel and
-window it in the next.
-
-The limit was measured in Chromium against the markup of the preview. The
-machine was busy with other work during the measurements and the figures
-moved by about a third between runs, so they are given as ranges: holding
-1,000 cells took 20 to 60 ms of layout, 2,000 cells 30 to 90 ms, 4,000 cells
-75 to 120 ms, 10,000 cells about 300 ms and 100,000 cells 3 to 4 s. The
-rendering of the cells is on top of the layout the browser does for them. A
-pause of a tenth of a second is where the viewer starts to notice one, so
-2,000 cells is the largest grid whose cost stays around it. The window itself
-holds about 800 cells and costs 15 to 25 ms, so holding a file of that size
-whole costs little more than opening any windowed file.
+The whole-grid threshold remains `TABLE_WHOLE_GRID_CELL_LIMIT`, and the grid
+size includes the header row. Small grids stay whole on open, whatever the
+panel width, so native selection needs no preparation. Larger grids open with
+the existing window and spacer rows. This prototype disables selection until
+its explicit harness request renders the full retained table. It keeps the
+row cap unchanged and introduces no cell-count cap. The large DOM remains
+connected after readiness, including while the user scrolls or clears a range.
+The harness control is private to this experiment; the app caller does not add
+or expose a production action here.
 
 ### Why the file is read in one place
 
@@ -752,15 +703,16 @@ one flat colour where the preview stripes every row. They stand at least
 five rows beyond the edges of the viewport, so the region they cover is never
 on screen and the stripes of the mounted rows carry on unbroken.
 
-### Why native selection uses arbitrary range boundaries
+### Why preparation waits for a complete connected table
 
-The browser may place range endpoints at cells, row boundaries or a container
-that encloses the table. The preview maps row boundaries to adjacent cells and
-detects when an enclosing range covers the table. It keeps a small set of real
-cells beside ordinary range endpoints, including source-adjacent cells in the
-same row, so native keyboard extension can land on connected text instead of
-entering a virtual spacer. A range enclosing the table retains every cell it
-selects; the viewport remains a separate region.
+The browser can own native selection once every retained data cell exists in
+the connected table. The experiment checks row and cell counts, forces a
+geometry read, then waits one more animation frame before it enables text
+selection. It keeps those cells mounted for later scroll and copy operations.
+This removes range projection, endpoint rebasing and clipboard synthesis from
+the preview. The actual preparation wait and browser clipboard behavior are
+measured in the local Chromium harness; this prototype does not establish a
+production interaction or cross-browser equivalence.
 
 ### Why a range of columns wider than a cell may span is carried by more than one cell
 

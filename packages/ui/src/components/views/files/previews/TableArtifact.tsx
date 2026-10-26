@@ -33,11 +33,6 @@ import {
   type TableRange,
   type TableWindow,
 } from './tableLayout';
-import {
-  projectNativeTableSelection,
-  resolveNativeSelectionEndpointOffset,
-  type NativeTableSelection,
-} from './tableSelection';
 import { useDelimitedTable } from './useDelimitedTable';
 
 /**
@@ -57,13 +52,14 @@ const PROBE_TEXT = '0'.repeat(PROBE_CHARACTER_COUNT);
 const PROBE_ROW_TEXT = '0';
 
 /**
- * The cells the cache of the cut rows holds beside the rows on screen.
+ * The target cell count for cached rows outside the visible window.
  *
  * The rows that are on screen are held whatever they cost, because they are
  * the ones the preview draws. The rows beside them are held as long as the
  * cache holds fewer cells than this, so a scroll that comes back over a row
  * does not cut it again, and a file with many columns does not put millions
- * of strings in the cache.
+ * of strings in the cache. A prepared full table holds every retained row,
+ * which can exceed this target by design.
  */
 const TABLE_ROW_CACHE_CELL_LIMIT = 2_000;
 
@@ -131,9 +127,21 @@ type TableLayout = {
   direction: TableDirection;
 };
 
-type NativeSelectionBuffer = {
-  bodyRows: { row: number; columns: number[] }[];
-  headerColumns: number[];
+type SelectionPreparationPhase = 'small' | 'windowed' | 'preparing' | 'ready';
+
+type SelectionPreparation = {
+  path: string;
+  content: string;
+  delimiter: ',' | '\t';
+  table: DelimitedTable;
+  phase: 'preparing' | 'ready';
+};
+
+type SelectionPreparationRequest = {
+  id: number;
+  path: string;
+  content: string;
+  delimiter: ',' | '\t';
 };
 
 const INITIAL_LAYOUT: TableLayout = {
@@ -160,6 +168,66 @@ const sameLayout = (current: TableLayout, next: TableLayout): boolean => (
   && current.rowHeight === next.rowHeight
   && current.direction === next.direction
 );
+
+/** The complete table must be connected and laid out before selection is enabled. */
+const hasCompleteLaidOutTable = (
+  scroller: HTMLDivElement,
+  table: HTMLTableElement,
+  bodyRowCount: number,
+  columnCount: number,
+): boolean => {
+  if (
+    !table.isConnected
+    || table.parentElement !== scroller
+    || scroller.clientWidth <= 0
+    || scroller.clientHeight <= 0
+    || table.getAttribute('aria-rowcount') !== String(bodyRowCount + 1)
+    || table.getAttribute('aria-colcount') !== String(columnCount)
+  ) return false;
+
+  const header = table.querySelector('thead tr');
+  const headerCells = header?.querySelectorAll('th');
+  const bodyRows = table.querySelectorAll('tbody tr');
+  if (!headerCells || headerCells.length !== columnCount || bodyRows.length !== bodyRowCount) return false;
+
+  for (let column = 0; column < columnCount; column += 1) {
+    const cell = headerCells.item(column);
+    if (cell?.getAttribute('aria-colindex') !== String(column + 1)) return false;
+  }
+
+  for (let rowIndex = 0; rowIndex < bodyRowCount; rowIndex += 1) {
+    const row = bodyRows.item(rowIndex);
+    const cells = row?.querySelectorAll('td');
+    if (
+      !row
+      || !cells
+      || row.getAttribute('aria-rowindex') !== String(rowIndex + 2)
+      || cells.length !== columnCount
+    ) return false;
+    if (
+      cells.item(0)?.getAttribute('aria-colindex') !== '1'
+      || cells.item(columnCount - 1)?.getAttribute('aria-colindex') !== String(columnCount)
+    ) return false;
+  }
+
+  const tableRect = table.getBoundingClientRect();
+  const firstCell = bodyRowCount > 0
+    ? bodyRows.item(0)?.querySelector('td[aria-colindex="1"]')
+    : headerCells.item(0);
+  const lastCell = bodyRowCount > 0
+    ? bodyRows.item(bodyRowCount - 1)?.querySelector(`td[aria-colindex="${columnCount}"]`)
+    : headerCells.item(columnCount - 1);
+  const firstCellRect = firstCell?.getBoundingClientRect();
+  const lastCellRect = lastCell?.getBoundingClientRect();
+  return Boolean(
+    tableRect.width > 0
+    && tableRect.height > 0
+    && firstCellRect !== undefined
+    && firstCellRect.width > 0
+    && lastCellRect !== undefined
+    && lastCellRect.height > 0,
+  );
+};
 
 const toPixels = (value: string): number => {
   const parsed = Number.parseFloat(value);
@@ -232,18 +300,15 @@ type TableCellWidths = {
  * source and the cache that holds them come from here, so the rest of the
  * preview never walks over the cells of the file.
  *
- * The cache holds the rows that are on screen, and they are held whatever
- * they cost: they are the ones the preview draws, and a bound by the cells
- * the cache holds kept one row of a file with 5,000 columns, so every change
- * of the window cut all the rows on screen again. The rows beside them are
- * held as long as the cache holds fewer cells than the budget, so a scroll
- * that comes back over a row finds it, and the memory the cache holds does
- * not grow with the number of rows of the file.
+ * The cache holds every row the document needs. In windowed mode, the rows in
+ * view stay cached and nearby rows remain cached up to the cell target. In a
+ * prepared full table every retained row stays cached, so its memory grows
+ * with the retained table.
  */
 type TableSource = {
   /** The values of a row, cut out of the source the first time it is asked for. */
   values(row: number): string[];
-  /** Keep the viewport and native selection rows, and drop other cached rows. */
+  /** Keep the rows the current document needs and drop other cached rows. */
   keepRows(ranges: readonly TableRange[]): void;
 };
 
@@ -263,7 +328,7 @@ const createTableSource = (
   const cutRows = new Map<number, string[]>();
   /** The number of cells the cut rows hold. */
   let cutCells = 0;
-  /** The viewport and native selection rows. */
+  /** The rows the current document needs. */
   let heldRanges: readonly TableRange[] = [{ start: 0, end: 0 }];
 
   const values = (row: number): string[] => {
@@ -278,8 +343,7 @@ const createTableSource = (
   };
 
   /**
-   * Drop the rows that are not on screen when the cache holds more cells
-   * than the budget.
+   * Drop rows outside the document when the cache exceeds its cell target.
    */
   const prune = (): void => {
     while (cutCells > TABLE_ROW_CACHE_CELL_LIMIT) {
@@ -292,7 +356,7 @@ const createTableSource = (
         dropped = true;
         break;
       }
-      // Only the rows that are on screen are left, and they are held.
+      // Every remaining cached row belongs to the current document.
       if (!dropped) return;
     }
   };
@@ -316,20 +380,22 @@ const createTableSource = (
  * things to someone checking a result.
  *
  * A wide export holds far more cells than a screen can show, and mounting
- * all of them froze the viewer for seconds, so only the rows and the columns
- * in view are in the document. The skipped ones are carried by spacer rows
- * and spacer cells, which keeps the table's own layout, its column widths
- * and its text selection intact.
+ * all of them can freeze the viewer for seconds, so only the rows and columns
+ * in view are in the initial document. The skipped ones are carried by spacer
+ * rows and spacer cells, which keeps the table's own layout and column widths.
  *
  * A file whose grid is small enough is kept whole, so the document holds
- * every cell of it and the browser's find-in-page, a selection of the whole
- * file and a screen reader see the file and not the window.
+ * every cell of it and native selection works immediately. Large tables start
+ * windowed and disable text selection until the local experiment control asks
+ * for a complete render.
  */
 export const TableArtifact: React.FC<{
   path: string;
   content: string;
   sizeBytes: number | null;
-}> = ({ path, content, sizeBytes }) => {
+  /** Private request token used by the local native-selection feasibility harness. */
+  selectionPreparationRequest?: SelectionPreparationRequest;
+}> = ({ path, content, sizeBytes, selectionPreparationRequest }) => {
   const { t } = useI18n();
   const delimiter = delimiterForPath(path);
   // The parse of the file runs in a worker, so the main thread is free while
@@ -354,9 +420,11 @@ export const TableArtifact: React.FC<{
       table={delimited.table}
       bodyCells={delimited.bodyCells}
       countBodyCells={delimited.countBodyCells}
+      path={path}
       content={content}
       delimiter={delimiter}
       sizeBytes={sizeBytes}
+      selectionPreparationRequest={selectionPreparationRequest}
     />
   );
 };
@@ -368,10 +436,21 @@ const TableView: React.FC<{
   table: DelimitedTable;
   bodyCells: number[];
   countBodyCells: (characterWidths: TableCharacterWidths) => void;
+  path: string;
   content: string;
   delimiter: ',' | '\t';
   sizeBytes: number | null;
-}> = ({ table, bodyCells, countBodyCells, content, delimiter, sizeBytes }) => {
+  selectionPreparationRequest?: SelectionPreparationRequest;
+}> = ({
+  table,
+  bodyCells,
+  countBodyCells,
+  path,
+  content,
+  delimiter,
+  sizeBytes,
+  selectionPreparationRequest,
+}) => {
   const { t } = useI18n();
   // The rows of the file are cut out of the source when they are needed, and
   // the cache that holds them is bounded by the window.
@@ -383,6 +462,46 @@ const TableView: React.FC<{
   // document. It is a property of the file, so the same file is kept whole
   // in a narrow panel and in a wide one.
   const holdsWholeGrid = holdsWholeTable(table.rows.length, table.columnCount);
+  const [preparation, setPreparation] = React.useState<SelectionPreparation | null>(null);
+  const sourceRef = React.useRef({ path, content, delimiter, table });
+  sourceRef.current = { path, content, delimiter, table };
+  if (
+    preparation !== null
+    && (
+      preparation.path !== path
+      || preparation.content !== content
+      || preparation.delimiter !== delimiter
+      || preparation.table !== table
+    )
+  ) {
+    setPreparation(null);
+  }
+  const consumedRequestRef = React.useRef(selectionPreparationRequest?.id ?? 0);
+  if (
+    selectionPreparationRequest
+    && selectionPreparationRequest.id !== consumedRequestRef.current
+  ) {
+    consumedRequestRef.current = selectionPreparationRequest.id;
+    if (
+      !holdsWholeGrid
+      && selectionPreparationRequest.path === path
+      && selectionPreparationRequest.content === content
+      && selectionPreparationRequest.delimiter === delimiter
+    ) {
+      setPreparation({ path, content, delimiter, table, phase: 'preparing' });
+    }
+  }
+  const currentPreparation = preparation !== null
+    && preparation.path === path
+    && preparation.content === content
+    && preparation.delimiter === delimiter
+    && preparation.table === table
+    ? preparation
+    : null;
+  const fullGrid = holdsWholeGrid || currentPreparation !== null;
+  const selectionPhase: SelectionPreparationPhase = holdsWholeGrid
+    ? 'small'
+    : currentPreparation?.phase ?? 'windowed';
   // The characters outside latin are the ones the browser has to measure,
   // because the font it falls back to can lay them out wider than the
   // monospace font of the preview. The parser finds them in the same walk
@@ -407,60 +526,46 @@ const TableView: React.FC<{
     rows: { start: 0, end: 1 },
     columns: { start: 0, end: 1 },
   });
-  const [nativeSelection, setNativeSelection] = React.useState<NativeTableSelection | null>(null);
-  const nativeSelectionRef = React.useRef<NativeTableSelection | null>(null);
-
-  React.useLayoutEffect(() => {
-    nativeSelectionRef.current = null;
-    setNativeSelection(null);
-  }, [table]);
-
-  const readSelection = React.useCallback(() => {
-    const scroller = scrollerRef.current;
-    if (!scroller) {
-      nativeSelectionRef.current = null;
-      setNativeSelection(null);
-      return;
-    }
-    const ownerDocument = scroller.ownerDocument;
-    const selection = ownerDocument.getSelection();
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
-      nativeSelectionRef.current = null;
-      setNativeSelection(null);
-      return;
-    }
-    const tableElement = scroller.querySelector('table');
-    if (!tableElement) {
-      nativeSelectionRef.current = null;
-      setNativeSelection(null);
-      return;
-    }
-    const next = projectNativeTableSelection(
-      tableElement,
-      selection.getRangeAt(0),
-      selection,
-      table.rows.length,
-      table.columnCount,
-    );
-    nativeSelectionRef.current = next;
-    setNativeSelection((current) => (
-      current
-      && next
-      && current.start === next.start
-      && current.end === next.end
-      && current.wholeTable === next.wholeTable
-        ? current
-        : next
-    ));
-  }, [table]);
 
   React.useEffect(() => {
+    if (currentPreparation?.phase !== 'preparing') return;
     const scroller = scrollerRef.current;
-    if (!scroller) return;
-    const ownerDocument = scroller.ownerDocument;
-    ownerDocument.addEventListener('selectionchange', readSelection);
-    return () => ownerDocument.removeEventListener('selectionchange', readSelection);
-  }, [readSelection]);
+    const tableElement = scroller?.querySelector('table');
+    const ownerWindow = scroller?.ownerDocument.defaultView;
+    if (!scroller || !tableElement || !ownerWindow) return;
+
+    let cancelled = false;
+    let firstFrame = 0;
+    let secondFrame = 0;
+    firstFrame = ownerWindow.requestAnimationFrame(() => {
+      if (
+        cancelled
+        || !hasCompleteLaidOutTable(scroller, tableElement, table.rows.length, table.columnCount)
+      ) return;
+      secondFrame = ownerWindow.requestAnimationFrame(() => {
+        const source = sourceRef.current;
+        if (
+          cancelled
+          || ownerWindow.document.visibilityState !== 'visible'
+          || source.path !== currentPreparation.path
+          || source.content !== currentPreparation.content
+          || source.delimiter !== currentPreparation.delimiter
+          || source.table !== currentPreparation.table
+          || scroller.querySelector('table') !== tableElement
+          || !hasCompleteLaidOutTable(scroller, tableElement, table.rows.length, table.columnCount)
+        ) return;
+        setPreparation((current) => (
+          current === currentPreparation ? { ...current, phase: 'ready' } : current
+        ));
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      ownerWindow.cancelAnimationFrame(firstFrame);
+      ownerWindow.cancelAnimationFrame(secondFrame);
+    };
+  }, [content, currentPreparation, delimiter, layout, path, table]);
 
   // The width every column asks for comes from the data and the
   // measurements, so it is measured again when one of them changes and not
@@ -525,14 +630,13 @@ const TableView: React.FC<{
     layout,
     rowCount: table.rows.length,
     columnCount: table.columnCount,
-    holdsWholeGrid,
+    fullGrid,
   });
 
   const applyWindow = React.useCallback(() => {
     const model = modelRef.current;
-    // A file whose grid is kept whole has every cell of it in the document,
-    // so there is no window to move.
-    if (model.holdsWholeGrid) return;
+    // A complete table has every cell in the document, so there is no window to move.
+    if (model.fullGrid) return;
     const offsets = offsetsRef.current;
     const next = computeTableWindow({
       plan: model.plan,
@@ -669,168 +773,25 @@ const TableView: React.FC<{
       layout,
       rowCount: table.rows.length,
       columnCount: table.columnCount,
-      holdsWholeGrid,
+      fullGrid,
     };
     applyWindow();
-  }, [applyWindow, holdsWholeGrid, layout, plan, table]);
+  }, [applyWindow, fullGrid, layout, plan, table]);
 
   // The window of the file that was open before names the rows and the
   // columns of that file, and it is held inside the file that is open now
   // before anything is mounted. The first commit of a new file then carries
   // the new file's own rows and columns.
   //
-  // A file whose grid is small enough is kept whole: every row and every
-  // column of it is in the document, so the browser's find-in-page, a
-  // selection of the whole file and a screen reader see the file and not the
-  // window. The decision is a property of the file, so it does not change
-  // with the size of the panel.
-  const mountedWindow: TableWindow = holdsWholeGrid
+  // A small grid or an explicitly prepared large grid is rendered completely.
+  const mountedWindow: TableWindow = fullGrid
     ? { rows: { start: 0, end: table.rows.length }, columns: { start: 0, end: table.columnCount } }
     : clampTableWindow(visible, table.columnCount, table.rows.length);
-  const selectionRows = React.useMemo<TableRange | null>(
-    () => {
-      if (!nativeSelection || nativeSelection.end <= nativeSelection.start || table.columnCount === 0) {
-        return null;
-      }
-      const firstTableRow = Math.floor(nativeSelection.start / table.columnCount);
-      const endTableRow = Math.ceil(nativeSelection.end / table.columnCount);
-      return {
-        start: Math.max(0, Math.max(1, firstTableRow) - 1),
-        end: Math.max(0, Math.min(table.rows.length + 1, endTableRow) - 1),
-      };
-    },
-    [nativeSelection, table.columnCount, table.rows.length],
-  );
-  const selectionBuffer = React.useMemo<NativeSelectionBuffer>(() => {
-    if (!nativeSelection || nativeSelection.wholeTable || table.columnCount === 0) {
-      return { bodyRows: [], headerColumns: [] };
-    }
 
-    const bodyColumns = new Map<number, Set<number>>();
-    const headerColumns = new Set<number>();
-    const totalCells = (table.rows.length + 1) * table.columnCount;
-    const endpointSlots = [...new Set([
-      Math.min(nativeSelection.start, totalCells - 1),
-      Math.max(0, Math.min(nativeSelection.end - 1, totalCells - 1)),
-    ])];
-    const firstSelectedRow = Math.floor(nativeSelection.start / table.columnCount);
-    const lastSelectedRow = Math.floor(Math.max(nativeSelection.start, nativeSelection.end - 1) / table.columnCount);
-    const endpointColumns = (column: number): number[] => [...new Set([
-      0,
-      table.columnCount - 1,
-      column - 1,
-      column,
-      column + 1,
-    ].filter((candidate) => candidate >= 0 && candidate < table.columnCount))];
-
-    for (const slot of endpointSlots) {
-      const endpoint = {
-        row: Math.floor(slot / table.columnCount),
-        column: slot % table.columnCount,
-      };
-      // Keep text in source order beside each endpoint. A native keypress can
-      // move from the end of one cell into the next cell in the same row.
-      // The row's viewport may be far away, so that next cell must already be
-      // connected before the browser handles the key.
-      for (const adjacentRow of [endpoint.row - 1, endpoint.row, endpoint.row + 1]) {
-        if (
-          adjacentRow !== endpoint.row
-          && adjacentRow >= firstSelectedRow
-          && adjacentRow <= lastSelectedRow
-        ) continue;
-        const columns = endpointColumns(endpoint.column);
-        if (adjacentRow === 0) {
-          for (const column of columns) headerColumns.add(column);
-        } else if (adjacentRow > 0 && adjacentRow <= table.rows.length) {
-          const row = adjacentRow - 1;
-          const held = bodyColumns.get(row) ?? new Set<number>();
-          for (const column of columns) held.add(column);
-          bodyColumns.set(row, held);
-        }
-      }
-    }
-
-    return {
-      bodyRows: Array.from(bodyColumns, ([row, columns]) => ({ row, columns: [...columns] })),
-      headerColumns: [...headerColumns],
-    };
-  }, [nativeSelection, table.columnCount, table.rows.length]);
-
+  // The cache holds the rows present in the document and drops other rows.
   React.useLayoutEffect(() => {
-    const snapshot = nativeSelectionRef.current;
-    if (!snapshot || (!snapshot.anchor.structural && !snapshot.focus.structural)) return;
-    const scroller = scrollerRef.current;
-    const tableElement = scroller?.querySelector('table');
-    const selection = scroller?.ownerDocument.getSelection();
-    if (
-      !tableElement
-      || !selection
-      || selection.isCollapsed
-      || selection.rangeCount === 0
-    ) return;
-
-    const structureChanged = (endpoint: NativeTableSelection['anchor']): boolean => (
-      endpoint.structural
-      && endpoint.sourceOffset !== endpoint.sourceStart
-      && (
-        endpoint.node.childNodes.length !== endpoint.childNodes.length
-        || endpoint.childNodes.some((child, index) => endpoint.node.childNodes.item(index) !== child)
-      )
-    );
-    const rebaseEndpoint = (
-      endpoint: NativeTableSelection['anchor'],
-      node: Node | null,
-      offset: number,
-    ) => {
-      if (
-        !structureChanged(endpoint)
-        || !node
-        || (node !== endpoint.node && !endpoint.node.contains(node))
-      ) return { node, offset, refresh: false };
-      const nextOffset = resolveNativeSelectionEndpointOffset(
-        tableElement,
-        endpoint,
-        table.rows.length,
-        table.columnCount,
-      );
-      if (nextOffset === null) return { node, offset, refresh: false };
-      return {
-        node: endpoint.node,
-        offset: nextOffset,
-        refresh: true,
-      };
-    };
-    const anchor = rebaseEndpoint(snapshot.anchor, selection.anchorNode, selection.anchorOffset);
-    const focus = rebaseEndpoint(snapshot.focus, selection.focusNode, selection.focusOffset);
-    if (anchor.refresh || focus.refresh) {
-      if (!anchor.node || !focus.node) return;
-      // Reapply the native points after structural children change. A live
-      // Range can keep its numeric offset while its selected source cut drifts.
-      selection.collapse(anchor.node, anchor.offset);
-      selection.extend(focus.node, focus.offset);
-    }
-
-    const refreshChildren = (endpoint: NativeTableSelection['anchor']) => (
-      endpoint.structural ? { ...endpoint, childNodes: Array.from(endpoint.node.childNodes) } : endpoint
-    );
-    nativeSelectionRef.current = {
-      ...snapshot,
-      anchor: refreshChildren(snapshot.anchor),
-      focus: refreshChildren(snapshot.focus),
-    };
-  }, [nativeSelection, table, visible]);
-
-  // The cache holds the rows that are on screen and drops the rows that
-  // leave the screen, so a scroll or a render does not cut a row that was
-  // cut already. It runs after the commit, because the rows of the window
-  // are cut during the render.
-  React.useLayoutEffect(() => {
-    source.keepRows([
-      mountedWindow.rows,
-      ...(selectionRows ? [selectionRows] : []),
-      ...selectionBuffer.bodyRows.map(({ row }) => ({ start: row, end: row + 1 })),
-    ]);
-  }, [mountedWindow.rows, selectionBuffer.bodyRows, selectionRows, source]);
+    source.keepRows([mountedWindow.rows]);
+  }, [mountedWindow.rows, source]);
 
   const visibleColumns: number[] = [];
   for (let column = mountedWindow.columns.start; column < mountedWindow.columns.end; column += 1) {
@@ -840,38 +801,9 @@ const TableView: React.FC<{
   for (let row = mountedWindow.rows.start; row < mountedWindow.rows.end; row += 1) {
     visibleRows.push(row);
   }
-  const retainedRows = selectionRows && selectionRows.start < selectionRows.end
-    ? Array.from({ length: selectionRows.end - selectionRows.start }, (_, index) => selectionRows.start + index)
-    : [];
-  const bufferedRows = selectionBuffer.bodyRows.map(({ row }) => row);
-  const mountedRows = [...new Set([...visibleRows, ...retainedRows, ...bufferedRows])].sort((a, b) => a - b);
-  const columnsForRow = (row: number): number[] => {
-    const inViewport = row >= mountedWindow.rows.start && row < mountedWindow.rows.end
-      ? visibleColumns
-      : [];
-    const retained: number[] = [];
-    const sourceRow = row + 1;
-    const rowStart = sourceRow * table.columnCount;
-    if (nativeSelection) {
-      const start = Math.max(nativeSelection.start, rowStart) - rowStart;
-      const end = Math.min(nativeSelection.end, rowStart + table.columnCount) - rowStart;
-      for (let column = Math.max(0, start); column < Math.min(table.columnCount, end); column += 1) {
-        retained.push(column);
-      }
-    }
-    retained.push(...(selectionBuffer.bodyRows.find((buffer) => buffer.row === row)?.columns ?? []));
-    return [...new Set([...inViewport, ...retained])].sort((a, b) => a - b);
-  };
-  const headerStart = nativeSelection ? Math.max(0, nativeSelection.start) : 0;
-  const headerEnd = nativeSelection ? Math.min(table.columnCount, nativeSelection.end) : 0;
-  const retainedHeaderColumns = nativeSelection && headerStart < headerEnd
-    ? Array.from({ length: headerEnd - headerStart }, (_, index) => headerStart + index)
-    : [];
-  const columnsForHeader = [...new Set([
-    ...visibleColumns,
-    ...retainedHeaderColumns,
-    ...selectionBuffer.headerColumns,
-  ])].sort((a, b) => a - b);
+  const mountedRows = visibleRows;
+  const columnsForRow = (_row: number): number[] => visibleColumns;
+  const columnsForHeader = visibleColumns;
   // The cells that carry the columns beside the window. A range of columns
   // that is wider than a cell may span is carried by more than one cell, so
   // that the browser lays the cells of the window out over the columns the
@@ -977,6 +909,7 @@ const TableView: React.FC<{
           {characterProbe}
           <div ref={scrollerRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-auto">
             <table
+              data-selection-phase={selectionPhase}
               // The rows and the columns outside the window are not in the
               // document, so the table states how many of them it has, the
               // header row counted with the rows.
@@ -986,6 +919,7 @@ const TableView: React.FC<{
               style={{
                 tableLayout: 'fixed',
                 width: tableWidthCss(plan.totalCells, table.columnCount, layout.metrics),
+                userSelect: holdsWholeGrid ? undefined : currentPreparation?.phase === 'ready' ? 'text' : 'none',
               }}
             >
               {colgroup}
