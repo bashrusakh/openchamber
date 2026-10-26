@@ -329,7 +329,9 @@ export const TableArtifact: React.FC<{
   path: string;
   content: string;
   sizeBytes: number | null;
-}> = ({ path, content, sizeBytes }) => {
+  /** Isolated prototype modes. The production FilesView caller omits this. */
+  experiment?: TableArtifactExperiment;
+}> = ({ path, content, sizeBytes, experiment }) => {
   const { t } = useI18n();
   const delimiter = delimiterForPath(path);
   // The parse of the file runs in a worker, so the main thread is free while
@@ -357,6 +359,7 @@ export const TableArtifact: React.FC<{
       content={content}
       delimiter={delimiter}
       sizeBytes={sizeBytes}
+      experiment={experiment}
     />
   );
 };
@@ -371,8 +374,11 @@ const TableView: React.FC<{
   content: string;
   delimiter: ',' | '\t';
   sizeBytes: number | null;
-}> = ({ table, bodyCells, countBodyCells, content, delimiter, sizeBytes }) => {
+  experiment?: TableArtifactExperiment;
+}> = ({ table, bodyCells, countBodyCells, content, delimiter, sizeBytes, experiment }) => {
   const { t } = useI18n();
+  const fullNativeTable = experiment !== undefined;
+  const useContentVisibility = experiment === 'full-native-content-visibility';
   // The rows of the file are cut out of the source when they are needed, and
   // the cache that holds them is bounded by the window.
   const source = React.useMemo(
@@ -382,7 +388,7 @@ const TableView: React.FC<{
   // Whether the whole grid of the file is small enough to be kept in the
   // document. It is a property of the file, so the same file is kept whole
   // in a narrow panel and in a wide one.
-  const holdsWholeGrid = holdsWholeTable(table.rows.length, table.columnCount);
+  const holdsWholeGrid = fullNativeTable || holdsWholeTable(table.rows.length, table.columnCount);
   // The characters outside latin are the ones the browser has to measure,
   // because the font it falls back to can lay them out wider than the
   // monospace font of the preview. The parser finds them in the same walk
@@ -413,9 +419,10 @@ const TableView: React.FC<{
   React.useLayoutEffect(() => {
     nativeSelectionRef.current = null;
     setNativeSelection(null);
-  }, [table]);
+  }, [experiment, table]);
 
   const readSelection = React.useCallback(() => {
+    if (fullNativeTable) return;
     const scroller = scrollerRef.current;
     if (!scroller) {
       nativeSelectionRef.current = null;
@@ -452,15 +459,16 @@ const TableView: React.FC<{
         ? current
         : next
     ));
-  }, [table]);
+  }, [fullNativeTable, table]);
 
   React.useEffect(() => {
+    if (fullNativeTable) return;
     const scroller = scrollerRef.current;
     if (!scroller) return;
     const ownerDocument = scroller.ownerDocument;
     ownerDocument.addEventListener('selectionchange', readSelection);
     return () => ownerDocument.removeEventListener('selectionchange', readSelection);
-  }, [readSelection]);
+  }, [fullNativeTable, readSelection]);
 
   // The width every column asks for comes from the data and the
   // measurements, so it is measured again when one of them changes and not
@@ -757,6 +765,7 @@ const TableView: React.FC<{
   }, [nativeSelection, table.columnCount, table.rows.length]);
 
   React.useLayoutEffect(() => {
+    if (fullNativeTable) return;
     const snapshot = nativeSelectionRef.current;
     if (!snapshot || (!snapshot.anchor.structural && !snapshot.focus.structural)) return;
     const scroller = scrollerRef.current;
@@ -818,7 +827,7 @@ const TableView: React.FC<{
       anchor: refreshChildren(snapshot.anchor),
       focus: refreshChildren(snapshot.focus),
     };
-  }, [nativeSelection, table, visible]);
+  }, [fullNativeTable, nativeSelection, table, visible]);
 
   // The cache holds the rows that are on screen and drops the rows that
   // leave the screen, so a scroll or a render does not cut a row that was
@@ -896,6 +905,18 @@ const TableView: React.FC<{
   const rowClassName = (row: number): string => (
     row % 2 === 0 ? 'bg-[var(--surface-background)]' : 'bg-[var(--surface-subtle)]/40'
   );
+  const cellContent = (value: string): React.ReactNode => (
+    fullNativeTable
+      ? (
+        <span
+          className="block truncate"
+          style={useContentVisibility ? TABLE_CONTENT_VISIBILITY_STYLE : undefined}
+        >
+          {value}
+        </span>
+      )
+      : value
+  );
   const headerCells: React.ReactNode[] = [];
   let previousHeaderColumn = -1;
   for (const column of columnsForHeader) {
@@ -918,7 +939,7 @@ const TableView: React.FC<{
         aria-colindex={column + 1}
         className={headerClassName(column)}
       >
-        {table.header[column] ?? ''}
+        {cellContent(table.header[column] ?? '')}
       </th>,
     );
     previousHeaderColumn = column;
@@ -1069,7 +1090,7 @@ const TableView: React.FC<{
                         className={cellClassName(column)}
                         title={value}
                       >
-                        {value}
+                        {cellContent(value)}
                       </td>,
                     );
                     previousColumn = column;
@@ -1136,3 +1157,10 @@ const TableView: React.FC<{
     </div>
   );
 };
+/** The skipped cell text keeps the line height a rendered row would occupy. */
+const TABLE_CONTENT_VISIBILITY_STYLE: React.CSSProperties = {
+  contentVisibility: 'auto',
+  containIntrinsicSize: 'auto 1lh',
+};
+
+type TableArtifactExperiment = 'full-native' | 'full-native-content-visibility';
