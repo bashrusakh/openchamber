@@ -581,6 +581,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.export.failedRevealPath': 'Nie udało się ujawnić ścieżki',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'Wyeksportowano sesję, ale pominięto {count} pod-agenta, którego nie można załadować.',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'Wyeksportowano sesję, ale pominięto {count} pod-agentów, których nie można załadować.',
+  'sessions.sidebar.session.export.incompleteSessionList': 'Sesja została wyeksportowana, ale lista sesji była wciąż czytana, więc sesje subagentów mogą brakować.',
+  'sessions.sidebar.session.export.unreadableInbox': 'Sesja została wyeksportowana, ale nie udało się odczytać oczekujących wiadomości, więc oczekująca wiadomość może brakować.',
   'sessions.sidebar.session.export.dialog.title': 'Eksportuj sesję',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'Ta sesja ma {count} sesję pod-agenta. Czy dołączyć ją do eksportu?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'Ta sesja ma {count} sesji pod-agentów. Czy dołączyć je do eksportu?',

@@ -757,6 +757,8 @@ export const dict = {
   'sessions.sidebar.session.export.failedRevealPath': 'Failed to reveal path',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'Exported session, but skipped {count} sub-agent task that could not be loaded.',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'Exported session, but skipped {count} sub-agent tasks that could not be loaded.',
+  'sessions.sidebar.session.export.incompleteSessionList': 'The session was exported, but the session list was still being read, so sub-agent sessions may be missing from it.',
+  'sessions.sidebar.session.export.unreadableInbox': 'The session was exported, but a pending inbox could not be read, so a pending message may be missing from it.',
   'sessions.sidebar.session.export.dialog.title': 'Export session',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'This session has {count} sub-agent session. Include it in the export?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'This session has {count} sub-agent sessions. Include them in the export?',

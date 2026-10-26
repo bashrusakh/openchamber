@@ -497,13 +497,13 @@ describe('the coverage of the sub-agent transcripts', () => {
       sessions: [root, session('ses_child', { title: 'Child', parentID: 'ses_root', agent: 'reviewer' })],
       load: async (sessionID) => {
         if (sessionID === 'ses_root') {
-          return [dispatchedSessionReport('ses_root', 'r1', 2100, {
+          return { records: [dispatchedSessionReport('ses_root', 'r1', 2100, {
             childSessionID: 'ses_child',
             title: 'Child',
             output: 'The dispatched answer',
-          })];
+          })] };
         }
-        return [assistantMessage('ses_child', 'd1', 2200, 'The child transcript')];
+        return { records: [assistantMessage('ses_child', 'd1', 2200, 'The child transcript')] };
       },
     }, 'readable');
 
@@ -529,12 +529,12 @@ describe('the coverage of the sub-agent transcripts', () => {
       sessions: [root, session('ses_bg', { title: 'Background', parentID: 'ses_root', agent: 'worker' })],
       load: async (sessionID) => {
         if (sessionID === 'ses_root') {
-          return [subagentReport('ses_root', 'r1', 2100, {
+          return { records: [subagentReport('ses_root', 'r1', 2100, {
             childSessionID: 'ses_bg',
             output: 'The background answer',
-          })];
+          })] };
         }
-        return [assistantMessage('ses_bg', 'b1', 2200, 'The background transcript')];
+        return { records: [assistantMessage('ses_bg', 'b1', 2200, 'The background transcript')] };
       },
     }, 'readable');
 
@@ -562,9 +562,9 @@ describe('the coverage of the sub-agent transcripts', () => {
       ],
       load: async (sessionID) => {
         if (sessionID === 'ses_root') {
-          return [userMessage('ses_root', 'u1', 1000, 'Do the work')];
+          return { records: [userMessage('ses_root', 'u1', 1000, 'Do the work')] };
         }
-        return [assistantMessage('ses_child', 'ca1', 2000, 'The child work')];
+        return { records: [assistantMessage('ses_child', 'ca1', 2000, 'The child work')] };
       },
     }, 'readable');
 
@@ -590,8 +590,8 @@ describe('the coverage of the sub-agent transcripts', () => {
       root,
       sessions: [root, session('ses_child', { title: 'Child', parentID: 'ses_root', agent: 'reviewer' })],
       load: async (sessionID) => {
-        if (sessionID === 'ses_root') return [userMessage('ses_root', 'u1', 1000, 'Do the work')];
-        return [assistantMessage('ses_child', 'ca1', 2000, 'Child work')];
+        if (sessionID === 'ses_root') return { records: [userMessage('ses_root', 'u1', 1000, 'Do the work')] };
+        return { records: [assistantMessage('ses_child', 'ca1', 2000, 'Child work')] };
       },
     }, 'readable');
 
@@ -869,15 +869,15 @@ describe('the coverage of the sub-agent transcripts', () => {
       load: async (sessionID) => {
         loaded.push(sessionID);
         if (sessionID === 'ses_root') {
-          return [{
+          return { records: [{
             info: {
               id: 'a1', sessionID: 'ses_root', role: 'assistant', agent: 'build',
               providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 2000 },
             },
             parts: [subagentCall('a1', { childSessionID: 'ses_hidden' })],
-          }];
+          }] };
         }
-        return [assistantMessage('ses_hidden', 'ha1', 2500, 'The hidden child work')];
+        return { records: [assistantMessage('ses_hidden', 'ha1', 2500, 'The hidden child work')] };
       },
     }, 'readable');
 
@@ -901,13 +901,13 @@ describe('the coverage of the sub-agent transcripts', () => {
       includeSubagents: false,
       load: async (sessionID) => {
         if (sessionID === 'ses_root') {
-          return [{
+          return { records: [{
             info: {
               id: 'a1', sessionID: 'ses_root', role: 'assistant', agent: 'build',
               providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 2000 },
             },
             parts: [subagentCall('a1', { childSessionID: 'ses_child' })],
-          }];
+          }] };
         }
         return null;
       },
@@ -932,15 +932,15 @@ describe('the coverage of the sub-agent transcripts', () => {
       load: async (sessionID) => {
         loaded.push(sessionID);
         if (sessionID === 'ses_root') {
-          return [{
+          return { records: [{
             info: {
               id: 'a1', sessionID: 'ses_root', role: 'assistant', agent: 'build',
               providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 2000 },
             },
             parts: [subagentCall('a1', { childSessionID: 'ses_child' })],
-          }];
+          }] };
         }
-        return [assistantMessage('ses_child', 'ca1', 2500, 'The child work')];
+        return { records: [assistantMessage('ses_child', 'ca1', 2500, 'The child work')] };
       },
     }, 'readable');
 
@@ -970,13 +970,13 @@ describe('the coverage of the sub-agent transcripts', () => {
       sessions: [root],
       load: async (sessionID) => {
         if (sessionID === 'ses_root') {
-          return [{
+          return { records: [{
             info: {
               id: 'a1', sessionID: 'ses_root', role: 'assistant', agent: 'build',
               providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 2000 },
             },
             parts: [subagentCall('a1', { childSessionID: 'ses_gone' })],
-          }];
+          }] };
         }
         return null;
       },
@@ -998,13 +998,13 @@ describe('the coverage of the sub-agent transcripts', () => {
       sessions: [root],
       load: async (sessionID) => {
         if (sessionID === 'ses_root') {
-          return [{
+          return { records: [{
             info: {
               id: 'a1', sessionID: 'ses_root', role: 'assistant', agent: 'build',
               providerID: 'anthropic', modelID: 'claude-opus-4-1', time: { created: 2000 },
             },
             parts: [subagentCall('a1', { status: 'running', childSessionID: 'ses_running' })],
-          }];
+          }] };
         }
         return null;
       },

@@ -762,6 +762,8 @@ export const dict: Record<I18nKey, string> = {
   "sessions.sidebar.session.export.failedRevealPath": "No se pudo mostrar la ruta",
   "sessions.sidebar.session.export.skippedSubtaskSingle": "La sesión se exportó, pero se omitió {count} tarea de subagente que no se pudo cargar.",
   "sessions.sidebar.session.export.skippedSubtaskMany": "La sesión se exportó, pero se omitieron {count} tareas de subagente que no se pudieron cargar.",
+  'sessions.sidebar.session.export.incompleteSessionList': 'La sesión se exportó, pero la lista de sesiones todavía se estaba leyendo, así que pueden faltar sesiones de subagentes.',
+  'sessions.sidebar.session.export.unreadableInbox': 'La sesión se exportó, pero no se pudieron leer los mensajes pendientes, así que puede faltar un mensaje pendiente.',
   'sessions.sidebar.session.export.dialog.title': 'Exportar sesión',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'Esta sesión tiene {count} sesión de subagente. ¿Incluirla en la exportación?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'Esta sesión tiene {count} sesiones de subagente. ¿Incluirlas en la exportación?',

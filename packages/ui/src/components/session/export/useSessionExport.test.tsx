@@ -7,7 +7,7 @@
  * say the transcript could not be loaded.
  */
 
-import { afterAll, describe, expect, mock, test } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Window } from 'happy-dom';
@@ -33,6 +33,9 @@ Object.assign(globalThis, {
 
 let savedDocumentCount = 0;
 
+/** The warnings the export showed the person who asked for it. */
+const toastWarnings: string[] = [];
+
 mock.module('@/components/ui/dialog', () => ({
   Dialog: ({ children }: React.PropsWithChildren) => <>{children}</>,
   DialogContent: ({ children }: React.PropsWithChildren) => <div>{children}</div>,
@@ -43,7 +46,11 @@ mock.module('@/components/ui/dialog', () => ({
 }));
 
 mock.module('@/components/ui', () => ({
-  toast: { error: () => undefined, success: () => undefined, warning: () => undefined },
+  toast: {
+    error: () => undefined,
+    success: () => undefined,
+    warning: (message: string) => { toastWarnings.push(message); },
+  },
 }));
 
 /** The records every directory holds, keyed by the session they belong to. */
@@ -51,7 +58,9 @@ const recordsByDirectory = new Map<string, Map<string, SessionMessageRecord[]>>(
 
 /** The reads the export made, in the order it made them. */
 const recordReads: Array<{ directory: string; sessionID: string }> = [];
-let loadRecordsOverride: ((target: { directory: string; sessionID: string }) => Promise<SessionMessageRecord[] | null>) | null = null;
+/** What one session's read established, the way the loader reports it. */
+type ExportRecords = { records: SessionMessageRecord[]; inboxUnavailable?: boolean };
+let loadRecordsOverride: ((target: { directory: string; sessionID: string }) => Promise<ExportRecords | null>) | null = null;
 let runtimeResponse: ((request: Request) => Promise<Response>) | null = null;
 
 const runtimeUrlResolver = {
@@ -86,7 +95,8 @@ mock.module('@/sync/use-sync', () => ({
   useSessionMessageRecordsForExport: () => async ({ directory, sessionID }: { directory: string; sessionID: string }) => {
     recordReads.push({ directory, sessionID });
     if (loadRecordsOverride) return loadRecordsOverride({ directory, sessionID });
-    return recordsByDirectory.get(directory)?.get(sessionID) ?? null;
+    const records = recordsByDirectory.get(directory)?.get(sessionID);
+    return records ? { records } : null;
   },
 }));
 
@@ -103,6 +113,45 @@ mock.module('@/lib/exportSession', () => ({
   },
 }));
 
+const globalSessionsStore = await import('@/stores/useGlobalSessionsStore');
+
+/**
+ * The app's own global session load, as the export sees it.
+ *
+ * The list arrives in pages, and the export waits for the whole list before
+ * it claims a tree. The test decides when the list arrives and what it
+ * holds.
+ */
+let listLoads = 0;
+let listLoadGate: Promise<void> | null = null;
+let listLoadOutcome: { sessions: Session[]; complete: boolean } | null = null;
+
+mock.module('@/stores/useGlobalSessionsStore', () => ({
+  ...globalSessionsStore,
+  ensureGlobalSessionsLoaded: async () => {
+    listLoads += 1;
+    if (listLoadGate) await listLoadGate;
+    const outcome = listLoadOutcome;
+    const activeSessions = outcome?.sessions ?? [];
+    const archivedSessions: Session[] = [];
+    globalSessionsStore.useGlobalSessionsStore.setState({
+      activeSessions,
+      archivedSessions,
+      sessionsByDirectory: new Map(),
+      entityById: new Map(),
+      structure: {
+        activeSessionIds: [],
+        activeRootIds: [],
+        activeChildrenByParentId: new Map(),
+        activeIdsByDirectory: new Map(),
+      },
+      hasLoaded: outcome?.complete ?? false,
+      status: outcome?.complete ? 'ready' : 'error',
+    });
+    return { activeSessions, archivedSessions };
+  },
+}));
+
 const { I18nProvider } = await import('@/lib/i18n');
 const { useGlobalSessionsStore } = await import('@/stores/useGlobalSessionsStore');
 const { useSessionExport } = await import('./useSessionExport');
@@ -110,9 +159,28 @@ const { opencodeClient } = await import('@/lib/opencode/client');
 const { ChildStoreManager } = await import('@/sync/child-store');
 const { SessionMessageLoader } = await import('@/sync/session-message-loader');
 
+beforeEach(() => {
+  listLoads = 0;
+  listLoadGate = null;
+  listLoadOutcome = null;
+  loadRecordsOverride = null;
+  toastWarnings.length = 0;
+});
+
 afterAll(() => {
   browser.close();
 });
+
+/** A promise the test opens by hand, so a step can wait for the test's cue. */
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
 
 const session = (id: string, overrides: Partial<Session> = {}): Session => ({
   id,
@@ -202,6 +270,30 @@ const setSessions = (sessions: Session[]): void => {
 };
 
 /**
+ * Puts the sessions into the store while the list is still being read.
+ *
+ * The list arrives in pages, and the export cannot claim a tree before the
+ * whole list is there.
+ */
+const setPartialSessions = (sessions: Session[]): void => {
+  useGlobalSessionsStore.setState({
+    activeSessions: [],
+    archivedSessions: [],
+    sessionsByDirectory: new Map(),
+    entityById: new Map(),
+    structure: {
+      activeSessionIds: [],
+      activeRootIds: [],
+      activeChildrenByParentId: new Map(),
+      activeIdsByDirectory: new Map(),
+    },
+    hasLoaded: false,
+    status: 'loading',
+  });
+  useGlobalSessionsStore.getState().upsertSessions(sessions);
+};
+
+/**
  * Puts the records into the directories they live in.
  *
  * A session store holds the records of the sessions that run in its own
@@ -218,18 +310,17 @@ const setRecords = (entries: Array<[directory: string, sessionID: string, record
 };
 
 /**
- * Exports a session and hands back the document it wrote.
+ * Opens the export dialog for a session and confirms it.
  *
  * The dialog is opened and confirmed, the way a reader does it, so the test
- * reads what the export writes.
+ * reads what the export writes. The export itself keeps running after the
+ * confirmation, so the caller gets the document it writes and the handle
+ * that closes the dialog.
  */
-const exportSessionTo = async (
+const openAndConfirmExport = async (
   target: { sessionID: string; directory: string },
-  format: ExportFormat = 'markdown',
-  detailed = false,
-  noDocumentExpected = false,
-  actionSettled?: Promise<void>,
-): Promise<string> => {
+  options: { format?: ExportFormat; detailed?: boolean; includeSubagents?: boolean } = {},
+): Promise<{ written: Promise<string>; stop: () => Promise<void> }> => {
   const container = document.createElement('div');
   document.body.append(container);
   const root = createRoot(container);
@@ -256,14 +347,22 @@ const exportSessionTo = async (
     open({ sessionID: target.sessionID, title: 'Root', directory: target.directory });
   });
 
-  if (format !== 'markdown') {
+  const format = options.format;
+  if (format && format !== 'markdown') {
     await act(async () => {
       container.querySelector<HTMLElement>(`button[aria-label="${format.toUpperCase()}"]`)?.click();
     });
   }
-  if (detailed) {
+  if (options.detailed) {
     await act(async () => {
       container.querySelector<HTMLElement>('button[aria-label="Full details"]')?.click();
+    });
+  }
+  if (options.includeSubagents === false) {
+    await act(async () => {
+      const coverage = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
+      expect(coverage).toBeTruthy();
+      coverage?.click();
     });
   }
   await act(async () => {
@@ -272,21 +371,38 @@ const exportSessionTo = async (
     ));
     expect(confirm).toBeTruthy();
     confirm?.click();
-    if (noDocumentExpected) {
-      await actionSettled;
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
   });
 
+  return {
+    written,
+    stop: async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+};
+
+/**
+ * Exports a session and hands back the document it wrote.
+ */
+const exportSessionTo = async (
+  target: { sessionID: string; directory: string },
+  format: ExportFormat = 'markdown',
+  detailed = false,
+  noDocumentExpected = false,
+  actionSettled?: Promise<void>,
+): Promise<string> => {
   if (noDocumentExpected) {
-    await act(async () => root.unmount());
-    container.remove();
+    const { stop } = await openAndConfirmExport(target, { format, detailed });
+    await actionSettled;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await stop();
     return '';
   }
 
+  const { written, stop } = await openAndConfirmExport(target, { format, detailed });
   const outputDocument = await written;
-  await act(async () => root.unmount());
-  container.remove();
+  await stop();
   return outputDocument;
 };
 
@@ -494,5 +610,90 @@ describe('the export reads every session from its own directory', () => {
     expect(recordReads.some((read) => read.directory === '/third' && read.sessionID === 'ses_grand')).toBe(true);
     expect(output).toContain('Deeper work');
     expect(output).not.toContain('Incomplete export');
+  });
+});
+
+describe('the export waits for the whole session list before it claims a tree', () => {
+  const rootSession = session('ses_root', { title: 'Root', directory: '/repo' });
+  const childSession = session('ses_child', { title: 'Child', parentID: 'ses_root', directory: '/other' });
+
+  test('an export that covers the sub-agent sessions waits for the list', async () => {
+    // The list holds the root only: the child session has not arrived yet.
+    setPartialSessions([rootSession]);
+    setRecords([
+      ['/repo', 'ses_root', rootRecords],
+      ['/other', 'ses_child', childRecords],
+    ]);
+
+    const listGate = deferred<void>();
+    listLoadGate = listGate.promise;
+    listLoadOutcome = { sessions: [rootSession, childSession], complete: true };
+
+    const { written, stop } = await openAndConfirmExport({ sessionID: 'ses_root', directory: '/repo' });
+
+    // The export waits for the list: it has read nothing yet, so it cannot
+    // have claimed a tree.
+    expect(listLoads).toBe(1);
+    expect(recordReads.length).toBe(0);
+
+    listGate.resolve();
+
+    const output = await written;
+
+    // The child arrived with the list, and its transcript is in the
+    // document, read from the directory it runs in.
+    expect(output).toContain('Verdict: changes required.');
+    expect(recordReads.some((read) => read.directory === '/other' && read.sessionID === 'ses_child')).toBe(true);
+    expect(output).not.toContain('Incomplete export');
+    await stop();
+  });
+
+  test('an export of the root session alone does not wait for the list', async () => {
+    // The lineage is not walked at all, so the list's completeness is not
+    // the export's business.
+    setPartialSessions([rootSession]);
+    setRecords([['/repo', 'ses_root', rootRecords]]);
+
+    const { written, stop } = await openAndConfirmExport(
+      { sessionID: 'ses_root', directory: '/repo' },
+      { includeSubagents: false },
+    );
+
+    expect(listLoads).toBe(0);
+
+    const output = await written;
+
+    expect(output).toContain('Do the work');
+    expect(output).not.toContain('Incomplete export');
+    await stop();
+  });
+
+  test('an export that ran against an incomplete list says so in the document', async () => {
+    setPartialSessions([rootSession]);
+    setRecords([['/repo', 'ses_root', rootRecords]]);
+
+    // The load failed, so the list is still not the whole list. The export
+    // runs anyway, and the document says what it could not establish.
+    listLoadOutcome = { sessions: [rootSession], complete: false };
+
+    const output = await exportSessionTo({ sessionID: 'ses_root', directory: '/repo' });
+
+    expect(output).toContain('The session list was still being read when this export ran');
+    expect(toastWarnings.some((message) => message.includes('the session list was still being read'))).toBe(true);
+  });
+});
+
+describe('an export that could not read a pending inbox', () => {
+  test('keeps the history and says the pending message may be missing', async () => {
+    setSessions([session('ses_root', { title: 'Root', directory: '/repo' })]);
+    setRecords([['/repo', 'ses_root', rootRecords]]);
+    loadRecordsOverride = async () => ({ records: rootRecords, inboxUnavailable: true });
+
+    const output = await exportSessionTo({ sessionID: 'ses_root', directory: '/repo' });
+
+    // The history was read, so the document carries it.
+    expect(output).toContain('Do the work');
+    expect(output).toContain('The pending inbox of the session "Root" could not be read');
+    expect(toastWarnings.some((message) => message.includes('a pending inbox could not be read'))).toBe(true);
   });
 });

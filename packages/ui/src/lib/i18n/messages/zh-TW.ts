@@ -778,6 +778,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.export.failedRevealPath': '顯示路徑失敗',
   'sessions.sidebar.session.export.skippedSubtaskSingle': '會話已匯出，但略過了 {count} 個無法載入的子 Agent 任務。',
   'sessions.sidebar.session.export.skippedSubtaskMany': '會話已匯出，但略過了 {count} 個無法載入的子 Agent 任務。',
+  'sessions.sidebar.session.export.incompleteSessionList': '會話已匯出，但工作階段清單仍在讀取中，因此其中可能缺少子 Agent 工作階段。',
+  'sessions.sidebar.session.export.unreadableInbox': '會話已匯出，但無法讀取待處理訊息，因此其中可能缺少一則待處理訊息。',
   'sessions.sidebar.session.export.dialog.title': '匯出工作階段',
   'sessions.sidebar.session.export.dialog.descriptionSingle': '此會話有 {count} 個子代理程式工作階段。是否包含在匯出中？',
   'sessions.sidebar.session.export.dialog.descriptionMany': '此會話有 {count} 個子代理程式工作階段。是否包含在匯出中？',

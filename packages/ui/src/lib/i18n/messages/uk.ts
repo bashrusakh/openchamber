@@ -762,6 +762,8 @@ export const dict: Record<I18nKey, string> = {
   "sessions.sidebar.session.export.failedRevealPath": "Не вдалося відкрити шлях",
   "sessions.sidebar.session.export.skippedSubtaskSingle": "Сесію експортовано, але пропущено {count} завдання під-агента, яке не вдалося завантажити.",
   "sessions.sidebar.session.export.skippedSubtaskMany": "Сесію експортовано, але пропущено {count} завдань під-агента, які не вдалося завантажити.",
+  'sessions.sidebar.session.export.incompleteSessionList': 'Сесію експортовано, але список сесій ще читався, тому можуть бути відсутні сесії субагентів.',
+  'sessions.sidebar.session.export.unreadableInbox': 'Сесію експортовано, але очікувані повідомлення не вдалося прочитати, тому може бути відсутнє очікуване повідомлення.',
   'sessions.sidebar.session.export.dialog.title': 'Експорт сесії',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'Ця сесія має {count} сесію під-агента. Додати її до експорту?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'Ця сесія має {count} сесій під-агентів. Додати їх до експорту?',

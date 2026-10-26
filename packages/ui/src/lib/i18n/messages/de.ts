@@ -659,6 +659,8 @@ export const dict = {
   'sessions.sidebar.session.export.failedRevealPath': 'Pfad konnte nicht angezeigt werden',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'Sitzung exportiert, aber {count} Unteraufgabe des Sub-Agents wurde übersprungen, da sie nicht geladen werden konnte.',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'Sitzung exportiert, aber {count} Unteraufgaben des Sub-Agents wurden übersprungen, da sie nicht geladen werden konnten.',
+  'sessions.sidebar.session.export.incompleteSessionList': 'Die Sitzung wurde exportiert, aber die Sitzungsliste wurde noch gelesen, daher fehlen möglicherweise Sub-Agent-Sitzungen.',
+  'sessions.sidebar.session.export.unreadableInbox': 'Die Sitzung wurde exportiert, aber die ausstehenden Nachrichten konnten nicht gelesen werden, daher fehlt möglicherweise eine ausstehende Nachricht.',
   'sessions.sidebar.session.export.dialog.title': 'Sitzung exportieren',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'Diese Sitzung hat {count} Sub-Agent-Sitzung. Soll sie in den Export inkludiert werden?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'Diese Sitzung hat {count} Sub-Agent-Sitzungen. Sollen sie in den Export inkludiert werden?',

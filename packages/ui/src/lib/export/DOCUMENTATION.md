@@ -42,6 +42,16 @@ cannot name them differently.
   says so. The switch stays: the choice is the reader's, and it has to stay
   reachable when the number is not known. The text says what the choice will
   do, so the promise and the export agree.
+  The export does not take the dialog's number. It reads the session list
+  itself, and when the export covers the sub-agent sessions it makes the list
+  whole first (`ensureGlobalSessionsLoaded`), so a descendant whose page had
+  not arrived yet still reaches the document. The list and the directory each
+  session runs in come from the app's list after the wait, so a descendant
+  that arrives in a later page is read from its own directory. A list that is
+  still not complete after that wait does not fail the export: the export
+  runs and records an `incomplete-session-list` finding. A root-only export
+  does not walk the lineage at all, so the list's completeness is not its
+  business: it neither waits nor reports.
 - **Every session is read from its own directory.** A descendant that runs in
   another directory lives in another session store, so the root's directory
   would never find it. The export reads each session where it runs, and a
@@ -175,14 +185,19 @@ cannot name them differently.
   export snapshot; they never replace live chat records. Each page enters the
   shared session-page lane separately, so interactive history can run between
   export pages. A failed page fails that session's read and cannot produce an
-  empty or complete result.
+  empty or complete result. The pending inbox is read once, after the pages:
+  a read of it that fails leaves the confirmed history standing and the
+  pending items unconfirmed, and the export records an `unreadable-inbox`
+  finding that names the session. A stale runtime still fails the read, as a
+  failed page does.
 - **A partial export says so.** Everything the export could not establish —
   a child that would not load, a call that named no child, a session that was
-  resumed, a part the model does not cover — lands in `findings`, and the
-  readable document reports them once at the end. A child that would not load
-  also becomes a `gap` event to preserve its structural position, while its
-  diagnostic appears once in the final integrity section. An ordinary message
-  never carries a diagnostic line.
+  resumed, a part the model does not cover, a session list that was not the
+  whole list, a pending inbox that could not be read — lands in `findings`,
+  and the readable document reports them once at the end. A child that would
+  not load also becomes a `gap` event to preserve its structural position,
+  while its diagnostic appears once in the final integrity section. An
+  ordinary message never carries a diagnostic line.
   A child the user left out on purpose is not a gap: the export knows it was
   left out.
 - **A missing transcript can still have a recorded parent result.** When the
@@ -425,6 +440,20 @@ The session the reader asked for is the exception. They export it on purpose,
 from the archive bin, so it is carried even when it is archived — and the
 live work below it travels with it.
 
+### Why the export waits for the whole list instead of exporting what it has
+
+The export reads the session list when it runs, and when it covers the
+sub-agent sessions it waits for the whole list before it walks the lineage.
+The list is where the lineage lives, and the app is already loading it, so
+the wait costs one shared load and the reader gets the sub-agent transcripts
+they asked for.
+
+The rejected alternative was to export the partial list and mark the result
+incomplete right away. The document would come out short of the sub-agent
+sessions, and the marking is the fallback for a list that cannot be obtained,
+not the default. A root-only export does not walk the lineage at all, so it
+neither waits nor reports.
+
 ### Why an archived child is named once, and not reported as a gap
 
 An archived child is cut out of the tree the app shows, so the export does
@@ -635,7 +664,11 @@ alternative was hydrating every shell while writing those results into the live
 chat cache: an export could then replace newer parts from a concurrent stream,
 and many per-message reads could occupy the lane ahead of navigation.
 
-The snapshot is complete according to the page cursor and inbox response the
-runtime returned during that read. It does not claim an atomic server snapshot
-across concurrent live mutations. Runtime identity, SDK epoch, directory and
-session remain bound to the read; a runtime change stops later page admission.
+The snapshot's history is complete according to the page cursor the runtime
+returned during that read, and its pending items are complete according to the
+inbox response, when there was one. A pending item that could not be read is
+reported on its own channel instead of undoing the history (the loader's own
+reason is in `packages/ui/src/sync/DOCUMENTATION.md`). It does not claim an
+atomic server snapshot across concurrent live mutations. Runtime identity, SDK
+epoch, directory and session remain bound to the read; a runtime change stops
+later page admission.

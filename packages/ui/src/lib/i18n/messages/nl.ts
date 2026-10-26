@@ -752,6 +752,8 @@ export const dict = {
   'sessions.sidebar.session.export.failedRevealPath': 'Kan het pad niet tonen',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'Sessie geëxporteerd, maar {count} sub-agenttaak overgeslagen die niet kon worden geladen.',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'Sessie geëxporteerd, maar {count} sub-agenttaken overgeslagen die niet konden worden geladen.',
+  'sessions.sidebar.session.export.incompleteSessionList': 'De sessie is geëxporteerd, maar de sessielijst werd nog gelezen, dus er kunnen sub-agentsessies ontbreken.',
+  'sessions.sidebar.session.export.unreadableInbox': 'De sessie is geëxporteerd, maar de wachtende berichten konden niet worden gelezen, dus er kan een wachtend bericht ontbreken.',
   'sessions.sidebar.session.export.dialog.title': 'Sessie exporteren',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'Deze sessie heeft {count} sub-agentsessie. Opnemen in de export?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'Deze sessie heeft {count} sub-agentsessies. Opnemen in de export?',

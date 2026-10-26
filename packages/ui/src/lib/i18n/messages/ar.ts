@@ -712,6 +712,8 @@ export const dict = {
   'sessions.sidebar.session.export.failedRevealPath': 'تعذّر إظهار المسار',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'تم تصدير الجلسة، لكن تم تخطي {count} مهمة لوكيل فرعي تعذّر تحميلها.',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'تم تصدير الجلسة، لكن تم تخطي {count} مهام لوكلاء فرعيين تعذّر تحميلها.',
+  'sessions.sidebar.session.export.incompleteSessionList': 'تم تصدير الجلسة، لكن قائمة الجلسات كانت تُقرأ بعد ذلك، لذا قد تكون جلسات الوكلاء الفرعيين مفقودة.',
+  'sessions.sidebar.session.export.unreadableInbox': 'تم تصدير الجلسة، لكن الرسائل المعلّقة لم تُقرأ، لذا قد تكون هناك رسالة معلّقة مفقودة.',
   'sessions.sidebar.session.export.dialog.title': 'تصدير الجلسة',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'تحتوي هذه الجلسة على {count} جلسة لوكيل فرعي. هل تريد تضمينها في التصدير؟',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'تحتوي هذه الجلسة على {count} جلسات للوكلاء الفرعيين. هل تريد تضمينها في التصدير؟',

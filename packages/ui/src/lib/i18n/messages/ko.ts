@@ -758,6 +758,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.export.failedRevealPath': '경로 표시 실패',
   'sessions.sidebar.session.export.skippedSubtaskSingle': '세션을 내보냈지만 로드할 수 없는 서브 에이전트 작업 {count}개는 건너뛰었습니다.',
   'sessions.sidebar.session.export.skippedSubtaskMany': '세션을 내보냈지만 로드할 수 없는 서브 에이전트 작업 {count}개는 건너뛰었습니다.',
+  'sessions.sidebar.session.export.incompleteSessionList': '세션을 내보냈지만 세션 목록을 아직 읽는 중이어서 서브 에이전트 세션이 누락되었을 수 있습니다.',
+  'sessions.sidebar.session.export.unreadableInbox': '세션을 내보냈지만 대기 중인 메시지를 읽지 못해서 대기 중인 메시지가 누락되었을 수 있습니다.',
   'sessions.sidebar.session.export.dialog.title': '세션 내보내기',
   'sessions.sidebar.session.export.dialog.descriptionSingle': '이 세션에는 서브 에이전트 세션 {count}개가 있습니다. 내보내기에 포함할까요?',
   'sessions.sidebar.session.export.dialog.descriptionMany': '이 세션에는 서브 에이전트 세션 {count}개가 있습니다. 내보내기에 포함할까요?',

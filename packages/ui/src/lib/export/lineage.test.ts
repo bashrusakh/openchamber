@@ -112,8 +112,8 @@ describe('the lineage the export carries', () => {
       sessions,
       load: async (sessionID) => {
         loaded.push(sessionID);
-        if (sessionID === 'ses_root') return rootRecords;
-        return childRecords;
+        if (sessionID === 'ses_root') return { records: rootRecords };
+        return { records: childRecords };
       },
     }, 'readable');
 

@@ -641,7 +641,9 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
       t,
       session: { id: session.id, title: resolvedSession.title, directory: sessionDirectory },
       loadRecords: () => (sessionDirectory
-        ? loadExportRecords({ directory: sessionDirectory, sessionID: session.id }).catch(() => null)
+        ? loadExportRecords({ directory: sessionDirectory, sessionID: session.id })
+          .then((snapshot) => snapshot?.records ?? null)
+          .catch(() => null)
         : Promise.resolve(null)),
       onLoadFailed: () => toast.error(t('sessions.sidebar.session.export.failedLoadHistory')),
     });

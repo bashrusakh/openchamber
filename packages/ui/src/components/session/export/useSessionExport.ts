@@ -19,7 +19,11 @@
 import * as React from 'react';
 import { toast } from '@/components/ui';
 import { useI18n } from '@/lib/i18n';
-import { useGlobalSessionsStore, resolveGlobalSessionDirectory } from '@/stores/useGlobalSessionsStore';
+import {
+  useGlobalSessionsStore,
+  resolveGlobalSessionDirectory,
+  ensureGlobalSessionsLoaded,
+} from '@/stores/useGlobalSessionsStore';
 import { useSessionMessageRecordsForExport } from '@/sync/use-sync';
 import {
   buildExportFilename,
@@ -29,9 +33,8 @@ import {
   revealExportedMarkdown,
   saveAsMarkdownDesktop,
   type ExportFormat,
-  type SessionMessageRecord,
 } from '@/lib/exportSession';
-import { readExportSessions, type ExportSession } from '@/lib/export/collect';
+import { readExportSessions, type ExportRecordResult, type ExportSession } from '@/lib/export/collect';
 import { buildExport } from '@/lib/export/pipeline';
 import { useSessionExportDialog, type ExportChoice, type UseSessionExportDialog } from './useSessionExportDialog';
 
@@ -75,7 +78,30 @@ export const useSessionExport = (): UseSessionExport => {
     // The session list is read when the export runs, not while the row
     // renders: a sidebar holds a row per session, and every one of them
     // would otherwise follow the list.
-    const { activeSessions, archivedSessions } = useGlobalSessionsStore.getState();
+    const initial = useGlobalSessionsStore.getState();
+    let activeSessions = initial.activeSessions;
+    let archivedSessions = initial.archivedSessions;
+    // Whether the list is the whole list. The lineage lives in the list, so
+    // an export that covers the sub-agent sessions needs the whole list: a
+    // descendant whose page has not arrived yet is invisible to the walk,
+    // and the document would come out short without saying so.
+    let sessionListComplete = initial.hasLoaded;
+
+    if (choice.includeSubagents && !sessionListComplete) {
+      // The app's own load, shared with everything else that needs the
+      // list. It resolves even when the load fails, and the export then
+      // runs against a partial list and says so.
+      await ensureGlobalSessionsLoaded().catch(() => undefined);
+      const state = useGlobalSessionsStore.getState();
+      // The list and the directories come from the list as it is after the
+      // wait, not from the state the store happened to be in before it: a
+      // descendant that arrives in a later page must be loadable from its
+      // own directory, or it is reported missing for the wrong reason.
+      activeSessions = state.activeSessions;
+      archivedSessions = state.archivedSessions;
+      sessionListComplete = state.hasLoaded;
+    }
+
     const allSessions = readExportSessions([...activeSessions, ...archivedSessions]);
     const root = allSessions.find((session) => session.id === target.sessionID);
 
@@ -100,7 +126,7 @@ export const useSessionExport = (): UseSessionExport => {
       createdAt: root?.createdAt,
     };
 
-    const load = async (sessionID: string): Promise<SessionMessageRecord[] | null> => {
+    const load = async (sessionID: string): Promise<ExportRecordResult | null> => {
       // The exported session is read from the directory the export starts
       // from; every other session from the directory it runs in.
       const directory = sessionID === target.sessionID
@@ -109,12 +135,12 @@ export const useSessionExport = (): UseSessionExport => {
       return loadRecords({ sessionID, directory }).catch(() => null);
     };
 
-    const rootRecords = await load(target.sessionID);
-    if (!rootRecords) {
+    const rootResult = await load(target.sessionID);
+    if (!rootResult) {
       toast.error(t('sessions.sidebar.session.export.failedLoadHistory'));
       return;
     }
-    if (rootRecords.length === 0) {
+    if (rootResult.records.length === 0) {
       toast.error(t('sessions.sidebar.session.export.nothingToExport'));
       return;
     }
@@ -131,14 +157,18 @@ export const useSessionExport = (): UseSessionExport => {
       // notice that they were left out.
       sessions: allSessions,
       load: async (sessionID) => {
-        if (sessionID === target.sessionID) return rootRecords;
+        if (sessionID === target.sessionID) return rootResult;
         return load(sessionID);
       },
       includeSubagents: choice.includeSubagents,
+      // The list was not the whole list, so the document says that the
+      // sub-agent sessions that had not arrived yet are not in it.
+      sessionListComplete,
     }, choice.mode);
 
     const document = renderExportDocument(result, choice.format, choice.mode, target.title);
-    const skipped = result.timeline.findings.filter((finding) => finding.kind === 'missing-session').length;
+    const findings = result.timeline.findings;
+    const skipped = findings.filter((finding) => finding.kind === 'missing-session').length;
 
     const filename = buildExportFilename(target.title, EXTENSIONS.get(choice.format) ?? 'md');
     const savedPath = await saveAsMarkdownDesktop(document, filename, choice.format);
@@ -165,6 +195,15 @@ export const useSessionExport = (): UseSessionExport => {
       toast.warning(skipped === 1
         ? t('sessions.sidebar.session.export.skippedSubtaskSingle', { count: skipped })
         : t('sessions.sidebar.session.export.skippedSubtaskMany', { count: skipped }));
+    }
+
+    // The export says what it could not establish, and the person who asked
+    // hears it too.
+    if (findings.some((finding) => finding.kind === 'incomplete-session-list')) {
+      toast.warning(t('sessions.sidebar.session.export.incompleteSessionList'));
+    }
+    if (findings.some((finding) => finding.kind === 'unreadable-inbox')) {
+      toast.warning(t('sessions.sidebar.session.export.unreadableInbox'));
     }
   }, [loadRecords, t]);
 

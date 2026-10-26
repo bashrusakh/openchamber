@@ -186,8 +186,8 @@ describe('export consistency', () => {
       { id: 'ses_child', title: 'Child', parentID: 'ses_root' },
     ];
     const load = async (sessionID: string) => {
-      if (sessionID === 'ses_root') return rootRecords;
-      if (sessionID === 'ses_child') return childRecords;
+      if (sessionID === 'ses_root') return { records: rootRecords };
+      if (sessionID === 'ses_child') return { records: childRecords };
       return null;
     };
 
@@ -208,12 +208,12 @@ describe('export consistency', () => {
     const load = async (sessionID: string) => {
       loaded.push(sessionID);
       if (sessionID === 'ses_root') {
-        return [dispatchedSessionReport('ses_root', 'r1', 2100, {
+        return { records: [dispatchedSessionReport('ses_root', 'r1', 2100, {
           childSessionID: 'ses_dispatched',
           output: 'The dispatched answer',
-        })];
+        })] };
       }
-      return [assistantMessage('ses_dispatched', 'd1', 2200, 'The dispatched transcript')];
+      return { records: [assistantMessage('ses_dispatched', 'd1', 2200, 'The dispatched transcript')] };
     };
 
     const result = await buildExport({ root: { id: 'ses_root', title: 'Root' }, sessions: list, load }, 'readable');
@@ -240,8 +240,8 @@ describe('export consistency', () => {
         agent: session.agent,
       })),
       load: async (sessionID) => {
-        if (sessionID === 'ses_root') return rootRecords;
-        if (sessionID === 'ses_child') return childRecords;
+        if (sessionID === 'ses_root') return { records: rootRecords };
+        if (sessionID === 'ses_child') return { records: childRecords };
         return null;
       },
     }, 'readable');

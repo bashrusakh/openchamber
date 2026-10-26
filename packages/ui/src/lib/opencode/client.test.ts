@@ -851,9 +851,10 @@ describe("messages and config", () => {
     try {
       const snapshot = await loader.readCompleteSnapshot(target)
       const pageRequests = requests.filter((request) => request.url.pathname === "/api/session/ses_1/message")
-      expect(snapshot).toHaveLength(201)
-      expect(snapshot.at(-1)?.info.id).toBe("msg_pending")
-      expect(snapshot.at(-1)?.parts[0]).toMatchObject({ type: "text", text: "queued" })
+      expect(snapshot.records).toHaveLength(201)
+      expect(snapshot.records.at(-1)?.info.id).toBe("msg_pending")
+      expect(snapshot.records.at(-1)?.parts[0]).toMatchObject({ type: "text", text: "queued" })
+      expect(snapshot.inboxUnavailable).toBe(false)
       expect(pageRequests).toHaveLength(2)
       expect(pageRequests.every((request) => request.url.searchParams.get("limit") === "100")).toBe(true)
       expect(pageRequests.every((request) => !request.headers.has("x-opencode-part-shells"))).toBe(true)

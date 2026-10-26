@@ -669,6 +669,8 @@ export const dict = {
   'sessions.sidebar.session.export.failedRevealPath': 'Yol gösterilemedi',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'Session dışa aktarıldı ancak yüklenemeyen {count} alt agent görevi atlandı.',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'Session dışa aktarıldı ancak yüklenemeyen {count} alt agent görevi atlandı.',
+  'sessions.sidebar.session.export.incompleteSessionList': 'Oturum dışa aktarıldı, ancak oturum listesi hâlâ okunuyordu; bu yüzden alt ajan oturumları eksik olabilir.',
+  'sessions.sidebar.session.export.unreadableInbox': 'Oturum dışa aktarıldı, ancak bekleyen mesajlar okunamadı; bu yüzden bekleyen bir mesaj eksik olabilir.',
   'sessions.sidebar.session.export.dialog.title': 'Oturumu dışa aktar',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'Bu session\'da {count} alt ajan oturumu var. Dışa aktarmaya dahil edilsin mi?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'Bu session\'da {count} alt ajan oturumu var. Dışa aktarmaya dahil edilsin mi?',

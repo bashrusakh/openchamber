@@ -712,6 +712,8 @@ export const dict = {
   'sessions.sidebar.session.export.failedRevealPath': 'לא ניתן היה להציג את הנתיב',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'ההפעלה יוצאה, אבל דולגה {count} משימה של סוכן משנה שלא ניתן היה לטעון.',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'ההפעלה יוצאה, אבל דולגו {count} משימות של סוכני משנה שלא ניתן היה לטעון.',
+  'sessions.sidebar.session.export.incompleteSessionList': 'ההפעלה יוצאה, אבל רשימת ההפעלות עוד נקראה, ולכן ייתכן שהפעלות תת־סוכן חסרות.',
+  'sessions.sidebar.session.export.unreadableInbox': 'ההפעלה יוצאה, אבל ההודעות הממתינות לא ניתנו לקריאה, ולכן ייתכן שהודעה ממתינה חסרה.',
   'sessions.sidebar.session.export.dialog.title': 'ייצוא הסשן',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'בהפעלה הזו יש {count} הפעלה של סוכן משנה. לכלול אותה בייצוא?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'בהפעלה הזו יש {count} הפעלות של סוכני משנה. לכלול אותן בייצוא?',

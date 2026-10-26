@@ -758,6 +758,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.export.failedRevealPath': '显示路径失败',
   'sessions.sidebar.session.export.skippedSubtaskSingle': '会话已导出，但跳过了 {count} 个无法加载的子智能体任务。',
   'sessions.sidebar.session.export.skippedSubtaskMany': '会话已导出，但跳过了 {count} 个无法加载的子智能体任务。',
+  'sessions.sidebar.session.export.incompleteSessionList': '会话已导出，但会话列表仍在读取中，因此其中可能缺少子智能体会话。',
+  'sessions.sidebar.session.export.unreadableInbox': '会话已导出，但无法读取待处理消息，因此其中可能缺少一条待处理消息。',
   'sessions.sidebar.session.export.dialog.title': '导出会话',
   'sessions.sidebar.session.export.dialog.descriptionSingle': '此会话有 {count} 个子智能体会话。是否包含在导出中？',
   'sessions.sidebar.session.export.dialog.descriptionMany': '此会话有 {count} 个子智能体会话。是否包含在导出中？',

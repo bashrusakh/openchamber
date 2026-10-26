@@ -109,7 +109,7 @@ describe("SessionMessageLoader", () => {
     expect(getBackgroundNetworkState().active + getBackgroundNetworkState().sessionLists.active).toBe(2)
     heldB.resolve()
     await Promise.all([occupiedA, occupiedB, navigating])
-    expect((await exporting)).toHaveLength(300)
+    expect((await exporting).records).toHaveLength(300)
     expect(calls.indexOf("navigation:first")).toBeLessThan(calls.indexOf("export:cursor-1"))
     loader.dispose()
     childStores.disposeAll()
@@ -199,9 +199,11 @@ describe("SessionMessageLoader", () => {
     }
     const loader = new SessionMessageLoader(childStores, { sdk, runtimeKey: getRuntimeKey() })
 
-    const records = await loader.readCompleteSnapshot(target)
+    const { records, inboxUnavailable } = await loader.readCompleteSnapshot(target)
 
     expect(records.map((record) => record.info.id)).toEqual(["source-a", "source-b", "pending"])
+    // The pending inbox was read, so nothing is unconfirmed.
+    expect(inboxUnavailable).toBe(false)
     expect(store.getState().message[target.sessionID]?.map((message) => message.id)).toEqual(["live-before", "live-during"])
     expect(store.getState().part["live-before"]?.[0]).toMatchObject({ state: { output: "settled live result" } })
     expect(loader.getSnapshot(target)).toMatchObject({ resolved: false, complete: false })
@@ -227,7 +229,7 @@ describe("SessionMessageLoader", () => {
     })
 
     await loader.ensure(target)
-    const records = await loader.readCompleteSnapshot(target)
+    const { records } = await loader.readCompleteSnapshot(target)
 
     expect(records.map((record) => record.info.id)).toEqual(["source", "pending"])
     expect(records.find((record) => record.info.id === "pending")?.parts).toEqual(pending.parts)
@@ -254,6 +256,57 @@ describe("SessionMessageLoader", () => {
 
     expect(calls).toBe(2)
     expect(loader.getSnapshot({ directory: "/repo", sessionID: "session-a" })).toMatchObject({ resolved: false, complete: false })
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("keeps the confirmed history when the pending inbox cannot be read", async () => {
+    // The history pages already succeeded. A pending inbox that cannot be
+    // read does not undo them, and the fact travels on its own channel: the
+    // caller can tell a complete history from a complete history whose
+    // pending items are unconfirmed.
+    const childStores = new ChildStoreManager()
+    const target = { directory: "/repo", sessionID: "session-inbox-export" }
+    const record = createRecord(target.sessionID, "msg_history", 1)
+    let inboxReads = 0
+    const loader = new SessionMessageLoader(childStores, {
+      sdk: {
+        getSessionMessages: async () => response([record]),
+        getSessionInbox: async () => {
+          inboxReads += 1
+          throw new Error("inbox unavailable")
+        },
+      },
+      runtimeKey: getRuntimeKey(),
+    })
+
+    const snapshot = await loader.readCompleteSnapshot(target)
+
+    expect(snapshot.records.map((entry) => entry.info.id)).toEqual(["msg_history"])
+    expect(snapshot.inboxUnavailable).toBe(true)
+    // The read is best effort: one attempt, no retry.
+    expect(inboxReads).toBe(1)
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("rejects the export snapshot when the runtime changes while the pending inbox is read", async () => {
+    // A stale snapshot never resolves: the runtime it belongs to is gone.
+    // Only a failed inbox read is absorbed.
+    const childStores = new ChildStoreManager()
+    const target = { directory: "/repo", sessionID: "session-stale-inbox" }
+    const record = createRecord(target.sessionID, "msg_history", 1)
+    const sdk: SessionMessagePageSource = {
+      getSessionMessages: async () => response([record]),
+      getSessionInbox: async () => {
+        loader.configure({ sdk, runtimeKey: "runtime-b" })
+        return []
+      },
+    }
+    const loader = new SessionMessageLoader(childStores, { sdk, runtimeKey: "runtime-a" })
+
+    await expect(loader.readCompleteSnapshot(target))
+      .rejects.toThrow("Session history changed while export was loading")
     loader.dispose()
     childStores.disposeAll()
   })
@@ -447,7 +500,7 @@ describe("SessionMessageLoader", () => {
     expect(store?.getState().part.assistant_1?.[0]).toMatchObject({
       state: { output: "", metadata: { openchamberContentShell: { chars: 12 } } },
     })
-    const exportRecords = await loader.readCompleteSnapshot(target)
+    const { records: exportRecords } = await loader.readCompleteSnapshot(target)
     expect(exportRecords[0].parts[0]).toMatchObject({
       state: { status: "completed", output: "full result", attachments: [{ filename: "a.txt", mime: "text/plain" }] },
     })

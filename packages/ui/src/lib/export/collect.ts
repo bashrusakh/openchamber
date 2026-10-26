@@ -50,8 +50,24 @@ export type ExportSession = {
 /** One message and its parts, as the source recorded them. */
 export type ExportSourceRecord = { info: import('@/lib/opencode/model').Message; parts: import('@/lib/opencode/model').Part[] };
 
+/**
+ * What one session's read established.
+ *
+ * The records are the history the runtime confirmed. The inbox flag is a
+ * separate fact: a session's pending items are not part of its history, so a
+ * read of them that failed leaves the history complete and the pending items
+ * unconfirmed. The two travel together, so a caller that ignores the flag
+ * cannot mistake the result for a fully verified one.
+ */
+export type ExportRecordResult = {
+  /** The session's records, as the source recorded them. */
+  records: ExportSourceRecord[];
+  /** The session's pending inbox could not be read. */
+  inboxUnavailable?: boolean;
+};
+
 /** Loads one session's records. Returns null when the session is gone. */
-export type ExportRecordLoader = (sessionID: string) => Promise<ExportSourceRecord[] | null>;
+export type ExportRecordLoader = (sessionID: string) => Promise<ExportRecordResult | null>;
 
 /** How many descendant sessions are loaded at the same time. */
 const MAX_CONCURRENT_LOADS = 4;
@@ -113,6 +129,35 @@ type DescendantSession = {
   session: ExportSession;
   depth: number;
 };
+
+/**
+ * The finding that records a session list that was not the whole list.
+ *
+ * The lineage lives in the list, so a descendant whose page has not arrived
+ * yet is invisible to the walk: the export never learns the session exists,
+ * so it cannot report it as missing, and the document comes out silently
+ * short. A root-only export does not walk the lineage at all, so the list's
+ * completeness is not its business.
+ */
+const incompleteSessionListFindings = (includeSubagents: boolean): ExportFinding[] => (
+  includeSubagents
+    ? [{ kind: 'incomplete-session-list', messageKey: 'export.finding.incompleteSessionList' }]
+    : []
+);
+
+/**
+ * The finding that records a session whose pending inbox could not be read.
+ *
+ * The history of that session is confirmed; its pending items are not. The
+ * finding names the session, so a reader knows which one may be missing a
+ * pending message.
+ */
+const unreadableInboxFinding = (session: { id: string; title: string }): ExportFinding => ({
+  kind: 'unreadable-inbox',
+  sessionID: session.id,
+  messageKey: 'export.finding.unreadableInbox',
+  messageParams: { title: session.title },
+});
 
 /** The descendants of a session, and whether the lineage loops. */
 type DescendantSessions = {
@@ -356,11 +401,23 @@ export const collectExportSessions = async (options: {
    * about the ones the caller left out.
    */
   includeSubagents?: boolean;
+  /**
+   * Whether the session list was the whole list.
+   *
+   * The list arrives in pages, and it is the only place the lineage lives.
+   * A list that was not the whole one hides the descendants that had not
+   * arrived yet, and the document says so.
+   */
+  sessionListComplete?: boolean;
 }): Promise<CollectionResult> => {
   const { root, sessions, load } = options;
   const includeSubagents = options.includeSubagents ?? true;
   const findings: ExportFinding[] = [];
   const missing: MissingSession[] = [];
+
+  if (options.sessionListComplete === false) {
+    findings.push(...incompleteSessionListFindings(includeSubagents));
+  }
 
   const { descendants, excluded, cyclic } = coveredDescendants(root, sessions, includeSubagents);
   if (cyclic) {
@@ -371,10 +428,10 @@ export const collectExportSessions = async (options: {
     });
   }
 
-  const rootRecords = await load(root.id);
+  const rootResult = await load(root.id);
   const collected: CollectedSession[] = [];
 
-  if (!rootRecords) {
+  if (!rootResult) {
     findings.push({
       kind: 'load-failure',
       sessionID: root.id,
@@ -383,12 +440,16 @@ export const collectExportSessions = async (options: {
     return { sessions: collected, missing, excluded, findings };
   }
 
+  if (rootResult.inboxUnavailable) {
+    findings.push(unreadableInboxFinding(root));
+  }
+
   collected.push({
     sessionID: root.id,
     title: root.title,
     agent: root.agent,
     parentID: root.parentID,
-    records: rootRecords,
+    records: rootResult.records,
     createdAt: root.createdAt,
     depth: 0,
   });
@@ -401,21 +462,24 @@ export const collectExportSessions = async (options: {
   while (queue.length > 0) {
     const wave = queue.splice(0, MAX_CONCURRENT_LOADS);
     const results = await Promise.all(wave.map(async ({ session, depth }) => {
-      const records = await load(session.id).catch(() => null);
-      return { session, depth, records };
+      const result = await load(session.id).catch(() => null);
+      return { session, depth, result };
     }));
 
-    for (const { session, depth, records } of results) {
-      if (!records) {
+    for (const { session, depth, result } of results) {
+      if (!result) {
         missing.push({ session, depth });
         continue;
+      }
+      if (result.inboxUnavailable) {
+        findings.push(unreadableInboxFinding(session));
       }
       collected.push({
         sessionID: session.id,
         title: session.title,
         agent: session.agent,
         parentID: session.parentID,
-        records,
+        records: result.records,
         createdAt: session.createdAt,
         invocationKey: session.invocationKey,
         depth,

@@ -149,7 +149,7 @@ describe('the sessions the export leaves out on purpose', () => {
       root,
       sessions: [root],
       load: async (sessionID) => {
-        if (sessionID === 'ses_root') return rootRecords;
+        if (sessionID === 'ses_root') return { records: rootRecords };
         return null;
       },
     }, 'readable');
@@ -175,7 +175,7 @@ describe('the sessions the export leaves out on purpose', () => {
       root,
       sessions: [root, session('ses_child', { title: 'Child', parentID: 'ses_root', agent: 'reviewer' })],
       load: async (sessionID) => {
-        if (sessionID === 'ses_root') return rootRecords;
+        if (sessionID === 'ses_root') return { records: rootRecords };
         return null;
       },
     }, 'readable');

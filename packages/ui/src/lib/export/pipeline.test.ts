@@ -1444,7 +1444,7 @@ describe('export pipeline', () => {
       root,
       sessions: [root, child],
       load: async (sessionID) => {
-        if (sessionID === 'ses_root') return [userMessage('ses_root', 'u1', 1000, 'Go')];
+        if (sessionID === 'ses_root') return { records: [userMessage('ses_root', 'u1', 1000, 'Go')] };
         return null;
       },
     }, 'readable');
@@ -1477,12 +1477,12 @@ describe('export pipeline', () => {
       root,
       sessions: [root, child],
       load: async (sessionID) => {
-        if (sessionID === root.id) return [{
+        if (sessionID === root.id) return { records: [{
           info: assistantMessage(root.id, 'a1', 1000, '').info,
           parts: [subagentCall('a1', {
             sessionID: root.id, childSessionID: child.id, output: 'PARENT_CALL_OUTPUT_SENTINEL',
           })],
-        }];
+        }] };
         return null;
       },
     }, 'detailed');
@@ -1518,12 +1518,12 @@ describe('export pipeline', () => {
       root,
       sessions: [root, child],
       load: async (sessionID) => sessionID === root.id
-        ? [{
+        ? { records: [{
             info: assistantMessage(root.id, 'a1', 1000, '').info,
             parts: [subagentCall('a1', {
               sessionID: root.id, childSessionID: child.id, output: longResult,
             })],
-          }]
+          }] }
         : null,
     }, 'readable');
 
@@ -1553,7 +1553,7 @@ describe('export pipeline', () => {
       root,
       sessions: [root],
       load: async (sessionID) => {
-        if (sessionID === 'ses_root') return [userMessage('ses_root', 'u1', 1000, 'Go')];
+        if (sessionID === 'ses_root') return { records: [userMessage('ses_root', 'u1', 1000, 'Go')] };
         return null;
       },
     }, 'readable');
@@ -2237,5 +2237,85 @@ describe('export scale', () => {
     const output = markdown(buildLarge(3000));
 
     expect(output.indexOf('bun test --case 2999')).toBeLessThan(output.indexOf('ls -la'));
+  });
+});
+
+describe('what the export could not establish', () => {
+  const root = { id: 'ses_root', title: 'Root' };
+  const child = { id: 'ses_child', title: 'Child', parentID: 'ses_root' };
+  const rootRecords = [userMessage('ses_root', 'u1', 1000, 'Go')];
+  const childRecords = [userMessage('ses_child', 'cu1', 1100, 'Child work')];
+
+  const buildWith = (options: {
+    sessionListComplete?: boolean;
+    includeSubagents?: boolean;
+    inboxUnavailable?: (sessionID: string) => boolean;
+  }) => buildExport({
+    root,
+    sessions: [root, child],
+    load: async (sessionID) => ({
+      records: sessionID === root.id ? rootRecords : childRecords,
+      inboxUnavailable: options.inboxUnavailable?.(sessionID) ?? false,
+    }),
+    includeSubagents: options.includeSubagents ?? true,
+    sessionListComplete: options.sessionListComplete ?? true,
+  }, 'readable');
+
+  test('a session list that was not the whole list is reported', async () => {
+    const result = await buildWith({ sessionListComplete: false });
+
+    expect(result.timeline.findings.some((finding) => finding.kind === 'incomplete-session-list')).toBe(true);
+  });
+
+  test('an export of the root session alone does not report the list', async () => {
+    // The lineage is not walked at all, so the list's completeness is not
+    // the export's business.
+    const result = await buildWith({ sessionListComplete: false, includeSubagents: false });
+
+    expect(result.timeline.findings.some((finding) => finding.kind === 'incomplete-session-list')).toBe(false);
+  });
+
+  test('a session whose pending inbox could not be read is named', async () => {
+    const result = await buildWith({ inboxUnavailable: (sessionID) => sessionID === child.id });
+
+    const finding = result.timeline.findings.find((entry) => entry.kind === 'unreadable-inbox');
+    expect(finding?.sessionID).toBe('ses_child');
+    expect(finding?.messageParams?.title).toBe('Child');
+  });
+
+  test('a complete session list and a readable inbox are not reported', async () => {
+    const result = await buildWith({});
+
+    expect(result.timeline.findings.some((finding) => (
+      finding.kind === 'incomplete-session-list' || finding.kind === 'unreadable-inbox'
+    ))).toBe(false);
+  });
+
+  test('the findings reach the Markdown, HTML and JSON documents', async () => {
+    const result = await buildWith({
+      sessionListComplete: false,
+      inboxUnavailable: (sessionID) => sessionID === child.id,
+    });
+    const markdownOutput = renderExportMarkdown(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    const htmlOutput = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+    });
+    // SAFETY: `renderExportJson` writes the export's own finding schema, so
+    // every parsed finding has the kind and detail fields read here.
+    const jsonOutput = JSON.parse(renderExportJson(result.timeline)) as {
+      findings: Array<{ kind: string; detail: string }>;
+    };
+
+    expect(markdownOutput).toContain('The session list was still being read when this export ran');
+    expect(markdownOutput).toContain('The pending inbox of the session "Child" could not be read');
+    expect(htmlOutput).toContain('The session list was still being read when this export ran');
+    expect(htmlOutput).toContain('The pending inbox of the session &quot;Child&quot; could not be read');
+    expect(jsonOutput.findings.map((finding) => finding.kind)).toContain('incomplete-session-list');
+    expect(jsonOutput.findings.map((finding) => finding.detail).join(' '))
+      .toContain('The pending inbox of the session "Child" could not be read');
   });
 });

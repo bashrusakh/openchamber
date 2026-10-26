@@ -758,6 +758,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.export.failedRevealPath': 'パスの表示に失敗しました',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'セッションをエクスポートしましたが、読み込めなかった{count}件のサブエージェントタスクをスキップしました。',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'セッションをエクスポートしましたが、読み込めなかった{count}件のサブエージェントタスクをスキップしました。',
+  'sessions.sidebar.session.export.incompleteSessionList': 'セッションはエクスポートされましたが、セッション一覧の読み込みがまだ途中だったため、サブエージェントセッションが含まれていない可能性があります。',
+  'sessions.sidebar.session.export.unreadableInbox': 'セッションはエクスポートされましたが、保留中のメッセージを読み取れなかったため、保留中のメッセージが含まれていない可能性があります。',
   'sessions.sidebar.session.export.dialog.title': 'セッションをエクスポート',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'このセッションには{count}件のサブエージェントセッションがあります。エクスポートに含めますか？',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'このセッションには{count}件のサブエージェントセッションがあります。エクスポートに含めますか？',

@@ -277,15 +277,18 @@ export function useSessionMessageRecordsForExport() {
     if (getRuntimeKey() !== runtimeKey) return null
     const store = childStores.ensureChild(directory, { bootstrap: false })
     const target = { directory, sessionID }
-    const records = await messageLoader.readCompleteSnapshot(target)
+    const snapshot = await messageLoader.readCompleteSnapshot(target)
     if (getRuntimeKey() !== runtimeKey) return null
     const current = store.getState()
     const parts = { ...current.part }
-    for (const record of records) parts[record.info.id] = record.parts
-    return buildSessionMessageRecordsSnapshot({
-      ...current,
-      message: { ...current.message, [sessionID]: records.map((record) => record.info) },
-      part: parts,
-    }, sessionID).list
+    for (const record of snapshot.records) parts[record.info.id] = record.parts
+    return {
+      records: buildSessionMessageRecordsSnapshot({
+        ...current,
+        message: { ...current.message, [sessionID]: snapshot.records.map((record) => record.info) },
+        part: parts,
+      }, sessionID).list,
+      inboxUnavailable: snapshot.inboxUnavailable,
+    }
   }, [childStores, messageLoader, runtimeKey])
 }

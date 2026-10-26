@@ -504,7 +504,8 @@ export const Header: React.FC = () => {
       loadRecords: async () => {
         if (!openDirectory) return null;
         try {
-          return await loadSessionRecords({ sessionID: currentSessionId, directory: openDirectory });
+          const snapshot = await loadSessionRecords({ sessionID: currentSessionId, directory: openDirectory });
+          return snapshot?.records ?? null;
         } catch {
           return null;
         }

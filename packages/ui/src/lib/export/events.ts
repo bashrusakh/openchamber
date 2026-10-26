@@ -286,7 +286,9 @@ export type ExportFinding = {
     | 'unsupported-message-role'
     | 'resumed-session'
     | 'load-failure'
-    | 'cyclic-lineage';
+    | 'cyclic-lineage'
+    | 'incomplete-session-list'
+    | 'unreadable-inbox';
   /** The session the finding is about, when it names one. */
   sessionID?: string;
   /** The child session the finding is about, when it names one. */

@@ -591,6 +591,8 @@ export const dict = {
   'sessions.sidebar.session.export.failedRevealPath': 'Impossible de révéler le chemin',
   'sessions.sidebar.session.export.skippedSubtaskSingle': 'Session exportée, mais tâche de sous-agent {count} ignorée qui n\'a pas pu être chargée.',
   'sessions.sidebar.session.export.skippedSubtaskMany': 'Session exportée, mais tâches du sous-agent {count} ignorées qui n\'ont pas pu être chargées.',
+  'sessions.sidebar.session.export.incompleteSessionList': 'La session a été exportée, mais la liste des sessions était encore en cours de lecture, donc des sessions de sous-agents peuvent manquer.',
+  'sessions.sidebar.session.export.unreadableInbox': 'La session a été exportée, mais les messages en attente n’ont pas pu être lus, donc un message en attente peut manquer.',
   'sessions.sidebar.session.export.dialog.title': 'Exporter la session',
   'sessions.sidebar.session.export.dialog.descriptionSingle': 'Cette session comporte une session de sous-agent {count}. L\'inclure dans l\'exportation ?',
   'sessions.sidebar.session.export.dialog.descriptionMany': 'Cette session comporte {count} sessions de sous-agent. Les inclure dans l\'exportation ?',

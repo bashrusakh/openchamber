@@ -210,8 +210,8 @@ describe('the HTML page keeps the match on the page', () => {
       root,
       sessions: [root, child],
       load: async (sessionID) => sessionID === root.id
-        ? [delegation('a1', child.id, root.id)]
-        : [assistantMessage(child.id, 'ca1', 3000, 'CHILD_MESSAGE_NEEDLE')],
+        ? { records: [delegation('a1', child.id, root.id)] }
+        : { records: [assistantMessage(child.id, 'ca1', 3000, 'CHILD_MESSAGE_NEEDLE')] },
     }, 'readable');
 
     const htmlFor = (mode: 'readable' | 'detailed') => renderExportHtml(result.projection, {
@@ -421,13 +421,13 @@ describe('the HTML page keeps the match on the page', () => {
       root,
       sessions: [root, child],
       load: async (sessionID) => sessionID === root.id
-        ? [{
+        ? { records: [{
             info: assistantMessage(root.id, 'a1', 1000, '').info,
             parts: [subagentCall('a1', {
               sessionID: root.id, childSessionID: child.id, status: 'error',
               error: 'VISIBLE_FAILURE_NEEDLE',
             })],
-          }]
+          }] }
         : null,
     }, 'readable');
     for (const mode of ['readable', 'detailed'] as const) {

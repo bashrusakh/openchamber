@@ -35,6 +35,14 @@ type ExportPipelineInput = {
    * does not want it to report them as missing.
    */
   includeSubagents?: boolean;
+  /**
+   * Whether the session list was the whole list.
+   *
+   * The list arrives in pages, and it is the only place the lineage lives.
+   * A list that was not the whole one hides the descendants that had not
+   * arrived yet, so the document says so rather than coming out short.
+   */
+  sessionListComplete?: boolean;
 };
 
 /** The export built from sessions whose records the caller already holds. */
@@ -117,6 +125,7 @@ export const buildExport = async (
     sessions: input.sessions,
     load: input.load,
     includeSubagents: input.includeSubagents ?? true,
+    sessionListComplete: input.sessionListComplete ?? true,
   });
   return buildFromCollection(collection, input.root.id, mode, input.includeSubagents ?? true);
 };

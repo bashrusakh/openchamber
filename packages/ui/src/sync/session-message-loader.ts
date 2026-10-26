@@ -53,6 +53,22 @@ export type SessionMessageTarget = {
   sessionID: string
 }
 
+/**
+ * A private read of one session's whole history.
+ *
+ * The records are the history the runtime confirmed. The inbox flag is a
+ * separate fact: the pending items of a session are not part of its history,
+ * so a read of them that failed leaves the history complete and the pending
+ * items unconfirmed. A caller that ignores the flag cannot tell the two
+ * apart, so it is part of the result rather than a detail of the read.
+ */
+export type SessionMessageSnapshot = {
+  /** The records the history pages confirmed, in chronological order. */
+  records: Array<{ info: Message; parts: Part[] }>
+  /** The session's pending inbox could not be read. */
+  inboxUnavailable: boolean
+}
+
 export type SessionMessageLoadKind = "initial" | "older" | "refresh" | "prefetch"
 export type SessionMessageLoadStatus = "idle" | "loading" | "ready" | "error"
 
@@ -672,7 +688,7 @@ export class SessionMessageLoader {
   }
 
   /** Reads complete export records into a private snapshot without publishing history to the live directory store. */
-  async readCompleteSnapshot(target: SessionMessageTarget): Promise<Array<{ info: Message; parts: Part[] }>> {
+  async readCompleteSnapshot(target: SessionMessageTarget): Promise<SessionMessageSnapshot> {
     const normalized = this.normalizeTarget(target)
     if (!normalized || this.disposed) throw new Error("Session message loader is unavailable")
     const sdk = this.sdk
@@ -702,12 +718,25 @@ export class SessionMessageLoader {
       if (cursor) visited.add(cursor)
     } while (cursor)
 
+    // The pending inbox is read once, and a failure is absorbed: the history
+    // pages above already succeeded, so a pending item that could not be
+    // confirmed does not undo them. The fact travels on its own channel, so
+    // the caller can tell a complete history from a complete history whose
+    // pending items are unconfirmed. A loader that is no longer current is not
+    // a failed inbox read: that snapshot is stale, and it still rejects.
+    let inboxUnavailable = false
     if (sdk.getSessionInbox) {
-      const inbox = await runSessionListNetworkTask(() => {
+      let inbox: readonly PendingInboxMessage[] = []
+      try {
+        inbox = await runSessionListNetworkTask(() => {
+          if (!isCurrent()) throw new Error("Session history changed while export was loading")
+          return sdk.getSessionInbox?.(normalized.sessionID, normalized.directory) ?? Promise.resolve([])
+        })
         if (!isCurrent()) throw new Error("Session history changed while export was loading")
-        return sdk.getSessionInbox?.(normalized.sessionID, normalized.directory) ?? Promise.resolve([])
-      })
-      if (!isCurrent()) throw new Error("Session history changed while export was loading")
+      } catch (error) {
+        if (!isCurrent()) throw error
+        inboxUnavailable = true
+      }
       for (const item of inbox) {
         if (!records.has(item.info.id)) records.set(item.info.id, { info: item.info, parts: item.parts ?? [] })
       }
@@ -719,7 +748,10 @@ export class SessionMessageLoader {
       const info = liveStore?.message[normalized.sessionID]?.find((message) => message.id === messageID)
       if (info) records.set(messageID, { info, parts: liveStore?.part[messageID] ?? [] })
     }
-    return [...records.values()].sort((left, right) => compareMessagesChronologically(left.info, right.info))
+    return {
+      records: [...records.values()].sort((left, right) => compareMessagesChronologically(left.info, right.info)),
+      inboxUnavailable,
+    }
   }
 
   refreshTail(target: SessionMessageTarget, limit: number): Promise<void> {
