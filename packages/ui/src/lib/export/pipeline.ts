@@ -87,6 +87,7 @@ const buildFromCollection = (
     sessions: collection.sessions,
     missing: collection.missing,
     excluded: collection.excluded,
+    notes: collection.notes,
     findings: collection.findings,
     includeSubagents,
   });

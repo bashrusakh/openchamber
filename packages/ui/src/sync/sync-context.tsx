@@ -4124,7 +4124,7 @@ export function useChildStoreManager() {
   return useSyncRuntime().childStores
 }
 
-type SessionMessageRecord = { info: Message; parts: Part[] }
+export type SessionMessageRecord = { info: Message; parts: Part[] }
 const EMPTY_SESSION_MESSAGE_RECORDS: SessionMessageRecord[] = []
 
 type SessionMessageRecordsSnapshot = {
@@ -4383,6 +4383,44 @@ export function buildSessionMessageRecordsSnapshot(
     suspendedPartUpdatesMessageID,
     list: nextList,
     byId: nextById,
+  }
+}
+
+/**
+ * The records an export read established.
+ *
+ * A staged revert hides the tail of a transcript without deleting it, so an
+ * export needs two sets of records: the conversation the app shows now, and
+ * the records the runtime wrote. The second set is carried only when it
+ * differs, and the marker comes with it — a marker the read does not hold cut
+ * nothing, so there is nothing to report.
+ */
+export type SessionExportRecords = {
+  /** The conversation the app shows now. */
+  records: SessionMessageRecord[]
+  /** The records the runtime wrote, when a staged revert cut something. */
+  sourceRecords?: SessionMessageRecord[]
+  /** The staged revert's marker, when it cut something. */
+  revertMessageID?: string
+}
+
+export const buildSessionExportRecords = (
+  snapshot: SessionMessageRecordsSnapshot,
+  part: State["part"],
+): SessionExportRecords => {
+  const revertMessageID = snapshot.revertMessageID
+  const cut = Boolean(revertMessageID)
+    && snapshot.visibleMessages.length < snapshot.sourceMessages.length
+  if (!revertMessageID || !cut) {
+    return { records: snapshot.list }
+  }
+  return {
+    records: snapshot.list,
+    sourceRecords: snapshot.sourceMessages.map((message) => ({
+      info: message,
+      parts: part[message.id] ?? EMPTY_PARTS,
+    })),
+    revertMessageID,
   }
 }
 

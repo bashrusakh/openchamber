@@ -16,7 +16,7 @@ import type { StructuredError } from '@/lib/opencode/model';
 import { exportText } from './i18n';
 import type { ConcurrentWork } from './order';
 import type { ProjectedTool } from './project';
-import type { ExportExcludedSession } from './events';
+import type { ExportExcludedSession, ExportNote } from './events';
 
 /**
  * The label a role's messages carry in the export.
@@ -169,3 +169,28 @@ export const excludedArchivedNote = (excluded: readonly ExportExcludedSession[])
     ? exportText('export.excluded.archivedSingle', { title: titles[0] })
     : exportText('export.excluded.archivedPlural', { titles: titles.join(', ') });
 };
+
+/**
+ * The text of a note, in the reader's language.
+ *
+ * The note carries the kind of fact it is, and the kind decides the text: a
+ * staged revert reads one way, and the next kind of note will read its own
+ * way. The Markdown and the HTML read this, so the two formats cannot word
+ * the same note differently.
+ */
+export const exportNoteText = (note: ExportNote): string => {
+  switch (note.kind) {
+    case 'staged-revert':
+      return exportText('export.note.stagedRevert', { title: note.title, marker: note.marker });
+  }
+};
+
+/**
+ * The notes the document carries, one line each.
+ *
+ * A note is a fact about the export, so it is stated once, next to the
+ * excluded note, where the reader learns what the export covers.
+ */
+export const exportNoteLines = (notes: readonly ExportNote[]): string[] => (
+  notes.map(exportNoteText)
+);

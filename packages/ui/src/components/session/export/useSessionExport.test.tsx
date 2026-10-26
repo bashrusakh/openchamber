@@ -35,6 +35,8 @@ let savedDocumentCount = 0;
 
 /** The warnings the export showed the person who asked for it. */
 const toastWarnings: string[] = [];
+/** The failures the export reported. */
+const toastErrors: string[] = [];
 
 mock.module('@/components/ui/dialog', () => ({
   Dialog: ({ children }: React.PropsWithChildren) => <>{children}</>,
@@ -47,7 +49,7 @@ mock.module('@/components/ui/dialog', () => ({
 
 mock.module('@/components/ui', () => ({
   toast: {
-    error: () => undefined,
+    error: (message: string) => { toastErrors.push(message); },
     success: () => undefined,
     warning: (message: string) => { toastWarnings.push(message); },
   },
@@ -59,7 +61,14 @@ const recordsByDirectory = new Map<string, Map<string, SessionMessageRecord[]>>(
 /** The reads the export made, in the order it made them. */
 const recordReads: Array<{ directory: string; sessionID: string }> = [];
 /** What one session's read established, the way the loader reports it. */
-type ExportRecords = { records: SessionMessageRecord[]; inboxUnavailable?: boolean };
+type ExportRecords = {
+  records: SessionMessageRecord[];
+  inboxUnavailable?: boolean;
+  /** The records the runtime wrote, when a staged revert cut something. */
+  sourceRecords?: SessionMessageRecord[];
+  /** The staged revert's marker, when it cut something. */
+  revertMessageID?: string;
+};
 let loadRecordsOverride: ((target: { directory: string; sessionID: string }) => Promise<ExportRecords | null>) | null = null;
 let runtimeResponse: ((request: Request) => Promise<Response>) | null = null;
 
@@ -165,6 +174,7 @@ beforeEach(() => {
   listLoadOutcome = null;
   loadRecordsOverride = null;
   toastWarnings.length = 0;
+  toastErrors.length = 0;
 });
 
 afterAll(() => {
@@ -695,5 +705,93 @@ describe('an export that could not read a pending inbox', () => {
     expect(output).toContain('Do the work');
     expect(output).toContain('The pending inbox of the session "Root" could not be read');
     expect(toastWarnings.some((message) => message.includes('a pending inbox could not be read'))).toBe(true);
+  });
+});
+
+describe('a session with a staged revert', () => {
+  /** The part of the conversation the app shows. */
+  const visibleRecords: SessionMessageRecord[] = [
+    textRecord('ses_root', 'u1', 'Do the work', 1000),
+  ];
+  /** The records the runtime wrote, hidden behind the marker. */
+  const hiddenRecords: SessionMessageRecord[] = [
+    answerRecord('ses_root', 'a1', 'The first answer', 2000),
+    answerRecord('ses_root', 'a2', 'The hidden answer', 3000),
+  ];
+
+  test('the document names the staged revert and the JSON keeps the hidden records', async () => {
+    setSessions([session('ses_root', { title: 'Root', directory: '/repo' })]);
+    setRecords([['/repo', 'ses_root', visibleRecords]]);
+    loadRecordsOverride = async () => ({
+      records: visibleRecords,
+      sourceRecords: [...visibleRecords, ...hiddenRecords],
+      revertMessageID: 'a1',
+    });
+
+    const markdown = await exportSessionTo({ sessionID: 'ses_root', directory: '/repo' });
+
+    // The document names the staged revert, under the header.
+    expect(markdown).toContain('The session "Root" has a staged revert');
+    expect(markdown).toContain('"a1"');
+    // The export read every record, so it is complete: the document carries
+    // no integrity notice over a conversation that was read in full.
+    expect(markdown).not.toContain('Incomplete export');
+    // The conversation is the one the app shows: the hidden messages are not
+    // part of it.
+    expect(markdown).toContain('Do the work');
+    expect(markdown).not.toContain('The first answer');
+    expect(markdown).not.toContain('The hidden answer');
+
+    // SAFETY: the JSON export writes its own schema, so every parsed record,
+    // event and note has the fields read here.
+    const json = JSON.parse(await exportSessionTo({ sessionID: 'ses_root', directory: '/repo' }, 'json')) as {
+      source: Record<string, { records: Array<{ info: { id: string } }> }>;
+      events: Array<{ origin: { messageID: string } }>;
+      findings: Array<{ kind: string; detail: string }>;
+      notes: Array<{ kind: string; marker: string; detail: string }>;
+    };
+
+    // The source records are the whole recorded history.
+    expect(json.source.ses_root.records.map((record) => record.info.id)).toEqual(['u1', 'a1', 'a2']);
+    // The events are the conversation.
+    expect(json.events.map((event) => event.origin.messageID)).toEqual(['u1']);
+    // The staged revert is a note, not a finding.
+    expect(json.findings).toEqual([]);
+    expect(json.notes.map((note) => note.kind)).toEqual(['staged-revert']);
+    expect(json.notes.map((note) => note.marker)).toEqual(['a1']);
+    expect(json.notes.map((note) => note.detail).join(' ')).toContain('has a staged revert');
+  });
+
+  test('a session whose whole conversation is hidden still exports', async () => {
+    setSessions([session('ses_root', { title: 'Root', directory: '/repo' })]);
+    setRecords([['/repo', 'ses_root', visibleRecords]]);
+    loadRecordsOverride = async () => ({
+      records: [],
+      sourceRecords: [...visibleRecords, ...hiddenRecords],
+      revertMessageID: 'u1',
+    });
+
+    const markdown = await exportSessionTo({ sessionID: 'ses_root', directory: '/repo' });
+
+    // The records are there, so the export is not refused as empty.
+    expect(toastErrors.length).toBe(0);
+    expect(markdown).toContain('The session "Root" has a staged revert');
+  });
+
+  test('the staged revert raises no toast', async () => {
+    setSessions([session('ses_root', { title: 'Root', directory: '/repo' })]);
+    setRecords([['/repo', 'ses_root', visibleRecords]]);
+    loadRecordsOverride = async () => ({
+      records: visibleRecords,
+      sourceRecords: [...visibleRecords, ...hiddenRecords],
+      revertMessageID: 'a1',
+    });
+
+    await exportSessionTo({ sessionID: 'ses_root', directory: '/repo' });
+
+    // The document names it under the header. A staged revert is the
+    // reader's own action, so the toast says nothing about it.
+    expect(toastWarnings.some((message) => message.includes('staged revert'))).toBe(false);
+    expect(toastErrors.length).toBe(0);
   });
 });

@@ -31,6 +31,7 @@ import type {
   ExportEvent,
   ExportExcludedSession,
   ExportFinding,
+  ExportNote,
   ExportPart,
   ExportRole,
   ExportSessionInfo,
@@ -404,6 +405,14 @@ export const normalizeExportTimeline = (options: {
    * reports nothing.
    */
   excluded: ExcludedSession[];
+  /**
+   * The facts about what the export shows and what it does not.
+   *
+   * A staged revert is one of them: the conversation the app shows is
+   * shorter than the recorded history, and the document says so where the
+   * reader learns what the export covers.
+   */
+  notes: ExportNote[];
   findings: ExportFinding[];
   /**
    * Whether the export covers the sub-agent sessions at all.
@@ -413,7 +422,7 @@ export const normalizeExportTimeline = (options: {
    */
   includeSubagents?: boolean;
 }): NormalizeResult => {
-  const { rootSessionID, sessions, missing, findings, excluded } = options;
+  const { rootSessionID, sessions, missing, findings, excluded, notes } = options;
   const includeSubagents = options.includeSubagents ?? true;
 
   const sessionsById = new Map<string, ExportSessionInfo>();
@@ -448,7 +457,9 @@ export const normalizeExportTimeline = (options: {
       title: collected.title,
       agent: collected.agent,
       parentID: collected.parentID,
-      records: collected.records,
+      // The records the runtime wrote, when a staged revert cut something. The
+      // conversation's own records otherwise: the two are the same then.
+      records: collected.sourceRecords ?? collected.records,
     });
   }
 
@@ -858,6 +869,7 @@ export const normalizeExportTimeline = (options: {
       findings: [...findings, ...localFindings],
       sourceRecords,
       excluded: excludedSessions,
+      notes,
     },
   };
 };

@@ -16,10 +16,10 @@
 
 import { getCurrentIntlLocale } from '@/lib/i18n';
 import { readTimestamp } from './values';
-import type { ExportExcludedSession, ExportFinding } from './events';
+import type { ExportExcludedSession, ExportFinding, ExportNote } from './events';
 import { orderingStatement } from './order';
 import { exportText, findingText } from './i18n';
-import { agentLabel, compactionOutcome, concurrentLabel, excludedArchivedNote, messageAgent, readablePrompt, recordedError, roleLabel, runtimeTruncationNote, statusLabel } from './labels';
+import { agentLabel, compactionOutcome, concurrentLabel, excludedArchivedNote, exportNoteLines, messageAgent, readablePrompt, recordedError, roleLabel, runtimeTruncationNote, statusLabel } from './labels';
 import type { ProjectedEntry, ProjectedNode, ProjectedSubagent, ProjectionMode } from './project';
 
 /** The clock time of a timestamp, in the reader's locale. */
@@ -172,6 +172,13 @@ type MarkdownRenderOptions = {
    * carries the tree the app shows, and an archived session is not in it.
    */
   excluded: ExportExcludedSession[];
+  /**
+   * The facts about what the export shows and what it does not.
+   *
+   * The document states them under the header, next to the excluded note:
+   * they are facts about the export, not holes in the history.
+   */
+  notes: ExportNote[];
   /**
    * The agent the exported session ran.
    *
@@ -462,16 +469,21 @@ export const renderExportMarkdown = (
   const { title, mode, findings } = options;
   const exportedAt = formatDateTime(Date.now());
 
-  // The sessions the export left out on purpose. The document says so once,
-  // under the header, where the reader learns what the export covers: it is
-  // a fact about the coverage, not a finding about a hole in the history.
+  // The sessions the export left out on purpose, and the facts about what
+  // the export shows. The document says them once, under the header, where
+  // the reader learns what the export covers: they are facts about the
+  // coverage, not findings about a hole in the history.
   const excludedNote = excludedArchivedNote(options.excluded);
+  const headerNotes = [
+    ...(excludedNote ? [excludedNote] : []),
+    ...exportNoteLines(options.notes),
+  ];
 
   const header = [
     `# ${title}`,
     '',
     `*${options.sessionCount === 1 ? exportText('export.header.sessionSingle') : exportText('export.header.sessionsPlural', { count: options.sessionCount })} · ${mode === 'readable' ? exportText('export.header.view.readable') : exportText('export.header.view.detailed')} · ${exportText('export.header.exported', { time: exportedAt })}*`,
-    ...(excludedNote ? ['', `*${excludedNote}*`] : []),
+    ...(headerNotes.length > 0 ? ['', ...headerNotes.map((note) => `*${note}*`)] : []),
   ].join('\n');
 
   const body: string[] = [];

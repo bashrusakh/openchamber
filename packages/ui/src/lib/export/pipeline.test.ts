@@ -79,7 +79,7 @@ const markdown = (input: Fixture, mode: 'readable' | 'detailed' = 'readable'): s
   return renderExportMarkdown(projection, {
     title: input.root.title,
     mode,
-    findings: timeline.findings, excluded: timeline.excluded,
+    findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
     sessionCount: timeline.sessions.size,
   });
 };
@@ -119,11 +119,11 @@ describe('export pipeline', () => {
     const result = build(input, 'detailed');
     const markdownOutput = renderExportMarkdown(result.projection, {
       title: 'Root', mode: 'detailed', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     const htmlOutput = renderExportHtml(result.projection, {
       title: 'Root', mode: 'detailed', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     for (const output of [markdownOutput, htmlOutput]) {
       expect(output).toContain('TASK_FILE_SENTINEL.txt');
@@ -153,11 +153,11 @@ describe('export pipeline', () => {
     }, 'readable');
     const markdownOutput = renderExportMarkdown(projection, {
       title: 'Root', mode: 'readable', findings: timeline.findings,
-      excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+      excluded: timeline.excluded, notes: timeline.notes, sessionCount: timeline.sessions.size,
     });
     const htmlOutput = renderExportHtml(projection, {
       title: 'Root', mode: 'readable', findings: timeline.findings,
-      excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+      excluded: timeline.excluded, notes: timeline.notes, sessionCount: timeline.sessions.size,
     });
     for (const [output, format] of [[markdownOutput, 'markdown'], [htmlOutput, 'html']] as const) {
       expect(output).toContain('reviewer');
@@ -818,7 +818,7 @@ describe('export pipeline', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'detailed',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -949,7 +949,7 @@ describe('export pipeline', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -992,7 +992,7 @@ describe('export pipeline', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1048,7 +1048,7 @@ describe('export pipeline', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'detailed',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1206,7 +1206,7 @@ describe('export pipeline', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1255,7 +1255,7 @@ describe('export pipeline', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'detailed',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1303,7 +1303,7 @@ describe('export pipeline', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1340,7 +1340,7 @@ describe('export pipeline', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1388,7 +1388,7 @@ describe('export pipeline', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'detailed',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1454,7 +1454,7 @@ describe('export pipeline', () => {
     const document = renderExportMarkdown(result.projection, {
       title: 'Root',
       mode: 'readable',
-      findings: result.timeline.findings, excluded: result.timeline.excluded,
+      findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
     expect(document.split('could not be loaded')).toHaveLength(2);
@@ -1462,7 +1462,7 @@ describe('export pipeline', () => {
     expect(document.indexOf('Incomplete export')).toBeGreaterThan(document.indexOf('Go'));
     const html = renderExportHtml(result.projection, {
       title: 'Root', mode: 'readable', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     expect(html.split('could not be loaded')).toHaveLength(2);
     expect(html.indexOf('Incomplete export')).toBeGreaterThan(html.indexOf('Go'));
@@ -1491,11 +1491,11 @@ describe('export pipeline', () => {
     for (const [document, format] of [
       [renderExportMarkdown(result.projection, {
         title: 'Root', mode: 'detailed', findings: result.timeline.findings,
-        excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+        excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
       }), 'markdown'],
       [renderExportHtml(result.projection, {
         title: 'Root', mode: 'detailed', findings: result.timeline.findings,
-        excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+        excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
       }), 'html'],
     ] as const) {
       expect(document).toContain('PARENT_CALL_OUTPUT_SENTINEL');
@@ -1529,7 +1529,7 @@ describe('export pipeline', () => {
 
     const document = renderExportMarkdown(result.projection, {
       title: 'Root', mode: 'readable', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     expect(document).toContain('PARENT_RESULT_SENTINEL');
     expect(document).toContain('excerpt');
@@ -1537,7 +1537,7 @@ describe('export pipeline', () => {
     expect(document.split('Incomplete export')).toHaveLength(2);
     const html = renderExportHtml(result.projection, {
       title: 'Root', mode: 'readable', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     expect(html).toContain('PARENT_RESULT_SENTINEL');
     expect(html).toContain('Shown in part.');
@@ -1778,7 +1778,7 @@ describe('export pipeline', () => {
       const { projection } = build(input, mode);
       const options = {
         title: 'Root', mode, findings: timeline.findings,
-        excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+        excluded: timeline.excluded, notes: timeline.notes, sessionCount: timeline.sessions.size,
       };
       const markdown = renderExportMarkdown(projection, options);
       const html = renderExportHtml(projection, options);
@@ -1833,7 +1833,7 @@ describe('export pipeline', () => {
       const { projection, timeline } = build(input, mode);
       const options = {
         title: 'Root', mode, findings: timeline.findings,
-        excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+        excluded: timeline.excluded, notes: timeline.notes, sessionCount: timeline.sessions.size,
       };
       const document = renderExportMarkdown(projection, options);
       const html = renderExportHtml(projection, options);
@@ -1994,7 +1994,7 @@ describe('export pipeline', () => {
         }, mode);
         const html = renderExportHtml(result.projection, {
           title: 'Root', mode, findings: result.timeline.findings,
-          excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+          excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
         });
         expect(html).toContain('TOOL_IMAGE_SENTINEL.png');
         if (mode === 'detailed') expect(html).toContain('data:image/png;base64,AA==');
@@ -2034,11 +2034,11 @@ describe('export pipeline', () => {
       const { projection, timeline } = build(input, mode);
       const markdownDocument = renderExportMarkdown(projection, {
         title: 'Root', mode, findings: timeline.findings,
-        excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+        excluded: timeline.excluded, notes: timeline.notes, sessionCount: timeline.sessions.size,
       });
       const htmlDocument = renderExportHtml(projection, {
         title: 'Root', mode, findings: timeline.findings,
-        excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+        excluded: timeline.excluded, notes: timeline.notes, sessionCount: timeline.sessions.size,
       });
       expect(markdownDocument).toContain('ROOT_FILE_SENTINEL.png');
       expect(markdownDocument).toContain('image/png');
@@ -2089,7 +2089,7 @@ describe('export pipeline', () => {
     const { projection, timeline } = build(input, 'detailed');
     const html = renderExportHtml(projection, {
       title: 'Root', mode: 'detailed', findings: timeline.findings,
-      excluded: timeline.excluded, sessionCount: timeline.sessions.size,
+      excluded: timeline.excluded, notes: timeline.notes, sessionCount: timeline.sessions.size,
     });
     const parsed = JSON.parse(renderExportJson(timeline));
 
@@ -2298,11 +2298,11 @@ describe('what the export could not establish', () => {
     });
     const markdownOutput = renderExportMarkdown(result.projection, {
       title: 'Root', mode: 'readable', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     const htmlOutput = renderExportHtml(result.projection, {
       title: 'Root', mode: 'readable', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     // SAFETY: `renderExportJson` writes the export's own finding schema, so
     // every parsed finding has the kind and detail fields read here.
@@ -2317,5 +2317,177 @@ describe('what the export could not establish', () => {
     expect(jsonOutput.findings.map((finding) => finding.kind)).toContain('incomplete-session-list');
     expect(jsonOutput.findings.map((finding) => finding.detail).join(' '))
       .toContain('The pending inbox of the session "Child" could not be read');
+  });
+});
+
+describe('a session with a staged revert', () => {
+  const root = { id: 'ses_root', title: 'Root' };
+  // What the runtime wrote: the marker and everything after it are hidden in
+  // the app, so the conversation the app shows is the first record only.
+  const sourceRecords = [
+    userMessage('ses_root', 'u0', 900, 'Before'),
+    userMessage('ses_root', 'u1', 1000, 'Go'),
+    userMessage('ses_root', 'u2', 1200, 'Hidden'),
+  ];
+  const visibleRecords = [sourceRecords[0]];
+
+  const buildWith = (options: { marker?: string; sourceRecords?: Record_[] }) => buildExport({
+    root,
+    sessions: [root],
+    load: async () => ({
+      records: visibleRecords,
+      sourceRecords: options.sourceRecords,
+      revertMessageID: options.marker,
+    }),
+    includeSubagents: true,
+    sessionListComplete: true,
+  }, 'readable');
+
+  test('a session whose records were cut is noted', async () => {
+    const result = await buildWith({ marker: 'u1', sourceRecords });
+
+    const note = result.timeline.notes.find((entry) => entry.kind === 'staged-revert');
+    expect(note?.sessionID).toBe('ses_root');
+    expect(note?.title).toBe('Root');
+    expect(note?.marker).toBe('u1');
+    // A staged revert is a fact about the conversation, not a hole in the
+    // read: the export read every record, so there is nothing to report.
+    expect(result.timeline.findings).toEqual([]);
+  });
+
+  test('a session without a staged revert is not noted', async () => {
+    const result = await buildWith({});
+
+    expect(result.timeline.notes).toEqual([]);
+    // The two sets are the same when nothing was cut, so the export carries
+    // one set of records.
+    // SAFETY: the JSON export writes its own schema, so every parsed record
+    // has the fields read here.
+    const jsonOutput = JSON.parse(renderExportJson(result.timeline)) as {
+      source: Record<string, { records: Array<{ info: { id: string } }> }>;
+    };
+    expect(jsonOutput.source.ses_root.records.map((record) => record.info.id)).toEqual(['u0']);
+  });
+
+  test('a marker the records do not hold cut nothing', async () => {
+    const result = await buildWith({ marker: 'u_not_here', sourceRecords });
+
+    expect(result.timeline.notes).toEqual([]);
+  });
+
+  test('the JSON export keeps the records the runtime wrote', async () => {
+    const result = await buildWith({ marker: 'u1', sourceRecords });
+    // SAFETY: the JSON export writes its own schema, so every parsed record
+    // and event has the fields read here.
+    const jsonOutput = JSON.parse(renderExportJson(result.timeline)) as {
+      source: Record<string, { records: Array<{ info: { id: string } }> }>;
+      events: Array<{ origin: { messageID: string } }>;
+    };
+
+    // The source records are the whole recorded history; the events are the
+    // conversation the app shows.
+    expect(jsonOutput.source.ses_root.records.map((record) => record.info.id)).toEqual(['u0', 'u1', 'u2']);
+    expect(jsonOutput.events.map((event) => event.origin.messageID)).not.toContain('u1');
+    expect(jsonOutput.events.map((event) => event.origin.messageID)).not.toContain('u2');
+  });
+
+  test('the note reaches the Markdown, HTML and JSON documents', async () => {
+    const result = await buildWith({ marker: 'u1', sourceRecords });
+    const markdownOutput = renderExportMarkdown(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, notes: result.timeline.notes,
+      sessionCount: result.timeline.sessions.size,
+    });
+    const htmlOutput = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, notes: result.timeline.notes,
+      sessionCount: result.timeline.sessions.size,
+    });
+    // SAFETY: `renderExportJson` writes the export's own note schema, so
+    // every parsed note has the fields read here.
+    const jsonOutput = JSON.parse(renderExportJson(result.timeline)) as {
+      findings: Array<{ kind: string; detail: string }>;
+      notes: Array<{ kind: string; marker: string; detail: string }>;
+    };
+
+    // The document says it under the header, and it says it about the marker
+    // and the messages after it.
+    expect(markdownOutput).toContain('has a staged revert');
+    expect(markdownOutput).toContain('"u1"');
+    expect(htmlOutput).toContain('has a staged revert');
+    expect(htmlOutput).toContain('&quot;u1&quot;');
+    // A complete export carries no integrity notice.
+    expect(markdownOutput).not.toContain('Incomplete export');
+    expect(htmlOutput).not.toContain('Incomplete export');
+    // The note is not a finding.
+    expect(jsonOutput.findings).toEqual([]);
+    expect(jsonOutput.notes.map((note) => note.kind)).toEqual(['staged-revert']);
+    expect(jsonOutput.notes.map((note) => note.marker)).toEqual(['u1']);
+    expect(jsonOutput.notes.map((note) => note.detail).join(' ')).toContain('has a staged revert');
+  });
+
+  test('two sessions with a staged revert get one line each', async () => {
+    const child = { id: 'ses_child', title: 'Child', parentID: 'ses_root' };
+    const result = await buildExport({
+      root,
+      sessions: [root, child],
+      load: async (sessionID) => (sessionID === root.id
+        ? {
+          // The root's conversation carries the call that started the child,
+          // so the child is tied to a call and the export is complete. The
+          // marker and the messages after it are hidden in the app, so the
+          // conversation stops before them.
+          records: [
+            userMessage('ses_root', 'u0', 800, 'Before'),
+            {
+              info: assistantMessage('ses_root', 'a1', 900, '').info,
+              parts: [subagentCall('a1', { childSessionID: child.id })],
+            },
+          ],
+          sourceRecords: [
+            userMessage('ses_root', 'u0', 800, 'Before'),
+            {
+              info: assistantMessage('ses_root', 'a1', 900, '').info,
+              parts: [subagentCall('a1', { childSessionID: child.id })],
+            },
+            userMessage('ses_root', 'u1', 1000, 'Go'),
+            userMessage('ses_root', 'u2', 1200, 'Hidden'),
+          ],
+          revertMessageID: 'u1',
+        }
+        : {
+          records: [userMessage('ses_child', 'cu0', 900, 'Child before')],
+          sourceRecords: [
+            userMessage('ses_child', 'cu0', 900, 'Child before'),
+            userMessage('ses_child', 'cu1', 1000, 'Child hidden'),
+          ],
+          revertMessageID: 'cu1',
+        }),
+      includeSubagents: true,
+      sessionListComplete: true,
+    }, 'readable');
+
+    expect(result.timeline.findings).toEqual([]);
+    expect(result.timeline.notes.map((note) => note.marker)).toEqual(['u1', 'cu1']);
+
+    const markdownOutput = renderExportMarkdown(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, notes: result.timeline.notes,
+      sessionCount: result.timeline.sessions.size,
+    });
+    const htmlOutput = renderExportHtml(result.projection, {
+      title: 'Root', mode: 'readable', findings: result.timeline.findings,
+      excluded: result.timeline.excluded, notes: result.timeline.notes,
+      sessionCount: result.timeline.sessions.size,
+    });
+
+    // One line per session, and the two formats word them the same way.
+    for (const output of [markdownOutput, htmlOutput]) {
+      expect(output.split('has a staged revert').length - 1).toBe(2);
+    }
+    expect(markdownOutput).toContain('The session "Root" has a staged revert');
+    expect(markdownOutput).toContain('The session "Child" has a staged revert');
+    expect(htmlOutput).toContain('The session &quot;Root&quot; has a staged revert');
+    expect(htmlOutput).toContain('The session &quot;Child&quot; has a staged revert');
   });
 });

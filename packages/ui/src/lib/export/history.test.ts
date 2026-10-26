@@ -67,7 +67,7 @@ const markdown = (input: Fixture, mode: 'readable' | 'detailed' = 'readable'): s
   return renderExportMarkdown(projection, {
     title: input.root.title,
     mode,
-    findings: timeline.findings, excluded: timeline.excluded,
+    findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
     sessionCount: timeline.sessions.size,
   });
 };
@@ -161,7 +161,7 @@ describe('a nested sub-agent sits where its call sat', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -510,7 +510,7 @@ describe('the coverage of the sub-agent transcripts', () => {
     const document = renderExportMarkdown(result.projection, {
       title: 'Root',
       mode: 'readable',
-      findings: result.timeline.findings, excluded: result.timeline.excluded,
+      findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
 
@@ -541,7 +541,7 @@ describe('the coverage of the sub-agent transcripts', () => {
     const document = renderExportMarkdown(result.projection, {
       title: 'Root',
       mode: 'readable',
-      findings: result.timeline.findings, excluded: result.timeline.excluded,
+      findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
 
@@ -571,7 +571,7 @@ describe('the coverage of the sub-agent transcripts', () => {
     const document = renderExportMarkdown(result.projection, {
       title: 'Root',
       mode: 'readable',
-      findings: result.timeline.findings, excluded: result.timeline.excluded,
+      findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
     const parsed = JSON.parse(renderExportJson(result.timeline));
@@ -884,7 +884,7 @@ describe('the coverage of the sub-agent transcripts', () => {
     const document = renderExportMarkdown(result.projection, {
       title: 'Root',
       mode: 'readable',
-      findings: result.timeline.findings, excluded: result.timeline.excluded,
+      findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
 
@@ -947,7 +947,7 @@ describe('the coverage of the sub-agent transcripts', () => {
     const document = renderExportMarkdown(result.projection, {
       title: 'Root',
       mode: 'readable',
-      findings: result.timeline.findings, excluded: result.timeline.excluded,
+      findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
 
@@ -1158,7 +1158,7 @@ describe('the HTML export', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1196,7 +1196,7 @@ describe('the HTML export', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'detailed',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1242,7 +1242,7 @@ describe('the HTML export', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1270,7 +1270,7 @@ describe('the HTML export', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
@@ -1311,12 +1311,13 @@ describe('the HTML export', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'readable',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 
-    // The page's own script hides a section whose entries are all hidden.
-    expect(html).toContain("section.classList.toggle('hidden', !anyVisible)");
+    // The page's own script hides a section whose entries are all hidden,
+    // while a search or a filter is running.
+    expect(html).toContain("section.classList.toggle('hidden', active && !anyVisible)");
   });
 
   test('the call that started a sub-agent is searchable', () => {
@@ -1344,7 +1345,7 @@ describe('the HTML export', () => {
     const html = renderExportHtml(projection, {
       title: 'Root',
       mode: 'detailed',
-      findings: timeline.findings, excluded: timeline.excluded,
+      findings: timeline.findings, excluded: timeline.excluded, notes: timeline.notes,
       sessionCount: timeline.sessions.size,
     });
 

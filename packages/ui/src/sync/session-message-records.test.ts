@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import type { Message, Part, Session } from '@/lib/opencode/model';
+import { collectExportSessions } from '@/lib/export/collect';
 
-import { buildSessionMessageRecordsSnapshot } from './sync-context';
+import { buildSessionExportRecords, buildSessionMessageRecordsSnapshot } from './sync-context';
 import { INITIAL_STATE, type State } from './types';
 
 // v2 messages carry no `parentID`; the argument is kept only so the fixtures
@@ -15,6 +16,15 @@ const textPart = (id: string, text: string): Part => ({
   id,
   sessionID: 'ses_1',
   messageID: 'msg_1',
+  type: 'text',
+  text,
+});
+
+/** A part that belongs to the record it is named after. */
+const partOf = (messageID: string, text: string): Part => ({
+  id: `${messageID}-text`,
+  sessionID: 'ses_1',
+  messageID,
   type: 'text',
   text,
 });
@@ -130,5 +140,135 @@ describe('buildSessionMessageRecordsSnapshot', () => {
     );
 
     expect(next.byId.get(assistant.id)?.parts).toBe(identifiedParts);
+  });
+});
+
+describe('buildSessionExportRecords', () => {
+  const before = message('msg_before', 'user', undefined, 100);
+  const marker = message('msg_marker', 'user', undefined, 200);
+  const after = message('msg_after', 'assistant', marker.id, 300);
+  const part = {
+    msg_before: [partOf('msg_before', 'before')],
+    msg_marker: [partOf('msg_marker', 'marker')],
+    msg_after: [partOf('msg_after', 'after')],
+  };
+
+  test('a staged revert carries the records the runtime wrote', () => {
+    const snapshot = buildSessionMessageRecordsSnapshot(
+      state({
+        session: [session({ revert: { messageID: marker.id } })],
+        message: { ses_1: [before, marker, after] },
+        part,
+      }),
+      'ses_1',
+    );
+
+    const records = buildSessionExportRecords(snapshot, part);
+
+    // The conversation is what the app shows: everything before the marker.
+    expect(records.records.map((record) => record.info.id)).toEqual([before.id]);
+    // The source records are what the runtime wrote, hidden messages included.
+    expect(records.sourceRecords?.map((record) => record.info.id)).toEqual([before.id, marker.id, after.id]);
+    expect(records.sourceRecords?.map((record) => record.parts[0]?.type)).toEqual(['text', 'text', 'text']);
+    expect(records.revertMessageID).toBe(marker.id);
+  });
+
+  test('a marker the records do not hold cut nothing', () => {
+    const snapshot = buildSessionMessageRecordsSnapshot(
+      state({
+        session: [session({ revert: { messageID: 'msg_not_here' } })],
+        message: { ses_1: [before, marker, after] },
+        part,
+      }),
+      'ses_1',
+    );
+
+    const records = buildSessionExportRecords(snapshot, part);
+
+    expect(records.records.map((record) => record.info.id)).toEqual([before.id, marker.id, after.id]);
+    expect(records.sourceRecords).toBeUndefined();
+    expect(records.revertMessageID).toBeUndefined();
+  });
+
+  test('a session without a staged revert carries one set of records', () => {
+    const snapshot = buildSessionMessageRecordsSnapshot(
+      state({ message: { ses_1: [before, after] }, part }),
+      'ses_1',
+    );
+
+    const records = buildSessionExportRecords(snapshot, part);
+
+    expect(records.records.map((record) => record.info.id)).toEqual([before.id, after.id]);
+    expect(records.sourceRecords).toBeUndefined();
+    expect(records.revertMessageID).toBeUndefined();
+  });
+});
+
+/**
+ * The seam between the app's read and the export's collector.
+ *
+ * The two are separate implementations of one rule: the app's read carries
+ * the records the runtime wrote only when a staged revert cut something, and
+ * the collector raises a note only when the records it was given say so. The
+ * test runs the real read into the real collector, so a change to either
+ * half that breaks the other shows up here.
+ *
+ * It sits here, and not in the export's own tests, because the export is the
+ * lower layer: the export never reads the app's state, so the test that
+ * joins the two is the app's to write.
+ */
+describe('the export reads what the app read', () => {
+  const before = message('msg_before', 'user', undefined, 100);
+  const marker = message('msg_marker', 'user', undefined, 200);
+  const after = message('msg_after', 'assistant', marker.id, 300);
+  const part = {
+    msg_before: [partOf('msg_before', 'before')],
+    msg_marker: [partOf('msg_marker', 'marker')],
+    msg_after: [partOf('msg_after', 'after')],
+  };
+
+  const collect = async (records: ReturnType<typeof buildSessionExportRecords>) => collectExportSessions({
+    root: { id: 'ses_1', title: 'Session' },
+    sessions: [{ id: 'ses_1', title: 'Session' }],
+    load: async () => records,
+  });
+
+  test('a staged revert reaches the export as a note with the source records', async () => {
+    const read = buildSessionExportRecords(buildSessionMessageRecordsSnapshot(
+      state({
+        session: [session({ revert: { messageID: marker.id } })],
+        message: { ses_1: [before, marker, after] },
+        part,
+      }),
+      'ses_1',
+    ), part);
+
+    const collection = await collect(read);
+
+    // The export established everything, so the staged revert is a note and
+    // not a finding: a complete export carries no integrity notice.
+    expect(collection.notes.map((note) => note.kind)).toEqual(['staged-revert']);
+    expect(collection.notes[0]?.sessionID).toBe('ses_1');
+    expect(collection.notes[0]?.marker).toBe(marker.id);
+    expect(collection.findings).toEqual([]);
+    // The conversation is what the app shows, and the records the runtime
+    // wrote travel with it.
+    expect(collection.sessions[0]?.records.map((record) => record.info.id)).toEqual([before.id]);
+    expect(collection.sessions[0]?.sourceRecords?.map((record) => record.info.id))
+      .toEqual([before.id, marker.id, after.id]);
+  });
+
+  test('a session without a staged revert raises no note', async () => {
+    const read = buildSessionExportRecords(buildSessionMessageRecordsSnapshot(
+      state({ message: { ses_1: [before, after] }, part }),
+      'ses_1',
+    ), part);
+
+    const collection = await collect(read);
+
+    expect(read.sourceRecords).toBeUndefined();
+    expect(collection.notes).toEqual([]);
+    expect(collection.findings).toEqual([]);
+    expect(collection.sessions[0]?.sourceRecords).toBeUndefined();
   });
 });

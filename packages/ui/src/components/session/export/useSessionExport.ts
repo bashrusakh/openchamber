@@ -140,7 +140,11 @@ export const useSessionExport = (): UseSessionExport => {
       toast.error(t('sessions.sidebar.session.export.failedLoadHistory'));
       return;
     }
-    if (rootResult.records.length === 0) {
+    // A staged revert can hide the whole conversation. The records the runtime
+    // wrote are still there, so the session is not empty: the document names
+    // the staged revert, and the JSON export keeps the records.
+    const rootRecords = rootResult.sourceRecords ?? rootResult.records;
+    if (rootRecords.length === 0) {
       toast.error(t('sessions.sidebar.session.export.nothingToExport'));
       return;
     }

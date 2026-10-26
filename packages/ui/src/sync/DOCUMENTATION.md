@@ -259,6 +259,17 @@ fetch from restoring deleted messages. The remaining visible records stay in pla
 while the loader establishes fresh coverage. Their optimistic shadows remain
 until an authoritative snapshot confirms them.
 
+An export reads the same split. A staged revert hides the tail of the
+transcript without deleting it, so the export's read establishes two sets of
+records: the conversation the app shows now, and the records the runtime
+wrote. The export carries the source records only when a staged revert cut
+something, and it carries the marker with them, so the document can name what
+is hidden. A marker the read does not hold cut nothing, so there is nothing to
+carry and nothing to report. The JSON export keeps the records the runtime
+wrote; the readable formats show the conversation, and the document names the
+staged revert as a fact about the conversation, not as something the export
+could not read.
+
 ## An interruption whose reason is `shutdown`
 
 `session.execution.interrupted` carries a reason. `user`, `inactivity` and

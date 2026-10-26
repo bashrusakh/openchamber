@@ -23,8 +23,8 @@ The document's own text lives in `../i18n/messages/export-document.i18n.ts`
 and is read through `i18n.ts`, so the exported file speaks the reader's
 language like the app around it. `labels.ts` holds the names the document
 gives things — the agent, the role, the overlapping work, the cut of a long
-prompt, the runtime's own cut of a result — so the Markdown and the HTML
-cannot name them differently.
+prompt, the runtime's own cut of a result, the notes the document carries —
+so the Markdown and the HTML cannot name them differently.
 
 ## Invariants
 
@@ -127,28 +127,30 @@ cannot name them differently.
   HTML filter come from the same name, so a reader who filters by an agent
   finds the entries the document shows under that name.
 - **A match stays on the page.** The HTML page's search hides the entries that
-  do not match, and a block that holds nothing else. A match inside a nested
-  block keeps that block and every block above it, so the count the page
-  reports counts matches the reader can see. A sub-agent's block is a fold the
-  reader can close, and a closed fold paints nothing: while a search or a
-  filter is active, the page opens the block that holds a match and every
-  block above it. The page only opens a fold, never closes one, so clearing
-  the search leaves the blocks as the reader last saw them. The folds inside
-  a row, such as a tool's output, stay where the reader put them, and with no
-  search or filter active the page touches no fold at all. The search index
-  holds the text the page shows: a long prompt and a long sub-agent result are
-  cut in the readable view, and the index holds those cuts, so a search does
-  not find a word the reader cannot read. The reasoning the readable view does
-  not draw is not in the index at all. Search includes rendered shell output
-  and attachment filenames, and visible sub-agent result attribution is
-  available through the agent filter. Visible delegation failures and
-  readable fallback results are indexed in the selected mode; readable search
-  does not include detailed payload hidden from that view. The index and the
-  filters read the fields the page draws: a detailed reasoning entry carries
-  the agent its header names, a completion report carries its status, and a
-  tool's call identifier is indexed only on the delegation entry whose detailed
-  view shows it. An ordinary tool row never draws its call identifier, so a
-  search cannot find one there.
+  do not match, and a block that holds nothing else. With nothing being
+  searched or filtered, such a block stays on the page: its own header is the
+  only place a sub-agent whose transcript could not be read is named. A match
+  inside a nested block keeps that block and every block above it, so the
+  count the page reports counts matches the reader can see. A sub-agent's
+  block is a fold the reader can close, and a closed fold paints nothing:
+  while a search or a filter is active, the page opens the block that holds a
+  match and every block above it. The page only opens a fold, never closes
+  one, so clearing the search leaves the blocks as the reader last saw them.
+  The folds inside a row, such as a tool's output, stay where the reader put
+  them, and with no search or filter active the page touches no fold at all.
+  The search index holds the text the page shows: a long prompt and a long
+  sub-agent result are cut in the readable view, and the index holds those
+  cuts, so a search does not find a word the reader cannot read. The reasoning
+  the readable view does not draw is not in the index at all. Search includes
+  rendered shell output and attachment filenames, and visible sub-agent result
+  attribution is available through the agent filter. Visible delegation
+  failures and readable fallback results are indexed in the selected mode;
+  readable search does not include detailed payload hidden from that view. The
+  index and the filters read the fields the page draws: a detailed reasoning
+  entry carries the agent its header names, a completion report carries its
+  status, and a tool's call identifier is indexed only on the delegation entry
+  whose detailed view shows it. An ordinary tool row never draws its call
+  identifier, so a search cannot find one there.
 - **Compact never means lost.** The readable view cuts a long tool result
   down and marks the cut. The mark says where the whole result is: the
   export of this session with full details, which carries the recorded
@@ -200,6 +202,26 @@ cannot name them differently.
   ordinary message never carries a diagnostic line.
   A child the user left out on purpose is not a gap: the export knows it was
   left out.
+- **A fact about the conversation is a note, not a finding.** The export
+  carries two kinds of fact beside its findings: the sessions it left out on
+  purpose, and the notes about what it shows and what it does not. A staged
+  revert is a note: the export read every record, and the JSON's `source`
+  carries the ones the app hides, so nothing failed to be read. The document
+  states the note under the header, next to the excluded note, one line per
+  session, and the findings keep their own meaning: a finding is something
+  the export could not establish. The JSON carries the notes in a field of
+  their own, next to the findings and the excluded sessions.
+- **The export carries two sets of records, and says which is which.** The
+  conversation is the records the app shows now. The source records are the
+  records the runtime wrote. The Markdown, the HTML and the JSON's `events`
+  are built from the conversation; the JSON's `source` carries the source
+  records. The two sets are the same when nothing was cut, and the source
+  records are carried only when they differ, so an ordinary export is what
+  it has always been. A staged revert is a note in every format: it names
+  the session and the marker, and says that the marker and the messages after
+  it are hidden in the app and therefore not part of the conversation. A
+  staged revert whose marker is not among the records cut nothing, so it is
+  not reported.
 - **A missing transcript can still have a recorded parent result.** When the
   child history cannot be loaded, the readable view keeps the parent's
   recorded result as a compact marked excerpt. It does not invent child
@@ -581,6 +603,40 @@ The block's own header keeps the session's name in every case. The rejected
 alternative was to sign the block with the name of the last message in it:
 the block is the identity of the session's work, and a name that changed
 under the reader's feet would say that two sessions were one.
+
+### Why the readable formats keep the app's conversation and the JSON keeps the recorded history
+
+A staged revert hides the tail of a transcript without deleting it, so the
+records the runtime wrote and the conversation on screen are two different
+things. The readable formats show the conversation: the document mirrors the
+app the reader was looking at, and a hidden message is not part of it. The
+JSON export is the audit copy, so its `source` carries the records the runtime
+wrote, the hidden ones included, and a reader can rebuild the whole recorded
+history from it. The document names the staged revert, so a reader of either
+format knows that the conversation is shorter than the history and where the
+rest of it is.
+
+The staged revert is a fact about the conversation, not a hole in the read:
+the export read every record, and the JSON's `source` carries the hidden ones.
+It is therefore a note, and the document names it once, under the header,
+next to the excluded note, and the JSON carries it in a field of its own,
+next to the findings and not among them. A complete export must not carry an
+`Incomplete export` notice over a conversation that was read in full.
+
+The rejected alternative was to report the staged revert as a finding. The
+document would then carry an "Incomplete export" notice over an export that
+read every record, and it would claim that something could not be read when
+everything was. The rejected alternative was to turn the filter off in every
+format: the Markdown would then carry messages the app hides, and the
+document would describe a conversation that never happened. The rejected
+alternative on the other side — dropping the hidden records everywhere —
+would lose what the runtime wrote, which is the one thing the JSON export
+exists for.
+
+The path that takes the records the caller already holds
+(`collectLoadedSessions`) carries no staged revert fact: it is not reachable
+from the app, and the export cannot learn a revert it was not told about. The
+app's path reads the session itself and hands the pipeline both sets.
 
 ### Why the JSON export keeps the source records next to the derived events
 

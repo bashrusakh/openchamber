@@ -12,7 +12,9 @@ import {
   useSyncRuntime,
   resyncBlockingRequestsForDirectory,
   buildSessionMessageRecordsSnapshot,
+  buildSessionExportRecords,
   markRecordedInterruptedTurn,
+  type SessionExportRecords,
 } from "./sync-context"
 import { stripSessionDiffSnapshots } from "./sanitize"
 import { getSessionMaterializationStatus } from "./materialization"
@@ -270,10 +272,22 @@ export function usePrefetchSessionMessages() {
   }, [messageLoader, runtimeKey])
 }
 
+/**
+ * What one session's export read established.
+ *
+ * The records are the conversation the app shows now. A staged revert hides
+ * the tail of the transcript without deleting it, so the read also carries the
+ * records the runtime wrote and the marker that cut them.
+ */
+export type SessionExportRead = SessionExportRecords & {
+  /** The session's pending inbox could not be read. */
+  inboxUnavailable?: boolean
+}
+
 export function useSessionMessageRecordsForExport() {
   const { childStores, messageLoader, runtimeKey } = useSyncRuntime()
 
-  return useCallback(async ({ directory, sessionID }: { directory: string; sessionID: string }) => {
+  return useCallback(async ({ directory, sessionID }: { directory: string; sessionID: string }): Promise<SessionExportRead | null> => {
     if (getRuntimeKey() !== runtimeKey) return null
     const store = childStores.ensureChild(directory, { bootstrap: false })
     const target = { directory, sessionID }
@@ -282,13 +296,11 @@ export function useSessionMessageRecordsForExport() {
     const current = store.getState()
     const parts = { ...current.part }
     for (const record of snapshot.records) parts[record.info.id] = record.parts
-    return {
-      records: buildSessionMessageRecordsSnapshot({
-        ...current,
-        message: { ...current.message, [sessionID]: snapshot.records.map((record) => record.info) },
-        part: parts,
-      }, sessionID).list,
-      inboxUnavailable: snapshot.inboxUnavailable,
-    }
+    const records = buildSessionExportRecords(buildSessionMessageRecordsSnapshot({
+      ...current,
+      message: { ...current.message, [sessionID]: snapshot.records.map((record) => record.info) },
+      part: parts,
+    }, sessionID), parts)
+    return { ...records, inboxUnavailable: snapshot.inboxUnavailable }
   }, [childStores, messageLoader, runtimeKey])
 }

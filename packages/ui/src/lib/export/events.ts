@@ -329,6 +329,30 @@ export type ExportExcludedSession = {
 };
 
 /**
+ * A fact about what the export shows and what it does not.
+ *
+ * A note is not a finding: nothing failed to be read. The export established
+ * everything the note says, and the document states it where the reader
+ * learns what the export covers.
+ *
+ * A staged revert is a note. The app hides the marker and the messages after
+ * it, and the export carries the conversation the app shows; the records the
+ * runtime wrote are in the JSON export's `source`. The document says that
+ * the conversation is shorter than the recorded history, and where the rest
+ * of it is.
+ */
+export type ExportNote = {
+  /** What the note is about. */
+  kind: 'staged-revert';
+  /** The session the note is about. */
+  sessionID: string;
+  /** The session's title, as the document names it. */
+  title: string;
+  /** The staged revert's marker: the message the revert took back. */
+  marker: string;
+};
+
+/**
  * The whole export: the events in their resolved order, the sessions they came
  * from, and what the export could not establish.
  */
@@ -345,4 +369,6 @@ export type ExportTimeline = {
   sourceRecords: Map<string, ExportSourceSession>;
   /** The sessions the export left out on purpose, and why. */
   excluded: ExportExcludedSession[];
+  /** The facts about what the export shows and what it does not. */
+  notes: ExportNote[];
 };

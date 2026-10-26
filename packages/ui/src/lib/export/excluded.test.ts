@@ -59,7 +59,7 @@ const documentOf = (result: ReturnType<typeof buildExportFromRecords>): string =
     title: 'Root',
     mode: 'readable',
     findings: result.timeline.findings,
-    excluded: result.timeline.excluded,
+    excluded: result.timeline.excluded, notes: result.timeline.notes,
     sessionCount: result.timeline.sessions.size,
   })
 );
@@ -96,7 +96,7 @@ describe('the sessions the export leaves out on purpose', () => {
       title: 'Root',
       mode: 'readable',
       findings: result.timeline.findings,
-      excluded: result.timeline.excluded,
+      excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
     expect(page).toContain('archived sub-agent session &quot;Child&quot;');
@@ -158,7 +158,7 @@ describe('the sessions the export leaves out on purpose', () => {
       title: 'Root',
       mode: 'readable',
       findings: result.timeline.findings,
-      excluded: result.timeline.excluded,
+      excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
 
@@ -184,7 +184,7 @@ describe('the sessions the export leaves out on purpose', () => {
       title: 'Root',
       mode: 'readable',
       findings: result.timeline.findings,
-      excluded: result.timeline.excluded,
+      excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
 

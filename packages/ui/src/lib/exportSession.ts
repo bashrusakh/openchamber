@@ -60,9 +60,9 @@ export const renderExportDocument = (
     return renderExportJson(timeline);
   }
   if (format === 'html') {
-    return renderExportHtml(projection, { title, mode, findings: timeline.findings, sessionCount, rootAgent, excluded: timeline.excluded });
+    return renderExportHtml(projection, { title, mode, findings: timeline.findings, sessionCount, rootAgent, excluded: timeline.excluded, notes: timeline.notes });
   }
-  return renderExportMarkdown(projection, { title, mode, findings: timeline.findings, sessionCount, rootAgent, excluded: timeline.excluded });
+  return renderExportMarkdown(projection, { title, mode, findings: timeline.findings, sessionCount, rootAgent, excluded: timeline.excluded, notes: timeline.notes });
 };
 
 /** Downloads any exported text under the name the caller chose. */

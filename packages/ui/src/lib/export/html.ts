@@ -14,10 +14,10 @@
 
 import { getCurrentIntlLocale } from '@/lib/i18n';
 import { readTimestamp } from './values';
-import type { ExportExcludedSession, ExportFinding } from './events';
+import type { ExportExcludedSession, ExportFinding, ExportNote } from './events';
 import { orderingStatement, type ConcurrentWork } from './order';
 import { exportText, findingText } from './i18n';
-import { agentLabel, compactionOutcome, concurrentLabel, excludedArchivedNote, messageAgent, readablePrompt, recordedError, roleLabel, runtimeTruncationNote, statusLabel } from './labels';
+import { agentLabel, compactionOutcome, concurrentLabel, excludedArchivedNote, exportNoteLines, messageAgent, readablePrompt, recordedError, roleLabel, runtimeTruncationNote, statusLabel } from './labels';
 import type { ProjectedEntry, ProjectedNode, ProjectedSubagent, ProjectedTool, ProjectionMode } from './project';
 
 /** Escapes text for an HTML text node or attribute. */
@@ -806,6 +806,9 @@ const SCRIPT = `
 
     // A section whose entries are all hidden is hidden too, so an empty
     // sub-agent block does not sit on the page while the reader searches.
+    // With no search and no filter running the block keeps its name: its own
+    // header is the only place a sub-agent whose transcript could not be
+    // loaded is named, and without it the block is gone from the document.
     // A match anywhere under a block keeps that block and every block above
     // it on the page: a match inside a nested block belongs to the reader,
     // and hiding the block above it would take the match away while the
@@ -814,7 +817,7 @@ const SCRIPT = `
       var anyVisible = Array.prototype.slice.call(section.querySelectorAll('.entry')).some(function (entry) {
         return !entry.classList.contains('hidden');
       });
-      section.classList.toggle('hidden', !anyVisible);
+      section.classList.toggle('hidden', active && !anyVisible);
 
       // A closed fold paints nothing, so a match inside one is counted while
       // staying invisible. While a search or a filter is active, the block
@@ -857,6 +860,13 @@ type HtmlRenderOptions = {
    */
   excluded: ExportExcludedSession[];
   /**
+   * The facts about what the export shows and what it does not.
+   *
+   * The page states them under the header, next to the excluded note: they
+   * are facts about the export, not holes in the history.
+   */
+  notes: ExportNote[];
+  /**
    * The agent the exported session ran.
    *
    * The document names the agent in its own messages instead of a role of
@@ -894,13 +904,18 @@ export const renderExportHtml = (
     ? exportText('export.header.sessionSingle')
     : exportText('export.header.sessionsPlural', { count: options.sessionCount });
 
-  // The sessions the export left out on purpose. The page says so once,
-  // under the header, where the reader learns what the export covers: it is
-  // a fact about the coverage, not a finding about a hole in the history.
+  // The sessions the export left out on purpose, and the facts about what
+  // the export shows. The page says them once, under the header, where the
+  // reader learns what the export covers: they are facts about the
+  // coverage, not findings about a hole in the history.
   const excludedNote = excludedArchivedNote(options.excluded);
-  const excludedLine = excludedNote
-    ? `  <p class="note">${escapeHtml(excludedNote)}</p>\n`
-    : '';
+  const headerNotes = [
+    ...(excludedNote ? [excludedNote] : []),
+    ...exportNoteLines(options.notes),
+  ];
+  const headerNoteLines = headerNotes
+    .map((note) => `  <p class="note">${escapeHtml(note)}</p>\n`)
+    .join('');
 
   // The page speaks the reader's language, so it declares that language: a
   // screen reader reads the text in the voice of the language the page names,
@@ -917,7 +932,7 @@ export const renderExportHtml = (
 <main>
   <h1>${escapeHtml(options.title)}</h1>
   <p class="subtitle">${escapeHtml(sessionLabel)} · ${escapeHtml(options.mode === 'readable' ? exportText('export.header.view.readable') : exportText('export.header.view.detailed'))} · ${escapeHtml(exportText('export.header.exported', { time: formatDateTime(Date.now()) ?? '' }))}</p>
-${excludedLine}  <div class="bar">
+${headerNoteLines}  <div class="bar">
     <div class="row">
       <input type="search" id="search" placeholder="${escapeHtml(exportText('export.html.searchPlaceholder'))}" aria-label="${escapeHtml(exportText('export.html.searchLabel'))}">
       <select id="filter-agent" aria-label="${escapeHtml(exportText('export.html.filterAgent'))}"><option value="">${escapeHtml(exportText('export.html.allAgents'))}</option></select>

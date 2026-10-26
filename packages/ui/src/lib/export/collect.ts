@@ -16,7 +16,7 @@
  * fail the export.
  */
 
-import type { ExportFinding, ExportSourceSession } from './events';
+import type { ExportFinding, ExportNote, ExportSourceSession } from './events';
 
 /**
  * A session as the export reads it: the identity and the labels, without the
@@ -53,17 +53,31 @@ export type ExportSourceRecord = { info: import('@/lib/opencode/model').Message;
 /**
  * What one session's read established.
  *
- * The records are the history the runtime confirmed. The inbox flag is a
- * separate fact: a session's pending items are not part of its history, so a
- * read of them that failed leaves the history complete and the pending items
- * unconfirmed. The two travel together, so a caller that ignores the flag
- * cannot mistake the result for a fully verified one.
+ * The records are the conversation: the history the runtime confirmed, minus
+ * what a staged revert hides. The source records are the history the runtime
+ * wrote, hidden messages included, and they are carried only when they
+ * differ. The inbox flag is a separate fact: a session's pending items are
+ * not part of its history, so a read of them that failed leaves the history
+ * complete and the pending items unconfirmed. The two travel together, so a
+ * caller that ignores the flag cannot mistake the result for a fully verified
+ * one.
  */
 export type ExportRecordResult = {
   /** The session's records, as the source recorded them. */
   records: ExportSourceRecord[];
   /** The session's pending inbox could not be read. */
   inboxUnavailable?: boolean;
+  /**
+   * The records the runtime wrote, when a staged revert cut something.
+   *
+   * A staged revert hides the tail of a transcript without deleting it, so a
+   * read carries two sets of records: the conversation the app shows, and the
+   * records the runtime wrote. They are the same when nothing was cut, and
+   * the second set is carried only when it differs.
+   */
+  sourceRecords?: ExportSourceRecord[];
+  /** The staged revert's marker, when it cut something. */
+  revertMessageID?: string;
 };
 
 /** Loads one session's records. Returns null when the session is gone. */
@@ -82,6 +96,14 @@ export type CollectedSession = ExportSourceSession & {
    * session id of its own.
    */
   invocationKey?: string;
+  /**
+   * The records the runtime wrote, when a staged revert cut something.
+   *
+   * The conversation the app shows is in `records`; the source records of the
+   * export are these when the session has them, and the conversation's own
+   * records otherwise.
+   */
+  sourceRecords?: ExportSourceRecord[];
 };
 
 type CollectionResult = {
@@ -101,6 +123,13 @@ type CollectionResult = {
    * fact: they are not part of the lineage, and nothing was lost.
    */
   excluded: ExcludedSession[];
+  /**
+   * The facts about what the export shows and what it does not.
+   *
+   * They are not findings: the export established everything they say. The
+   * document states them where the reader learns what the export covers.
+   */
+  notes: ExportNote[];
   /** What the collection could not establish. */
   findings: ExportFinding[];
 };
@@ -158,6 +187,44 @@ const unreadableInboxFinding = (session: { id: string; title: string }): ExportF
   messageKey: 'export.finding.unreadableInbox',
   messageParams: { title: session.title },
 });
+
+/**
+ * The note that records a staged revert.
+ *
+ * A staged revert hides the marker and the messages after it without
+ * deleting them, so the conversation the document shows is shorter than the
+ * recorded history. The note names the session and the marker, so a reader
+ * knows what the conversation does not hold and where the rest of the
+ * recorded history is.
+ *
+ * It is a note and not a finding: the export read every record, and the JSON
+ * export keeps the ones the app hides in its source records.
+ */
+const stagedRevertNote = (session: { id: string; title: string }, revertMessageID: string): ExportNote => ({
+  kind: 'staged-revert',
+  sessionID: session.id,
+  title: session.title,
+  marker: revertMessageID,
+});
+
+/**
+ * The staged revert of a session, when it cut something.
+ *
+ * The marker has to be among the records the runtime wrote, and the
+ * conversation has to be shorter than they are: that is what makes it a cut. A
+ * marker the read does not hold cut nothing, so there is nothing to report
+ * and no second set of records to carry.
+ */
+const stagedRevertOf = (
+  result: ExportRecordResult,
+): { revertMessageID: string; sourceRecords: ExportSourceRecord[] } | null => {
+  const revertMessageID = result.revertMessageID;
+  const sourceRecords = result.sourceRecords;
+  if (!revertMessageID || !sourceRecords) return null;
+  if (sourceRecords.length <= result.records.length) return null;
+  if (!sourceRecords.some((record) => record.info.id === revertMessageID)) return null;
+  return { revertMessageID, sourceRecords };
+};
 
 /** The descendants of a session, and whether the lineage loops. */
 type DescendantSessions = {
@@ -294,6 +361,9 @@ export const readExportSessions = (sessions: readonly {
  * A caller that has the whole tree in hand — the Sidebar's export dialog, or
  * a caller that read the records itself — does not need the loader, and the
  * export should not ask for one.
+ *
+ * The path carries no staged revert: the records it is given are the
+ * conversation, and the export cannot learn a revert it was not told about.
  */
 export const collectLoadedSessions = (options: {
   root: ExportSession;
@@ -336,7 +406,7 @@ export const collectLoadedSessions = (options: {
       sessionID: root.id,
       messageKey: 'export.finding.loadFailure',
     });
-    return { sessions: [], missing, excluded, findings };
+    return { sessions: [], missing, excluded, notes: [], findings };
   }
 
   const collected: CollectedSession[] = [{
@@ -367,7 +437,7 @@ export const collectLoadedSessions = (options: {
     });
   }
 
-  return { sessions: collected, missing, excluded, findings };
+  return { sessions: collected, missing, excluded, notes: [], findings };
 };
 
 /**
@@ -413,6 +483,7 @@ export const collectExportSessions = async (options: {
   const { root, sessions, load } = options;
   const includeSubagents = options.includeSubagents ?? true;
   const findings: ExportFinding[] = [];
+  const notes: ExportNote[] = [];
   const missing: MissingSession[] = [];
 
   if (options.sessionListComplete === false) {
@@ -437,11 +508,16 @@ export const collectExportSessions = async (options: {
       sessionID: root.id,
       messageKey: 'export.finding.loadFailure',
     });
-    return { sessions: collected, missing, excluded, findings };
+    return { sessions: collected, missing, excluded, notes, findings };
   }
 
   if (rootResult.inboxUnavailable) {
     findings.push(unreadableInboxFinding(root));
+  }
+
+  const rootRevert = stagedRevertOf(rootResult);
+  if (rootRevert) {
+    notes.push(stagedRevertNote(root, rootRevert.revertMessageID));
   }
 
   collected.push({
@@ -450,6 +526,7 @@ export const collectExportSessions = async (options: {
     agent: root.agent,
     parentID: root.parentID,
     records: rootResult.records,
+    sourceRecords: rootRevert?.sourceRecords,
     createdAt: root.createdAt,
     depth: 0,
   });
@@ -474,12 +551,17 @@ export const collectExportSessions = async (options: {
       if (result.inboxUnavailable) {
         findings.push(unreadableInboxFinding(session));
       }
+      const revert = stagedRevertOf(result);
+      if (revert) {
+        notes.push(stagedRevertNote(session, revert.revertMessageID));
+      }
       collected.push({
         sessionID: session.id,
         title: session.title,
         agent: session.agent,
         parentID: session.parentID,
         records: result.records,
+        sourceRecords: revert?.sourceRecords,
         createdAt: session.createdAt,
         invocationKey: session.invocationKey,
         depth,
@@ -487,5 +569,5 @@ export const collectExportSessions = async (options: {
     }
   }
 
-  return { sessions: collected, missing, excluded, findings };
+  return { sessions: collected, missing, excluded, notes, findings };
 };

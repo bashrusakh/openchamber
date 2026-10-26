@@ -13,9 +13,10 @@
  */
 
 import type { Message, Part } from '@/lib/opencode/model';
-import type { ExportEvent, ExportExcludedSession, ExportFinding, ExportSessionInfo, ExportTimeline } from './events';
+import type { ExportEvent, ExportExcludedSession, ExportFinding, ExportNote, ExportSessionInfo, ExportTimeline } from './events';
 import { orderByRecordedTime } from './ordering';
 import { exportText, findingText } from './i18n';
+import { exportNoteText } from './labels';
 
 /**
  * The schema and ordering guarantees the JSON export documents.
@@ -34,6 +35,7 @@ const jsonExportSchema = () => ({
     'source': exportText('export.json.schema.source'),
     'findings': exportText('export.json.schema.findings'),
     'excluded': exportText('export.json.schema.excluded'),
+    'notes': exportText('export.json.schema.notes'),
   },
 });
 
@@ -61,6 +63,22 @@ type ExportJson = {
    * shows, and an archived session is not in that tree.
    */
   excluded: ExportExcludedSession[];
+  /**
+   * The facts about what the export shows and what it does not.
+   *
+   * They are not findings: the export established everything they say.
+   */
+  notes: ExportJsonNote[];
+};
+
+/**
+ * A note, as the JSON export carries it.
+ *
+ * The note keeps its own fields and the text beside them, so a tool that
+ * reads the export gets a sentence and not a key it has to resolve itself.
+ */
+type ExportJsonNote = ExportNote & {
+  detail: string;
 };
 
 /**
@@ -118,6 +136,10 @@ const buildExportJson = (timeline: ExportTimeline): ExportJson => ({
     detail: findingText(finding.messageKey, finding.messageParams),
   })),
   excluded: timeline.excluded,
+  notes: timeline.notes.map((note) => ({
+    ...note,
+    detail: exportNoteText(note),
+  })),
 });
 
 /** The JSON export, as text. */

@@ -73,7 +73,7 @@ const pageHtml = (): string => {
   return renderExportHtml(result.projection, {
     title: 'Root',
     mode: 'readable',
-    findings: result.timeline.findings, excluded: result.timeline.excluded,
+    findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
     sessionCount: result.timeline.sessions.size,
   });
 };
@@ -184,7 +184,7 @@ describe('the HTML page keeps the match on the page', () => {
     }, 'readable');
     const html = renderExportHtml(result.projection, {
       title: 'Root', mode: 'readable', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     const dom = new Window({ url: 'https://localhost/' });
     dom.document.write(html);
@@ -216,7 +216,7 @@ describe('the HTML page keeps the match on the page', () => {
 
     const htmlFor = (mode: 'readable' | 'detailed') => renderExportHtml(result.projection, {
       title: 'Root', mode, findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     const readableHtml = htmlFor('readable');
     const readable = new Window({ url: 'https://localhost/' });
@@ -264,7 +264,7 @@ describe('the HTML page keeps the match on the page', () => {
     }, 'detailed');
     const html = renderExportHtml(result.projection, {
       title: 'Root', mode: 'detailed', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     const dom = new Window({ url: 'https://localhost/' });
     dom.document.write(html);
@@ -305,7 +305,7 @@ describe('the HTML page keeps the match on the page', () => {
     }, 'readable');
     const html = renderExportHtml(result.projection, {
       title: 'Root', mode: 'readable', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     const dom = new Window({ url: 'https://localhost/' });
     dom.document.write(html);
@@ -354,7 +354,7 @@ describe('the HTML page keeps the match on the page', () => {
     }, 'detailed');
     const html = renderExportHtml(result.projection, {
       title: 'Root', mode: 'detailed', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     const dom = new Window({ url: 'https://localhost/' });
     dom.document.write(html);
@@ -393,17 +393,20 @@ describe('the HTML page keeps the match on the page', () => {
     const result = buildExportFromRecords({ root, sessions: [root], records: new Map([[root.id, [record, mention]]]) }, 'detailed');
     const html = renderExportHtml(result.projection, {
       title: 'Root', mode: 'detailed', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     expect(html).toContain('{&quot;command&quot;:&quot;streamed-argument&quot;');
     expect(html).toContain('@recorded-reviewer');
     expect(html).not.toContain('unsupported part');
     const markdown = renderExportMarkdown(result.projection, {
       title: 'Root', mode: 'detailed', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     expect(markdown).toContain('{"command":"streamed-argument"');
     expect(markdown).toContain('before\n\n@recorded-reviewer\n\nafter');
+    // SAFETY: `renderExportJson` writes the export's own event and source
+    // schema, so every parsed event and source record has the fields read
+    // here.
     const json = JSON.parse(renderExportJson(result.timeline)) as {
       events: Array<{ kind: string; text?: string; call?: { raw?: string } }>;
       source: Record<string, { records: Array<{ parts: Array<{ type: string; state?: { raw?: string } }> }> }>;
@@ -433,7 +436,7 @@ describe('the HTML page keeps the match on the page', () => {
     for (const mode of ['readable', 'detailed'] as const) {
       const html = renderExportHtml(result.projection, {
         title: 'Root', mode, findings: result.timeline.findings,
-        excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+        excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
       });
       const dom = new Window({ url: 'https://localhost/' });
       dom.document.write(html);
@@ -688,7 +691,7 @@ const longPromptPage = (): string => {
   return renderExportHtml(result.projection, {
     title: 'Root',
     mode: 'readable',
-    findings: result.timeline.findings, excluded: result.timeline.excluded,
+    findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
     sessionCount: result.timeline.sessions.size,
   });
 };
@@ -777,7 +780,7 @@ describe('the HTML index follows rendered shell and result fields', () => {
     }, mode);
     const html = renderExportHtml(result.projection, {
       title: 'Root', mode, findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     const dom = new Window({ url: 'https://localhost/' });
     dom.document.write(html);
@@ -832,7 +835,7 @@ const longResultPage = (): string => {
   return renderExportHtml(result.projection, {
     title: 'Root',
     mode: 'readable',
-    findings: result.timeline.findings, excluded: result.timeline.excluded,
+    findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
     sessionCount: result.timeline.sessions.size,
   });
 };
@@ -899,7 +902,7 @@ const reasoningPage = (mode: 'readable' | 'detailed'): string => {
   return renderExportHtml(result.projection, {
     title: 'Root',
     mode,
-    findings: result.timeline.findings, excluded: result.timeline.excluded,
+    findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
     sessionCount: result.timeline.sessions.size,
   });
 };
@@ -978,7 +981,7 @@ describe('the detailed HTML page filters a delegated invocation', () => {
     }, 'detailed');
     const html = renderExportHtml(result.projection, {
       title: 'Root', mode: 'detailed', findings: result.timeline.findings,
-      excluded: result.timeline.excluded, sessionCount: result.timeline.sessions.size,
+      excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
     });
     const dom = new Window({ url: 'https://localhost/' });
     dom.document.write(html);
@@ -1002,5 +1005,61 @@ describe('the detailed HTML page filters a delegated invocation', () => {
 
     chooseFilter(dom, 'filter-tool', 'shell');
     expect(isOnPage(call ?? null)).toBe(false);
+  });
+});
+
+/**
+ * The page with a sub-agent the export could not read.
+ *
+ * The session list names the child, so the export knows of it, but its
+ * history could not be loaded, and no recorded call names it either. The
+ * block holds nothing at all: its transcript is a gap, and the page draws
+ * no gap, so the block's own header is the only thing that names the
+ * sub-agent.
+ */
+const unreadableSubagentPage = async (): Promise<string> => {
+  const root = session('ses_root', { title: 'Root' });
+  const child = session('ses_child', { title: 'Child', parentID: root.id, agent: 'reviewer' });
+  const result = await buildExport({
+    root,
+    sessions: [root, child],
+    load: async (sessionID) => sessionID === root.id
+      ? { records: [assistantMessage(root.id, 'a1', 1000, 'ROOT_WORK_NEEDLE')] }
+      : null,
+  }, 'readable');
+
+  return renderExportHtml(result.projection, {
+    title: 'Root', mode: 'readable', findings: result.timeline.findings,
+    excluded: result.timeline.excluded, notes: result.timeline.notes, sessionCount: result.timeline.sessions.size,
+  });
+};
+
+describe('the HTML page names a sub-agent it could not read', () => {
+  test('a block with nothing in it keeps its name until a search runs', async () => {
+    const html = await unreadableSubagentPage();
+
+    const dom = new Window({ url: 'https://localhost/' });
+    dom.document.write(html);
+    const script = html.match(/<script>([\s\S]*?)<\/script>/);
+    if (!script) throw new Error('The export wrote no page script');
+    new Function('document', script[1])(dom.document);
+
+    // The block is on the page and it names the sub-agent, and it holds no
+    // entry of its own: the transcript was a gap, and the page draws none.
+    expect(html).toContain('<span class="subagent-label">↳ reviewer</span>');
+    const section = dom.document.querySelector('section.subagent[data-id="ses_child"]');
+    expect(section).toBeTruthy();
+    expect(section?.querySelectorAll('.entry')).toHaveLength(0);
+    expect(section?.querySelector('.subagent-label')?.textContent ?? '').toContain('reviewer');
+
+    // With no search and no filter running, the block keeps its name: it is
+    // the only place the export names that sub-agent.
+    expect(isOnPage(section)).toBe(true);
+    expect(section?.classList.contains('hidden')).toBe(false);
+
+    // A search that matches the root's own message leaves the empty block
+    // out of the reader's way while the search runs.
+    search(dom, 'ROOT_WORK_NEEDLE');
+    expect(section?.classList.contains('hidden')).toBe(true);
   });
 });

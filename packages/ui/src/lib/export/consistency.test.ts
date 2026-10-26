@@ -111,12 +111,12 @@ describe('export consistency', () => {
     expect(renderExportMarkdown(first.projection, {
       title: 'Root',
       mode: 'readable',
-      findings: first.timeline.findings, excluded: first.timeline.excluded,
+      findings: first.timeline.findings, excluded: first.timeline.excluded, notes: first.timeline.notes,
       sessionCount: first.timeline.sessions.size,
     })).toBe(renderExportMarkdown(second.projection, {
       title: 'Root',
       mode: 'readable',
-      findings: second.timeline.findings, excluded: second.timeline.excluded,
+      findings: second.timeline.findings, excluded: second.timeline.excluded, notes: second.timeline.notes,
       sessionCount: second.timeline.sessions.size,
     }));
   });
@@ -260,7 +260,7 @@ describe('export consistency', () => {
     const render = (result: typeof fromList) => renderExportMarkdown(result.projection, {
       title: 'Root',
       mode: 'readable',
-      findings: result.timeline.findings, excluded: result.timeline.excluded,
+      findings: result.timeline.findings, excluded: result.timeline.excluded, notes: result.timeline.notes,
       sessionCount: result.timeline.sessions.size,
     });
 
