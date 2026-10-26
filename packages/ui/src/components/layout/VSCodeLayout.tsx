@@ -1,6 +1,7 @@
 import React from 'react';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import { SessionSidebar } from '@/components/session/SessionSidebar';
+import { SessionExportProvider } from '@/components/session/export/SessionExportProvider';
 import { SessionDialogs } from '@/components/session/SessionDialogs';
 import { ChatView } from '@/components/views/ChatView';
 import { useSessionUIStore } from '@/sync/session-ui-store';
@@ -536,6 +537,7 @@ export const VSCodeLayout: React.FC = () => {
   useTerminalSessionKeepalive();
 
   return (
+    <SessionExportProvider>
     <>
       <div ref={containerRef} className="h-full w-full bg-background text-foreground flex flex-col">
       {viewMode === 'editor' ? (
@@ -644,6 +646,7 @@ export const VSCodeLayout: React.FC = () => {
       <RunAutoFusion />
       </div>
     </>
+    </SessionExportProvider>
   );
 };
 

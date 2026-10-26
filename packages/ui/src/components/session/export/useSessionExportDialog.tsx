@@ -1,10 +1,11 @@
 /**
  * The export dialog's state.
  *
- * The dialog lives in its own hook so the Header and the Sidebar can hold it
- * without both of them owning the writing of the file. The caller opens it
- * with the session to export; the dialog asks for the format, the detail
- * level and whether the sub-agent tasks are part of it.
+ * The dialog is one thing for the app, so its state lives in one hook: the
+ * provider above the Header and the Sidebar holds it, and the two open the
+ * same dialog. The caller opens it with the session to export; the dialog
+ * asks for the format, the detail level and whether the sub-agent tasks are
+ * part of it.
  */
 
 import * as React from 'react';
@@ -49,8 +50,14 @@ export const useSessionExportDialog = (
    *
    * The key is the session id, so a choice made for one session never
    * reaches another one: the sub-agent tasks of a session are its own.
+   *
+   * It is a memory, not something the dialog draws: the dialog shows the
+   * choice for the session it is open for, and the opener reads this when
+   * it opens. Keeping it out of the state keeps the opener's identity
+   * steady, so the rows below the provider do not re-render when the reader
+   * touches the dialog.
    */
-  const [coverage, setCoverage] = React.useState<Record<string, boolean>>({});
+  const coverage = React.useRef<Record<string, boolean>>({});
   /**
    * Whether the session list is complete.
    *
@@ -104,9 +111,9 @@ export const useSessionExportDialog = (
     setTarget(next);
     // The choice the reader already made for this session. A session they
     // have not decided about yet covers the lineage.
-    setIncludeSubagents(coverage[next.sessionID] ?? true);
+    setIncludeSubagents(coverage.current[next.sessionID] ?? true);
     countDescendants(next);
-  }, [countDescendants, coverage]);
+  }, [countDescendants]);
 
   /**
    * Records the coverage the reader picked, for the session the dialog is
@@ -114,7 +121,7 @@ export const useSessionExportDialog = (
    */
   const handleCoverageChange = React.useCallback((include: boolean) => {
     if (target) {
-      setCoverage((previous) => ({ ...previous, [target.sessionID]: include }));
+      coverage.current = { ...coverage.current, [target.sessionID]: include };
     }
     setIncludeSubagents(include);
   }, [target]);

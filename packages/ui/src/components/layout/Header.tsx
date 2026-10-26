@@ -54,7 +54,7 @@ import { getInlineStartSide, useI18n } from '@/lib/i18n';
 import { useShallow } from 'zustand/react/shallow';
 import { toast } from '@/components/ui';
 import { copyTextToClipboard } from '@/lib/clipboard';
-import { useSessionExport } from '@/components/session/export/useSessionExport';
+import { useSessionExportOpener } from '@/components/session/export/SessionExportProvider';
 import { GuestIcon } from '@/components/layout/GuestRailIcon';
 import { useGuestActions } from '@/hooks/useGuestSurfaces';
 import { guestSessionActions, type GuestActionEntry } from '@/lib/guests/actions';
@@ -400,7 +400,7 @@ export const Header: React.FC = () => {
     const trimmedTitle = currentSession?.title?.trim();
     return trimmedTitle && trimmedTitle.length > 0 ? trimmedTitle : 'Untitled Session';
   }, [activeProjectLabel, currentSession?.title, currentSessionId]);
-  const sessionExport = useSessionExport();
+  const openExport = useSessionExportOpener();
   const loadSessionRecords = useSessionMessageRecordsForExport();
   const updateSessionTitle = useSessionUIStore((state) => state.updateSessionTitle);
   const archiveSessions = useSessionUIStore((state) => state.archiveSessions);
@@ -484,12 +484,12 @@ export const Header: React.FC = () => {
       toast.error(t('sessions.sidebar.session.export.nothingToExport'));
       return;
     }
-    sessionExport.openExport({
+    openExport({
       sessionID: currentSessionId,
       title: currentSession?.title ?? null,
       directory: openDirectory,
     });
-  }, [currentSession?.title, currentSessionId, openDirectory, sessionExport, t]);
+  }, [currentSession?.title, currentSessionId, openDirectory, openExport, t]);
 
   // Extension session actions on the current session. The conversation is
   // loaded the same way Export as Markdown loads it.
@@ -1362,7 +1362,6 @@ export const Header: React.FC = () => {
         onOpenChange={setMoveChatDialogOpen}
         onPick={moveCurrentChatToProject}
       />
-      {sessionExport.dialog}
       <Dialog open={pendingHeaderRetentionAction !== null} onOpenChange={(open) => { if (!open) setPendingHeaderRetentionAction(null); }}>
         <DialogContent showCloseButton={false} className="max-w-sm gap-5">
           <DialogHeader>

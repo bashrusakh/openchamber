@@ -20,13 +20,15 @@ import { assistantMessage, dispatchedSessionReport, subagentCall, textPart, user
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
- * The two places that open the export dialog, and the hook they both use.
+ * The two places that open the export dialog, the provider that holds it, and
+ * the hook they all reach.
  *
  * The files are read, not run: the invariant is about the wiring, and the
- * wiring is what the two files say.
+ * wiring is what the files say.
  */
 const headerSource = readFileSync(join(here, '..', '..', 'components', 'layout', 'Header.tsx'), 'utf-8');
 const sidebarSource = readFileSync(join(here, '..', '..', 'components', 'session', 'sidebar', 'sessions', 'SessionNodeItem.tsx'), 'utf-8');
+const providerSource = readFileSync(join(here, '..', '..', 'components', 'session', 'export', 'SessionExportProvider.tsx'), 'utf-8');
 const exportHookSource = readFileSync(join(here, '..', '..', 'components', 'session', 'export', 'useSessionExport.ts'), 'utf-8');
 
 const session = (id: string, overrides: Partial<Session> = {}): Session => ({
@@ -88,14 +90,25 @@ describe('export consistency', () => {
   });
 
   test('the Header and the Sidebar write the export through one path', () => {
-    // Both places call the same hook, so the format, the detail level and
+    // Both places open the same dialog, so the format, the detail level and
     // the coverage are chosen in one place, and the two documents are the
-    // same document. The hook builds the document with the one pipeline and
-    // writes it with the one renderer.
-    expect(headerSource).toContain('useSessionExport()');
-    expect(sidebarSource).toContain('useSessionExport()');
+    // same document. The provider above them holds that one dialog, and the
+    // hook builds the document with the one pipeline and writes it with the
+    // one renderer.
+    expect(headerSource).toContain('useSessionExportOpener()');
+    expect(sidebarSource).toContain('useSessionExportOpener()');
+    expect(providerSource).toContain('useSessionExport()');
     expect(exportHookSource).toContain('buildExport(');
     expect(exportHookSource).toContain('renderExportDocument(');
+  });
+
+  test('the dialog belongs to the provider, not to a row', () => {
+    // The Header and the Sidebar open the dialog; neither of them draws it.
+    // A row that drew its own would hold the reader's choice in the row,
+    // and a row the sidebar virtualizes away takes that choice with it.
+    expect(headerSource).not.toContain('useSessionExport(');
+    expect(sidebarSource).not.toContain('useSessionExport(');
+    expect(providerSource).toContain('{dialog}');
   });
 
   test('the same session produces the same document twice', () => {

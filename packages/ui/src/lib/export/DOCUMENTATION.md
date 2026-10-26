@@ -12,7 +12,10 @@ session it started, and what each format writes.
 `../exportSession.ts` owns the parts that touch the platform — the download,
 the desktop save dialog, the file name — and the API the rest of the app
 calls. `components/session/export/` owns the dialog and the writing of the
-file, so the Header and the Sidebar produce the same document.
+file, so the Header and the Sidebar produce the same document. The dialog is
+one thing for the app: the provider that holds it sits above the Header and
+the sidebar, so the two open the same one and the reader's choice is the same
+choice in both.
 
 The sub-agent's own helpers stay where they are: `lib/opencode/subagent-run.ts`
 reads a reported run, `lib/opencode/tools.ts` reads a call's metadata, and
@@ -64,7 +67,11 @@ so the Markdown and the HTML cannot name them differently.
   they belong to the root session's own history. The choice belongs to the
   session too: the dialog keeps it per session, so a second export of the
   same session keeps it, and the choice made for one session does not reach
-  another one.
+  another one. The dialog is the app's one dialog, so the choice outlives the
+  row it was made from: the sidebar virtualizes its rows, and a row that
+  scrolls out of the window is unmounted. The choice reaches the session it
+  was made for from the Header and from the sidebar alike, because both open
+  that one dialog.
 - **No invented chronology.** Inside a session's own sequence, events are
   ordered by their recorded timestamp. An event without one keeps the place
   the source gave it, and the source order breaks ties. The export never
@@ -694,6 +701,25 @@ the export could cover when the dialog was opened. The rejected alternative
 was to count the export's own walk: it would have loaded every record of
 every descendant to name a number the app already knows, and a number read
 later could land on a dialog that has moved on.
+
+### Why the dialog is one for the app
+
+The Header and the Sidebar open the same export, so the dialog is one thing:
+one format, one detail level, one coverage choice. A provider above both of
+them holds it and hands down the opener, so the two places reach the same
+dialog and the reader's choice is the same choice in both.
+
+The rejected alternative was a dialog per entry point, with every sidebar row
+holding one of its own. A row then held the reader's choice in its own state,
+and the sidebar virtualizes its rows: a row that scrolled out of the window
+was unmounted and took the choice with it.
+
+The opener the provider hands down keeps its identity when the dialog's own
+state changes, so a row does not re-render when the reader touches the
+dialog. The coverage the reader chose is a memory rather than state for the
+same reason: the dialog shows the choice for the session it is open for and
+reads the memory when it opens, and a map in the state would give the opener
+a new identity every time a choice changed.
 
 ### Why a field that holds no text costs no error
 

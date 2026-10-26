@@ -21,6 +21,7 @@ import { SessionDialogs } from '@/components/session/SessionDialogs';
 import { SpaceActionsSheet, SpaceDeleteDialog } from '@/components/session/spaces/SpaceActions';
 import { DiffWorkerProvider } from '@/contexts/DiffWorkerProvider';
 import { ProjectActionsProvider } from './ProjectActionsProvider';
+import { SessionExportProvider } from '@/components/session/export/SessionExportProvider';
 import { RunAutoFusion } from '@/lib/multirun/autoFusion';
 
 import { useUIStore } from '@/stores/useUIStore';
@@ -177,6 +178,7 @@ export const MainLayout: React.FC = () => {
     return (
         <DiagnosticDialogAvailableContext.Provider value><DiffWorkerProvider>
             <ProjectActionsProvider>
+            <SessionExportProvider>
             <div
                 data-page-scroll-lock="true"
                 className="main-content-safe-area relative flex h-[100dvh] bg-background"
@@ -267,6 +269,7 @@ export const MainLayout: React.FC = () => {
                     />
                 ) : null}
             </div>
+            </SessionExportProvider>
             </ProjectActionsProvider>
         </DiffWorkerProvider></DiagnosticDialogAvailableContext.Provider>
     );

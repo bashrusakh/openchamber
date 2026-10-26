@@ -25,7 +25,7 @@ import { toast } from '@/components/ui';
 import { isSessionPinned } from '@/lib/sessionPins';
 import { toggleSessionPin } from '@/sync/session-pins';
 import { Icon } from "@/components/icon/Icon";
-import { useSessionExport } from '@/components/session/export/useSessionExport';
+import { useSessionExportOpener } from '@/components/session/export/SessionExportProvider';
 import { GuestIcon } from '@/components/layout/GuestRailIcon';
 import { useGuestActions } from '@/hooks/useGuestSurfaces';
 import { guestSessionActions, type GuestActionEntry } from '@/lib/guests/actions';
@@ -491,7 +491,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
     return out;
   }, []);
 
-  const sessionExport = useSessionExport();
+  const openExport = useSessionExportOpener();
 
   const legacyContextKey = sessionExpansionKey(renderContext, archivedBucket, session.id);
   const menuInstanceKey = rowKey ? `session-menu:${rowKey}` : legacyContextKey;
@@ -627,12 +627,12 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
       toast.error(t('sessions.sidebar.session.export.nothingToExport'));
       return;
     }
-    sessionExport.openExport({
+    openExport({
       sessionID: session.id,
       title: resolvedSession.title ?? null,
       directory: sessionDirectory,
     });
-  }, [resolvedSession.title, session.id, sessionDirectory, sessionExport, t]);
+  }, [resolvedSession.title, session.id, sessionDirectory, openExport, t]);
   const guestActionEntries = useGuestActions();
   const guestSessionActionEntries = React.useMemo(() => guestSessionActions(guestActionEntries), [guestActionEntries]);
   const handleGuestSessionAction = React.useCallback((entry: GuestActionEntry) => {
@@ -1886,7 +1886,6 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
         </ContextMenuRoot>
       </DraggableSessionRow>
       {hasChildren && isExpanded ? children : null}
-      {sessionExport.dialog}
     </React.Fragment>
   );
 }
